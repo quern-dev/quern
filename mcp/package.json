@@ -1,0 +1,24 @@
+{
+  "name": "ios-debug-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for iOS Debug Server — thin wrapper over HTTP API",
+  "main": "dist/index.js",
+  "bin": {
+    "ios-debug-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

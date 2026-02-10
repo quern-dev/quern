@@ -1,0 +1,17 @@
+Feb  7 14:23:00 iPhone MyApp[1234] <Notice>: Application did finish launching
+Feb  7 14:23:00 iPhone MyApp(UIKitCore)[1234] <Notice>: viewDidLoad called for HomeViewController
+Feb  7 14:23:01 iPhone MyApp(CoreFoundation)[1234] <Notice>: viewDidLoad called for FeedViewController
+Feb  7 14:23:01 iPhone MyApp[1234] <Notice>: Starting network request to /api/v1/user/profile
+Feb  7 14:23:01 iPhone MyApp[1234] <e>: Failed to fetch user profile: HTTP 401
+Feb  7 14:23:02 iPhone MyApp[1234] <Notice>: Refreshing OAuth token...
+Feb  7 14:23:02 iPhone MyApp[1234] <e>: Token refresh failed: HTTP 401
+Feb  7 14:23:03 iPhone MyApp[1234] <Notice>: Retrying with stored refresh token...
+Feb  7 14:23:03 iPhone MyApp[1234] <Notice>: Token refresh succeeded
+Feb  7 14:23:03 iPhone MyApp[1234] <Notice>: Retrying /api/v1/user/profile...
+Feb  7 14:23:04 iPhone MyApp[1234] <Notice>: User profile loaded successfully
+Feb  7 14:23:05 iPhone kernel(Sandbox)[0] <Notice>: MyApp(1234) deny(1) mach-lookup com.apple.locationd.synchronous
+Feb  7 14:23:05 iPhone MyApp(UIKitCore)[1234] <w>: [LayoutConstraints] Unable to simultaneously satisfy constraints in FeedViewController
+Feb  7 14:23:05 iPhone MyApp(UIKitCore)[1234] <w>: [LayoutConstraints] Will attempt to recover by breaking constraint
+Feb  7 14:23:06 iPhone MyApp[1234] <Notice>: Feed loaded: 25 items
+Feb  7 14:23:10 iPhone MyApp[1234] <Notice>: User tapped on item 3: "Introduction to SwiftUI"
+Feb  7 14:23:11 iPhone MyApp(CoreFoundation)[1234] <Notice>: viewDidLoad called for DetailViewController
