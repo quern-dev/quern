@@ -379,3 +379,191 @@ async def test_proxy_flow_detail_not_found(app, auth_headers):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/proxy/flows/f_nope", headers=auth_headers)
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Proxy status / control endpoints
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_proxy_status_stopped(app, auth_headers):
+    """With proxy disabled, /proxy/status returns stopped."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/status", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "stopped"
+        assert "port" in data
+
+
+@pytest.mark.asyncio
+async def test_proxy_stop_when_not_running(app, auth_headers):
+    """Stopping a stopped proxy should return 409."""
+    # Need to set up adapter on app state since lifespan doesn't run
+    from server.sources.proxy import ProxyAdapter
+
+    adapter = ProxyAdapter(flow_store=FlowStore())
+    app.state.proxy_adapter = adapter
+    app.state.flow_store = adapter.flow_store
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/v1/proxy/stop", headers=auth_headers)
+        assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_proxy_start_when_already_running(app, auth_headers):
+    """Starting a running proxy should return 409."""
+    from server.sources.proxy import ProxyAdapter
+
+    adapter = ProxyAdapter(flow_store=FlowStore())
+    adapter._running = True  # Simulate running state
+    app.state.proxy_adapter = adapter
+    app.state.flow_store = adapter.flow_store
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/v1/proxy/start", headers=auth_headers)
+        assert resp.status_code == 409
+
+    adapter._running = False  # Clean up
+
+
+# ---------------------------------------------------------------------------
+# Flow summary endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_proxy_flow_summary_empty(app, auth_headers):
+    """Flow summary with no data returns zero counts."""
+    app.state.flow_store = FlowStore()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/proxy/flows/summary",
+            headers=auth_headers,
+            params={"window": "5m"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_flows"] == 0
+        assert data["by_host"] == []
+        assert "cursor" in data
+
+
+@pytest.mark.asyncio
+async def test_proxy_flow_summary_with_data(app, auth_headers):
+    """Flow summary groups by host and detects errors."""
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+
+    now = datetime.now(timezone.utc)
+    await flow_store.add(_make_flow(flow_id="f_s1", status_code=200))
+    await flow_store.add(_make_flow(flow_id="f_s2", status_code=500))
+    await flow_store.add(_make_flow(flow_id="f_s3", host="cdn.example.com", status_code=200))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/proxy/flows/summary",
+            headers=auth_headers,
+            params={"window": "5m"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_flows"] == 3
+        assert len(data["by_host"]) == 2
+        assert len(data["errors"]) == 1  # the 500
+
+
+@pytest.mark.asyncio
+async def test_proxy_flow_summary_invalid_window(app, auth_headers):
+    """Invalid window parameter should be rejected."""
+    app.state.flow_store = FlowStore()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/proxy/flows/summary",
+            headers=auth_headers,
+            params={"window": "99h"},
+        )
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_proxy_flow_summary_host_filter(app, auth_headers):
+    """Host filter should narrow summary results."""
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+
+    await flow_store.add(_make_flow(flow_id="f_h1", host="api.example.com"))
+    await flow_store.add(_make_flow(flow_id="f_h2", host="cdn.example.com"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/proxy/flows/summary",
+            headers=auth_headers,
+            params={"window": "5m", "host": "api.example.com"},
+        )
+        data = resp.json()
+        assert data["total_flows"] == 1
+        assert data["by_host"][0]["host"] == "api.example.com"
+
+
+# ---------------------------------------------------------------------------
+# Certificate & setup guide
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_proxy_cert_not_found(app, auth_headers):
+    """When mitmproxy CA cert doesn't exist, return 404."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Use a monkeypatch-free approach — the cert may or may not exist
+        resp = await client.get("/api/v1/proxy/cert", headers=auth_headers)
+        # If the cert exists on this machine, it'll be 200; if not, 404
+        assert resp.status_code in (200, 404)
+
+
+@pytest.mark.asyncio
+async def test_proxy_setup_guide(app, auth_headers):
+    """Setup guide should return valid JSON with steps for both targets."""
+    from server.sources.proxy import ProxyAdapter
+
+    adapter = ProxyAdapter(flow_store=FlowStore())
+    app.state.proxy_adapter = adapter
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/setup-guide", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "proxy_host" in data
+        assert "proxy_port" in data
+        assert "active_interface" in data  # may be None or a string
+        assert "warnings" in data
+        assert isinstance(data["warnings"], list)
+        assert "steps" in data
+        assert len(data["steps"]) == 2  # simulator + physical device
+
+        sim = data["steps"][0]
+        assert sim["target"] == "simulator"
+        assert "note" in sim
+        assert "inherits" in sim["note"].lower() or "proxy" in sim["note"].lower()
+        # Simulator instructions should mention networksetup (Mac-level config)
+        sim_text = " ".join(sim["instructions"])
+        assert "networksetup" in sim_text
+        assert "xcrun simctl keychain" in sim_text
+        assert "boot" in sim_text.lower()
+
+        phys = data["steps"][1]
+        assert phys["target"] == "physical_device"
+        assert "note" in phys

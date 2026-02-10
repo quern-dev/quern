@@ -1,14 +1,142 @@
-"""API routes for network proxy flow inspection."""
+"""API routes for network proxy flow inspection and control."""
 
 from __future__ import annotations
 
-from datetime import datetime
+import socket
+import subprocess
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 
-from server.models import FlowQueryParams, FlowQueryResponse, FlowRecord
+from server.models import (
+    FlowQueryParams,
+    FlowQueryResponse,
+    FlowRecord,
+    FlowSummaryResponse,
+    HeldFlow,
+    InterceptSetRequest,
+    InterceptStatusResponse,
+    MockListResponse,
+    MockRuleInfo,
+    MockResponseSpec,
+    ProxyStatusResponse,
+    ReleaseFlowRequest,
+    ReplayRequest,
+    ReplayResponse,
+    SetMockRequest,
+)
+from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
+from server.proxy.summary import generate_flow_summary
 
 router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_proxy_status(request: Request) -> ProxyStatusResponse:
+    """Build a ProxyStatusResponse from current app state."""
+    adapter = request.app.state.proxy_adapter
+    flow_store = request.app.state.flow_store
+
+    if adapter is None:
+        return ProxyStatusResponse(status="stopped")
+
+    if adapter._error:
+        return ProxyStatusResponse(
+            status="error",
+            port=adapter.listen_port,
+            listen_host=adapter.listen_host,
+            error=adapter._error,
+            flows_captured=flow_store.size if flow_store else 0,
+            active_intercept=adapter._intercept_pattern,
+            held_flows_count=len(adapter._held_flows),
+            mock_rules_count=len(adapter._mock_rules),
+        )
+
+    if adapter.is_running:
+        return ProxyStatusResponse(
+            status="running",
+            port=adapter.listen_port,
+            listen_host=adapter.listen_host,
+            started_at=adapter.started_at,
+            flows_captured=flow_store.size if flow_store else 0,
+            active_intercept=adapter._intercept_pattern,
+            held_flows_count=len(adapter._held_flows),
+            mock_rules_count=len(adapter._mock_rules),
+        )
+
+    return ProxyStatusResponse(
+        status="stopped",
+        port=adapter.listen_port,
+        listen_host=adapter.listen_host,
+        flows_captured=flow_store.size if flow_store else 0,
+    )
+
+
+def _require_running_proxy(request: Request):
+    """Return the proxy adapter, raising 503 if not running."""
+    adapter = request.app.state.proxy_adapter
+    if adapter is None or not adapter.is_running:
+        raise HTTPException(status_code=503, detail="Proxy is not running")
+    return adapter
+
+
+# ---------------------------------------------------------------------------
+# Status & control
+# ---------------------------------------------------------------------------
+
+
+@router.get("/status", response_model=ProxyStatusResponse)
+async def proxy_status(request: Request) -> ProxyStatusResponse:
+    """Get current proxy status and configuration."""
+    return _get_proxy_status(request)
+
+
+@router.post("/start", response_model=ProxyStatusResponse)
+async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatusResponse:
+    """Start the mitmproxy network capture."""
+    adapter = request.app.state.proxy_adapter
+    if adapter is None:
+        raise HTTPException(status_code=503, detail="Proxy adapter not configured")
+
+    if adapter.is_running:
+        raise HTTPException(status_code=409, detail="Proxy is already running")
+
+    # Apply optional port/host reconfiguration
+    if body:
+        port = body.get("port")
+        listen_host = body.get("listen_host")
+        adapter.reconfigure(listen_port=port, listen_host=listen_host)
+
+    await adapter.start()
+    return _get_proxy_status(request)
+
+
+@router.post("/stop", response_model=ProxyStatusResponse)
+async def stop_proxy(request: Request) -> ProxyStatusResponse:
+    """Stop the mitmproxy network capture."""
+    adapter = request.app.state.proxy_adapter
+    if adapter is None:
+        raise HTTPException(status_code=503, detail="Proxy adapter not configured")
+
+    if not adapter.is_running:
+        raise HTTPException(status_code=409, detail="Proxy is not running")
+
+    await adapter.stop()
+    return _get_proxy_status(request)
+
+
+# ---------------------------------------------------------------------------
+# Flows — IMPORTANT: /flows/summary MUST come before /flows/{flow_id}
+# to avoid FastAPI treating "summary" as a flow_id path parameter.
+# ---------------------------------------------------------------------------
 
 
 @router.get("/flows", response_model=FlowQueryResponse)
@@ -53,6 +181,34 @@ async def query_flows(
     )
 
 
+@router.get("/flows/summary", response_model=FlowSummaryResponse)
+async def flow_summary(
+    request: Request,
+    window: str = Query(default="5m", pattern=r"^(30s|1m|5m|15m|1h)$"),
+    host: str | None = None,
+    since_cursor: str | None = None,
+) -> FlowSummaryResponse:
+    """Get an LLM-optimized summary of recent HTTP traffic."""
+    flow_store = request.app.state.flow_store
+    if flow_store is None:
+        return generate_flow_summary([], window=window, host=host)
+
+    now = datetime.now(timezone.utc)
+
+    # Determine time boundary from cursor or window
+    if since_cursor:
+        since_ts = parse_cursor(since_cursor)
+        if since_ts is None:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+        flows = await flow_store.get_since(since_ts)
+    else:
+        duration = WINDOW_DURATIONS.get(window, timedelta(minutes=5))
+        since_ts = now - duration
+        flows = await flow_store.get_since(since_ts)
+
+    return generate_flow_summary(flows, window=window, host=host)
+
+
 @router.get("/flows/{flow_id}", response_model=FlowRecord)
 async def get_flow(request: Request, flow_id: str) -> FlowRecord:
     """Get full details for a single captured flow."""
@@ -64,6 +220,11 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
     if flow is None:
         raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
     return flow
+
+
+# ---------------------------------------------------------------------------
+# Filter
+# ---------------------------------------------------------------------------
 
 
 @router.post("/filter")
@@ -80,3 +241,422 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
     else:
         await proxy_adapter.send_command({"action": "clear_filter"})
         return {"status": "accepted", "filter": "none"}
+
+
+# ---------------------------------------------------------------------------
+# Intercept
+# ---------------------------------------------------------------------------
+
+
+@router.post("/intercept")
+async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
+    """Set an intercept pattern. Matching requests will be held."""
+    adapter = _require_running_proxy(request)
+    await adapter.set_intercept(body.pattern)
+    return {
+        "status": "accepted",
+        "pattern": body.pattern,
+        "note": "Matching requests will be held. Use GET /proxy/intercept/held to see them.",
+    }
+
+
+@router.delete("/intercept")
+async def clear_intercept(request: Request) -> dict:
+    """Clear the intercept pattern and release all held flows."""
+    adapter = _require_running_proxy(request)
+    count = len(adapter._held_flows)
+    await adapter.clear_intercept()
+    return {
+        "status": "accepted",
+        "note": f"Intercept cleared. {count} held flow(s) released.",
+    }
+
+
+@router.get("/intercept/held", response_model=InterceptStatusResponse)
+async def list_held_flows(
+    request: Request,
+    timeout: float = Query(default=0, ge=0, le=60),
+) -> InterceptStatusResponse:
+    """List currently held flows.
+
+    Supports long-polling: if timeout > 0 and no flows are currently held,
+    the server blocks until a flow is intercepted or timeout expires.
+    """
+    adapter = request.app.state.proxy_adapter
+
+    if adapter is None:
+        return InterceptStatusResponse()
+
+    # Long-poll: wait for a held flow if none exist and timeout > 0
+    if timeout > 0 and not adapter._held_flows:
+        await adapter.wait_for_held(timeout)
+
+    held = adapter.get_held_flows()
+    return InterceptStatusResponse(
+        pattern=adapter._intercept_pattern,
+        held_flows=[
+            HeldFlow(
+                id=h["id"],
+                held_at=h["held_at"],
+                age_seconds=h["age_seconds"],
+                request=h["request"],
+            )
+            for h in held
+        ],
+        total_held=len(held),
+    )
+
+
+@router.post("/intercept/release")
+async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
+    """Release a single held flow, optionally with request modifications."""
+    adapter = _require_running_proxy(request)
+
+    if body.flow_id not in adapter._held_flows:
+        raise HTTPException(status_code=404, detail=f"Flow {body.flow_id} not held")
+
+    await adapter.release_flow(body.flow_id, modifications=body.modifications)
+    # Remove from server-side tracking (addon will also emit a released event)
+    adapter._held_flows.pop(body.flow_id, None)
+    return {"status": "released", "flow_id": body.flow_id}
+
+
+@router.post("/intercept/release-all")
+async def release_all(request: Request) -> dict:
+    """Release all currently held flows."""
+    adapter = _require_running_proxy(request)
+    count = len(adapter._held_flows)
+    await adapter.release_all()
+    return {"status": "released", "count": count}
+
+
+# ---------------------------------------------------------------------------
+# Replay
+# ---------------------------------------------------------------------------
+
+
+@router.post("/replay/{flow_id}", response_model=ReplayResponse)
+async def replay_flow(
+    request: Request,
+    flow_id: str,
+    body: ReplayRequest | None = None,
+) -> ReplayResponse:
+    """Replay a captured flow through the proxy."""
+    adapter = _require_running_proxy(request)
+    flow_store = request.app.state.flow_store
+    if flow_store is None:
+        raise HTTPException(status_code=404, detail="Flow store not available")
+
+    original = await flow_store.get(flow_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+
+    # Reconstruct the request
+    req = original.request
+    headers = dict(req.headers)
+    request_body = req.body
+
+    if body:
+        if body.modify_headers:
+            headers.update(body.modify_headers)
+        if body.modify_body is not None:
+            request_body = body.modify_body
+
+    # Route through the proxy so the replayed flow appears in captures
+    proxy_url = f"http://127.0.0.1:{adapter.listen_port}"
+
+    # Use mitmproxy CA cert for TLS if available
+    cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+    verify = str(cert_path) if cert_path.is_file() else False
+
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy_url,
+            verify=verify,
+            timeout=30.0,
+        ) as client:
+            resp = await client.request(
+                method=req.method,
+                url=req.url,
+                headers=headers,
+                content=request_body.encode("utf-8") if request_body else None,
+            )
+        return ReplayResponse(
+            status="success",
+            original_flow_id=flow_id,
+            status_code=resp.status_code,
+        )
+    except Exception as e:
+        return ReplayResponse(
+            status="error",
+            original_flow_id=flow_id,
+            error=str(e),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mocks
+# ---------------------------------------------------------------------------
+
+
+@router.post("/mocks")
+async def set_mock(request: Request, body: SetMockRequest) -> dict:
+    """Add a mock response rule. Matching requests get a synthetic response."""
+    adapter = _require_running_proxy(request)
+    rule_id = await adapter.set_mock(
+        pattern=body.pattern,
+        response=body.response.model_dump(),
+    )
+    return {"status": "accepted", "rule_id": rule_id, "pattern": body.pattern}
+
+
+@router.get("/mocks", response_model=MockListResponse)
+async def list_mocks(request: Request) -> MockListResponse:
+    """List all active mock rules."""
+    adapter = request.app.state.proxy_adapter
+    if adapter is None:
+        return MockListResponse(rules=[], total=0)
+
+    rules = [
+        MockRuleInfo(
+            rule_id=r["rule_id"],
+            pattern=r["pattern"],
+            response=MockResponseSpec(),  # Server-side only tracks rule_id + pattern
+        )
+        for r in adapter._mock_rules
+    ]
+    return MockListResponse(rules=rules, total=len(rules))
+
+
+@router.delete("/mocks/{rule_id}")
+async def delete_mock(request: Request, rule_id: str) -> dict:
+    """Delete a specific mock rule."""
+    adapter = _require_running_proxy(request)
+    await adapter.clear_mock(rule_id=rule_id)
+    return {"status": "deleted", "rule_id": rule_id}
+
+
+@router.delete("/mocks")
+async def delete_all_mocks(request: Request) -> dict:
+    """Delete all mock rules."""
+    adapter = _require_running_proxy(request)
+    count = len(adapter._mock_rules)
+    await adapter.clear_mock()
+    return {"status": "deleted", "count": count}
+
+
+# ---------------------------------------------------------------------------
+# Certificate & setup guide
+# ---------------------------------------------------------------------------
+
+
+@router.get("/cert")
+async def download_cert() -> FileResponse:
+    """Download the mitmproxy CA certificate for device installation."""
+    cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+    if not cert_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="CA certificate not found. Run mitmproxy once to generate it.",
+        )
+    return FileResponse(
+        path=str(cert_path),
+        media_type="application/x-pem-file",
+        filename="mitmproxy-ca-cert.pem",
+    )
+
+
+@router.get("/setup-guide")
+async def setup_guide(request: Request) -> dict:
+    """Get device proxy setup instructions with auto-detected local IP and network interface."""
+    adapter = request.app.state.proxy_adapter
+    port = adapter.listen_port if adapter else 8080
+
+    # Auto-detect local IP
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        local_ip = "127.0.0.1"
+
+    # Auto-detect active network interface name (macOS networksetup name)
+    active_interface = _detect_active_interface()
+
+    # Detect VPN and other potential issues
+    warnings = _detect_proxy_warnings()
+
+    # Build simulator proxy commands with detected or placeholder interface
+    iface_display = active_interface or "<interface>"
+    set_proxy_cmd = (
+        f'networksetup -setwebproxy "{iface_display}" 127.0.0.1 {port} && '
+        f'networksetup -setsecurewebproxy "{iface_display}" 127.0.0.1 {port}'
+    )
+    clear_proxy_cmd = (
+        f'networksetup -setwebproxystate "{iface_display}" off && '
+        f'networksetup -setsecurewebproxystate "{iface_display}" off'
+    )
+
+    simulator_steps = []
+    if not active_interface:
+        simulator_steps.append(
+            "0. Detect your active network interface: "
+            "route -n get default | grep interface, then "
+            "networksetup -listallhardwareports | grep -B1 <device>"
+        )
+    simulator_steps.extend([
+        "1. If you have multiple network interfaces active (e.g. Wi-Fi + Ethernet), "
+        "disable the one you're NOT using to avoid routing ambiguity.",
+        f"2. Set proxy on the Mac's active network interface (NOT in simulator settings): "
+        f"{set_proxy_cmd}",
+        "3. Install the CA certificate into the simulator keychain: "
+        "xcrun simctl keychain booted add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem",
+        "4. Reboot the simulator — it reads the host's proxy settings at boot time, "
+        "so the proxy must be set BEFORE the simulator starts.",
+        f"5. When done, disable the proxy: {clear_proxy_cmd}",
+    ])
+
+    return {
+        "proxy_host": local_ip,
+        "proxy_port": port,
+        "active_interface": active_interface,
+        "warnings": warnings,
+        "cert_install_url": "http://mitm.it",
+        "steps": [
+            {
+                "target": "simulator",
+                "note": "The iOS Simulator inherits the Mac's network proxy settings. "
+                        "You must configure the proxy on macOS, not inside the simulator.",
+                "instructions": simulator_steps,
+            },
+            {
+                "target": "physical_device",
+                "note": "Physical devices are configured directly in iOS Settings.",
+                "instructions": [
+                    "1. Go to Settings > Wi-Fi > (your network) > Configure Proxy > Manual",
+                    f"2. Set Server: {local_ip}, Port: {port}",
+                    "3. Open Safari and go to http://mitm.it to download the CA certificate",
+                    "4. Install the profile in Settings > General > VPN & Device Management",
+                    "5. Trust the certificate in Settings > General > About > "
+                    "Certificate Trust Settings",
+                ],
+            },
+        ],
+    }
+
+
+def _detect_active_interface() -> str | None:
+    """Try to detect the macOS networksetup service name for the active interface.
+
+    Uses _get_default_route_device() to get the BSD device (e.g., en0),
+    then maps it to a networksetup service name (e.g., "Wi-Fi").
+
+    Returns None if detection fails (non-macOS, no default route, etc.).
+    """
+    bsd_device = _get_default_route_device()
+    if not bsd_device:
+        return None
+
+    return _bsd_device_to_service_name(bsd_device)
+
+
+def _bsd_device_to_service_name(bsd_device: str) -> str | None:
+    """Map a BSD device name (en0) to a networksetup service name (Wi-Fi)."""
+    try:
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        lines = result.stdout.splitlines()
+        for i, line in enumerate(lines):
+            if f"Device: {bsd_device}" in line:
+                for j in range(i - 1, -1, -1):
+                    if lines[j].startswith("Hardware Port:"):
+                        return lines[j].split(":", 1)[1].strip()
+        return None
+    except Exception:
+        return None
+
+
+def _detect_proxy_warnings() -> list[str]:
+    """Detect VPNs and network conditions that may interfere with mitmproxy.
+
+    Checks:
+    1. scutil --nc list — finds NetworkExtension/built-in VPNs with "Connected" status
+    2. Default route interface — if it goes through a utun device, a VPN is routing traffic
+    """
+    warnings: list[str] = []
+
+    # 1. Check scutil --nc list for connected VPNs
+    connected_vpns = _get_connected_vpns()
+    for vpn_name in connected_vpns:
+        warnings.append(
+            f"VPN detected: '{vpn_name}' is connected. "
+            "This may route traffic around the proxy, causing flows to not appear."
+        )
+
+    # 2. Check if the default route goes through a utun interface
+    default_device = _get_default_route_device()
+    if default_device and default_device.startswith("utun"):
+        if not connected_vpns:
+            # Only add this if we didn't already flag via scutil (avoid redundancy)
+            warnings.append(
+                f"Default route uses tunnel interface ({default_device}), "
+                "which suggests a VPN is active. Traffic may bypass the proxy."
+            )
+        warnings.append(
+            "Consider disconnecting the VPN before starting the proxy, "
+            "or configure split tunneling to exclude the target traffic."
+        )
+
+    return warnings
+
+
+def _get_connected_vpns() -> list[str]:
+    """Parse `scutil --nc list` for VPN configurations with Connected status."""
+    try:
+        result = subprocess.run(
+            ["scutil", "--nc", "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+
+        vpns: list[str] = []
+        for line in result.stdout.splitlines():
+            # Lines look like:
+            # * (Connected)      "My VPN" [com.apple.something]
+            # * (Disconnected)   "Other VPN" [com.apple.something]
+            if "(Connected)" not in line:
+                continue
+            # Extract the quoted name
+            start = line.find('"')
+            end = line.find('"', start + 1) if start != -1 else -1
+            if start != -1 and end != -1:
+                vpns.append(line[start + 1 : end])
+        return vpns
+    except Exception:
+        return []
+
+
+def _get_default_route_device() -> str | None:
+    """Get the BSD device name for the default route (e.g., en0, utun3)."""
+    try:
+        result = subprocess.run(
+            ["route", "-n", "get", "default"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("interface:"):
+                return line.split(":", 1)[1].strip()
+        return None
+    except Exception:
+        return None

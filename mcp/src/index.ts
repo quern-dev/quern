@@ -40,7 +40,7 @@ const API_KEY = loadApiKey();
 // ---------------------------------------------------------------------------
 
 async function apiRequest(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   params?: Record<string, string | number | boolean | undefined>,
   body?: unknown
@@ -539,6 +539,178 @@ server.tool(
 );
 
 server.tool(
+  "proxy_status",
+  `Check proxy state and configuration. Returns status (running/stopped/error), port, flows captured, intercept state, mock rules count, and any errors.`,
+  {},
+  async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/status");
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "start_proxy",
+  `Start the mitmproxy network capture. Optionally specify port and listen host.`,
+  {
+    port: z
+      .number()
+      .optional()
+      .describe("Port for the mitmproxy listener (default: 8080)"),
+    listen_host: z
+      .string()
+      .optional()
+      .describe("Host to listen on (default: 0.0.0.0)"),
+  },
+  async ({ port, listen_host }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (port !== undefined) body.port = port;
+      if (listen_host !== undefined) body.listen_host = listen_host;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/start",
+        undefined,
+        Object.keys(body).length > 0 ? body : undefined
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "stop_proxy",
+  `Stop the mitmproxy network capture.`,
+  {},
+  async () => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/proxy/stop");
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "get_flow_summary",
+  `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.`,
+  {
+    window: z
+      .enum(["30s", "1m", "5m", "15m", "1h"])
+      .default("5m")
+      .describe("Time window to summarize"),
+    host: z
+      .string()
+      .optional()
+      .describe("Filter to a specific host"),
+    since_cursor: z
+      .string()
+      .optional()
+      .describe(
+        "Cursor from a previous summary response — returns only new activity since then"
+      ),
+  },
+  async ({ window, host, since_cursor }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
+        window,
+        host,
+        since_cursor,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "proxy_setup_guide",
+  `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup.`,
+  {},
+  async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/setup-guide");
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
   "list_log_sources",
   `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
   {},
@@ -557,6 +729,330 @@ server.tool(
           {
             type: "text" as const,
             text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Phase 2c: Intercept, Replay & Mock tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "set_intercept",
+  `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them. Uses mitmproxy filter syntax (e.g. "~d api.example.com", "~m POST & ~d api.example.com").`,
+  {
+    pattern: z
+      .string()
+      .describe(
+        'mitmproxy filter pattern (e.g. "~d api.example.com", "~m POST & ~d api.example.com")'
+      ),
+  },
+  async ({ pattern }) => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/intercept",
+        undefined,
+        { pattern }
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "clear_intercept",
+  `Clear the intercept pattern and release all held flows. Flows will complete normally.`,
+  {},
+  async () => {
+    try {
+      const data = await apiRequest("DELETE", "/api/v1/proxy/intercept");
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "list_held_flows",
+  `List flows currently held by the intercept filter. Supports long-polling: set timeout > 0 to block until a flow is intercepted or timeout expires. This is the recommended approach for MCP agents — make a single blocking call instead of rapid polling.`,
+  {
+    timeout: z
+      .number()
+      .min(0)
+      .max(60)
+      .default(0)
+      .describe(
+        "Long-poll timeout in seconds. 0 = return immediately. >0 = block until a flow is caught or timeout expires."
+      ),
+  },
+  async ({ timeout }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/intercept/held", {
+        timeout,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "release_flow",
+  `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method.`,
+  {
+    flow_id: z.string().describe("The held flow ID to release"),
+    modifications: z
+      .object({
+        headers: z
+          .record(z.string())
+          .optional()
+          .describe("Headers to add/override"),
+        body: z.string().optional().describe("New request body"),
+        url: z.string().optional().describe("New request URL"),
+        method: z.string().optional().describe("New HTTP method"),
+      })
+      .optional()
+      .describe("Optional request modifications to apply before releasing"),
+  },
+  async ({ flow_id, modifications }) => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/intercept/release",
+        undefined,
+        { flow_id, modifications: modifications || null }
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "replay_flow",
+  `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body.`,
+  {
+    flow_id: z.string().describe("The captured flow ID to replay"),
+    modify_headers: z
+      .record(z.string())
+      .optional()
+      .describe("Headers to add/override on the replayed request"),
+    modify_body: z
+      .string()
+      .optional()
+      .describe("New body for the replayed request"),
+  },
+  async ({ flow_id, modify_headers, modify_body }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (modify_headers) body.modify_headers = modify_headers;
+      if (modify_body !== undefined) body.modify_body = modify_body;
+
+      const data = await apiRequest(
+        "POST",
+        `/api/v1/proxy/replay/${encodeURIComponent(flow_id)}`,
+        undefined,
+        Object.keys(body).length > 0 ? body : undefined
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "set_mock",
+  `Add a mock response rule. Requests matching the pattern will receive a synthetic response instead of hitting the real server. Mock rules take priority over intercept. Uses mitmproxy filter syntax.`,
+  {
+    pattern: z
+      .string()
+      .describe('mitmproxy filter pattern (e.g. "~d api.example.com & ~m POST")'),
+    status_code: z
+      .number()
+      .default(200)
+      .describe("HTTP status code for the mock response"),
+    headers: z
+      .record(z.string())
+      .optional()
+      .describe(
+        'Response headers (default: {"content-type": "application/json"})'
+      ),
+    body: z
+      .string()
+      .default("")
+      .describe("Response body string"),
+  },
+  async ({ pattern, status_code, headers, body }) => {
+    try {
+      const response: Record<string, unknown> = {
+        status_code,
+        body,
+      };
+      if (headers) {
+        response.headers = headers;
+      }
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/mocks",
+        undefined,
+        { pattern, response }
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "list_mocks",
+  `List all active mock response rules.`,
+  {},
+  async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/mocks");
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "clear_mocks",
+  `Clear mock response rules. If rule_id is provided, removes only that rule. Otherwise removes all mock rules.`,
+  {
+    rule_id: z
+      .string()
+      .optional()
+      .describe("Specific mock rule ID to remove. Omit to clear all."),
+  },
+  async ({ rule_id }) => {
+    try {
+      let data;
+      if (rule_id) {
+        data = await apiRequest(
+          "DELETE",
+          `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`
+        );
+      } else {
+        data = await apiRequest("DELETE", "/api/v1/proxy/mocks");
+      }
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
           },
         ],
         isError: true,
@@ -626,7 +1122,19 @@ const GUIDE_CONTENT = `# iOS Debug Server — Tool Selection Guide
 | Change what's being captured      | \`set_log_filter\`     |
 | See captured HTTP traffic         | \`query_flows\`        |
 | Inspect a specific HTTP flow      | \`get_flow_detail\`    |
+| Get HTTP traffic summary          | \`get_flow_summary\`   |
+| Check proxy status                | \`proxy_status\`       |
+| Start/stop the proxy              | \`start_proxy\` / \`stop_proxy\` |
+| Set up a device for proxying      | \`proxy_setup_guide\`  |
 | Check which sources are active    | \`list_log_sources\`   |
+| Intercept matching requests       | \`set_intercept\`      |
+| Stop intercepting                 | \`clear_intercept\`    |
+| See held/intercepted flows        | \`list_held_flows\`    |
+| Release a held flow               | \`release_flow\`       |
+| Replay a captured request         | \`replay_flow\`        |
+| Mock an API response              | \`set_mock\`           |
+| List active mock rules            | \`list_mocks\`         |
+| Remove mock rules                 | \`clear_mocks\`        |
 
 ## Recommended Workflows
 
@@ -659,7 +1167,47 @@ This is the most token-efficient way to stay informed.
 3. \`query_flows\` with \`host\` filter — narrow to a specific API
 4. \`query_logs\` with \`source: "proxy"\` — see network events in the log timeline
 
-### 5. Debugging a Specific Issue
+### 5. Proxy Control & Monitoring
+
+1. \`proxy_status\` — check if the proxy is running and how many flows are captured
+2. \`start_proxy\` — start the proxy (optionally on a custom port)
+3. \`proxy_setup_guide\` — get device setup instructions with auto-detected local IP
+4. \`get_flow_summary\` with \`window: "5m"\` — get a traffic digest
+5. Save the \`cursor\` and use \`since_cursor\` on subsequent calls for efficient delta polling
+6. \`stop_proxy\` — stop the proxy when done
+
+### 6. Intercepting & Modifying Requests
+
+Use intercept to pause matching requests, inspect them, and optionally modify before releasing:
+
+1. \`set_intercept\` with pattern (e.g. \`"~d api.example.com & ~m POST"\`)
+2. \`list_held_flows\` with \`timeout: 30\` — long-poll blocks until a flow is caught
+3. Inspect the held flow's request details
+4. \`release_flow\` with the flow ID — optionally pass \`modifications\` to change headers, body, URL, or method
+5. \`clear_intercept\` when done — releases all remaining held flows
+
+**Important**: Held flows auto-release after 30 seconds to prevent hanging clients.
+
+### 7. Mocking API Responses
+
+Use mocks to return synthetic responses without hitting the real server:
+
+1. \`set_mock\` with a pattern and response spec (status code, headers, body)
+2. Matching requests immediately get the mock response — they appear in flow captures as "MOCK" entries
+3. \`list_mocks\` to see active rules
+4. \`clear_mocks\` to remove rules (specific by rule_id, or all)
+
+**Note**: Mock rules take priority over intercept — if a request matches both a mock and an intercept pattern, the mock wins.
+
+### 8. Replaying Requests
+
+Replay a previously captured flow to reproduce behavior:
+
+1. \`query_flows\` to find the flow you want to replay
+2. \`replay_flow\` with the flow ID — optionally modify headers or body
+3. The replayed request goes through the proxy, so it appears as a new captured flow
+
+### 9. Debugging a Specific Issue
 
 1. \`query_logs\` with \`search\` to find relevant messages
 2. \`query_logs\` with \`process\` and time range to narrow down
@@ -670,6 +1218,8 @@ This is the most token-efficient way to stay informed.
 - **tail_logs vs query_logs**: Use \`tail_logs\` for "show me recent stuff" (defaults to 50, newest first). Use \`query_logs\` for searching with filters and time ranges.
 - **Level filtering**: \`level: "error"\` returns ERROR and FAULT entries.
 - **Sources**: \`syslog\` = device system log, \`oslog\` = macOS unified log, \`crash\` = crash reports, \`build\` = xcodebuild output, \`proxy\` = network traffic.
+- **Long-polling**: \`list_held_flows\` with \`timeout: 30\` is more efficient than polling every second — one blocking call instead of 30 rapid calls.
+- **Mock vs Intercept**: Mocks return instant synthetic responses. Intercept pauses real requests for inspection. Use mocks for stable test fixtures, intercept for ad-hoc debugging.
 `;
 
 const TROUBLESHOOTING_CONTENT = `# iOS Debug Server — Troubleshooting Guide

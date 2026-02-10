@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
 
@@ -56,6 +57,16 @@ class FlowStore:
         """Remove all flows."""
         async with self._lock:
             self._flows.clear()
+
+    async def get_since(self, since: datetime) -> list[FlowRecord]:
+        """Return all flows with timestamp > since."""
+        async with self._lock:
+            return [f for f in self._flows.values() if f.timestamp > since]
+
+    async def get_all(self) -> list[FlowRecord]:
+        """Return all flows (snapshot under lock)."""
+        async with self._lock:
+            return list(self._flows.values())
 
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
         """Apply query filters. Must be called under lock."""

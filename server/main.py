@@ -94,18 +94,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.build_adapter = build
     await build.start()
 
-    # Proxy adapter (opt-in via --proxy / enable_proxy)
+    # Proxy adapter — always create so status/start/stop endpoints work at runtime.
+    # Only auto-start when enabled via --proxy / enable_proxy.
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+    proxy = ProxyAdapter(
+        device_id=config.default_device_id,
+        on_entry=dedup.process,
+        flow_store=flow_store,
+        listen_port=app.state.proxy_port,
+    )
+    adapters["proxy"] = proxy
+    app.state.proxy_adapter = proxy
     if app.state.enable_proxy:
-        flow_store = FlowStore()
-        app.state.flow_store = flow_store
-        proxy = ProxyAdapter(
-            device_id=config.default_device_id,
-            on_entry=dedup.process,
-            flow_store=flow_store,
-            listen_port=app.state.proxy_port,
-        )
-        adapters["proxy"] = proxy
-        app.state.proxy_adapter = proxy
         await proxy.start()
 
     app.state.source_adapters = adapters

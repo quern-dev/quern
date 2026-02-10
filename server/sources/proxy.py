@@ -2,8 +2,8 @@
 
 Spawns `mitmdump` with our addon script as a subprocess and reads
 JSON Lines from its stdout. Each flow is dual-emitted:
-  1. Full FlowRecord → FlowStore
-  2. Summary LogEntry → processing pipeline (dedup → ring buffer)
+  1. Full FlowRecord -> FlowStore
+  2. Summary LogEntry -> processing pipeline (dedup -> ring buffer)
 
 Follows the same subprocess pattern as SyslogAdapter.
 """
@@ -60,7 +60,7 @@ def _format_summary(flow: FlowRecord) -> str:
 
     if flow.response:
         resp = flow.response
-        parts.append(f"→ {resp.status_code} {resp.reason}".rstrip())
+        parts.append(f"-> {resp.status_code} {resp.reason}".rstrip())
         if flow.timing.total_ms is not None:
             parts.append(f"({flow.timing.total_ms:.0f}ms")
             if resp.body_size:
@@ -70,7 +70,7 @@ def _format_summary(flow: FlowRecord) -> str:
         elif resp.body_size:
             parts.append(f"({_human_size(resp.body_size)})")
     elif flow.error:
-        parts.append(f"→ ERROR: {flow.error}")
+        parts.append(f"-> ERROR: {flow.error}")
 
     return " ".join(parts)
 
@@ -106,6 +106,23 @@ class ProxyAdapter(BaseSourceAdapter):
         self.listen_port = listen_port
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
+
+        # Intercept state (server-side mirror of addon state)
+        self._intercept_pattern: str | None = None
+        self._held_flows: dict[str, dict] = {}  # flow_id -> {id, held_at, request}
+        self._intercept_event: asyncio.Event = asyncio.Event()
+
+        # Mock state (server-side mirror)
+        self._mock_rules: list[dict] = []  # [{rule_id, pattern}]
+
+    def reconfigure(self, listen_port: int | None = None, listen_host: str | None = None) -> None:
+        """Update listen config. Only allowed when stopped."""
+        if self._running:
+            raise RuntimeError("Cannot reconfigure while running")
+        if listen_port is not None:
+            self.listen_port = listen_port
+        if listen_host is not None:
+            self.listen_host = listen_host
 
     @staticmethod
     def _find_mitmdump() -> str:
@@ -145,6 +162,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
+                limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for large bodies)
             )
         except Exception as e:
             self._error = f"Failed to start mitmdump: {e}"
@@ -180,6 +198,12 @@ class ProxyAdapter(BaseSourceAdapter):
 
         self._process = None
         self._read_task = None
+
+        # Clear intercept/mock state
+        self._intercept_pattern = None
+        self._held_flows.clear()
+        self._mock_rules.clear()
+
         logger.info("Proxy adapter stopped")
 
     async def send_command(self, command: dict) -> None:
@@ -195,6 +219,90 @@ class ProxyAdapter(BaseSourceAdapter):
         if s.status == "streaming":
             s.status = "proxying"
         return s
+
+    # -------------------------------------------------------------------
+    # Intercept convenience methods
+    # -------------------------------------------------------------------
+
+    async def set_intercept(self, pattern: str) -> None:
+        """Set an intercept pattern on the addon."""
+        self._intercept_pattern = pattern
+        await self.send_command({"action": "set_intercept", "pattern": pattern})
+
+    async def clear_intercept(self) -> None:
+        """Clear the intercept pattern and release all held flows."""
+        self._intercept_pattern = None
+        self._held_flows.clear()
+        await self.send_command({"action": "clear_intercept"})
+
+    async def release_flow(self, flow_id: str, modifications: dict | None = None) -> None:
+        """Release a single held flow, optionally with modifications."""
+        if modifications:
+            await self.send_command({
+                "action": "modify_and_release",
+                "flow_id": flow_id,
+                "modifications": modifications,
+            })
+        else:
+            await self.send_command({"action": "release_flow", "flow_id": flow_id})
+
+    async def release_all(self) -> None:
+        """Release all held flows."""
+        self._held_flows.clear()
+        await self.send_command({"action": "release_all"})
+
+    async def set_mock(self, pattern: str, response: dict, rule_id: str | None = None) -> str:
+        """Add a mock response rule. Returns the rule_id."""
+        if rule_id is None:
+            rule_id = f"mock_{uuid.uuid4().hex[:8]}"
+        self._mock_rules.append({"rule_id": rule_id, "pattern": pattern})
+        await self.send_command({
+            "action": "set_mock",
+            "rule_id": rule_id,
+            "pattern": pattern,
+            "response": response,
+        })
+        return rule_id
+
+    async def clear_mock(self, rule_id: str | None = None) -> None:
+        """Remove a specific mock rule or all mock rules."""
+        if rule_id:
+            self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
+        else:
+            self._mock_rules.clear()
+        await self.send_command({"action": "clear_mock", "rule_id": rule_id})
+
+    def get_held_flows(self) -> list[dict]:
+        """Return held flows with computed age_seconds."""
+        now = datetime.now(timezone.utc)
+        result = []
+        for flow_id, info in self._held_flows.items():
+            held_at = info["held_at"]
+            age = (now - held_at).total_seconds()
+            result.append({
+                "id": flow_id,
+                "held_at": held_at,
+                "age_seconds": round(age, 1),
+                "request": info["request"],
+            })
+        return result
+
+    async def wait_for_held(self, timeout: float) -> bool:
+        """Wait for a new flow to be intercepted.
+
+        Clears the event, then waits up to `timeout` seconds for it to be set again.
+        Returns True if a new flow was intercepted, False if timeout expired.
+        """
+        self._intercept_event.clear()
+        try:
+            await asyncio.wait_for(self._intercept_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    # -------------------------------------------------------------------
+    # Read loop and event handlers
+    # -------------------------------------------------------------------
 
     async def _read_loop(self) -> None:
         """Read JSON Lines from mitmdump stdout and dispatch."""
@@ -219,8 +327,16 @@ class ProxyAdapter(BaseSourceAdapter):
                 msg_type = data.get("type")
                 if msg_type == "flow":
                     await self._handle_flow(data)
+                elif msg_type == "intercepted":
+                    self._handle_intercepted(data)
+                elif msg_type == "released":
+                    self._handle_released(data)
+                elif msg_type == "mock_hit":
+                    await self._handle_mock_hit(data)
                 elif msg_type == "status":
-                    logger.info("Proxy addon status: %s", data.get("event"))
+                    self._handle_status_event(data)
+                elif msg_type == "error":
+                    logger.warning("Addon error: %s", data)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -254,6 +370,83 @@ class ProxyAdapter(BaseSourceAdapter):
             source=LogSource.PROXY,
         )
         await self.emit(entry)
+
+    def _handle_intercepted(self, data: dict) -> None:
+        """Process an intercepted flow event — store in held_flows and signal waiters."""
+        flow_id = data.get("id", "")
+        req_data = data.get("request", {})
+        ts = data.get("timestamp", 0)
+        held_at = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
+
+        self._held_flows[flow_id] = {
+            "id": flow_id,
+            "held_at": held_at,
+            "request": req_data,
+        }
+        self._intercept_event.set()
+
+        # Emit NOTICE log entry
+        method = req_data.get("method", "?")
+        path = req_data.get("path", "?")
+        entry = LogEntry(
+            id=uuid.uuid4().hex[:8],
+            timestamp=held_at,
+            device_id=self.device_id,
+            process="network",
+            subsystem=req_data.get("host", ""),
+            level=LogLevel.NOTICE,
+            message=f"INTERCEPTED: {method} {path}",
+            source=LogSource.PROXY,
+        )
+        # Fire-and-forget emit (synchronous context)
+        asyncio.ensure_future(self.emit(entry))
+
+    def _handle_released(self, data: dict) -> None:
+        """Remove a flow from held_flows when released."""
+        flow_id = data.get("id", "")
+        self._held_flows.pop(flow_id, None)
+
+    async def _handle_mock_hit(self, data: dict) -> None:
+        """Process a mock hit — create FlowRecord and emit log entry."""
+        flow = self._parse_flow(data)
+        if flow is None:
+            return
+
+        await self.flow_store.add(flow)
+
+        req = flow.request
+        status = flow.response.status_code if flow.response else "?"
+        entry = LogEntry(
+            id=uuid.uuid4().hex[:8],
+            timestamp=flow.timestamp,
+            device_id=self.device_id,
+            process="network",
+            subsystem=req.host,
+            level=LogLevel.INFO,
+            message=f"MOCK: {req.method} {req.path} -> {status}",
+            source=LogSource.PROXY,
+        )
+        await self.emit(entry)
+
+    def _handle_status_event(self, data: dict) -> None:
+        """Handle status events from the addon that update local state mirrors."""
+        event = data.get("event")
+        if event == "intercept_set":
+            self._intercept_pattern = data.get("pattern")
+        elif event == "intercept_cleared":
+            self._intercept_pattern = None
+            self._held_flows.clear()
+        elif event == "mock_set":
+            # Already tracked in set_mock(), but handle for completeness
+            pass
+        elif event == "mocks_cleared":
+            rule_id = data.get("rule_id")
+            if rule_id:
+                self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
+            else:
+                self._mock_rules.clear()
+        else:
+            logger.info("Proxy addon status: %s", event)
 
     def _parse_flow(self, data: dict) -> FlowRecord | None:
         """Parse addon JSON into a FlowRecord."""

@@ -282,3 +282,157 @@ class FlowQueryResponse(BaseModel):
     flows: list[FlowRecord]
     total: int
     has_more: bool
+
+
+# ---------------------------------------------------------------------------
+# Proxy status & flow summary models (Phase 2b)
+# ---------------------------------------------------------------------------
+
+
+class ProxyStatusResponse(BaseModel):
+    """Response from GET /api/v1/proxy/status."""
+
+    status: str  # "running", "stopped", "error"
+    port: int = 8080
+    listen_host: str = "0.0.0.0"
+    started_at: datetime | None = None
+    flows_captured: int = 0
+    active_filter: str | None = None
+    active_intercept: str | None = None
+    held_flows_count: int = 0
+    mock_rules_count: int = 0
+    error: str | None = None
+
+
+class HostSummary(BaseModel):
+    """Traffic summary for a single host."""
+
+    host: str
+    total: int
+    success: int = 0
+    client_error: int = 0
+    server_error: int = 0
+    connection_errors: int = 0
+    avg_latency_ms: float | None = None
+
+
+class FlowErrorPattern(BaseModel):
+    """A grouped error pattern with occurrence count."""
+
+    pattern: str
+    count: int
+    first_seen: datetime
+    last_seen: datetime
+
+
+class SlowRequest(BaseModel):
+    """A request that exceeded the slow threshold."""
+
+    method: str
+    url: str
+    total_ms: float
+    status_code: int | None = None
+
+
+class FlowSummaryResponse(BaseModel):
+    """Response from GET /api/v1/proxy/flows/summary."""
+
+    window: str
+    generated_at: datetime
+    cursor: str
+    summary: str
+    total_flows: int
+    by_host: list[HostSummary]
+    errors: list[FlowErrorPattern]
+    slow_requests: list[SlowRequest]
+
+
+# ---------------------------------------------------------------------------
+# Intercept models (Phase 2c)
+# ---------------------------------------------------------------------------
+
+
+class InterceptSetRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/intercept."""
+
+    pattern: str
+
+
+class HeldFlow(BaseModel):
+    """A flow currently held by the intercept filter."""
+
+    id: str
+    held_at: datetime
+    age_seconds: float
+    request: FlowRequest
+
+
+class InterceptStatusResponse(BaseModel):
+    """Response from GET /api/v1/proxy/intercept/held."""
+
+    pattern: str | None = None
+    held_flows: list[HeldFlow] = Field(default_factory=list)
+    total_held: int = 0
+
+
+class ReleaseFlowRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/intercept/release."""
+
+    flow_id: str
+    modifications: dict | None = None  # {headers?, body?, url?, method?}
+
+
+# ---------------------------------------------------------------------------
+# Replay models (Phase 2c)
+# ---------------------------------------------------------------------------
+
+
+class ReplayRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/replay/{flow_id}."""
+
+    modify_headers: dict[str, str] | None = None
+    modify_body: str | None = None
+
+
+class ReplayResponse(BaseModel):
+    """Response from POST /api/v1/proxy/replay/{flow_id}."""
+
+    status: str  # "success" or "error"
+    original_flow_id: str
+    status_code: int | None = None
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Mock models (Phase 2c)
+# ---------------------------------------------------------------------------
+
+
+class MockResponseSpec(BaseModel):
+    """Specification for a mock HTTP response."""
+
+    status_code: int = 200
+    headers: dict[str, str] = Field(default_factory=lambda: {"content-type": "application/json"})
+    body: str = ""
+
+
+class SetMockRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/mocks."""
+
+    pattern: str
+    response: MockResponseSpec
+
+
+class MockRuleInfo(BaseModel):
+    """Info about an active mock rule."""
+
+    rule_id: str
+    pattern: str
+    response: MockResponseSpec
+
+
+class MockListResponse(BaseModel):
+    """Response from GET /api/v1/proxy/mocks."""
+
+    rules: list[MockRuleInfo] = Field(default_factory=list)
+    total: int = 0
