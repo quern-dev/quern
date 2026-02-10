@@ -123,7 +123,7 @@ server.tool(
       .describe("Minimum log level filter"),
     process: z.string().optional().describe("Filter by process name"),
     source: z
-      .enum(["syslog", "oslog", "crash", "build", "app_drain"])
+      .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain"])
       .optional()
       .describe("Filter by log source"),
   },
@@ -179,7 +179,7 @@ server.tool(
       .describe("Minimum log level"),
     process: z.string().optional().describe("Filter by process name"),
     source: z
-      .enum(["syslog", "oslog", "crash", "build", "app_drain"])
+      .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain"])
       .optional()
       .describe("Filter by log source"),
     search: z
@@ -436,6 +436,109 @@ server.tool(
 );
 
 server.tool(
+  "query_flows",
+  `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.`,
+  {
+    host: z.string().optional().describe("Filter by hostname"),
+    path_contains: z.string().optional().describe("Filter by path substring"),
+    method: z
+      .string()
+      .optional()
+      .describe("Filter by HTTP method (GET, POST, etc.)"),
+    status_min: z
+      .number()
+      .optional()
+      .describe("Minimum status code (e.g. 400 for errors)"),
+    status_max: z
+      .number()
+      .optional()
+      .describe("Maximum status code"),
+    has_error: z
+      .boolean()
+      .optional()
+      .describe("Filter to flows with connection errors"),
+    limit: z
+      .number()
+      .min(1)
+      .max(1000)
+      .default(100)
+      .describe("Max flows to return"),
+    offset: z.number().min(0).default(0).describe("Pagination offset"),
+  },
+  async ({
+    host,
+    path_contains,
+    method,
+    status_min,
+    status_max,
+    has_error,
+    limit,
+    offset,
+  }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/flows", {
+        host,
+        path_contains,
+        method,
+        status_min,
+        status_max,
+        has_error,
+        limit,
+        offset,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "get_flow_detail",
+  `Get full request/response detail for a single captured HTTP flow, including headers and bodies.`,
+  {
+    flow_id: z.string().describe("The flow ID to retrieve"),
+  },
+  async ({ flow_id }) => {
+    try {
+      const data = await apiRequest(
+        "GET",
+        `/api/v1/proxy/flows/${encodeURIComponent(flow_id)}`
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
   "list_log_sources",
   `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
   {},
@@ -521,6 +624,8 @@ const GUIDE_CONTENT = `# iOS Debug Server — Tool Selection Guide
 | Check build results               | \`get_build_result\`   |
 | Investigate a crash               | \`get_latest_crash\`   |
 | Change what's being captured      | \`set_log_filter\`     |
+| See captured HTTP traffic         | \`query_flows\`        |
+| Inspect a specific HTTP flow      | \`get_flow_detail\`    |
 | Check which sources are active    | \`list_log_sources\`   |
 
 ## Recommended Workflows
@@ -547,7 +652,14 @@ This is the most token-efficient way to stay informed.
 1. \`get_build_result\` — see errors, warnings, and test results
 2. If tests failed, \`query_logs\` with \`source: "build"\` for full output
 
-### 4. Debugging a Specific Issue
+### 4. Investigating Network Issues
+
+1. \`query_flows\` with \`status_min: 400\` — see all failed HTTP requests
+2. \`get_flow_detail\` with the flow ID — inspect full headers and body
+3. \`query_flows\` with \`host\` filter — narrow to a specific API
+4. \`query_logs\` with \`source: "proxy"\` — see network events in the log timeline
+
+### 5. Debugging a Specific Issue
 
 1. \`query_logs\` with \`search\` to find relevant messages
 2. \`query_logs\` with \`process\` and time range to narrow down
@@ -557,7 +669,7 @@ This is the most token-efficient way to stay informed.
 
 - **tail_logs vs query_logs**: Use \`tail_logs\` for "show me recent stuff" (defaults to 50, newest first). Use \`query_logs\` for searching with filters and time ranges.
 - **Level filtering**: \`level: "error"\` returns ERROR and FAULT entries.
-- **Sources**: \`syslog\` = device system log, \`oslog\` = macOS unified log, \`crash\` = crash reports, \`build\` = xcodebuild output.
+- **Sources**: \`syslog\` = device system log, \`oslog\` = macOS unified log, \`crash\` = crash reports, \`build\` = xcodebuild output, \`proxy\` = network traffic.
 `;
 
 const TROUBLESHOOTING_CONTENT = `# iOS Debug Server — Troubleshooting Guide

@@ -33,6 +33,7 @@ class LogSource(str, enum.Enum):
     OSLOG = "oslog"
     CRASH = "crash"
     BUILD = "build"
+    PROXY = "proxy"
     APP_DRAIN = "app_drain"
 
 
@@ -201,3 +202,83 @@ class BuildResult(BaseModel):
     warnings: list[BuildDiagnostic] = Field(default_factory=list)
     tests: TestSummary | None = None
     raw_line_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Network proxy flow models (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class FlowRequest(BaseModel):
+    """HTTP request captured by the proxy."""
+
+    method: str
+    url: str
+    host: str
+    path: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    body_size: int = 0
+    body_truncated: bool = False
+    body_encoding: str = "utf-8"
+
+
+class FlowResponse(BaseModel):
+    """HTTP response captured by the proxy."""
+
+    status_code: int
+    reason: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    body_size: int = 0
+    body_truncated: bool = False
+    body_encoding: str = "utf-8"
+
+
+class FlowTiming(BaseModel):
+    """Timing breakdown for a captured flow."""
+
+    dns_ms: float | None = None
+    connect_ms: float | None = None
+    tls_ms: float | None = None
+    request_ms: float | None = None
+    response_ms: float | None = None
+    total_ms: float | None = None
+
+
+class FlowRecord(BaseModel):
+    """A complete HTTP flow (request + response) captured by the proxy."""
+
+    id: str = Field(description="Unique flow identifier")
+    timestamp: datetime
+    device_id: str = "default"
+    request: FlowRequest
+    response: FlowResponse | None = None
+    timing: FlowTiming = Field(default_factory=FlowTiming)
+    tls: dict[str, str] | None = None
+    error: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class FlowQueryParams(BaseModel):
+    """Parameters for querying captured flows."""
+
+    host: str | None = None
+    path_contains: str | None = None
+    method: str | None = None
+    status_min: int | None = None
+    status_max: int | None = None
+    has_error: bool | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    device_id: str = "default"
+    limit: int = Field(default=100, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+
+
+class FlowQueryResponse(BaseModel):
+    """Response from flow query endpoint."""
+
+    flows: list[FlowRecord]
+    total: int
+    has_more: bool

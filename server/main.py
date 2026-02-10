@@ -24,15 +24,18 @@ from fastapi import FastAPI
 from server.auth import APIKeyMiddleware
 from server.config import ServerConfig
 from server.processing.deduplicator import Deduplicator
+from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter
 from server.sources.build import BuildAdapter
 from server.sources.crash import CrashAdapter
 from server.sources.oslog import OslogAdapter
+from server.sources.proxy import ProxyAdapter
 from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
 from server.api.builds import router as builds_router
 from server.api.crashes import router as crashes_router
 from server.api.logs import router as logs_router
+from server.api.proxy import router as proxy_router
 
 logger = logging.getLogger("ios-debug-server")
 
@@ -91,6 +94,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.build_adapter = build
     await build.start()
 
+    # Proxy adapter (opt-in via --proxy / enable_proxy)
+    if app.state.enable_proxy:
+        flow_store = FlowStore()
+        app.state.flow_store = flow_store
+        proxy = ProxyAdapter(
+            device_id=config.default_device_id,
+            on_entry=dedup.process,
+            flow_store=flow_store,
+            listen_port=app.state.proxy_port,
+        )
+        adapters["proxy"] = proxy
+        app.state.proxy_adapter = proxy
+        await proxy.start()
+
     app.state.source_adapters = adapters
 
     logger.info(
@@ -118,6 +135,8 @@ def create_app(
     enable_crash: bool = True,
     crash_dir: Path | None = None,
     pull_crashes: bool = False,
+    enable_proxy: bool = True,
+    proxy_port: int = 8080,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     if config is None:
@@ -139,9 +158,13 @@ def create_app(
     app.state.enable_crash = enable_crash
     app.state.crash_dir = crash_dir
     app.state.pull_crashes = pull_crashes
+    app.state.enable_proxy = enable_proxy
+    app.state.proxy_port = proxy_port
     app.state.source_adapters = {}
     app.state.crash_adapter = None
     app.state.build_adapter = None
+    app.state.proxy_adapter = None
+    app.state.flow_store = None
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
@@ -150,6 +173,7 @@ def create_app(
     app.include_router(logs_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
+    app.include_router(proxy_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -202,6 +226,14 @@ def cli() -> None:
         "--pull-crashes", action="store_true", default=False,
         help="Run idevicecrashreport to pull crashes from device",
     )
+    parser.add_argument(
+        "--no-proxy", action="store_true", default=False,
+        help="Disable the mitmproxy network capture adapter",
+    )
+    parser.add_argument(
+        "--proxy-port", type=int, default=8080,
+        help="Port for the mitmproxy listener (default: 8080)",
+    )
 
     args = parser.parse_args()
 
@@ -232,6 +264,7 @@ def cli() -> None:
     )
 
     enable_crash = not args.no_crash
+    enable_proxy = not args.no_proxy
 
     if args.process:
         print(f"   Process filter: {args.process}")
@@ -241,6 +274,8 @@ def cli() -> None:
     if enable_crash:
         crash_path = args.crash_dir or "~/.ios-debug-server/crashes"
         print(f"   Crash watcher: enabled (dir: {crash_path})")
+    if enable_proxy:
+        print(f"   Proxy: enabled (port: {args.proxy_port})")
     print()
 
     app = create_app(
@@ -251,6 +286,8 @@ def cli() -> None:
         enable_crash=enable_crash,
         crash_dir=args.crash_dir,
         pull_crashes=args.pull_crashes,
+        enable_proxy=enable_proxy,
+        proxy_port=args.proxy_port,
     )
     uvicorn.run(app, host=config.host, port=config.port, log_level="info")
 

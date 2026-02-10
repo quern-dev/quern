@@ -9,6 +9,8 @@ from httpx import ASGITransport, AsyncClient
 from server.config import ServerConfig
 from server.main import create_app
 from server.models import LogEntry, LogLevel, LogSource
+from server.models import FlowRecord, FlowRequest, FlowResponse, FlowTiming
+from server.proxy.flow_store import FlowStore
 
 
 def _make_entry(
@@ -30,7 +32,7 @@ def _make_entry(
 @pytest.fixture
 def app():
     config = ServerConfig(api_key="test-key-12345")
-    return create_app(config=config, enable_oslog=False, enable_crash=False)
+    return create_app(config=config, enable_oslog=False, enable_crash=False, enable_proxy=False)
 
 
 @pytest.fixture
@@ -277,3 +279,103 @@ async def test_builds_parse(app, auth_headers):
         assert resp2.json()["succeeded"] is False
 
     await build.stop()
+
+
+# ---------------------------------------------------------------------------
+# Proxy endpoints
+# ---------------------------------------------------------------------------
+
+
+def _make_flow(
+    flow_id: str = "f_test",
+    method: str = "GET",
+    host: str = "api.example.com",
+    path: str = "/v1/test",
+    status_code: int = 200,
+) -> FlowRecord:
+    return FlowRecord(
+        id=flow_id,
+        timestamp=datetime.now(timezone.utc),
+        request=FlowRequest(method=method, url=f"https://{host}{path}", host=host, path=path),
+        response=FlowResponse(status_code=status_code, reason="OK"),
+        timing=FlowTiming(total_ms=100.0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_proxy_flows_empty(app, auth_headers):
+    """With proxy disabled, /proxy/flows returns empty list."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/flows", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["flows"] == []
+        assert data["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_proxy_flows_with_data(app, auth_headers):
+    """Inject flows into store and query them back."""
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+
+    await flow_store.add(_make_flow(flow_id="f_1", status_code=200))
+    await flow_store.add(_make_flow(flow_id="f_2", status_code=401))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/flows", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["flows"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_proxy_flows_filter_host(app, auth_headers):
+    """Host filter should narrow results."""
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+
+    await flow_store.add(_make_flow(flow_id="f_1", host="api.example.com"))
+    await flow_store.add(_make_flow(flow_id="f_2", host="other.example.com"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/proxy/flows",
+            headers=auth_headers,
+            params={"host": "api.example.com"},
+        )
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["flows"][0]["id"] == "f_1"
+
+
+@pytest.mark.asyncio
+async def test_proxy_flow_detail(app, auth_headers):
+    """Get a single flow by ID."""
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+
+    await flow_store.add(_make_flow(flow_id="f_detail"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/flows/f_detail", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == "f_detail"
+
+
+@pytest.mark.asyncio
+async def test_proxy_flow_detail_not_found(app, auth_headers):
+    """Missing flow should return 404."""
+    flow_store = FlowStore()
+    app.state.flow_store = flow_store
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/flows/f_nope", headers=auth_headers)
+        assert resp.status_code == 404
