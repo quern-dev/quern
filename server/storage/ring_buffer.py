@@ -60,9 +60,14 @@ class RingBuffer:
             return paginated, total
 
     async def get_since(self, since: datetime) -> list[LogEntry]:
-        """Get all entries since a given timestamp. Used by the summary cursor system."""
+        """Get all entries at or after a given timestamp."""
         async with self._lock:
             return [e for e in self._buffer if e.timestamp >= since]
+
+    async def get_after(self, after: datetime) -> list[LogEntry]:
+        """Get all entries strictly after a given timestamp (for cursor deltas)."""
+        async with self._lock:
+            return [e for e in self._buffer if e.timestamp > after]
 
     async def get_recent(self, count: int = 100) -> list[LogEntry]:
         """Get the N most recent entries."""

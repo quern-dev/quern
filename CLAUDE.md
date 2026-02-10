@@ -44,22 +44,22 @@ The MCP server is intentionally thin — just translates MCP tool calls into HTT
 
 ## Implementation Phases
 
-We are currently building **Phase 1a: Minimum Viable Log Server**.
+We are currently building **Phase 1b: Structured Logging & Summaries**.
 
-### Phase 1a — MVP (current)
+### Phase 1a — MVP (complete)
 - [x] Project scaffolding
-- [ ] `idevicesyslog` source adapter (spawn subprocess, parse stdout)
-- [ ] Ring buffer storage
-- [ ] FastAPI server with `/logs/stream` (SSE) and `/logs/query`
-- [ ] API key auth middleware
-- [ ] `/health` endpoint
-- [ ] CLI entry point to start/stop server
+- [x] `idevicesyslog` source adapter (spawn subprocess, parse stdout)
+- [x] Ring buffer storage
+- [x] FastAPI server with `/logs/stream` (SSE) and `/logs/query`
+- [x] API key auth middleware
+- [x] `/health` endpoint
+- [x] CLI entry point to start/stop server
 
-### Phase 1b — Structured Logging & Summaries
-- [ ] `log stream` (OSLog) source adapter
-- [ ] Processing pipeline (parser, classifier, deduplicator)
-- [ ] `/logs/summary` endpoint with template-based generation + cursor support
-- [ ] `/logs/errors` convenience endpoint
+### Phase 1b — Structured Logging & Summaries (complete)
+- [x] `log stream` (OSLog) source adapter
+- [x] Processing pipeline (classifier, deduplicator)
+- [x] `/logs/summary` endpoint with template-based generation + cursor support
+- [x] `/logs/errors` convenience endpoint
 
 ### Phase 1c — MCP Wrapper & Build Integration
 - [ ] TypeScript MCP server (`mcp/`)
@@ -99,13 +99,15 @@ docs/                Architecture docs, API reference
 
 `http://127.0.0.1:9100/api/v1`
 
-## Key Endpoints (Phase 1a target)
+## Key Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check (no auth required) |
 | GET | `/api/v1/logs/stream` | SSE real-time log stream with filters |
 | GET | `/api/v1/logs/query` | Historical log query with pagination |
+| GET | `/api/v1/logs/summary` | LLM-optimized summary with cursor support |
+| GET | `/api/v1/logs/errors` | Errors and crashes only |
 | GET | `/api/v1/logs/sources` | List active log sources |
 | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
 

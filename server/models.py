@@ -51,6 +51,11 @@ class LogEntry(BaseModel):
     message: str
     source: LogSource
     raw: str = Field(default="", description="Original unparsed line, preserved for debugging")
+    repeat_count: int = Field(
+        default=1,
+        description="Number of occurrences this entry represents. "
+        "Values > 1 are emitted by the deduplicator for suppressed repeats.",
+    )
 
 
 class LogQueryParams(BaseModel):
@@ -90,3 +95,38 @@ class SourceStatus(BaseModel):
     entries_captured: int = 0
     started_at: datetime | None = None
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Summary / errors response models (Phase 1b)
+# ---------------------------------------------------------------------------
+
+
+class TopIssue(BaseModel):
+    """A grouped error pattern with occurrence count."""
+
+    pattern: str
+    count: int
+    first_seen: datetime
+    last_seen: datetime
+    resolved: bool = False
+
+
+class LogSummaryResponse(BaseModel):
+    """Response from GET /api/v1/logs/summary."""
+
+    window: str
+    generated_at: datetime
+    cursor: str
+    summary: str
+    error_count: int
+    warning_count: int
+    total_count: int
+    top_issues: list[TopIssue]
+
+
+class LogErrorsResponse(BaseModel):
+    """Response from GET /api/v1/logs/errors."""
+
+    entries: list[LogEntry]
+    total: int

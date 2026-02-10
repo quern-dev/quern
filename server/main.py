@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import platform
 import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -21,8 +22,11 @@ from fastapi import FastAPI
 
 from server.auth import APIKeyMiddleware
 from server.config import ServerConfig
-from server.storage.ring_buffer import RingBuffer
+from server.processing.deduplicator import Deduplicator
+from server.sources import BaseSourceAdapter
+from server.sources.oslog import OslogAdapter
 from server.sources.syslog import SyslogAdapter
+from server.storage.ring_buffer import RingBuffer
 from server.api.logs import router as logs_router
 
 logger = logging.getLogger("ios-debug-server")
@@ -34,16 +38,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config: ServerConfig = app.state.config
     buffer: RingBuffer = app.state.ring_buffer
 
-    # Start source adapters
-    adapters: dict[str, SyslogAdapter] = {}
+    # Processing pipeline: adapter → deduplicator → ring buffer
+    dedup = Deduplicator(on_entry=buffer.append)
+    dedup.start()
+    app.state.deduplicator = dedup
+
+    # Start source adapters (all feed into the deduplicator)
+    adapters: dict[str, BaseSourceAdapter] = {}
 
     syslog = SyslogAdapter(
         device_id=config.default_device_id,
-        on_entry=buffer.append,
+        on_entry=dedup.process,
         process_filter=app.state.process_filter,
     )
     adapters["syslog"] = syslog
     await syslog.start()
+
+    # OSLog adapter (macOS only)
+    if app.state.enable_oslog:
+        oslog = OslogAdapter(
+            device_id=config.default_device_id,
+            on_entry=dedup.process,
+            subsystem_filter=app.state.subsystem_filter,
+            process_filter=app.state.process_filter,
+        )
+        adapters["oslog"] = oslog
+        await oslog.start()
 
     app.state.source_adapters = adapters
 
@@ -57,13 +77,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
-    # Shutdown: stop all adapters
+    # Shutdown: stop adapters first, then flush the deduplicator
     for adapter in adapters.values():
         await adapter.stop()
+    await dedup.stop()
     logger.info("Server stopped")
 
 
-def create_app(config: ServerConfig | None = None, process_filter: str | None = None) -> FastAPI:
+def create_app(
+    config: ServerConfig | None = None,
+    process_filter: str | None = None,
+    enable_oslog: bool = True,
+    subsystem_filter: str | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application."""
     if config is None:
         config = ServerConfig()
@@ -79,6 +105,8 @@ def create_app(config: ServerConfig | None = None, process_filter: str | None = 
     app.state.config = config
     app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size)
     app.state.process_filter = process_filter
+    app.state.enable_oslog = enable_oslog
+    app.state.subsystem_filter = subsystem_filter
     app.state.source_adapters = {}
 
     # Auth middleware
@@ -117,6 +145,15 @@ def cli() -> None:
         "--buffer-size", type=int, default=10_000, help="Ring buffer size (default: 10000)"
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--oslog", action="store_true", default=None,
+        help="Enable OSLog adapter (default: enabled on macOS)",
+    )
+    parser.add_argument(
+        "--no-oslog", action="store_true", default=False,
+        help="Disable OSLog adapter",
+    )
+    parser.add_argument("--subsystem", default=None, help="OSLog subsystem filter")
 
     args = parser.parse_args()
 
@@ -141,11 +178,24 @@ def cli() -> None:
     print(f"   http://{config.host}:{config.port}")
     print(f"   API key: {config.api_key[:8]}...{config.api_key[-4:]}")
     print(f"   API key file: ~/.ios-debug-server/api-key")
+    # Determine OSLog enablement: default on for macOS, off otherwise
+    enable_oslog = not args.no_oslog and (
+        args.oslog is True or platform.system() == "Darwin"
+    )
+
     if args.process:
         print(f"   Process filter: {args.process}")
+    if enable_oslog:
+        sub = args.subsystem or "(all)"
+        print(f"   OSLog: enabled (subsystem: {sub})")
     print()
 
-    app = create_app(config=config, process_filter=args.process)
+    app = create_app(
+        config=config,
+        process_filter=args.process,
+        enable_oslog=enable_oslog,
+        subsystem_filter=args.subsystem,
+    )
     uvicorn.run(app, host=config.host, port=config.port, log_level="info")
 
 

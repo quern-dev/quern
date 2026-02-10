@@ -3,9 +3,9 @@
 Spawns `idevicesyslog` as a subprocess and parses its stdout line-by-line
 into structured LogEntry objects.
 
-Expected line format:
+Expected line formats (device name may or may not be present):
     Feb  7 14:23:01 iPhone MyApp(CoreFoundation)[1234] <Notice>: message text
-    Feb  7 14:23:01 iPhone MyApp[1234] <Error>: message text
+    Feb  7 14:23:01 MyApp[1234] <Error>: message text
 
 Dependencies:
     - libimobiledevice must be installed (`brew install libimobiledevice`)
@@ -26,11 +26,12 @@ from server.sources import BaseSourceAdapter, EntryCallback
 logger = logging.getLogger(__name__)
 
 # Regex to parse idevicesyslog output lines
-# Groups: month, day, time, device, process, subsystem (optional), pid, level, message
+# Groups: date, time, device (optional), process, subsystem (optional), pid, level, message
+# Device name is optional — some idevicesyslog versions omit it.
 SYSLOG_PATTERN = re.compile(
     r"^(\w+\s+\d+)\s+"          # date: "Feb  7"
     r"(\d{2}:\d{2}:\d{2})\s+"   # time: "14:23:01"
-    r"(\S+)\s+"                  # device: "iPhone"
+    r"(?:(\S+)\s+)?"             # device (optional): "iPhone"
     r"(\S+?)"                    # process: "MyApp"
     r"(?:\(([^)]+)\))?"          # subsystem (optional): "(CoreFoundation)"
     r"\[(\d+)\]\s+"              # pid: "[1234]"

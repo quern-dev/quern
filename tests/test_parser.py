@@ -62,3 +62,42 @@ def test_parse_empty_message(adapter: SyslogAdapter):
     assert entry is not None
     assert entry.message == ""
     assert entry.level == LogLevel.INFO
+
+
+# ---------------------------------------------------------------------------
+# Lines without device name (some idevicesyslog versions omit it)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_no_device_with_subsystem(adapter: SyslogAdapter):
+    line = 'Feb  9 20:26:11 backboardd(CoreBrightness)[72] <Notice>: Ammolite: Lux 475.7'
+    entry = adapter._parse_line(line)
+
+    assert entry is not None
+    assert entry.process == "backboardd"
+    assert entry.subsystem == "CoreBrightness"
+    assert entry.pid == 72
+    assert entry.level == LogLevel.NOTICE
+    assert entry.message == "Ammolite: Lux 475.7"
+
+
+def test_parse_no_device_without_subsystem(adapter: SyslogAdapter):
+    line = 'Feb  9 20:26:12 powerexperienced[125] <Notice>: Evaluating power mode'
+    entry = adapter._parse_line(line)
+
+    assert entry is not None
+    assert entry.process == "powerexperienced"
+    assert entry.subsystem == ""
+    assert entry.pid == 125
+    assert entry.level == LogLevel.NOTICE
+    assert entry.message == "Evaluating power mode"
+
+
+def test_parse_no_device_error(adapter: SyslogAdapter):
+    line = 'Feb  9 20:26:12 locationd[78] <Error>: GPS signal lost'
+    entry = adapter._parse_line(line)
+
+    assert entry is not None
+    assert entry.process == "locationd"
+    assert entry.level == LogLevel.ERROR
+    assert entry.message == "GPS signal lost"
