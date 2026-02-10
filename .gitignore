@@ -21,4 +21,8 @@ mcp/dist/
 
 # Project
 .ios-debug-server/
-*.log
+*.log 
+
+# Local AI
+.claude/
+
