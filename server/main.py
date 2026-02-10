@@ -15,6 +15,7 @@ import logging
 import platform
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 import uvicorn
@@ -24,9 +25,13 @@ from server.auth import APIKeyMiddleware
 from server.config import ServerConfig
 from server.processing.deduplicator import Deduplicator
 from server.sources import BaseSourceAdapter
+from server.sources.build import BuildAdapter
+from server.sources.crash import CrashAdapter
 from server.sources.oslog import OslogAdapter
 from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
+from server.api.builds import router as builds_router
+from server.api.crashes import router as crashes_router
 from server.api.logs import router as logs_router
 
 logger = logging.getLogger("ios-debug-server")
@@ -65,6 +70,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         adapters["oslog"] = oslog
         await oslog.start()
 
+    # Crash report watcher
+    if app.state.enable_crash:
+        crash = CrashAdapter(
+            device_id=config.default_device_id,
+            on_entry=dedup.process,
+            watch_dir=app.state.crash_dir,
+            pull_from_device=app.state.pull_crashes,
+        )
+        adapters["crash"] = crash
+        app.state.crash_adapter = crash
+        await crash.start()
+
+    # Build adapter (on-demand, no background loop)
+    build = BuildAdapter(
+        device_id=config.default_device_id,
+        on_entry=buffer.append,
+    )
+    adapters["build"] = build
+    app.state.build_adapter = build
+    await build.start()
+
     app.state.source_adapters = adapters
 
     logger.info(
@@ -89,6 +115,9 @@ def create_app(
     process_filter: str | None = None,
     enable_oslog: bool = True,
     subsystem_filter: str | None = None,
+    enable_crash: bool = True,
+    crash_dir: Path | None = None,
+    pull_crashes: bool = False,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     if config is None:
@@ -107,13 +136,20 @@ def create_app(
     app.state.process_filter = process_filter
     app.state.enable_oslog = enable_oslog
     app.state.subsystem_filter = subsystem_filter
+    app.state.enable_crash = enable_crash
+    app.state.crash_dir = crash_dir
+    app.state.pull_crashes = pull_crashes
     app.state.source_adapters = {}
+    app.state.crash_adapter = None
+    app.state.build_adapter = None
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
 
     # Routes
     app.include_router(logs_router)
+    app.include_router(crashes_router)
+    app.include_router(builds_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -154,6 +190,18 @@ def cli() -> None:
         help="Disable OSLog adapter",
     )
     parser.add_argument("--subsystem", default=None, help="OSLog subsystem filter")
+    parser.add_argument(
+        "--no-crash", action="store_true", default=False,
+        help="Disable crash report watcher",
+    )
+    parser.add_argument(
+        "--crash-dir", default=None, type=Path,
+        help="Directory to watch for crash reports (default: ~/.ios-debug-server/crashes)",
+    )
+    parser.add_argument(
+        "--pull-crashes", action="store_true", default=False,
+        help="Run idevicecrashreport to pull crashes from device",
+    )
 
     args = parser.parse_args()
 
@@ -183,11 +231,16 @@ def cli() -> None:
         args.oslog is True or platform.system() == "Darwin"
     )
 
+    enable_crash = not args.no_crash
+
     if args.process:
         print(f"   Process filter: {args.process}")
     if enable_oslog:
         sub = args.subsystem or "(all)"
         print(f"   OSLog: enabled (subsystem: {sub})")
+    if enable_crash:
+        crash_path = args.crash_dir or "~/.ios-debug-server/crashes"
+        print(f"   Crash watcher: enabled (dir: {crash_path})")
     print()
 
     app = create_app(
@@ -195,6 +248,9 @@ def cli() -> None:
         process_filter=args.process,
         enable_oslog=enable_oslog,
         subsystem_filter=args.subsystem,
+        enable_crash=enable_crash,
+        crash_dir=args.crash_dir,
+        pull_crashes=args.pull_crashes,
     )
     uvicorn.run(app, host=config.host, port=config.port, log_level="info")
 

@@ -1,6 +1,7 @@
 """Integration tests — create app, inject entries, query endpoints."""
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -29,7 +30,7 @@ def _make_entry(
 @pytest.fixture
 def app():
     config = ServerConfig(api_key="test-key-12345")
-    return create_app(config=config, enable_oslog=False)
+    return create_app(config=config, enable_oslog=False, enable_crash=False)
 
 
 @pytest.fixture
@@ -206,3 +207,73 @@ async def test_summary_invalid_window(app, auth_headers):
             params={"window": "99h"},
         )
         assert resp.status_code == 422  # validation error
+
+
+# ---------------------------------------------------------------------------
+# Crashes endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_crashes_latest_empty(app, auth_headers):
+    """With crash adapter disabled, /crashes/latest returns empty."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/crashes/latest", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["crashes"] == []
+        assert data["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Builds endpoint
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.mark.asyncio
+async def test_builds_latest_empty(app, auth_headers):
+    """Before any build parse, /builds/latest returns null."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/builds/latest", headers=auth_headers)
+        assert resp.status_code == 200
+        # No build parsed yet — null response
+        assert resp.json() is None
+
+
+@pytest.mark.asyncio
+async def test_builds_parse(app, auth_headers):
+    """POST build output and get a parsed result back."""
+    # Manually set up the build adapter since lifespan doesn't run in tests
+    from server.sources.build import BuildAdapter
+
+    build = BuildAdapter()
+    await build.start()
+    app.state.build_adapter = build
+
+    content = (FIXTURES / "xcodebuild_output.txt").read_text()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/builds/parse",
+            headers=auth_headers,
+            json={"output": content},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["succeeded"] is False
+        assert len(data["errors"]) == 2
+        assert len(data["warnings"]) == 3
+        assert data["tests"]["total"] == 5
+        assert data["tests"]["failed"] == 2
+
+        # Now /builds/latest should return this result
+        resp2 = await client.get("/api/v1/builds/latest", headers=auth_headers)
+        assert resp2.status_code == 200
+        assert resp2.json()["succeeded"] is False
+
+    await build.stop()

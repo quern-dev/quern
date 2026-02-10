@@ -40,11 +40,11 @@ The MCP server is intentionally thin — just translates MCP tool calls into HTT
 - TypeScript + Node.js 18+ (MCP wrapper)
 - libimobiledevice (`idevicesyslog`, `idevicecrashreport`)
 - macOS `log` command (`log stream --style json`)
-- xcbeautify (build output parsing)
+- Pure-Python xcodebuild output parsing (no xcbeautify dependency)
 
 ## Implementation Phases
 
-We are currently building **Phase 1b: Structured Logging & Summaries**.
+We are currently building **Phase 1d: Polish & App Drain**.
 
 ### Phase 1a — MVP (complete)
 - [x] Project scaffolding
@@ -61,12 +61,12 @@ We are currently building **Phase 1b: Structured Logging & Summaries**.
 - [x] `/logs/summary` endpoint with template-based generation + cursor support
 - [x] `/logs/errors` convenience endpoint
 
-### Phase 1c — MCP Wrapper & Build Integration
-- [ ] TypeScript MCP server (`mcp/`)
-- [ ] `xcodebuild` output parser source adapter
-- [ ] Crash report watcher source adapter
-- [ ] npm package for MCP server
-- [ ] MCP resources (guide, troubleshooting docs)
+### Phase 1c — MCP Wrapper & Build Integration (complete)
+- [x] TypeScript MCP server (`mcp/`)
+- [x] `xcodebuild` output parser source adapter
+- [x] Crash report watcher source adapter
+- [x] npm package for MCP server
+- [x] MCP resources (guide, troubleshooting docs)
 
 ### Phase 1d — Polish & App Drain
 - [ ] Swift package for app-embedded log drain (`swift-package/`)
@@ -110,6 +110,9 @@ docs/                Architecture docs, API reference
 | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | GET | `/api/v1/logs/sources` | List active log sources |
 | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
+| GET | `/api/v1/crashes/latest` | Recent crash reports with parsed details |
+| GET | `/api/v1/builds/latest` | Most recent parsed build result |
+| POST | `/api/v1/builds/parse` | Submit xcodebuild output for parsing |
 
 ## Full Architecture Doc
 

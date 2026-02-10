@@ -1,0 +1,34 @@
+{
+  "procName": "MyApp",
+  "bundleID": "com.example.myapp",
+  "captureTime": "2026-02-08 10:30:45.000 +0000",
+  "termination": {
+    "signal": "SIGABRT"
+  },
+  "exception": {
+    "type": "EXC_CRASH",
+    "codes": "0x0000000000000000, 0x0000000000000000",
+    "signal": "SIGABRT"
+  },
+  "faultingThread": 0,
+  "threads": [
+    {
+      "id": 0,
+      "name": "main",
+      "frames": [
+        {"imageOffset": 123456, "symbol": "MyApp.ViewController.crashAction()"},
+        {"imageOffset": 654321, "symbol": "UIKit.UIApplication.sendAction()"},
+        {"imageOffset": 111111, "symbol": "libdispatch.dylib._dispatch_main_queue_drain"},
+        {"imageOffset": 222222, "symbol": "CoreFoundation.CFRunLoopRun"},
+        {"imageOffset": 333333, "symbol": "UIKitCore.UIApplicationMain"}
+      ]
+    },
+    {
+      "id": 1,
+      "name": "worker",
+      "frames": [
+        {"imageOffset": 444444, "symbol": "libsystem_kernel.dylib.__workq_kernreturn"}
+      ]
+    }
+  ]
+}

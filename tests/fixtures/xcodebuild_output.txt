@@ -1,0 +1,26 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild build test -scheme MyApp -destination "platform=iOS Simulator,name=iPhone 15"
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+note: Using codesigning identity override: -
+Compiling Swift source files
+/Users/dev/MyApp/Sources/ViewController.swift:42:10: error: use of undeclared identifier 'foo'
+/Users/dev/MyApp/Sources/ViewController.swift:85:5: warning: result of call to 'doSomething()' is unused
+/Users/dev/MyApp/Sources/NetworkManager.swift:123:22: error: cannot convert value of type 'String' to expected argument type 'URL'
+/Users/dev/MyApp/Sources/Utils.swift:15:1: warning: file has no member declarations
+Linking MyApp
+/Users/dev/MyApp/Sources/AppDelegate.swift:10:20: warning: 'UIApplicationMain' is deprecated
+
+Test Suite 'All tests' started at 2026-02-08 10:00:00.000.
+Test Suite 'MyAppTests.xctest' started at 2026-02-08 10:00:00.001.
+Test Case '-[MyAppTests testLogin]' passed (0.523 seconds).
+Test Case '-[MyAppTests testLogout]' passed (0.112 seconds).
+Test Case '-[MyAppTests testFetchData]' failed (1.234 seconds).
+Test Case '-[MyAppTests testDeleteAccount]' passed (0.089 seconds).
+Test Case '-[MyAppTests testRefreshToken]' failed (0.567 seconds).
+Test Suite 'MyAppTests.xctest' finished at 2026-02-08 10:00:02.525.
+Executed 5 tests, with 2 failures in 2.525 (2.530) seconds
+
+** BUILD FAILED **

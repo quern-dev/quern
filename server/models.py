@@ -130,3 +130,74 @@ class LogErrorsResponse(BaseModel):
 
     entries: list[LogEntry]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Crash report models (Phase 1c)
+# ---------------------------------------------------------------------------
+
+
+class CrashReport(BaseModel):
+    """A parsed crash report."""
+
+    crash_id: str = Field(description="Unique crash identifier")
+    timestamp: datetime
+    device_id: str = "default"
+    process: str = Field(default="", description="Crashed process name")
+    exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
+    exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
+    signal: str = Field(default="", description="e.g. SIGSEGV")
+    top_frames: list[str] = Field(default_factory=list, description="Top stack frames from crashing thread")
+    file_path: str = Field(default="", description="Path to the raw crash file on disk")
+    raw_text: str = Field(default="", description="First portion of raw crash content")
+
+
+class CrashLatestResponse(BaseModel):
+    """Response from GET /api/v1/crashes/latest."""
+
+    crashes: list[CrashReport]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# Build result models (Phase 1c)
+# ---------------------------------------------------------------------------
+
+
+class BuildDiagnostic(BaseModel):
+    """A single build error or warning."""
+
+    file: str = ""
+    line: int | None = None
+    column: int | None = None
+    severity: str = "error"  # "error" or "warning"
+    message: str = ""
+
+
+class TestFailure(BaseModel):
+    """A single failing test case."""
+
+    class_name: str = ""
+    method: str = ""
+    duration: float = 0.0
+    message: str = ""
+
+
+class TestSummary(BaseModel):
+    """Summary of test execution."""
+
+    passed: int = 0
+    failed: int = 0
+    total: int = 0
+    duration: float = 0.0
+    failures: list[TestFailure] = Field(default_factory=list)
+
+
+class BuildResult(BaseModel):
+    """Parsed result from an xcodebuild invocation."""
+
+    succeeded: bool = False
+    errors: list[BuildDiagnostic] = Field(default_factory=list)
+    warnings: list[BuildDiagnostic] = Field(default_factory=list)
+    tests: TestSummary | None = None
+    raw_line_count: int = 0

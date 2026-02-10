@@ -1,0 +1,32 @@
+Incident Identifier: AABBCCDD-1122-3344-5566-778899001122
+CrashReporter Key:   abcdef1234567890abcdef1234567890
+Hardware Model:      iPhone14,5
+Process:             MyApp [12345]
+Path:                /private/var/containers/Bundle/Application/.../MyApp.app/MyApp
+Identifier:          com.example.myapp
+Version:             1.0.0 (100)
+Code Type:           ARM-64
+Role:                Foreground
+Parent Process:      launchd [1]
+
+Date/Time:           2026-02-08 09:15:30 +0000
+Launch Time:         2026-02-08 09:10:00 +0000
+OS Version:          iPhone OS 17.3 (21D50)
+
+Exception Type:      EXC_BAD_ACCESS (SIGSEGV)
+Exception Codes:     KERN_INVALID_ADDRESS at 0x0000000000000010
+Exception Note:      EXC_CORPSE_NOTIFY
+
+Thread 0 name:  Dispatch queue: com.apple.main-thread
+Thread 0 Crashed:
+0   MyApp                       0x0000000100abc000 -[FeedViewController tableView:cellForRowAtIndexPath:] + 128
+1   UIKitCore                   0x00000001abcdef00 -[UITableView _createPreparedCellForGlobalRow:withIndexPath:willDisplay:] + 456
+2   UIKitCore                   0x00000001abcde000 -[UITableView _updateVisibleCellsNow:] + 1024
+3   CoreFoundation              0x00000001cdef0000 __CFRUNLOOP_IS_CALLING_OUT_TO_AN_OBSERVER_CALLBACK_FUNCTION__ + 32
+4   CoreFoundation              0x00000001cdef1000 __CFRunLoopDoObservers + 556
+
+Thread 1:
+0   libsystem_kernel.dylib      0x00000001ff000000 __workq_kernreturn + 8
+
+Binary Images:
+0x100000000 -        0x100ffffff MyApp arm64  <AABB1122334455667788990011223344> /private/var/.../MyApp
