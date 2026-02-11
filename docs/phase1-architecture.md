@@ -1,4 +1,4 @@
-# Phase 1: iOS Debug Log Capture & AI Context System
+# Phase 1: Debug Log Capture & AI Context System
 
 ## Architecture Document — v0.1
 
@@ -6,7 +6,7 @@
 
 ## 1. Vision
 
-Build an open-source system that captures iOS debug logs from multiple sources, processes them into structured and AI-consumable formats, and exposes them through a local HTTP API with a thin MCP wrapper. An AI agent should be able to tail logs in real time, query historical logs, receive filtered/summarized digests, and correlate log events with UI state — all without Xcode running.
+Build an open-source system that captures debug logs from multiple sources, processes them into structured and AI-consumable formats, and exposes them through a local HTTP API with a thin MCP wrapper. An AI agent should be able to tail logs in real time, query historical logs, receive filtered/summarized digests, and correlate log events with UI state — all without Xcode running.
 
 This is the foundation layer. Phases 2 (network proxy) and 3 (device control) will plug into the same API surface.
 
@@ -14,7 +14,7 @@ This is the foundation layer. Phases 2 (network proxy) and 3 (device control) wi
 
 ## 2. Log Sources
 
-iOS debug information comes from several distinct channels. We need to capture all of them.
+Debug information comes from several distinct channels. We need to capture all of them.
 
 ### 2.1 Device System Log (`idevicesyslog`)
 
@@ -232,14 +232,14 @@ All endpoints (except `GET /api/v1/health`) require authentication via one of:
 - Header: `Authorization: Bearer <api-key>`
 - Header: `X-API-Key: <api-key>`
 
-The API key is generated on first server start and stored at `~/.ios-debug-server/api-key`. The MCP server reads this file automatically. Unauthenticated requests receive `401 Unauthorized`.
+The API key is generated on first server start and stored at `~/.quern/api-key`. The MCP server reads this file automatically. Unauthenticated requests receive `401 Unauthorized`.
 
 ```bash
 # The key is printed on first start and can be retrieved:
-cat ~/.ios-debug-server/api-key
+cat ~/.quern/api-key
 
 # Or regenerated:
-ios-debug-server regenerate-key
+quern-debug-server regenerate-key
 ```
 
 ### 4.2 Log Streaming (SSE)
@@ -552,7 +552,7 @@ Rationale:
 ## 7. Project Structure
 
 ```
-ios-debug-server/
+quern-debug-server/
 ├── README.md
 ├── LICENSE                          # MIT
 ├── pyproject.toml                   # Python project config
@@ -673,4 +673,4 @@ Goal: Optional enhancements.
 
 4. **"What's new" mode:** Yes. The `/api/v1/logs/summary` endpoint will support a `since_cursor` parameter. Each summary response includes a `cursor` value (opaque, timestamp-based). Passing `since_cursor` on the next request returns only a summary of entries that arrived after that point. This enables the AI pattern: "check logs" → get summary + cursor → do some work → "what's new?" with cursor → get delta summary. This is significantly more token-efficient than re-summarizing the full window each time.
 
-5. **API key:** Yes. The server will generate a random API key on first start and write it to `~/.ios-debug-server/api-key`. All endpoints require `Authorization: Bearer <key>` or `X-API-Key: <key>` header. The MCP server reads the same file automatically. This prevents accidental interference from other tools hitting localhost:9100 but doesn't pretend to be real security (it's localhost-only anyway). The key can be regenerated via CLI command.
+5. **API key:** Yes. The server will generate a random API key on first start and write it to `~/.quern/api-key`. All endpoints require `Authorization: Bearer <key>` or `X-API-Key: <key>` header. The MCP server reads the same file automatically. This prevents accidental interference from other tools hitting localhost:9100 but doesn't pretend to be real security (it's localhost-only anyway). The key can be regenerated via CLI command.

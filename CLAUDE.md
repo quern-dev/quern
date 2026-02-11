@@ -1,8 +1,8 @@
-# iOS Debug Server
+# Quern Debug Server
 
 ## What This Project Is
 
-An open-source system that captures iOS debug logs from multiple sources, processes them into structured and AI-consumable formats, and exposes them through a local HTTP API with a thin MCP wrapper. This is Phase 1 of a three-phase project to build a comprehensive AI-assisted iOS debugging and testing environment.
+An open-source system that captures debug logs from multiple sources, processes them into structured and AI-consumable formats, and exposes them through a local HTTP API with a thin MCP wrapper. This is Phase 1 of a three-phase project to build a comprehensive AI-assisted iOS debugging and testing environment.
 
 Phase 2 (network proxy via mitmproxy) and Phase 3 (remote device inspection/control via WebDriverAgent) will build on this foundation.
 
@@ -29,7 +29,7 @@ The MCP server is intentionally thin — just translates MCP tool calls into HTT
 - **Single device first, multi-device later.** All internal interfaces accept a `device_id` parameter (defaults to `"default"`). API responses include `device_id`. When multi-device lands, it's additive.
 - **Ephemeral storage by default.** In-memory ring buffer (10,000 entries). Crash reports always persist to disk. SQLite is a future enhancement. The storage layer uses an abstract interface for easy substitution.
 - **Cursor-based "what's new" summaries.** `/api/v1/logs/summary` returns a `cursor` and accepts `since_cursor` for delta summaries. This is critical for token-efficient AI workflows.
-- **API key auth.** Auto-generated on first start, stored at `~/.ios-debug-server/api-key`. Required on all endpoints except `/health`. Supports `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- **API key auth.** Auto-generated on first start, stored at `~/.quern/api-key`. Required on all endpoints except `/health`. Supports `Authorization: Bearer <key>` or `X-API-Key: <key>`.
 - **LLM summaries are template-based, not LLM-generated.** The summary endpoint groups errors by pattern, detects resolution sequences, and composes natural language via templates. No external LLM calls needed.
 - **Python (FastAPI) for the server** — chosen for Phase 2 alignment (mitmproxy is Python) and strong async subprocess support.
 - **TypeScript for the MCP server** — best MCP SDK support, `npx` distribution.
@@ -127,7 +127,7 @@ Phase 2 adds network traffic inspection by integrating mitmproxy as a managed su
 ### Architecture
 
 ```
-ios-debug-server (port 9100)
+quern-debug-server (port 9100)
     │
     ├── Ring Buffer (logs + network summary events)
     ├── Flow Store (full HTTP flow records, separate)
@@ -490,9 +490,9 @@ tail_logs → verify error resolved
 
 ### Phase 4a Context: Process Lifecycle Management
 
-**What it does:** Makes server and proxy startup idempotent, adds daemon mode, and establishes `~/.ios-debug-server/state.json` as the single source of truth for all tools and agents.
+**What it does:** Makes server and proxy startup idempotent, adds daemon mode, and establishes `~/.quern/state.json` as the single source of truth for all tools and agents.
 
-**The core problem this solves:** Agents currently waste time fighting process management — detecting running instances, killing them, restarting. After 4a, `ios-debug-server start` always does the right thing and `ensure_server` MCP tool is all an agent needs.
+**The core problem this solves:** Agents currently waste time fighting process management — detecting running instances, killing them, restarting. After 4a, `quern-debug-server start` always does the right thing and `ensure_server` MCP tool is all an agent needs.
 
 ---
 
@@ -511,7 +511,7 @@ server/lifecycle/watchdog.py    — Async monitor for proxy subprocess health
 ### Key Constants
 
 ```python
-CONFIG_DIR = Path.home() / ".ios-debug-server"
+CONFIG_DIR = Path.home() / ".quern"
 STATE_FILE = CONFIG_DIR / "state.json"
 LOG_FILE = CONFIG_DIR / "server.log"
 DEFAULT_SERVER_PORT = 9100
@@ -523,7 +523,7 @@ MAX_PORT_SCAN = 20
 
 ### Critical Implementation Rules
 
-**State file is the contract.** Every consumer (CLI, MCP, shell scripts, CI) discovers the server by reading `~/.ios-debug-server/state.json`. Never hardcode ports. Never use environment variables for discovery.
+**State file is the contract.** Every consumer (CLI, MCP, shell scripts, CI) discovers the server by reading `~/.quern/state.json`. Never hardcode ports. Never use environment variables for discovery.
 
 **Idempotent start pattern:**
 ```python
@@ -573,13 +573,13 @@ def handle_sigterm(signum, frame):
 The `cli()` function in `main.py` changes from a single-command entry point to subcommands:
 
 ```
-ios-debug-server start [--no-proxy] [--port N] [--proxy-port N] [--foreground] [--verbose]
-ios-debug-server stop
-ios-debug-server restart [OPTIONS]
-ios-debug-server status
+quern-debug-server start [--no-proxy] [--port N] [--proxy-port N] [--foreground] [--verbose]
+quern-debug-server stop
+quern-debug-server restart [OPTIONS]
+quern-debug-server status
 ```
 
-`--foreground` skips daemonization — essential for debugging the server itself. All existing behavior (direct `ios-debug-server` with no subcommand) should remain as an alias for `start --foreground` for backward compatibility.
+`--foreground` skips daemonization — essential for debugging the server itself. All existing behavior (direct `quern-debug-server` with no subcommand) should remain as an alias for `start --foreground` for backward compatibility.
 
 ---
 

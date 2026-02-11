@@ -1,13 +1,13 @@
-"""iOS Debug Server — main entry point.
+"""Quern Debug Server — main entry point.
 
 Usage:
-    ios-debug-server                  Start in foreground (backward compat)
-    ios-debug-server start            Start as daemon
-    ios-debug-server start -f         Start in foreground
-    ios-debug-server stop             Stop a running daemon
-    ios-debug-server restart          Restart the daemon
-    ios-debug-server status           Show server status
-    ios-debug-server regenerate-key   Generate a new API key
+    quern-debug-server                  Start in foreground (backward compat)
+    quern-debug-server start            Start as daemon
+    quern-debug-server start -f         Start in foreground
+    quern-debug-server stop             Stop a running daemon
+    quern-debug-server restart          Restart the daemon
+    quern-debug-server status           Show server status
+    quern-debug-server regenerate-key   Generate a new API key
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from server.api.device import router as device_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 
-logger = logging.getLogger("ios-debug-server")
+logger = logging.getLogger("quern-debug-server")
 
 
 @asynccontextmanager
@@ -190,9 +190,9 @@ def create_app(
         config = ServerConfig()
 
     app = FastAPI(
-        title="iOS Debug Server",
+        title="Quern Debug Server",
         version="0.1.0",
-        description="iOS debug log capture and AI context server",
+        description="Debug log capture and AI context server",
         lifespan=lifespan,
     )
 
@@ -259,7 +259,7 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--crash-dir", default=None, type=Path,
-        help="Directory to watch for crash reports (default: ~/.ios-debug-server/crashes)",
+        help="Directory to watch for crash reports (default: ~/.quern/crashes)",
     )
     parser.add_argument(
         "--pull-crashes", action="store_true", default=False,
@@ -285,7 +285,7 @@ def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def _is_our_process(pid: int) -> bool:
-    """Check if a PID belongs to an ios-debug-server process (PID reuse guard)."""
+    """Check if a PID belongs to a quern-debug-server process (PID reuse guard)."""
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
@@ -294,7 +294,7 @@ def _is_our_process(pid: int) -> bool:
         if result.returncode != 0:
             return False
         cmd = result.stdout.strip()
-        return "ios-debug-server" in cmd or "server.main" in cmd or "uvicorn" in cmd
+        return "quern-debug-server" in cmd or "server.main" in cmd or "uvicorn" in cmd
     except Exception:
         return False
 
@@ -366,17 +366,17 @@ def _cmd_start(args: argparse.Namespace) -> None:
     })
 
     if args.foreground:
-        print(f"iOS Debug Server v0.1.0")
+        print(f"Quern Debug Server v0.1.0")
         print(f"  http://{config.host}:{server_port}")
         print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
-        print(f"  API key file: ~/.ios-debug-server/api-key")
+        print(f"  API key file: ~/.quern/api-key")
         if args.process:
             print(f"  Process filter: {args.process}")
         if enable_oslog:
             sub = args.subsystem or "(all)"
             print(f"  OSLog: enabled (subsystem: {sub})")
         if enable_crash:
-            crash_path = args.crash_dir or "~/.ios-debug-server/crashes"
+            crash_path = args.crash_dir or "~/.quern/crashes"
             print(f"  Crash watcher: enabled (dir: {crash_path})")
         if enable_proxy:
             print(f"  Proxy: enabled (port: {proxy_port})")
@@ -428,7 +428,7 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     # PID reuse guard
     if not _is_our_process(pid):
         remove_state()
-        print(f"Warning: PID {pid} is not an ios-debug-server process (stale state cleaned up)")
+        print(f"Warning: PID {pid} is not a quern-debug-server process (stale state cleaned up)")
         return
 
     # Send SIGTERM
@@ -472,7 +472,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
     port = state.get("server_port", 9100)
     if not is_server_healthy(port):
         print("Server state file exists but server is not responding")
-        print(f"  State file may be stale. Run 'ios-debug-server stop' to clean up.")
+        print(f"  State file may be stale. Run 'quern-debug-server stop' to clean up.")
         sys.exit(1)
 
     # Calculate uptime
@@ -496,7 +496,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="iOS Debug Server — capture device logs for AI agents",
+        description="Quern Debug Server — capture device logs for AI agents",
     )
     parser.set_defaults(command=None)
 

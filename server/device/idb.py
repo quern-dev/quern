@@ -11,7 +11,7 @@ from pathlib import Path
 
 from server.models import DeviceError
 
-logger = logging.getLogger("ios-debug-server.idb")
+logger = logging.getLogger("quern-debug-server.idb")
 
 # Container role_descriptions whose children are often missing from describe-all
 _PROBEABLE_ROLES = frozenset({

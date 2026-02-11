@@ -1,10 +1,10 @@
-# iOS Debug MCP Server
+# Quern Debug MCP Server
 
-MCP (Model Context Protocol) server that wraps the iOS Debug Server HTTP API, letting AI agents query iOS device logs, crash reports, and build results.
+MCP (Model Context Protocol) server that wraps the Quern Debug Server HTTP API, letting AI agents query iOS device logs, crash reports, and build results.
 
 ## Prerequisites
 
-- The Python iOS Debug Server must be running (`ios-debug-server` on port 9100)
+- The Python Quern Debug Server must be running (`quern-debug-server` on port 9100)
 - Node.js 18+
 
 ## Usage
@@ -16,9 +16,9 @@ Add to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "ios-debug": {
+    "quern-debug": {
       "command": "npx",
-      "args": ["-y", "ios-debug-mcp"]
+      "args": ["-y", "quern-debug-mcp"]
     }
   }
 }
@@ -30,9 +30,9 @@ Add to your MCP settings:
 
 ```json
 {
-  "ios-debug": {
+  "quern-debug": {
     "command": "npx",
-    "args": ["-y", "ios-debug-mcp"]
+    "args": ["-y", "quern-debug-mcp"]
   }
 }
 ```
@@ -50,9 +50,9 @@ node dist/index.js
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `IOS_DEBUG_SERVER_URL` | `http://127.0.0.1:9100` | Python server URL |
+| `QUERN_DEBUG_SERVER_URL` | `http://127.0.0.1:9100` | Python server URL |
 
-The API key is read automatically from `~/.ios-debug-server/api-key`.
+The API key is read automatically from `~/.quern/api-key`.
 
 ## Tools
 

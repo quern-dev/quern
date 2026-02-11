@@ -7,13 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-CONFIG_DIR = Path.home() / ".ios-debug-server"
+CONFIG_DIR = Path.home() / ".quern"
 API_KEY_FILE = CONFIG_DIR / "api-key"
 
 
 @dataclass
 class ServerConfig:
-    """Configuration for the iOS debug log server."""
+    """Configuration for the Quern debug log server."""
 
     host: str = "127.0.0.1"
     port: int = 9100

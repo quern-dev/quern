@@ -19,7 +19,7 @@ import pytest
 
 # Use the same Python interpreter that runs the tests
 PYTHON = sys.executable
-STATE_FILE = Path.home() / ".ios-debug-server" / "state.json"
+STATE_FILE = Path.home() / ".quern" / "state.json"
 
 
 def _read_state() -> dict | None:
@@ -79,7 +79,7 @@ def _bind_port(port: int) -> socket.socket:
 
 
 class TestStartDaemon:
-    """Tests for `ios-debug-server start` (daemon mode)."""
+    """Tests for `quern-debug-server start` (daemon mode)."""
 
     def teardown_method(self):
         """Kill any leftover server process."""
@@ -152,7 +152,7 @@ class TestStartDaemon:
 
 
 class TestStop:
-    """Tests for `ios-debug-server stop`."""
+    """Tests for `quern-debug-server stop`."""
 
     def teardown_method(self):
         _kill_server()
@@ -203,7 +203,7 @@ class TestStop:
 
 
 class TestStatus:
-    """Tests for `ios-debug-server status`."""
+    """Tests for `quern-debug-server status`."""
 
     def teardown_method(self):
         _kill_server()

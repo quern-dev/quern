@@ -1,6 +1,6 @@
-"""State file management for iOS Debug Server.
+"""State file management for Quern Debug Server.
 
-The state file (~/.ios-debug-server/state.json) is the single source of truth
+The state file (~/.quern/state.json) is the single source of truth
 for discovering a running server instance. Every consumer (CLI, MCP, shell
 scripts, CI) reads this file to find the server.
 """

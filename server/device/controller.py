@@ -17,7 +17,7 @@ from server.device.ui_elements import (
 )
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, UIElement
 
-logger = logging.getLogger("ios-debug-server.device")
+logger = logging.getLogger("quern-debug-server.device")
 
 
 class DeviceController:

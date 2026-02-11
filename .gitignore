@@ -20,8 +20,12 @@ mcp/dist/
 .DS_Store
 
 # Project
-.ios-debug-server/
+.quern/
 *.log 
+
+# Session notes / investigation logs
+*.txt
+docs/bugs/
 
 # Local AI
 .claude/

@@ -6,7 +6,7 @@
 
 ## 1. Vision
 
-Add network traffic inspection and manipulation capabilities to the iOS debug server by integrating mitmproxy as a managed subprocess. An AI agent should be able to see every HTTP/HTTPS request an app makes, inspect full request/response details, filter traffic by host or path, replay requests, and set up intercept rules — all through the same HTTP API and MCP interface used for logs.
+Add network traffic inspection and manipulation capabilities to the Quern debug server by integrating mitmproxy as a managed subprocess. An AI agent should be able to see every HTTP/HTTPS request an app makes, inspect full request/response details, filter traffic by host or path, replay requests, and set up intercept rules — all through the same HTTP API and MCP interface used for logs.
 
 The key insight driving the hybrid storage design: network events appear naturally in the log stream ("POST /api/v1/login → 401 Unauthorized, 234ms") alongside console output, while the full flow details (headers, bodies, timing) live in a dedicated flow store the AI can drill into when needed.
 
@@ -29,7 +29,7 @@ The tool ships in three forms:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     iOS Debug Server (port 9100)                  │
+│                     Quern Debug Server (port 9100)                  │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐    │
 │  │                     HTTP API Layer                        │    │
@@ -854,7 +854,7 @@ tests/
 
 ## 14. Design Decisions (Resolved)
 
-1. **Integration pattern:** mitmdump as a subprocess, matching the idevicesyslog pattern. Single entry point via `ios-debug-server`.
+1. **Integration pattern:** mitmdump as a subprocess, matching the idevicesyslog pattern. Single entry point via `quern-debug-server`.
 
 2. **Storage:** Hybrid. Summary log entries in the shared ring buffer (visible in log stream, included in log summaries). Full flow records in a dedicated FlowStore (queryable via /proxy/flows endpoints).
 

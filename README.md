@@ -1,11 +1,11 @@
-# iOS Debug Server
+# Quern Debug Server
 
 A local server that captures iOS simulator logs, network traffic, crash reports, and build output — then exposes everything through an HTTP API and MCP tools designed for AI coding agents.
 
 ```
 iOS Simulator
     │
-iOS Debug Server (localhost:9100)
+Quern Debug Server (localhost:9100)
     ├── Log capture (syslog, oslog, crash reports, build output)
     ├── Network proxy (mitmproxy — intercept, mock, replay)
     ├── Device control (boot, screenshot, tap, swipe, type)
@@ -28,7 +28,7 @@ iOS Debug Server (localhost:9100)
 
 ```bash
 git clone <repo-url>
-cd ios-debug-server
+cd quern-debug-server
 pip install -e ".[dev]"
 
 # Build the MCP server
@@ -39,19 +39,19 @@ cd mcp && npm install && npm run build && cd ..
 
 ```bash
 # Start as a background daemon
-ios-debug-server start
+quern-debug-server start
 
 # Or run in the foreground (Ctrl-C to stop)
-ios-debug-server start -f
+quern-debug-server start -f
 
 # Check status
-ios-debug-server status
+quern-debug-server status
 
 # Stop
-ios-debug-server stop
+quern-debug-server stop
 ```
 
-The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.ios-debug-server/`:
+The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`:
 
 | File | Purpose |
 |------|---------|
@@ -66,9 +66,9 @@ Add to your MCP client config (e.g. Claude Code `~/.claude.json`):
 ```json
 {
   "mcpServers": {
-    "ios-debug": {
+    "quern-debug": {
       "command": "node",
-      "args": ["/path/to/ios-debug-server/mcp/dist/index.js"]
+      "args": ["/path/to/quern-debug-server/mcp/dist/index.js"]
     }
   }
 }
@@ -81,7 +81,7 @@ The MCP server auto-discovers the running server via `state.json` — no URL or 
 ### Use the HTTP API
 
 ```bash
-API_KEY=$(cat ~/.ios-debug-server/api-key)
+API_KEY=$(cat ~/.quern/api-key)
 
 # Health check (no auth)
 curl http://localhost:9100/health
@@ -137,15 +137,15 @@ Device management and screenshots use `xcrun simctl` (always available with Xcod
 Startup is idempotent — running `start` when a server is already running is a no-op. Port conflicts are handled automatically by scanning upward.
 
 ```bash
-ios-debug-server start          # Daemonize
-ios-debug-server start -f       # Foreground
-ios-debug-server stop            # Graceful shutdown
-ios-debug-server restart         # Stop + start
-ios-debug-server status          # Show PID, URL, uptime
-ios-debug-server regenerate-key  # New API key
+quern-debug-server start          # Daemonize
+quern-debug-server start -f       # Foreground
+quern-debug-server stop            # Graceful shutdown
+quern-debug-server restart         # Stop + start
+quern-debug-server status          # Show PID, URL, uptime
+quern-debug-server regenerate-key  # New API key
 ```
 
-`~/.ios-debug-server/state.json` is the single source of truth for discovering a running instance.
+`~/.quern/state.json` is the single source of truth for discovering a running instance.
 
 ## MCP Tools
 
@@ -250,7 +250,7 @@ tests/                 428 tests
 cd mcp && npm run build
 
 # Run with debug logging
-ios-debug-server start -f --verbose
+quern-debug-server start -f --verbose
 ```
 
 ## License

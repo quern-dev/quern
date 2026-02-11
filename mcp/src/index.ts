@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * iOS Debug Server — MCP Server
+ * Quern Debug Server — MCP Server
  *
  * Thin wrapper that translates MCP tool calls into HTTP requests
  * to the Python log server running on localhost:9100.
@@ -19,7 +19,7 @@ import { z } from "zod";
 // Configuration & State Discovery
 // ---------------------------------------------------------------------------
 
-const CONFIG_DIR = join(homedir(), ".ios-debug-server");
+const CONFIG_DIR = join(homedir(), ".quern");
 const STATE_FILE = join(CONFIG_DIR, "state.json");
 const API_KEY_FILE = join(CONFIG_DIR, "api-key");
 
@@ -47,9 +47,9 @@ function readStateFile(): ServerState | null {
 
 function discoverServer(): { url: string; apiKey: string } {
   // Priority 1: Environment variable
-  if (process.env.IOS_DEBUG_SERVER_URL) {
+  if (process.env.QUERN_DEBUG_SERVER_URL) {
     return {
-      url: process.env.IOS_DEBUG_SERVER_URL,
+      url: process.env.QUERN_DEBUG_SERVER_URL,
       apiKey: loadApiKey(),
     };
   }
@@ -75,7 +75,7 @@ function loadApiKey(): string {
     return readFileSync(API_KEY_FILE, "utf-8").trim();
   } catch {
     console.error(
-      "WARNING: Could not read API key from ~/.ios-debug-server/api-key"
+      "WARNING: Could not read API key from ~/.quern/api-key"
     );
     return "";
   }
@@ -91,7 +91,7 @@ function getApiKey(): string {
 }
 
 // Kept for backward compat in places that reference these directly
-const SERVER_URL = process.env.IOS_DEBUG_SERVER_URL || "http://127.0.0.1:9100";
+const SERVER_URL = process.env.QUERN_DEBUG_SERVER_URL || "http://127.0.0.1:9100";
 const API_KEY = loadApiKey();
 
 // ---------------------------------------------------------------------------
@@ -147,10 +147,10 @@ async function probeServer(): Promise<void> {
     await fetch(new URL("/health", serverUrl).toString(), {
       signal: AbortSignal.timeout(3000),
     });
-    console.error(`Connected to iOS Debug Server at ${serverUrl}`);
+    console.error(`Connected to Quern Debug Server at ${serverUrl}`);
   } catch {
     console.error(
-      `WARNING: Cannot reach iOS Debug Server at ${serverUrl} — use ensure_server tool to start it`
+      `WARNING: Cannot reach Quern Debug Server at ${serverUrl} — use ensure_server tool to start it`
     );
   }
 }
@@ -160,7 +160,7 @@ async function probeServer(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const server = new McpServer({
-  name: "ios-debug-server",
+  name: "quern-debug-server",
   version: "0.1.0",
 });
 
@@ -170,7 +170,7 @@ const server = new McpServer({
 
 server.tool(
   "ensure_server",
-  `Ensure the iOS Debug Server is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key.`,
+  `Ensure the Quern Debug Server is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key.`,
   {},
   async () => {
     try {
@@ -212,7 +212,7 @@ server.tool(
 
       // Try to start the server
       try {
-        execSync("ios-debug-server start", {
+        execSync("quern-debug-server start", {
           timeout: 10000,
           stdio: "pipe",
         });
@@ -224,7 +224,7 @@ server.tool(
             content: [
               {
                 type: "text" as const,
-                text: `Error: Failed to start iOS Debug Server. Make sure 'ios-debug-server' is on your PATH.\n\nInstall: pip install ios-debug-server\n\n${e instanceof Error ? e.message : String(e)}`,
+                text: `Error: Failed to start Quern Debug Server. Make sure 'quern-debug-server' is on your PATH.\n\nInstall: pip install quern-debug-server\n\n${e instanceof Error ? e.message : String(e)}`,
               },
             ],
             isError: true,
@@ -262,7 +262,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: "Error: Server started but state file not found. Check ~/.ios-debug-server/server.log for details.",
+            text: "Error: Server started but state file not found. Check ~/.quern/server.log for details.",
           },
         ],
         isError: true,
@@ -326,7 +326,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -391,7 +391,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -434,7 +434,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -480,7 +480,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -518,7 +518,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -559,7 +559,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -600,7 +600,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -671,7 +671,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -703,7 +703,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -730,7 +730,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -775,7 +775,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -802,7 +802,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -848,7 +848,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -875,7 +875,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -902,7 +902,7 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the iOS Debug Server running? Start it with: ios-debug-server`,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
@@ -2032,7 +2032,7 @@ server.resource(
 // Resource content
 // ---------------------------------------------------------------------------
 
-const GUIDE_CONTENT = `# iOS Debug Server — Tool Selection Guide
+const GUIDE_CONTENT = `# Quern Debug Server — Tool Selection Guide
 
 ## Getting Started
 
@@ -2182,7 +2182,7 @@ Use device tools to inspect and interact with the simulator:
 - **Mock vs Intercept**: Mocks return instant synthetic responses. Intercept pauses real requests for inspection. Use mocks for stable test fixtures, intercept for ad-hoc debugging.
 `;
 
-const TROUBLESHOOTING_CONTENT = `# iOS Debug Server — Troubleshooting Guide
+const TROUBLESHOOTING_CONTENT = `# Quern Debug Server — Troubleshooting Guide
 
 ## Common iOS Error Patterns
 
@@ -2268,7 +2268,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error("iOS Debug MCP Server running on stdio");
+  console.error("Quern Debug MCP Server running on stdio");
 }
 
 main().catch((err) => {

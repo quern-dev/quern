@@ -1,4 +1,4 @@
-"""Daemon mode for iOS Debug Server.
+"""Daemon mode for Quern Debug Server.
 
 Forks the server into a background process, redirects stdio to a log file,
 and waits for the server to become healthy before the parent exits.
@@ -104,7 +104,7 @@ def _print_status(state: dict) -> None:
 
     key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
 
-    print(f"iOS Debug Server running")
+    print(f"Quern Debug Server running")
     print(f"  PID:        {pid}")
     print(f"  Server:     http://127.0.0.1:{port}")
     if proxy_enabled:

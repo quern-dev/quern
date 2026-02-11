@@ -1,11 +1,11 @@
 {
-  "name": "ios-debug-mcp",
+  "name": "quern-debug-mcp",
   "version": "0.1.0",
-  "description": "MCP server for iOS Debug Server — thin wrapper over HTTP API",
+  "description": "MCP server for Quern Debug Server — thin wrapper over HTTP API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ios-debug-mcp": "dist/index.js"
+    "quern-debug-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc && chmod 755 dist/index.js",

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
-logger = logging.getLogger("ios-debug-server.simctl")
+logger = logging.getLogger("quern-debug-server.simctl")
 
 
 class SimctlBackend:

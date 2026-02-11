@@ -42,7 +42,7 @@ We'll call `idb` CLI commands as subprocesses rather than importing fb-idb as a 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                     iOS Debug Server (port 9100)                      │
+│                     Quern Debug Server (port 9100)                      │
 │                                                                       │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │                       HTTP API Layer                          │    │

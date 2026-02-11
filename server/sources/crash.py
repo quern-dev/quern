@@ -24,7 +24,7 @@ from server.sources import BaseSourceAdapter, EntryCallback
 
 logger = logging.getLogger(__name__)
 
-CRASH_DIR = Path.home() / ".ios-debug-server" / "crashes"
+CRASH_DIR = Path.home() / ".quern" / "crashes"
 POLL_INTERVAL = 10  # seconds
 PULL_TIMEOUT = 30  # seconds
 

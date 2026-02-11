@@ -1,4 +1,4 @@
-"""mitmproxy addon for iOS Debug Server.
+"""mitmproxy addon for Quern Debug Server.
 
 This script runs INSIDE the mitmdump process, not inside our server.
 It has zero imports from server.* — only stdlib + mitmproxy.
