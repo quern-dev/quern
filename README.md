@@ -29,7 +29,12 @@ Quern Debug Server (localhost:9100)
 ```bash
 git clone <repo-url>
 cd quern-debug-server
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
+
+# Verify system dependencies
+quern-debug-server setup
 
 # Build the MCP server
 cd mcp && npm install && npm run build && cd ..
@@ -243,8 +248,11 @@ tests/                 428 tests
 ## Development
 
 ```bash
+# Activate the venv (if not already active)
+source .venv/bin/activate
+
 # Run tests
-.venv/bin/python -m pytest tests/ -v
+pytest tests/ -v
 
 # Build MCP server
 cd mcp && npm run build

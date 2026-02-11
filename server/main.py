@@ -7,6 +7,7 @@ Usage:
     quern-debug-server stop             Stop a running daemon
     quern-debug-server restart          Restart the daemon
     quern-debug-server status           Show server status
+    quern-debug-server setup            Check environment and install dependencies
     quern-debug-server regenerate-key   Generate a new API key
 """
 
@@ -524,6 +525,9 @@ def cli() -> None:
     # status
     subparsers.add_parser("status", help="Show server status")
 
+    # setup
+    subparsers.add_parser("setup", help="Check environment and install dependencies")
+
     # regenerate-key (preserved)
     subparsers.add_parser("regenerate-key", help="Generate a new API key")
 
@@ -553,6 +557,9 @@ def cli() -> None:
     elif args.command == "regenerate-key":
         key = ServerConfig.regenerate_api_key()
         print(f"New API key: {key}")
+    elif args.command == "setup":
+        from server.lifecycle.setup import run_setup
+        sys.exit(run_setup())
 
 
 if __name__ == "__main__":
