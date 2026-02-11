@@ -71,10 +71,13 @@ class IdbBackend:
     async def describe_all(self, udid: str) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
-        Runs: idb ui describe-all --udid <udid>
-        Returns the parsed JSON array from idb output.
+        Runs: idb ui describe-all --udid <udid> --nested
+        Uses --nested to get the full tree including children inside
+        containers (nav bars, tab bars, etc.), then flattens to a list.
         """
-        stdout, _ = await self._run("ui", "describe-all", "--udid", udid)
+        stdout, _ = await self._run(
+            "ui", "describe-all", "--udid", udid, "--nested",
+        )
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError as exc:
@@ -87,7 +90,18 @@ class IdbBackend:
                 f"Expected JSON array from describe-all, got {type(data).__name__}",
                 tool="idb",
             )
-        return data
+        return self._flatten_nested(data)
+
+    @staticmethod
+    def _flatten_nested(items: list[dict]) -> list[dict]:
+        """Recursively flatten a nested idb element tree into a flat list."""
+        result: list[dict] = []
+        for item in items:
+            children = item.pop("children", [])
+            result.append(item)
+            if children:
+                result.extend(IdbBackend._flatten_nested(children))
+        return result
 
     async def tap(self, udid: str, x: float, y: float) -> None:
         """Tap at coordinates. Runs: idb ui tap <x> <y> --udid <udid>

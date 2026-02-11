@@ -150,6 +150,20 @@ class SimctlBackend:
             ))
         return apps
 
+    async def set_location(self, udid: str, latitude: float, longitude: float) -> None:
+        """Set the simulated GPS location.
+
+        Runs: xcrun simctl location <udid> set <lat>,<lon>
+        """
+        await self._run_simctl("location", udid, "set", f"{latitude},{longitude}")
+
+    async def grant_permission(self, udid: str, bundle_id: str, permission: str) -> None:
+        """Grant an app permission.
+
+        Runs: xcrun simctl privacy <udid> grant <permission> <bundle_id>
+        """
+        await self._run_simctl("privacy", udid, "grant", permission, bundle_id)
+
     async def screenshot(self, udid: str) -> bytes:
         """Capture a screenshot from a simulator.
 

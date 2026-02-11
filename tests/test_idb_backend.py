@@ -147,7 +147,7 @@ class TestDescribeAll:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.describe_all("UDID-123")
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "describe-all", "--udid", "UDID-123",
+                "/usr/local/bin/idb", "ui", "describe-all", "--udid", "UDID-123", "--nested",
                 stdout=-1, stderr=-1,
             )
 

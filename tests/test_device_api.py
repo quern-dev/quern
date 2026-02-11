@@ -83,10 +83,17 @@ def mock_controller(app):
         },
         "AAAA-1111",
     ))
+    ctrl.tap = AsyncMock(return_value="AAAA-1111")
     ctrl.tap_element = AsyncMock(return_value={
         "status": "ok",
         "tapped": {"label": "Settings", "type": "Button", "identifier": "Settings", "x": 336.0, "y": 519.0},
     })
+    ctrl.swipe = AsyncMock(return_value="AAAA-1111")
+    ctrl.type_text = AsyncMock(return_value="AAAA-1111")
+    ctrl.press_button = AsyncMock(return_value="AAAA-1111")
+    ctrl.set_location = AsyncMock(return_value="AAAA-1111")
+    ctrl.grant_permission = AsyncMock(return_value="AAAA-1111")
+    ctrl.screenshot_annotated = AsyncMock(return_value=(b"\x89PNGannotated", "image/png"))
     app.state.device_controller = ctrl
     return ctrl
 
@@ -496,3 +503,289 @@ class TestTapElement:
                 headers=auth_headers,
             )
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# POST /device/ui/tap (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestTap:
+    async def test_tap(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/tap",
+                json={"x": 100.0, "y": 200.0},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["x"] == 100.0
+        assert data["y"] == 200.0
+        mock_controller.tap.assert_called_once_with(x=100.0, y=200.0, udid=None)
+
+    async def test_tap_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/tap",
+                json={"x": 100.0, "y": 200.0},
+            )
+        assert resp.status_code == 401
+
+    async def test_tap_idb_not_found(self, app, auth_headers, mock_controller):
+        mock_controller.tap = AsyncMock(
+            side_effect=DeviceError("idb not found. Install with: pip install fb-idb", tool="idb")
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/tap",
+                json={"x": 100.0, "y": 200.0},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# POST /device/ui/swipe (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestSwipe:
+    async def test_swipe(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/swipe",
+                json={"start_x": 100, "start_y": 400, "end_x": 100, "end_y": 100},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        mock_controller.swipe.assert_called_once_with(
+            start_x=100, start_y=400, end_x=100, end_y=100, duration=0.5, udid=None,
+        )
+
+    async def test_swipe_with_duration(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/swipe",
+                json={"start_x": 0, "start_y": 0, "end_x": 0, "end_y": 500, "duration": 1.5},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        mock_controller.swipe.assert_called_once_with(
+            start_x=0, start_y=0, end_x=0, end_y=500, duration=1.5, udid=None,
+        )
+
+    async def test_swipe_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/swipe",
+                json={"start_x": 0, "start_y": 0, "end_x": 0, "end_y": 100},
+            )
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# POST /device/ui/type (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestTypeText:
+    async def test_type_text(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/type",
+                json={"text": "hello world"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        mock_controller.type_text.assert_called_once_with(text="hello world", udid=None)
+
+    async def test_type_text_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/type",
+                json={"text": "test"},
+            )
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# POST /device/ui/press (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestPressButton:
+    async def test_press_button(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/press",
+                json={"button": "HOME"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        mock_controller.press_button.assert_called_once_with(button="HOME", udid=None)
+
+    async def test_press_button_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/press",
+                json={"button": "HOME"},
+            )
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# POST /device/location (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestSetLocation:
+    async def test_set_location(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/location",
+                json={"latitude": 37.7749, "longitude": -122.4194},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["latitude"] == 37.7749
+        assert data["longitude"] == -122.4194
+        mock_controller.set_location.assert_called_once_with(
+            latitude=37.7749, longitude=-122.4194, udid=None,
+        )
+
+    async def test_set_location_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/location",
+                json={"latitude": 0, "longitude": 0},
+            )
+        assert resp.status_code == 401
+
+    async def test_set_location_error(self, app, auth_headers, mock_controller):
+        mock_controller.set_location = AsyncMock(
+            side_effect=DeviceError("simctl location failed: error", tool="simctl")
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/location",
+                json={"latitude": 999, "longitude": 999},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# POST /device/permission (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestGrantPermission:
+    async def test_grant_permission(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/permission",
+                json={"bundle_id": "com.example.App", "permission": "photos"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["bundle_id"] == "com.example.App"
+        assert data["permission"] == "photos"
+        mock_controller.grant_permission.assert_called_once_with(
+            bundle_id="com.example.App", permission="photos", udid=None,
+        )
+
+    async def test_grant_permission_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/permission",
+                json={"bundle_id": "com.example.App", "permission": "photos"},
+            )
+        assert resp.status_code == 401
+
+    async def test_grant_permission_error(self, app, auth_headers, mock_controller):
+        mock_controller.grant_permission = AsyncMock(
+            side_effect=DeviceError("simctl privacy failed: unknown permission", tool="simctl")
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/permission",
+                json={"bundle_id": "com.example.App", "permission": "badperm"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# GET /device/screenshot/annotated (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotatedScreenshot:
+    async def test_annotated_screenshot(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/screenshot/annotated",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        assert resp.content == b"\x89PNGannotated"
+        mock_controller.screenshot_annotated.assert_called_once_with(
+            udid=None, scale=0.5, quality=85,
+        )
+
+    async def test_annotated_screenshot_with_params(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/screenshot/annotated?scale=1.0&udid=BBBB-2222",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        mock_controller.screenshot_annotated.assert_called_once_with(
+            udid="BBBB-2222", scale=1.0, quality=85,
+        )
+
+    async def test_annotated_screenshot_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/screenshot/annotated")
+        assert resp.status_code == 401
+
+    async def test_annotated_screenshot_error(self, app, auth_headers, mock_controller):
+        mock_controller.screenshot_annotated = AsyncMock(
+            side_effect=DeviceError("No booted simulator found", tool="simctl")
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/screenshot/annotated",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 400

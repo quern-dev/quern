@@ -389,3 +389,105 @@ class TestTapElement:
         result = await ctrl.tap_element(label="Settings", element_type="Button")
         assert result["status"] == "ok"
         assert result["tapped"]["type"] == "Button"
+
+
+# ---------------------------------------------------------------------------
+# swipe, type_text, press_button (Phase 3c — idb delegates)
+# ---------------------------------------------------------------------------
+
+
+class TestSwipe:
+    async def test_swipe_delegates_to_idb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.swipe = AsyncMock()
+
+        udid = await ctrl.swipe(100, 200, 100, 600, duration=0.3)
+        assert udid == "AAAA-1111"
+        ctrl.idb.swipe.assert_called_once_with("AAAA-1111", 100, 200, 100, 600, 0.3)
+
+    async def test_swipe_resolves_udid(self):
+        ctrl = DeviceController()
+        ctrl.idb.swipe = AsyncMock()
+        udid = await ctrl.swipe(0, 0, 0, 100, udid="BBBB-2222")
+        assert udid == "BBBB-2222"
+        assert ctrl._active_udid == "BBBB-2222"
+
+
+class TestTypeText:
+    async def test_type_text_delegates_to_idb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.type_text = AsyncMock()
+
+        udid = await ctrl.type_text("hello world")
+        assert udid == "AAAA-1111"
+        ctrl.idb.type_text.assert_called_once_with("AAAA-1111", "hello world")
+
+
+class TestPressButton:
+    async def test_press_button_delegates_to_idb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.press_button = AsyncMock()
+
+        udid = await ctrl.press_button("HOME")
+        assert udid == "AAAA-1111"
+        ctrl.idb.press_button.assert_called_once_with("AAAA-1111", "HOME")
+
+
+# ---------------------------------------------------------------------------
+# set_location, grant_permission (Phase 3c — simctl delegates)
+# ---------------------------------------------------------------------------
+
+
+class TestSetLocation:
+    async def test_set_location_delegates_to_simctl(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.set_location = AsyncMock()
+
+        udid = await ctrl.set_location(37.7749, -122.4194)
+        assert udid == "AAAA-1111"
+        ctrl.simctl.set_location.assert_called_once_with("AAAA-1111", 37.7749, -122.4194)
+
+
+class TestGrantPermission:
+    async def test_grant_permission_delegates_to_simctl(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.grant_permission = AsyncMock()
+
+        udid = await ctrl.grant_permission("com.example.App", "photos")
+        assert udid == "AAAA-1111"
+        ctrl.simctl.grant_permission.assert_called_once_with(
+            "AAAA-1111", "com.example.App", "photos",
+        )
+
+
+# ---------------------------------------------------------------------------
+# screenshot_annotated (Phase 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestScreenshotAnnotated:
+    async def test_screenshot_annotated_delegates(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        fake_png = b"\x89PNGfake"
+        ctrl.simctl.screenshot = AsyncMock(return_value=fake_png)
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        with patch("server.device.controller.annotate_screenshot") as mock_annotate:
+            mock_annotate.return_value = (b"annotated-png", "image/png")
+            result_bytes, media_type = await ctrl.screenshot_annotated(scale=0.5)
+
+        ctrl.simctl.screenshot.assert_called_once_with("AAAA-1111")
+        # annotate_screenshot should receive the raw png and parsed elements
+        assert mock_annotate.call_count == 1
+        call_args = mock_annotate.call_args
+        assert call_args[0][0] == fake_png  # raw_png
+        assert len(call_args[0][1]) == 4  # 4 elements from _FAKE_IDB_OUTPUT
+        assert call_args[1]["scale"] == 0.5
+        assert result_bytes == b"annotated-png"
+        assert media_type == "image/png"

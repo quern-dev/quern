@@ -35,7 +35,7 @@ def parse_elements(raw: list[dict]) -> list[UIElement]:
 
         elements.append(UIElement(
             type=item.get("type", "Unknown"),
-            label=item.get("AXLabel", ""),
+            label=item.get("AXLabel") or "",
             identifier=item.get("AXUniqueId"),
             value=item.get("AXValue"),
             frame=frame,

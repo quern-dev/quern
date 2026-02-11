@@ -267,6 +267,59 @@ class TestListApps:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# set_location
+# ---------------------------------------------------------------------------
+
+
+class TestSetLocation:
+    async def test_set_location(self):
+        backend = SimctlBackend()
+        proc = _mock_proc()
+        with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+            await backend.set_location("AAAA-1111", 37.7749, -122.4194)
+            mock_exec.assert_called_once_with(
+                "xcrun", "simctl", "location", "AAAA-1111", "set", "37.7749,-122.4194",
+                stdout=-1, stderr=-1,
+            )
+
+    async def test_set_location_error(self):
+        backend = SimctlBackend()
+        proc = _mock_proc(stderr=b"invalid coordinates", returncode=1)
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            with pytest.raises(DeviceError, match="invalid coordinates"):
+                await backend.set_location("AAAA-1111", 999, 999)
+
+
+# ---------------------------------------------------------------------------
+# grant_permission
+# ---------------------------------------------------------------------------
+
+
+class TestGrantPermission:
+    async def test_grant_permission(self):
+        backend = SimctlBackend()
+        proc = _mock_proc()
+        with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+            await backend.grant_permission("AAAA-1111", "com.example.App", "photos")
+            mock_exec.assert_called_once_with(
+                "xcrun", "simctl", "privacy", "AAAA-1111", "grant", "photos", "com.example.App",
+                stdout=-1, stderr=-1,
+            )
+
+    async def test_grant_permission_error(self):
+        backend = SimctlBackend()
+        proc = _mock_proc(stderr=b"unknown permission", returncode=1)
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            with pytest.raises(DeviceError, match="unknown permission"):
+                await backend.grant_permission("AAAA-1111", "com.example.App", "badperm")
+
+
+# ---------------------------------------------------------------------------
+# screenshot
+# ---------------------------------------------------------------------------
+
+
 class TestScreenshot:
     async def test_screenshot_reads_temp_file(self, tmp_path):
         backend = SimctlBackend()

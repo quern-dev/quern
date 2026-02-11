@@ -8,11 +8,17 @@ from fastapi.responses import Response
 from server.models import (
     BootDeviceRequest,
     DeviceError,
+    GrantPermissionRequest,
     InstallAppRequest,
     LaunchAppRequest,
+    PressButtonRequest,
+    SetLocationRequest,
     ShutdownDeviceRequest,
+    SwipeRequest,
     TapElementRequest,
+    TapRequest,
     TerminateAppRequest,
+    TypeTextRequest,
 )
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -202,6 +208,17 @@ async def get_screen_summary(
         raise _handle_device_error(e)
 
 
+@router.post("/ui/tap")
+async def tap(request: Request, body: TapRequest):
+    """Tap at specific coordinates."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.tap(x=body.x, y=body.y, udid=body.udid)
+        return {"status": "ok", "udid": udid, "x": body.x, "y": body.y}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
 @router.post("/ui/tap-element")
 async def tap_element(request: Request, body: TapElementRequest):
     """Find an element by label/identifier and tap its center.
@@ -220,5 +237,109 @@ async def tap_element(request: Request, body: TapElementRequest):
             udid=body.udid,
         )
         return result
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/swipe")
+async def swipe(request: Request, body: SwipeRequest):
+    """Perform a swipe gesture."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.swipe(
+            start_x=body.start_x,
+            start_y=body.start_y,
+            end_x=body.end_x,
+            end_y=body.end_y,
+            duration=body.duration,
+            udid=body.udid,
+        )
+        return {"status": "ok", "udid": udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/type")
+async def type_text(request: Request, body: TypeTextRequest):
+    """Type text into the focused field."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.type_text(text=body.text, udid=body.udid)
+        return {"status": "ok", "udid": udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/press")
+async def press_button(request: Request, body: PressButtonRequest):
+    """Press a hardware button."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.press_button(button=body.button, udid=body.udid)
+        return {"status": "ok", "udid": udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+@router.post("/location")
+async def set_location(request: Request, body: SetLocationRequest):
+    """Set the simulated GPS location."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.set_location(
+            latitude=body.latitude, longitude=body.longitude, udid=body.udid,
+        )
+        return {
+            "status": "ok",
+            "udid": udid,
+            "latitude": body.latitude,
+            "longitude": body.longitude,
+        }
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/permission")
+async def grant_permission(request: Request, body: GrantPermissionRequest):
+    """Grant an app permission."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.grant_permission(
+            bundle_id=body.bundle_id, permission=body.permission, udid=body.udid,
+        )
+        return {
+            "status": "ok",
+            "udid": udid,
+            "bundle_id": body.bundle_id,
+            "permission": body.permission,
+        }
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Annotated screenshots
+# ---------------------------------------------------------------------------
+
+
+@router.get("/screenshot/annotated")
+async def screenshot_annotated(
+    request: Request,
+    udid: str | None = Query(default=None),
+    scale: float = Query(default=0.5, ge=0.1, le=1.0),
+    quality: int = Query(default=85, ge=1, le=100),
+):
+    """Capture an annotated screenshot with accessibility overlays."""
+    controller = _get_controller(request)
+    try:
+        image_bytes, media_type = await controller.screenshot_annotated(
+            udid=udid, scale=scale, quality=quality,
+        )
+        return Response(content=image_bytes, media_type=media_type)
     except DeviceError as e:
         raise _handle_device_error(e)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from server.device.idb import IdbBackend
-from server.device.screenshots import process_screenshot
+from server.device.screenshots import annotate_screenshot, process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.ui_elements import (
     find_by_identifier,
@@ -235,3 +235,60 @@ class DeviceController:
                 "specify element_type or identifier to narrow"
             ),
         }
+
+    async def swipe(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        duration: float = 0.5,
+        udid: str | None = None,
+    ) -> str:
+        """Swipe gesture. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        await self.idb.swipe(resolved, start_x, start_y, end_x, end_y, duration)
+        return resolved
+
+    async def type_text(self, text: str, udid: str | None = None) -> str:
+        """Type text into focused field. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        await self.idb.type_text(resolved, text)
+        return resolved
+
+    async def press_button(self, button: str, udid: str | None = None) -> str:
+        """Press a hardware button. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        await self.idb.press_button(resolved, button)
+        return resolved
+
+    async def set_location(
+        self, latitude: float, longitude: float, udid: str | None = None,
+    ) -> str:
+        """Set simulated GPS location. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        await self.simctl.set_location(resolved, latitude, longitude)
+        return resolved
+
+    async def grant_permission(
+        self, bundle_id: str, permission: str, udid: str | None = None,
+    ) -> str:
+        """Grant an app permission. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        await self.simctl.grant_permission(resolved, bundle_id, permission)
+        return resolved
+
+    async def screenshot_annotated(
+        self,
+        udid: str | None = None,
+        scale: float = 0.5,
+        quality: int = 85,
+    ) -> tuple[bytes, str]:
+        """Capture an annotated screenshot with accessibility overlays.
+
+        Returns (image_bytes, media_type).
+        """
+        resolved = await self.resolve_udid(udid)
+        raw_png = await self.simctl.screenshot(resolved)
+        elements, _ = await self.get_ui_elements(resolved)
+        return annotate_screenshot(raw_png, elements, scale=scale, quality=quality)

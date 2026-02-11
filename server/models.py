@@ -558,3 +558,44 @@ class TapElementRequest(BaseModel):
     identifier: str | None = None
     element_type: str | None = None
     udid: str | None = None
+
+
+class SwipeRequest(BaseModel):
+    """Request body for POST /device/ui/swipe."""
+
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    duration: float = 0.5
+    udid: str | None = None
+
+
+class TypeTextRequest(BaseModel):
+    """Request body for POST /device/ui/type."""
+
+    text: str
+    udid: str | None = None
+
+
+class PressButtonRequest(BaseModel):
+    """Request body for POST /device/ui/press."""
+
+    button: str
+    udid: str | None = None
+
+
+class SetLocationRequest(BaseModel):
+    """Request body for POST /device/location."""
+
+    latitude: float
+    longitude: float
+    udid: str | None = None
+
+
+class GrantPermissionRequest(BaseModel):
+    """Request body for POST /device/permission."""
+
+    bundle_id: str
+    permission: str
+    udid: str | None = None
