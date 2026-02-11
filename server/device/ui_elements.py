@@ -37,7 +37,7 @@ def parse_elements(raw: list[dict]) -> list[UIElement]:
             type=item.get("type", "Unknown"),
             label=item.get("AXLabel") or "",
             identifier=item.get("AXUniqueId"),
-            value=item.get("AXValue"),
+            value=str(v) if (v := item.get("AXValue")) is not None else None,
             frame=frame,
             enabled=item.get("enabled", True),
             role=item.get("role", ""),

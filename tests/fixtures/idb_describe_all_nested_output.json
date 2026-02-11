@@ -1,0 +1,58 @@
+[
+  {
+    "type": "Application",
+    "AXLabel": "MyApp",
+    "AXUniqueId": null,
+    "AXValue": null,
+    "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+    "enabled": true,
+    "role": "AXApplication",
+    "role_description": "application",
+    "children": [
+      {
+        "type": "Group",
+        "AXLabel": null,
+        "AXUniqueId": null,
+        "AXValue": null,
+        "frame": {"x": 0, "y": 56, "width": 402, "height": 44},
+        "enabled": true,
+        "role": "AXGroup",
+        "role_description": "Nav bar",
+        "children": []
+      },
+      {
+        "type": "StaticText",
+        "AXLabel": "Hello World",
+        "AXUniqueId": null,
+        "AXValue": "Hello World",
+        "frame": {"x": 50, "y": 200, "width": 300, "height": 30},
+        "enabled": true,
+        "role": "AXStaticText",
+        "role_description": "text",
+        "children": []
+      },
+      {
+        "type": "Button",
+        "AXLabel": "Submit",
+        "AXUniqueId": "submit_btn",
+        "AXValue": null,
+        "frame": {"x": 100, "y": 400, "width": 200, "height": 44},
+        "enabled": true,
+        "role": "AXButton",
+        "role_description": "button",
+        "children": []
+      },
+      {
+        "type": "Group",
+        "AXLabel": "Tab Bar",
+        "AXUniqueId": null,
+        "AXValue": null,
+        "frame": {"x": 0, "y": 791, "width": 402, "height": 83},
+        "enabled": true,
+        "role": "AXGroup",
+        "role_description": "group",
+        "children": []
+      }
+    ]
+  }
+]
