@@ -3,7 +3,7 @@ name = "ios-debug-server"
 version = "0.1.0"
 description = "iOS debug log capture and AI context server"
 readme = "README.md"
-license = "MIT"
+license = "MIT with Commons Clause"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
