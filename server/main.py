@@ -22,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from server.auth import APIKeyMiddleware
+from server.device.controller import DeviceController
 from server.config import ServerConfig
 from server.processing.deduplicator import Deduplicator
 from server.proxy.flow_store import FlowStore
@@ -34,6 +35,7 @@ from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
 from server.api.builds import router as builds_router
 from server.api.crashes import router as crashes_router
+from server.api.device import router as device_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 
@@ -111,6 +113,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.source_adapters = adapters
 
+    # Device controller (Phase 3)
+    device_controller = DeviceController()
+    app.state.device_controller = device_controller
+    tools = await device_controller.check_tools()
+    logger.info("Device tools: %s", tools)
+
     logger.info(
         "Server started on http://%s:%d — API key: %s...%s",
         config.host,
@@ -166,6 +174,7 @@ def create_app(
     app.state.build_adapter = None
     app.state.proxy_adapter = None
     app.state.flow_store = None
+    app.state.device_controller = None
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
@@ -175,6 +184,7 @@ def create_app(
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
+    app.include_router(device_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

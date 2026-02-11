@@ -12,6 +12,7 @@ dependencies = [
     "sse-starlette>=2.0",
     "mitmproxy>=10.0",
     "httpx>=0.27",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

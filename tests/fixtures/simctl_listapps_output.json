@@ -1,0 +1,32 @@
+{
+  "com.example.MyApp": {
+    "ApplicationType": "User",
+    "CFBundleDisplayName": "My App",
+    "CFBundleIdentifier": "com.example.MyApp",
+    "CFBundleName": "MyApp",
+    "CFBundleVersion": "42",
+    "CFBundleExecutable": "MyApp",
+    "Path": "/Users/test/Library/Developer/CoreSimulator/Devices/AAAA-1111/data/Containers/Bundle/Application/1111/MyApp.app",
+    "SBAppTags": []
+  },
+  "com.apple.mobilesafari": {
+    "ApplicationType": "System",
+    "CFBundleDisplayName": "Safari",
+    "CFBundleIdentifier": "com.apple.mobilesafari",
+    "CFBundleName": "MobileSafari",
+    "CFBundleVersion": "620.1.16.11.6",
+    "CFBundleExecutable": "MobileSafari",
+    "Path": "/Applications/MobileSafari.app",
+    "SBAppTags": []
+  },
+  "com.apple.Preferences": {
+    "ApplicationType": "System",
+    "CFBundleDisplayName": "Settings",
+    "CFBundleIdentifier": "com.apple.Preferences",
+    "CFBundleName": "Preferences",
+    "CFBundleVersion": "1",
+    "CFBundleExecutable": "Preferences",
+    "Path": "/Applications/Preferences.app",
+    "SBAppTags": []
+  }
+}

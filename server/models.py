@@ -436,3 +436,125 @@ class MockListResponse(BaseModel):
 
     rules: list[MockRuleInfo] = Field(default_factory=list)
     total: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Device management models (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class DeviceType(str, enum.Enum):
+    """Type of iOS device."""
+
+    SIMULATOR = "simulator"
+    DEVICE = "device"
+
+
+class DeviceState(str, enum.Enum):
+    """State of a device."""
+
+    BOOTED = "booted"
+    SHUTDOWN = "shutdown"
+    BOOTING = "booting"
+
+
+class DeviceInfo(BaseModel):
+    """Information about a simulator or device."""
+
+    udid: str
+    name: str
+    state: DeviceState
+    device_type: DeviceType = DeviceType.SIMULATOR
+    os_version: str = ""
+    runtime: str = ""
+    is_available: bool = True
+
+
+class AppInfo(BaseModel):
+    """Information about an installed app."""
+
+    bundle_id: str
+    name: str = ""
+    app_type: str = ""  # "User" or "System"
+    architecture: str = ""
+    install_type: str = ""
+    process_state: str = ""
+
+
+class DeviceError(Exception):
+    """Raised when a device operation fails."""
+
+    def __init__(self, message: str, tool: str = "unknown"):
+        self.tool = tool
+        super().__init__(message)
+
+
+class BootDeviceRequest(BaseModel):
+    """Request body for POST /device/boot."""
+
+    udid: str | None = None
+    name: str | None = None
+
+
+class ShutdownDeviceRequest(BaseModel):
+    """Request body for POST /device/shutdown."""
+
+    udid: str
+
+
+class InstallAppRequest(BaseModel):
+    """Request body for POST /device/app/install."""
+
+    app_path: str
+    udid: str | None = None
+
+
+class LaunchAppRequest(BaseModel):
+    """Request body for POST /device/app/launch."""
+
+    bundle_id: str
+    udid: str | None = None
+
+
+class TerminateAppRequest(BaseModel):
+    """Request body for POST /device/app/terminate."""
+
+    bundle_id: str
+    udid: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# UI inspection models (Phase 3b)
+# ---------------------------------------------------------------------------
+
+
+class UIElement(BaseModel):
+    """A single UI accessibility element from idb describe-all."""
+
+    type: str  # "Button", "StaticText", "Slider", etc.
+    label: str = ""  # from AXLabel
+    identifier: str | None = None  # from AXUniqueId
+    value: str | None = None  # from AXValue
+    frame: dict[str, float] | None = None  # {"x", "y", "width", "height"}
+    enabled: bool = True
+    role: str = ""  # "AXButton", "AXSlider", etc.
+    role_description: str = ""  # "button", "slider", etc.
+    help: str | None = None
+    custom_actions: list[str] = Field(default_factory=list)
+
+
+class TapRequest(BaseModel):
+    """Request body for POST /device/ui/tap."""
+
+    x: float
+    y: float
+    udid: str | None = None
+
+
+class TapElementRequest(BaseModel):
+    """Request body for POST /device/ui/tap-element."""
+
+    label: str | None = None
+    identifier: str | None = None
+    element_type: str | None = None
+    udid: str | None = None

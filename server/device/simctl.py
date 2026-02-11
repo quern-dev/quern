@@ -1,0 +1,165 @@
+"""SimctlBackend — async wrapper around xcrun simctl for simulator management."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import tempfile
+from pathlib import Path
+
+from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
+
+logger = logging.getLogger("ios-debug-server.simctl")
+
+
+class SimctlBackend:
+    """Manages iOS simulators via xcrun simctl subprocess calls."""
+
+    async def _run_simctl(self, *args: str) -> tuple[str, str]:
+        """Run an xcrun simctl command and return (stdout, stderr).
+
+        Raises DeviceError on non-zero exit code.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "xcrun", "simctl", *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise DeviceError(
+                f"simctl {args[0]} failed: {stderr.decode().strip()}",
+                tool="simctl",
+            )
+        return stdout.decode(), stderr.decode()
+
+    async def _run_shell(self, cmd: str) -> tuple[str, str]:
+        """Run a shell pipeline and return (stdout, stderr).
+
+        Used for commands that require piping (e.g. listapps | plutil).
+        Raises DeviceError on non-zero exit code.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "sh", "-c", cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise DeviceError(
+                f"shell command failed: {stderr.decode().strip()}",
+                tool="simctl",
+            )
+        return stdout.decode(), stderr.decode()
+
+    async def is_available(self) -> bool:
+        """Check if xcrun simctl is available."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "which", "xcrun",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    async def list_devices(self) -> list[DeviceInfo]:
+        """List all simulators by parsing simctl list devices --json."""
+        stdout, _ = await self._run_simctl("list", "devices", "--json")
+        data = json.loads(stdout)
+        devices: list[DeviceInfo] = []
+
+        for runtime_key, device_list in data.get("devices", {}).items():
+            os_version = self._parse_runtime(runtime_key)
+            for dev in device_list:
+                if not dev.get("isAvailable", False):
+                    continue
+                state_str = dev.get("state", "Shutdown").lower()
+                try:
+                    state = DeviceState(state_str)
+                except ValueError:
+                    state = DeviceState.SHUTDOWN
+
+                devices.append(DeviceInfo(
+                    udid=dev["udid"],
+                    name=dev["name"],
+                    state=state,
+                    device_type=DeviceType.SIMULATOR,
+                    os_version=os_version,
+                    runtime=runtime_key,
+                    is_available=True,
+                ))
+
+        return devices
+
+    @staticmethod
+    def _parse_runtime(runtime_key: str) -> str:
+        """Extract human-readable OS version from a runtime identifier.
+
+        e.g. 'com.apple.CoreSimulator.SimRuntime.iOS-18-6' -> 'iOS 18.6'
+        """
+        match = re.search(r"SimRuntime\.(.+)$", runtime_key)
+        if not match:
+            return runtime_key
+        raw = match.group(1)  # e.g. 'iOS-18-6'
+        parts = raw.split("-", 1)
+        if len(parts) == 2:
+            return f"{parts[0]} {parts[1].replace('-', '.')}"
+        return raw
+
+    async def boot(self, udid: str) -> None:
+        """Boot a simulator."""
+        await self._run_simctl("boot", udid)
+
+    async def shutdown(self, udid: str) -> None:
+        """Shutdown a simulator."""
+        await self._run_simctl("shutdown", udid)
+
+    async def install_app(self, udid: str, app_path: str) -> None:
+        """Install an app on a simulator."""
+        await self._run_simctl("install", udid, app_path)
+
+    async def launch_app(self, udid: str, bundle_id: str) -> None:
+        """Launch an app on a simulator."""
+        await self._run_simctl("launch", udid, bundle_id)
+
+    async def terminate_app(self, udid: str, bundle_id: str) -> None:
+        """Terminate an app on a simulator."""
+        await self._run_simctl("terminate", udid, bundle_id)
+
+    async def list_apps(self, udid: str) -> list[AppInfo]:
+        """List installed apps on a simulator.
+
+        simctl listapps outputs NeXT-style plist, so we pipe through plutil
+        to convert to JSON.
+        """
+        cmd = f"xcrun simctl listapps {udid} | plutil -convert json -o - -- -"
+        stdout, _ = await self._run_shell(cmd)
+        data = json.loads(stdout)
+
+        apps: list[AppInfo] = []
+        for bundle_id, info in data.items():
+            apps.append(AppInfo(
+                bundle_id=bundle_id,
+                name=info.get("CFBundleDisplayName") or info.get("CFBundleName", ""),
+                app_type=info.get("ApplicationType", ""),
+            ))
+        return apps
+
+    async def screenshot(self, udid: str) -> bytes:
+        """Capture a screenshot from a simulator.
+
+        Writes to a temp file, reads bytes, then cleans up.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            await self._run_simctl("io", udid, "screenshot", tmp_path)
+            return Path(tmp_path).read_bytes()
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)

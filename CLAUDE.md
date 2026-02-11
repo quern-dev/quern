@@ -229,3 +229,259 @@ Add to pyproject.toml:
 ### Full Architecture Doc
 
 See `docs/phase2-architecture.md` for complete details including addon protocol, data models, API schemas, and iOS device setup instructions.
+
+
+
+### Phase 3 Context: Device Inspection & Control
+
+**Architecture Reference**
+The full Phase 3 architecture document is at docs/phase3-architecture.md. It contains the complete design rationale, API surface, data models, backend interfaces, and implementation phases. Read it before starting implementation — it covers the "why" behind decisions (tool selection, backend separation, active device concept, tap-element workflow, screenshot strategies) that this file summarizes as implementation rules.
+
+**What it does:** Adds remote iOS simulator inspection and control — list devices, boot/shutdown, install/launch apps, take screenshots, read accessibility trees, tap/swipe/type — all via the same HTTP API + MCP wrapper pattern.
+
+**Architecture:** Unlike Phases 1-2 (long-running subprocesses), Phase 3 dispatches individual CLI commands:
+- `xcrun simctl` — device/app management, screenshots (always available with Xcode)
+- `idb` (Facebook iOS Development Bridge) — UI automation: accessibility tree, tap, swipe, type (requires separate install)
+
+**Key pattern:** DeviceController orchestrator routes operations to SimctlBackend or IdbBackend based on what's needed. Each backend calls its CLI tool as an async subprocess.
+
+---
+
+### File Layout
+
+```
+server/device/controller.py    — DeviceController: orchestrates backends, active device tracking
+server/device/simctl.py        — SimctlBackend: xcrun simctl subprocess calls
+server/device/idb.py           — IdbBackend: idb subprocess calls for UI automation
+server/device/ui_tree.py       — Parse idb describe-all output → UITree model
+server/device/screenshots.py   — Screenshot capture, scaling (Pillow), annotation
+server/api/device.py           — FastAPI route handlers for /api/v1/device/*
+server/models.py               — DeviceInfo, AppInfo, UIElement, UITree, request models
+mcp/src/index.ts               — 18 new MCP tools for device control
+```
+
+---
+
+### Implementation Rules
+
+**Subprocess pattern:**
+```python
+async def _run_simctl(self, *args: str) -> tuple[str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "xcrun", "simctl", *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise DeviceError(f"simctl {args[0]} failed: {stderr.decode().strip()}")
+    return stdout.decode(), stderr.decode()
+```
+
+Same pattern for idb. Always async subprocess, always check returncode, always decode and strip.
+
+**Active device resolution order:**
+1. Explicit `udid` parameter → use it, update active
+2. Stored `self._active_udid` → use it
+3. Auto-detect: exactly 1 booted simulator → use it, update active
+4. 0 booted → error "No booted simulator"
+5. 2+ booted → error "Multiple simulators booted, specify udid"
+
+**simctl JSON parsing:** `xcrun simctl list devices --json` returns:
+```json
+{
+  "devices": {
+    "com.apple.CoreSimulator.SimRuntime.iOS-18-2": [
+      {"udid": "...", "name": "iPhone 16 Pro", "state": "Booted", "isAvailable": true}
+    ]
+  }
+}
+```
+Flatten the runtime-keyed dict into a single list. Extract OS version from the runtime key.
+
+**idb describe-all output parsing:** The output format varies by idb version. Parse conservatively — build UIElement tree from whatever structure idb provides. If parsing fails, return raw text in a fallback field rather than crashing.
+
+**Screenshot handling:**
+- `simctl io <udid> screenshot <path>` writes PNG to a temp file
+- Use Pillow to scale (default 0.5x) and optionally convert to JPEG
+- For annotated screenshots: overlay red bounding boxes + labels on interactive elements from the accessibility tree
+- Return bytes with correct Content-Type header
+
+**tap-element flow:**
+1. Get UI tree via idb
+2. Search by label OR identifier (not both)
+3. Optionally filter by element_type
+4. 0 matches → 404
+5. 1 match → calculate center from frame, tap it
+6. 2+ matches → return 200 with `"status": "ambiguous"` and all matches (let AI agent choose)
+
+**Tool availability checking:**
+```python
+async def is_available(self, tool: str) -> bool:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "which", tool,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        return proc.returncode == 0
+    except Exception:
+        return False
+```
+
+Report in GET /device/list response so the AI agent knows what it can do.
+
+---
+
+### API Routes (server/api/device.py)
+
+All routes under `/api/v1/device/`. The DeviceController is instantiated once and shared (same pattern as proxy source — stored on app state or as module-level singleton).
+
+**Device management (simctl):**
+- `GET /list` — list simulators, include tool availability
+- `POST /boot` — boot simulator by udid or name
+- `POST /shutdown` — shutdown simulator
+
+**App management (simctl):**
+- `POST /app/install` — install .app/.ipa
+- `POST /app/launch` — launch by bundle_id
+- `POST /app/terminate` — terminate by bundle_id
+- `GET /app/list` — list installed apps
+
+**Inspection (simctl + idb):**
+- `GET /screenshot` — capture screenshot (params: format, scale, quality)
+- `GET /screenshot/annotated` — screenshot with accessibility overlays
+- `GET /ui` — full accessibility tree JSON
+- `GET /screen-summary` — LLM-optimized text description
+
+**Interaction (idb):**
+- `POST /ui/tap` — tap at x,y
+- `POST /ui/tap-element` — find element by label/id, tap its center
+- `POST /ui/swipe` — swipe gesture
+- `POST /ui/type` — type text into focused field
+- `POST /ui/press` — press hardware button
+
+**Configuration (simctl):**
+- `POST /location` — set GPS coordinates
+- `POST /permission` — grant app permission
+
+---
+
+### MCP Tools (mcp/src/index.ts)
+
+18 new tools. Follow existing patterns exactly:
+- Each tool calls the HTTP API via fetch
+- Return structured JSON responses
+- Include `udid` as optional param (server resolves active device)
+
+Tool names: `list_devices`, `boot_device`, `shutdown_device`, `install_app`, `launch_app`, `terminate_app`, `list_apps`, `take_screenshot`, `get_ui_tree`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `type_text`, `press_button`, `set_location`, `grant_permission`
+
+For `take_screenshot`: the MCP tool should return the image as base64-encoded string with a mime type field, since MCP tools return JSON.
+
+---
+
+### Models to Add (server/models.py)
+
+Add these to the existing models file:
+- `DeviceType` (enum: simulator, device)
+- `DeviceState` (enum: booted, shutdown, booting)
+- `DeviceInfo` — udid, name, state, device_type, os_version, runtime, is_available
+- `AppInfo` — bundle_id, name, app_type, architecture, install_type, process_state
+- `UIElement` — type, label, identifier, value, frame, enabled, visible, traits, children
+- `UITree` — app_bundle_id, root, element_count, timestamp + helper methods (flatten, find_by_label, find_by_type)
+- `TapRequest` — x, y, udid?
+- `TapElementRequest` — label?, identifier?, element_type?, udid?
+- `SwipeRequest` — start_x, start_y, end_x, end_y, duration, udid?
+- `TypeTextRequest` — text, udid?
+- `PressButtonRequest` — button, udid?
+- `SetLocationRequest` — latitude, longitude, udid?
+- `GrantPermissionRequest` — bundle_id, permission, udid?
+- `InstallAppRequest` — app_path, udid?
+- `LaunchAppRequest` — bundle_id, udid?
+- `BootDeviceRequest` — udid?, name?
+- `ShutdownDeviceRequest` — udid
+- `DeviceError` (exception class)
+
+---
+
+### Testing Strategy
+
+**Unit tests with mocked subprocesses.** Never call real simctl/idb in tests.
+
+Mock pattern:
+```python
+@pytest.fixture
+def mock_subprocess():
+    with patch("asyncio.create_subprocess_exec") as mock:
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(return_value=(b"output", b""))
+        proc.returncode = 0
+        mock.return_value = proc
+        yield mock, proc
+```
+
+**Fixture files:**
+- `tests/fixtures/simctl_list_output.json` — real `simctl list devices --json` output
+- `tests/fixtures/idb_describe_all_output.txt` — real `idb ui describe-all` output
+- Capture these from your actual machine for accuracy
+
+**Test categories:**
+1. SimctlBackend — parsing simctl JSON, command construction, error handling
+2. IdbBackend — command construction, error handling
+3. UITree parsing — idb output → UIElement tree, find_by_label, find_by_type, flatten
+4. DeviceController — active device resolution logic, backend routing
+5. API routes — request handling, response formats, error responses
+6. Screenshots — scaling, format conversion (mock Pillow)
+7. tap-element — 0/1/multiple match scenarios
+
+---
+
+### Dependencies to Add
+
+In pyproject.toml:
+```
+"Pillow>=10.0",
+```
+
+---
+
+### Error Handling
+
+Custom exception:
+```python
+class DeviceError(Exception):
+    """Raised when a device operation fails."""
+    def __init__(self, message: str, tool: str = "unknown"):
+        self.tool = tool
+        super().__init__(message)
+```
+
+Map to HTTP responses:
+- DeviceError from simctl/idb → 500 with tool name and stderr message
+- Tool not available → 503 with install instructions
+- No booted device → 400 with helpful message
+- Element not found (tap-element) → 404
+- Ambiguous element (tap-element) → 200 with status "ambiguous"
+
+---
+
+### Integration with Phases 1 & 2
+
+Phase 3 doesn't change any Phase 1/2 code. It adds new routes under `/api/v1/device/` and new MCP tools. The router is registered alongside existing routers in the FastAPI app.
+
+The power is in the AI agent combining all three:
+```
+tail_logs → see error → get_screen_summary → understand UI state → 
+get_flow_summary → inspect network request → tap_element("Retry") → 
+tail_logs → verify error resolved
+```
+
+---
+
+### Phase 3 Sub-phases
+
+- **3a:** SimctlBackend + DeviceController + screenshots + device management API + tests
+- **3b:** IdbBackend + accessibility tree parsing + screen-summary + tap-element + tests
+- **3c:** All UI interaction endpoints + MCP tools + annotated screenshots + integration tests
+- **3d (deferred):** Physical device support via devicectl + WDA

@@ -1,0 +1,70 @@
+{
+  "devices": {
+    "com.apple.CoreSimulator.SimRuntime.iOS-18-6": [
+      {
+        "lastBootedAt": "2026-02-09T10:30:00Z",
+        "dataPath": "/Users/test/Library/Developer/CoreSimulator/Devices/AAAA-1111/data",
+        "dataPathSize": 1234567890,
+        "logPath": "/Users/test/Library/Logs/CoreSimulator/AAAA-1111",
+        "udid": "AAAA-1111-2222-3333-444444444444",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro",
+        "state": "Booted",
+        "name": "iPhone 16 Pro"
+      },
+      {
+        "dataPath": "/Users/test/Library/Developer/CoreSimulator/Devices/BBBB-1111/data",
+        "dataPathSize": 987654321,
+        "logPath": "/Users/test/Library/Logs/CoreSimulator/BBBB-1111",
+        "udid": "BBBB-1111-2222-3333-444444444444",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16",
+        "state": "Shutdown",
+        "name": "iPhone 16"
+      },
+      {
+        "dataPath": "/Users/test/Library/Developer/CoreSimulator/Devices/CCCC-1111/data",
+        "dataPathSize": 555555555,
+        "logPath": "/Users/test/Library/Logs/CoreSimulator/CCCC-1111",
+        "udid": "CCCC-1111-2222-3333-444444444444",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4",
+        "state": "Shutdown",
+        "name": "iPad Pro 13-inch (M4)"
+      }
+    ],
+    "com.apple.CoreSimulator.SimRuntime.iOS-17-2": [
+      {
+        "dataPath": "/Users/test/Library/Developer/CoreSimulator/Devices/DDDD-1111/data",
+        "dataPathSize": 111111111,
+        "logPath": "/Users/test/Library/Logs/CoreSimulator/DDDD-1111",
+        "udid": "DDDD-1111-2222-3333-444444444444",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
+        "state": "Shutdown",
+        "name": "iPhone 15"
+      },
+      {
+        "dataPath": "/Users/test/Library/Developer/CoreSimulator/Devices/EEEE-1111/data",
+        "dataPathSize": 222222222,
+        "logPath": "/Users/test/Library/Logs/CoreSimulator/EEEE-1111",
+        "udid": "EEEE-1111-2222-3333-444444444444",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-15-Pro",
+        "state": "Shutdown",
+        "name": "iPhone 15 Pro"
+      },
+      {
+        "dataPath": "/Users/test/Library/Developer/CoreSimulator/Devices/FFFF-1111/data",
+        "dataPathSize": 0,
+        "logPath": "/Users/test/Library/Logs/CoreSimulator/FFFF-1111",
+        "udid": "FFFF-1111-2222-3333-444444444444",
+        "isAvailable": false,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-14",
+        "state": "Shutdown",
+        "name": "iPhone 14 (unavailable)"
+      }
+    ],
+    "com.apple.CoreSimulator.SimRuntime.iOS-14-4": []
+  }
+}
