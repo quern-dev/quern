@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import subprocess
 import uuid
@@ -11,6 +12,10 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+
+from server.lifecycle.state import update_state
+
+_proxy_logger = logging.getLogger(__name__)
 
 from server.models import (
     FlowQueryParams,
@@ -116,6 +121,10 @@ async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatus
         adapter.reconfigure(listen_port=port, listen_host=listen_host)
 
     await adapter.start()
+    try:
+        update_state(proxy_status="running")
+    except Exception:
+        _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
     return _get_proxy_status(request)
 
 
@@ -130,6 +139,10 @@ async def stop_proxy(request: Request) -> ProxyStatusResponse:
         raise HTTPException(status_code=409, detail="Proxy is not running")
 
     await adapter.stop()
+    try:
+        update_state(proxy_status="stopped")
+    except Exception:
+        _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
     return _get_proxy_status(request)
 
 
@@ -470,7 +483,7 @@ async def download_cert() -> FileResponse:
 async def setup_guide(request: Request) -> dict:
     """Get device proxy setup instructions with auto-detected local IP and network interface."""
     adapter = request.app.state.proxy_adapter
-    port = adapter.listen_port if adapter else 8080
+    port = adapter.listen_port if adapter else 9101
 
     # Auto-detect local IP
     try:

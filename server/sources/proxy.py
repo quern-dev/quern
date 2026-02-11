@@ -93,7 +93,7 @@ class ProxyAdapter(BaseSourceAdapter):
         on_entry: EntryCallback | None = None,
         flow_store: FlowStore | None = None,
         listen_host: str = "0.0.0.0",
-        listen_port: int = 8080,
+        listen_port: int = 9101,
     ) -> None:
         super().__init__(
             adapter_id="proxy",

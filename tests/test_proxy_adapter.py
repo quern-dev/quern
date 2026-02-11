@@ -227,7 +227,7 @@ def test_format_summary_error():
 def test_reconfigure_port():
     """Reconfigure should update listen_port when stopped."""
     adapter = ProxyAdapter(flow_store=FlowStore())
-    assert adapter.listen_port == 8080
+    assert adapter.listen_port == 9101
     adapter.reconfigure(listen_port=9090)
     assert adapter.listen_port == 9090
 

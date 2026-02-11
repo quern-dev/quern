@@ -9,22 +9,70 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Configuration & State Discovery
 // ---------------------------------------------------------------------------
 
-const SERVER_URL =
-  process.env.IOS_DEBUG_SERVER_URL || "http://127.0.0.1:9100";
+const CONFIG_DIR = join(homedir(), ".ios-debug-server");
+const STATE_FILE = join(CONFIG_DIR, "state.json");
+const API_KEY_FILE = join(CONFIG_DIR, "api-key");
+
+interface ServerState {
+  pid: number;
+  server_port: number;
+  proxy_port: number;
+  proxy_enabled: boolean;
+  proxy_status: string;
+  started_at: string;
+  api_key: string;
+  active_devices: string[];
+}
+
+function readStateFile(): ServerState | null {
+  try {
+    if (!existsSync(STATE_FILE)) return null;
+    const content = readFileSync(STATE_FILE, "utf-8").trim();
+    if (!content) return null;
+    return JSON.parse(content) as ServerState;
+  } catch {
+    return null;
+  }
+}
+
+function discoverServer(): { url: string; apiKey: string } {
+  // Priority 1: Environment variable
+  if (process.env.IOS_DEBUG_SERVER_URL) {
+    return {
+      url: process.env.IOS_DEBUG_SERVER_URL,
+      apiKey: loadApiKey(),
+    };
+  }
+
+  // Priority 2: State file
+  const state = readStateFile();
+  if (state) {
+    return {
+      url: `http://127.0.0.1:${state.server_port}`,
+      apiKey: state.api_key || loadApiKey(),
+    };
+  }
+
+  // Priority 3: Default
+  return {
+    url: "http://127.0.0.1:9100",
+    apiKey: loadApiKey(),
+  };
+}
 
 function loadApiKey(): string {
   try {
-    const keyPath = join(homedir(), ".ios-debug-server", "api-key");
-    return readFileSync(keyPath, "utf-8").trim();
+    return readFileSync(API_KEY_FILE, "utf-8").trim();
   } catch {
     console.error(
       "WARNING: Could not read API key from ~/.ios-debug-server/api-key"
@@ -33,6 +81,17 @@ function loadApiKey(): string {
   }
 }
 
+// Lazy-resolved at call time (not module load) so state.json updates are picked up
+function getServerUrl(): string {
+  return discoverServer().url;
+}
+
+function getApiKey(): string {
+  return discoverServer().apiKey;
+}
+
+// Kept for backward compat in places that reference these directly
+const SERVER_URL = process.env.IOS_DEBUG_SERVER_URL || "http://127.0.0.1:9100";
 const API_KEY = loadApiKey();
 
 // ---------------------------------------------------------------------------
@@ -45,7 +104,8 @@ async function apiRequest(
   params?: Record<string, string | number | boolean | undefined>,
   body?: unknown
 ): Promise<unknown> {
-  const url = new URL(path, SERVER_URL);
+  const server = discoverServer();
+  const url = new URL(path, server.url);
 
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -56,7 +116,7 @@ async function apiRequest(
   }
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${API_KEY}`,
+    Authorization: `Bearer ${server.apiKey}`,
   };
 
   const init: RequestInit = { method, headers };
@@ -82,14 +142,15 @@ async function apiRequest(
 // ---------------------------------------------------------------------------
 
 async function probeServer(): Promise<void> {
+  const serverUrl = discoverServer().url;
   try {
-    await fetch(new URL("/health", SERVER_URL).toString(), {
+    await fetch(new URL("/health", serverUrl).toString(), {
       signal: AbortSignal.timeout(3000),
     });
-    console.error(`Connected to iOS Debug Server at ${SERVER_URL}`);
+    console.error(`Connected to iOS Debug Server at ${serverUrl}`);
   } catch {
     console.error(
-      `ERROR: Cannot reach iOS Debug Server at ${SERVER_URL} — is it running?`
+      `WARNING: Cannot reach iOS Debug Server at ${serverUrl} — use ensure_server tool to start it`
     );
   }
 }
@@ -106,6 +167,119 @@ const server = new McpServer({
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
+
+server.tool(
+  "ensure_server",
+  `Ensure the iOS Debug Server is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key.`,
+  {},
+  async () => {
+    try {
+      // Check if already running via state file
+      const state = readStateFile();
+      if (state) {
+        try {
+          const healthUrl = `http://127.0.0.1:${state.server_port}/health`;
+          const resp = await fetch(healthUrl, {
+            signal: AbortSignal.timeout(3000),
+          });
+          if (resp.ok) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    {
+                      status: "running",
+                      server_url: `http://127.0.0.1:${state.server_port}`,
+                      proxy_port: state.proxy_port,
+                      proxy_enabled: state.proxy_enabled,
+                      proxy_status: state.proxy_status,
+                      api_key: state.api_key,
+                      started_at: state.started_at,
+                      pid: state.pid,
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+            };
+          }
+        } catch {
+          // Health check failed, try to start
+        }
+      }
+
+      // Try to start the server
+      try {
+        execSync("ios-debug-server start", {
+          timeout: 10000,
+          stdio: "pipe",
+        });
+      } catch (e) {
+        // start may "fail" if it can't find the command — check if it actually started
+        const postState = readStateFile();
+        if (!postState) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: Failed to start iOS Debug Server. Make sure 'ios-debug-server' is on your PATH.\n\nInstall: pip install ios-debug-server\n\n${e instanceof Error ? e.message : String(e)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      // Read freshly-written state
+      const newState = readStateFile();
+      if (newState) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  status: "started",
+                  server_url: `http://127.0.0.1:${newState.server_port}`,
+                  proxy_port: newState.proxy_port,
+                  proxy_enabled: newState.proxy_enabled,
+                  proxy_status: newState.proxy_status,
+                  api_key: newState.api_key,
+                  started_at: newState.started_at,
+                  pid: newState.pid,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Error: Server started but state file not found. Check ~/.ios-debug-server/server.log for details.",
+          },
+        ],
+        isError: true,
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
 
 server.tool(
   "tail_logs",
@@ -572,7 +746,7 @@ server.tool(
     port: z
       .number()
       .optional()
-      .describe("Port for the mitmproxy listener (default: 8080)"),
+      .describe("Port for the mitmproxy listener (default: 9101)"),
     listen_host: z
       .string()
       .optional()
@@ -1380,14 +1554,15 @@ server.tool(
   },
   async ({ udid, format, scale, quality }) => {
     try {
-      const url = new URL("/api/v1/device/screenshot", SERVER_URL);
+      const server = discoverServer();
+      const url = new URL("/api/v1/device/screenshot", server.url);
       if (udid) url.searchParams.set("udid", udid);
       url.searchParams.set("format", format);
       url.searchParams.set("scale", String(scale));
       url.searchParams.set("quality", String(quality));
 
       const resp = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${API_KEY}` },
+        headers: { Authorization: `Bearer ${server.apiKey}` },
       });
 
       if (!resp.ok) {
@@ -1859,10 +2034,15 @@ server.resource(
 
 const GUIDE_CONTENT = `# iOS Debug Server — Tool Selection Guide
 
+## Getting Started
+
+**Always call \`ensure_server\` first.** This tool checks if the server is running and starts it if needed. It returns the server URL, API key, and proxy port — everything you need to connect. You don't need to start the server manually.
+
 ## Quick Reference
 
 | I want to…                        | Use this tool        |
 |-----------------------------------|----------------------|
+| Start/check the server            | \`ensure_server\`      |
 | See what just happened            | \`tail_logs\`          |
 | Search for specific errors        | \`query_logs\`         |
 | Get an AI-friendly status update  | \`get_log_summary\`    |

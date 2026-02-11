@@ -485,3 +485,128 @@ tail_logs → verify error resolved
 - **3b:** IdbBackend + accessibility tree parsing + screen-summary + tap-element + tests
 - **3c:** All UI interaction endpoints + MCP tools + annotated screenshots + integration tests
 - **3d (deferred):** Physical device support via devicectl + WDA
+
+
+
+### Phase 4a Context: Process Lifecycle Management
+
+**What it does:** Makes server and proxy startup idempotent, adds daemon mode, and establishes `~/.ios-debug-server/state.json` as the single source of truth for all tools and agents.
+
+**The core problem this solves:** Agents currently waste time fighting process management — detecting running instances, killing them, restarting. After 4a, `ios-debug-server start` always does the right thing and `ensure_server` MCP tool is all an agent needs.
+
+---
+
+### File Layout
+
+```
+server/lifecycle/__init__.py
+server/lifecycle/state.py       — Read/write/validate state.json with file locking
+server/lifecycle/ports.py       — Port scanning and availability checking
+server/lifecycle/daemon.py      — Fork, setsid, stdio redirect, signal handlers
+server/lifecycle/watchdog.py    — Async monitor for proxy subprocess health
+```
+
+---
+
+### Key Constants
+
+```python
+CONFIG_DIR = Path.home() / ".ios-debug-server"
+STATE_FILE = CONFIG_DIR / "state.json"
+LOG_FILE = CONFIG_DIR / "server.log"
+DEFAULT_SERVER_PORT = 9100
+DEFAULT_PROXY_PORT = 9101  # NOT 8080 — that's retired
+MAX_PORT_SCAN = 20
+```
+
+---
+
+### Critical Implementation Rules
+
+**State file is the contract.** Every consumer (CLI, MCP, shell scripts, CI) discovers the server by reading `~/.ios-debug-server/state.json`. Never hardcode ports. Never use environment variables for discovery.
+
+**Idempotent start pattern:**
+```python
+existing = read_state()
+if existing and health_check(existing["server_port"]):
+    print(f"Server already running on port {existing['server_port']}")
+    sys.exit(0)
+if existing:
+    # Stale — clean up
+    remove_state()
+# Proceed to start
+```
+
+**Port scanning:** Always try preferred port first, scan upward on conflict. Server port first, then proxy port starts scanning from `server_port + 1`.
+
+**Daemon fork pattern:**
+```python
+pid = os.fork()
+if pid > 0:
+    # Parent: wait for health check, print status, exit
+    wait_for_health(timeout=5.0)
+    print_status()
+    sys.exit(0)
+# Child: become session leader, redirect stdio, run server
+os.setsid()
+redirect_stdio_to_log()
+run_server()
+```
+
+**File locking on state.json:** Use `fcntl.flock()` for all reads (LOCK_SH) and writes (LOCK_EX) to prevent races between concurrent tools.
+
+**Signal handling in daemon:**
+```python
+def handle_sigterm(signum, frame):
+    # 1. Stop accepting requests
+    # 2. SIGTERM proxy child, wait 2s, SIGKILL if needed
+    # 3. Remove state.json
+    # 4. sys.exit(0)
+```
+
+**Proxy watchdog:** Async task that checks `proxy_process.returncode` every 1s. If proxy dies unexpectedly, set status to "crashed" and update state.json. Do NOT auto-restart.
+
+---
+
+### CLI Subcommands
+
+The `cli()` function in `main.py` changes from a single-command entry point to subcommands:
+
+```
+ios-debug-server start [--no-proxy] [--port N] [--proxy-port N] [--foreground] [--verbose]
+ios-debug-server stop
+ios-debug-server restart [OPTIONS]
+ios-debug-server status
+```
+
+`--foreground` skips daemonization — essential for debugging the server itself. All existing behavior (direct `ios-debug-server` with no subcommand) should remain as an alias for `start --foreground` for backward compatibility.
+
+---
+
+### MCP Changes
+
+**New tool: `ensure_server`**
+- Reads state.json, health checks, starts if needed
+- Returns: server_url, proxy_port, api_key, devices
+- This is the ONLY tool agents should use to start the server
+
+**Updated: `server_status`**
+- Same info as ensure_server but never starts the server
+- Returns `{"status": "not_running"}` if no instance found
+
+**Updated: MCP guide resource**
+- Tell agents to call `ensure_server` first, never start manually
+
+---
+
+### Testing Approach
+
+Process lifecycle tests are inherently integration-level. Use `subprocess.run` to invoke CLI commands and verify:
+- `start` creates state.json and daemon process
+- `start` again is idempotent (exit 0, no new process)
+- `stop` removes state.json and kills process
+- `status` returns correct info
+- Port conflict → successful scan to next port
+- Stale state.json → cleaned up on next `start`
+
+Unit-test state.py and ports.py in isolation. Daemon.py and watchdog.py need process-level tests.

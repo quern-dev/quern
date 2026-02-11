@@ -1,9 +1,12 @@
 """iOS Debug Server — main entry point.
 
 Usage:
-    ios-debug-server                  Start the server with defaults
-    ios-debug-server --port 9200      Start on a custom port
-    ios-debug-server --process MyApp  Filter logs to a specific process
+    ios-debug-server                  Start in foreground (backward compat)
+    ios-debug-server start            Start as daemon
+    ios-debug-server start -f         Start in foreground
+    ios-debug-server stop             Stop a running daemon
+    ios-debug-server restart          Restart the daemon
+    ios-debug-server status           Show server status
     ios-debug-server regenerate-key   Generate a new API key
 """
 
@@ -12,9 +15,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import platform
+import signal
+import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -24,6 +32,19 @@ from fastapi import FastAPI
 from server.auth import APIKeyMiddleware
 from server.device.controller import DeviceController
 from server.config import ServerConfig
+from server.lifecycle.daemon import LOG_FILE, daemonize, _print_status
+from server.lifecycle.ports import (
+    DEFAULT_PROXY_PORT,
+    DEFAULT_SERVER_PORT,
+    find_available_port,
+)
+from server.lifecycle.state import (
+    is_server_healthy,
+    read_state,
+    remove_state,
+    write_state,
+)
+from server.lifecycle.watchdog import proxy_watchdog
 from server.processing.deduplicator import Deduplicator
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter
@@ -119,6 +140,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     tools = await device_controller.check_tools()
     logger.info("Device tools: %s", tools)
 
+    # Launch proxy watchdog if proxy is enabled
+    watchdog_task = None
+    if app.state.enable_proxy:
+        watchdog_task = asyncio.create_task(
+            proxy_watchdog(lambda: app.state.proxy_adapter)
+        )
+
     logger.info(
         "Server started on http://%s:%d — API key: %s...%s",
         config.host,
@@ -129,10 +157,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
-    # Shutdown: stop adapters first, then flush the deduplicator
+    # Shutdown: cancel watchdog, stop adapters, flush deduplicator
+    if watchdog_task and not watchdog_task.done():
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+
     for adapter in adapters.values():
         await adapter.stop()
     await dedup.stop()
+
+    # Clean up state file (if daemon mode wrote one)
+    remove_state()
     logger.info("Server stopped")
 
 
@@ -145,7 +183,7 @@ def create_app(
     crash_dir: Path | None = None,
     pull_crashes: bool = False,
     enable_proxy: bool = True,
-    proxy_port: int = 8080,
+    proxy_port: int = 9101,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     if config is None:
@@ -197,20 +235,10 @@ def create_app(
     return app
 
 
-def cli() -> None:
-    """CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="iOS Debug Server — capture device logs for AI agents"
-    )
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default="serve",
-        choices=["serve", "regenerate-key"],
-        help="Command to run (default: serve)",
-    )
+def _add_server_flags(parser: argparse.ArgumentParser) -> None:
+    """Add shared server flags to a subcommand parser."""
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=9100, help="Bind port (default: 9100)")
+    parser.add_argument("--port", type=int, default=None, help="Bind port (default: 9100)")
     parser.add_argument("--process", "-p", default=None, help="Filter logs to this process name")
     parser.add_argument(
         "--buffer-size", type=int, default=10_000, help="Ring buffer size (default: 10000)"
@@ -242,11 +270,71 @@ def cli() -> None:
         help="Disable the mitmproxy network capture adapter",
     )
     parser.add_argument(
-        "--proxy-port", type=int, default=8080,
-        help="Port for the mitmproxy listener (default: 8080)",
+        "--proxy-port", type=int, default=None,
+        help="Port for the mitmproxy listener (default: 9101)",
     )
 
-    args = parser.parse_args()
+
+def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill in defaults for None-valued port args."""
+    if args.port is None:
+        args.port = DEFAULT_SERVER_PORT
+    if args.proxy_port is None:
+        args.proxy_port = DEFAULT_PROXY_PORT
+    return args
+
+
+def _is_our_process(pid: int) -> bool:
+    """Check if a PID belongs to an ios-debug-server process (PID reuse guard)."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        cmd = result.stdout.strip()
+        return "ios-debug-server" in cmd or "server.main" in cmd or "uvicorn" in cmd
+    except Exception:
+        return False
+
+
+def _cmd_start(args: argparse.Namespace) -> None:
+    """Start the server (daemon or foreground)."""
+    # Check for existing instance
+    existing = read_state()
+    if existing and is_server_healthy(existing["server_port"]):
+        print("Server already running")
+        _print_status(existing)
+        sys.exit(0)
+
+    if existing:
+        # Stale state — clean up
+        remove_state()
+
+    # Resolve ports (scan for available)
+    # Exclude the proxy port so the server never steals it
+    server_port = find_available_port(
+        args.port, host=args.host, exclude={args.proxy_port},
+    )
+    if server_port != args.port:
+        print(f"Port {args.port} in use, using {server_port}")
+
+    proxy_port = args.proxy_port
+    enable_proxy = not args.no_proxy
+    if enable_proxy:
+        proxy_port = find_available_port(
+            args.proxy_port,
+            host=args.host,
+            exclude={server_port},
+        )
+        if proxy_port != args.proxy_port:
+            print(f"Proxy port {args.proxy_port} in use, using {proxy_port}")
+
+    # Daemonize if not foreground mode
+    if not args.foreground:
+        daemonize(server_port)
+        # Only the child process reaches here
 
     # Configure logging
     logging.basicConfig(
@@ -254,40 +342,45 @@ def cli() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    if args.command == "regenerate-key":
-        key = ServerConfig.regenerate_api_key()
-        print(f"New API key: {key}")
-        return
-
     config = ServerConfig(
         host=args.host,
-        port=args.port,
+        port=server_port,
         ring_buffer_size=args.buffer_size,
     )
 
-    print(f"🔧 iOS Debug Server v0.1.0")
-    print(f"   http://{config.host}:{config.port}")
-    print(f"   API key: {config.api_key[:8]}...{config.api_key[-4:]}")
-    print(f"   API key file: ~/.ios-debug-server/api-key")
-    # Determine OSLog enablement: default on for macOS, off otherwise
     enable_oslog = not args.no_oslog and (
         args.oslog is True or platform.system() == "Darwin"
     )
-
     enable_crash = not args.no_crash
-    enable_proxy = not args.no_proxy
 
-    if args.process:
-        print(f"   Process filter: {args.process}")
-    if enable_oslog:
-        sub = args.subsystem or "(all)"
-        print(f"   OSLog: enabled (subsystem: {sub})")
-    if enable_crash:
-        crash_path = args.crash_dir or "~/.ios-debug-server/crashes"
-        print(f"   Crash watcher: enabled (dir: {crash_path})")
-    if enable_proxy:
-        print(f"   Proxy: enabled (port: {args.proxy_port})")
-    print()
+    # Write state file
+    write_state({
+        "pid": os.getpid(),
+        "server_port": server_port,
+        "proxy_port": proxy_port,
+        "proxy_enabled": enable_proxy,
+        "proxy_status": "starting" if enable_proxy else "disabled",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "api_key": config.api_key,
+        "active_devices": [],
+    })
+
+    if args.foreground:
+        print(f"iOS Debug Server v0.1.0")
+        print(f"  http://{config.host}:{server_port}")
+        print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
+        print(f"  API key file: ~/.ios-debug-server/api-key")
+        if args.process:
+            print(f"  Process filter: {args.process}")
+        if enable_oslog:
+            sub = args.subsystem or "(all)"
+            print(f"  OSLog: enabled (subsystem: {sub})")
+        if enable_crash:
+            crash_path = args.crash_dir or "~/.ios-debug-server/crashes"
+            print(f"  Crash watcher: enabled (dir: {crash_path})")
+        if enable_proxy:
+            print(f"  Proxy: enabled (port: {proxy_port})")
+        print()
 
     app = create_app(
         config=config,
@@ -298,9 +391,168 @@ def cli() -> None:
         crash_dir=args.crash_dir,
         pull_crashes=args.pull_crashes,
         enable_proxy=enable_proxy,
-        proxy_port=args.proxy_port,
+        proxy_port=proxy_port,
     )
-    uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+
+    uv_config = uvicorn.Config(
+        app,
+        host=config.host,
+        port=server_port,
+        log_level="debug" if args.verbose else "info",
+    )
+    server = uvicorn.Server(uv_config)
+    server.run()
+
+
+def _cmd_stop(args: argparse.Namespace) -> None:
+    """Stop the running server daemon."""
+    state = read_state()
+    if not state:
+        print("No server running")
+        return
+
+    pid = state.get("pid")
+    if not pid:
+        remove_state()
+        print("No server running (stale state cleaned up)")
+        return
+
+    # Check if process exists
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        remove_state()
+        print("No server running (stale state cleaned up)")
+        return
+
+    # PID reuse guard
+    if not _is_our_process(pid):
+        remove_state()
+        print(f"Warning: PID {pid} is not an ios-debug-server process (stale state cleaned up)")
+        return
+
+    # Send SIGTERM
+    print(f"Stopping server (pid {pid})...")
+    os.kill(pid, signal.SIGTERM)
+
+    # Wait for exit
+    for _ in range(50):  # 5 seconds at 100ms intervals
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            remove_state()
+            print("Server stopped")
+            return
+
+    # Force kill
+    print("Server didn't stop gracefully, sending SIGKILL...")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    remove_state()
+    print("Server killed")
+
+
+def _cmd_restart(args: argparse.Namespace) -> None:
+    """Restart the server daemon."""
+    _cmd_stop(args)
+    time.sleep(0.5)
+    _cmd_start(args)
+
+
+def _cmd_status(args: argparse.Namespace) -> None:
+    """Show server status."""
+    state = read_state()
+    if not state:
+        print("No server running")
+        sys.exit(1)
+
+    port = state.get("server_port", 9100)
+    if not is_server_healthy(port):
+        print("Server state file exists but server is not responding")
+        print(f"  State file may be stale. Run 'ios-debug-server stop' to clean up.")
+        sys.exit(1)
+
+    # Calculate uptime
+    started = state.get("started_at")
+    if started:
+        try:
+            start_dt = datetime.fromisoformat(started)
+            uptime = datetime.now(timezone.utc) - start_dt
+            hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            state["_uptime"] = f"{hours}h {minutes}m {seconds}s"
+        except (ValueError, TypeError):
+            pass
+
+    _print_status(state)
+    if "_uptime" in state:
+        print(f"  Uptime:     {state['_uptime']}")
+    sys.exit(0)
+
+
+def cli() -> None:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="iOS Debug Server — capture device logs for AI agents",
+    )
+    parser.set_defaults(command=None)
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    # start
+    start_parser = subparsers.add_parser("start", help="Start the server")
+    start_parser.add_argument(
+        "--foreground", "-f", action="store_true", default=False,
+        help="Run in foreground (don't daemonize)",
+    )
+    _add_server_flags(start_parser)
+
+    # stop
+    subparsers.add_parser("stop", help="Stop the running server")
+
+    # restart
+    restart_parser = subparsers.add_parser("restart", help="Restart the server")
+    restart_parser.add_argument(
+        "--foreground", "-f", action="store_true", default=False,
+        help="Run in foreground (don't daemonize)",
+    )
+    _add_server_flags(restart_parser)
+
+    # status
+    subparsers.add_parser("status", help="Show server status")
+
+    # regenerate-key (preserved)
+    subparsers.add_parser("regenerate-key", help="Generate a new API key")
+
+    args = parser.parse_args()
+
+    # Backward compat: no subcommand → start --foreground
+    if args.command is None:
+        # Re-parse with start defaults + foreground=True
+        # Check if any server flags were passed on the bare command
+        start_parser.parse_args(sys.argv[1:], namespace=args)
+        args.command = "start"
+        args.foreground = True
+
+    # Fill port defaults
+    if hasattr(args, "port"):
+        _resolve_args(args)
+
+    # Dispatch
+    if args.command == "start":
+        _cmd_start(args)
+    elif args.command == "stop":
+        _cmd_stop(args)
+    elif args.command == "restart":
+        _cmd_restart(args)
+    elif args.command == "status":
+        _cmd_status(args)
+    elif args.command == "regenerate-key":
+        key = ServerConfig.regenerate_api_key()
+        print(f"New API key: {key}")
 
 
 if __name__ == "__main__":

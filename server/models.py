@@ -293,7 +293,7 @@ class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
     status: str  # "running", "stopped", "error"
-    port: int = 8080
+    port: int = 9101
     listen_host: str = "0.0.0.0"
     started_at: datetime | None = None
     flows_captured: int = 0

@@ -60,7 +60,7 @@ def auth_headers():
 def running_adapter(app):
     """Set up a proxy adapter in 'running' state with mocked send_command."""
     flow_store = FlowStore()
-    adapter = ProxyAdapter(flow_store=flow_store, listen_port=8080)
+    adapter = ProxyAdapter(flow_store=flow_store, listen_port=9101)
     adapter._running = True
     adapter.started_at = datetime.now(timezone.utc)
     adapter.send_command = AsyncMock()

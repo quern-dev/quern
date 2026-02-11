@@ -8,7 +8,7 @@ Communication:
   - stdin:  JSON Lines for commands (set_filter, clear_filter, etc.)
 
 Usage:
-  mitmdump -s addon.py --listen-port 8080 --quiet
+  mitmdump -s addon.py --listen-port 9101 --quiet
 """
 
 from __future__ import annotations
