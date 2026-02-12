@@ -81,10 +81,15 @@ server/              Python FastAPI log server
   processing/        Pipeline: parser → classifier → deduplicator → correlator → summarizer
   storage/           Ring buffer (+ SQLite later)
   api/               HTTP route handlers
+  lifecycle/         Daemon, state.json, port scanning, watchdog, setup
 mcp/                 Thin TypeScript MCP-to-HTTP adapter
 swift-package/       Optional app-embedded log drain (Swift)
 tests/               Python tests + fixtures
 docs/                Architecture docs, API reference
+  docs/quern-roadmap.md                    Project roadmap (living document, status-tagged)
+  docs/quern-app-graph-and-dsl-design.md   App graph + test DSL design (early design)
+  docs/test-results/                       Captured test scenario results
+  docs/bugs/                               Known bug write-ups
 ```
 
 ## Code Conventions
@@ -114,9 +119,14 @@ docs/                Architecture docs, API reference
 | GET | `/api/v1/builds/latest` | Most recent parsed build result |
 | POST | `/api/v1/builds/parse` | Submit xcodebuild output for parsing |
 
-## Full Architecture Doc
+## Key Documents
 
-See `docs/phase1-architecture.md` for the complete architecture document including all API schemas, log source details, and the processing pipeline design.
+- `docs/phase1-architecture.md` — Complete Phase 1 architecture (API schemas, log sources, processing pipeline)
+- `docs/phase2-architecture.md` — Phase 2 proxy architecture (addon protocol, flow models, API schemas)
+- `docs/phase3-architecture.md` — Phase 3 device control architecture (simctl, idb, UI automation)
+- `docs/phase4a-architecture.md` — Phase 4a lifecycle management (daemon, state.json, watchdog)
+- `docs/quern-roadmap.md` — Project roadmap with status tags (complete/in-progress/designed/conceptual/seed). Covers core platform, developer experience, agent intelligence (app graph, test DSL, AI test runner), infrastructure/scale, and platform expansion.
+- `docs/quern-app-graph-and-dsl-design.md` — Design doc for the app graph (screen/transition model, marker-based identity, pre-commit validation) and test DSL (two-level abstraction, graph-aware `navigate_to`, parameterized data). Includes agent reasoning use cases and proxy-driven fault injection.
 
 ## Phase 2: Network Proxy (mitmproxy Integration)
 

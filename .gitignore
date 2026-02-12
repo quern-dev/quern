@@ -26,6 +26,7 @@ mcp/dist/
 # Session notes / investigation logs
 *.txt
 docs/bugs/
+docs/test-results/
 
 # Local AI
 .claude/
