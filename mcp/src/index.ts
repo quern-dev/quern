@@ -2204,6 +2204,136 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Device Pool Tools (Phase 4b-alpha)
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "list_device_pool",
+  `List all devices in the pool with their claim status. Shows which devices are available for claiming and which are already claimed by sessions. Use this to see what devices exist before claiming one.`,
+  {
+    state: z
+      .enum(["booted", "shutdown"])
+      .optional()
+      .describe("Filter by boot state"),
+    claimed: z
+      .enum(["claimed", "available"])
+      .optional()
+      .describe("Filter by claim status"),
+  },
+  async ({ state, claimed }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/devices/pool", {
+        state,
+        claimed,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "claim_device",
+  `Claim a device for exclusive use by a session. Once claimed, no other session can use this device until it's released. Essential for parallel test execution to ensure device isolation. Provide either a specific UDID or a name pattern.`,
+  {
+    session_id: z.string().describe("Session ID claiming the device"),
+    udid: z
+      .string()
+      .optional()
+      .describe("Specific device UDID to claim"),
+    name: z
+      .string()
+      .optional()
+      .describe("Device name pattern to match (e.g., 'iPhone 16 Pro')"),
+  },
+  async ({ session_id, udid, name }) => {
+    try {
+      const body: Record<string, unknown> = { session_id };
+      if (udid) body.udid = udid;
+      if (name) body.name = name;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/devices/claim",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "release_device",
+  `Release a claimed device back to the pool, making it available for other sessions. Always release devices when done to avoid resource exhaustion. Devices are also auto-released after 30 minutes of inactivity.`,
+  {
+    udid: z.string().describe("Device UDID to release"),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Session ID releasing the device (for validation)"),
+  },
+  async ({ udid, session_id }) => {
+    try {
+      const body: Record<string, unknown> = { udid };
+      if (session_id) body.session_id = session_id;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/devices/release",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
 

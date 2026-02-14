@@ -58,6 +58,7 @@ from server.storage.ring_buffer import RingBuffer
 from server.api.builds import router as builds_router
 from server.api.crashes import router as crashes_router
 from server.api.device import router as device_router
+from server.api.device_pool import router as device_pool_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 
@@ -153,6 +154,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Install with: pip install fb-idb && brew install idb-companion"
         )
 
+    # Device pool (Phase 4b-alpha)
+    from server.device.pool import DevicePool
+    device_pool = DevicePool(device_controller)
+    app.state.device_pool = device_pool
+
+    # Refresh pool state on startup
+    await device_pool.refresh_from_simctl()
+
+    # Cleanup stale claims from previous runs
+    released = await device_pool.cleanup_stale_claims()
+    if released:
+        logger.info("Cleaned up %d stale device claims on startup", len(released))
+
     # Launch proxy watchdog if proxy is enabled
     watchdog_task = None
     if app.state.enable_proxy:
@@ -226,6 +240,7 @@ def create_app(
     app.state.proxy_adapter = None
     app.state.flow_store = None
     app.state.device_controller = None
+    app.state.device_pool = None
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
@@ -236,6 +251,7 @@ def create_app(
     app.include_router(builds_router)
     app.include_router(proxy_router)
     app.include_router(device_router)
+    app.include_router(device_pool_router)
 
     @app.get("/health")
     async def health() -> dict:

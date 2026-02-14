@@ -624,3 +624,40 @@ class WaitForElementRequest(BaseModel):
     timeout: float = Field(default=10, ge=0.1, le=60)
     interval: float = Field(default=0.5, ge=0.1, le=5)
     udid: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Device pool models (Phase 4b)
+# ---------------------------------------------------------------------------
+
+
+class DeviceClaimStatus(str, enum.Enum):
+    """Device claim state."""
+
+    AVAILABLE = "available"
+    CLAIMED = "claimed"
+
+
+class DevicePoolEntry(BaseModel):
+    """Single device in the pool."""
+
+    udid: str
+    name: str
+    state: DeviceState
+    device_type: DeviceType
+    os_version: str
+    runtime: str
+
+    claim_status: DeviceClaimStatus
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
+    last_used: datetime
+    is_available: bool
+
+
+class DevicePoolState(BaseModel):
+    """Complete pool state for persistence."""
+
+    version: str = "1.0"
+    updated_at: datetime
+    devices: dict[str, DevicePoolEntry]
