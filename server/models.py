@@ -599,3 +599,28 @@ class GrantPermissionRequest(BaseModel):
     bundle_id: str
     permission: str
     udid: str | None = None
+
+
+class WaitCondition(str, enum.Enum):
+    """Condition to wait for when polling an element."""
+
+    EXISTS = "exists"
+    NOT_EXISTS = "not_exists"
+    VISIBLE = "visible"
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    VALUE_EQUALS = "value_equals"
+    VALUE_CONTAINS = "value_contains"
+
+
+class WaitForElementRequest(BaseModel):
+    """Request body for POST /device/ui/wait-for-element."""
+
+    label: str | None = None
+    identifier: str | None = None
+    element_type: str | None = Field(default=None, alias="type")
+    condition: WaitCondition
+    value: str | None = None  # Required for value_* conditions
+    timeout: float = Field(default=10, ge=0.1, le=60)
+    interval: float = Field(default=0.5, ge=0.1, le=5)
+    udid: str | None = None

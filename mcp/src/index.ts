@@ -177,64 +177,134 @@ server.tool(
       // Check if already running via state file
       const state = readStateFile();
       if (state) {
-        try {
-          const healthUrl = `http://127.0.0.1:${state.server_port}/health`;
-          const resp = await fetch(healthUrl, {
-            signal: AbortSignal.timeout(3000),
-          });
-          if (resp.ok) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: JSON.stringify(
-                    {
-                      status: "running",
-                      server_url: `http://127.0.0.1:${state.server_port}`,
-                      proxy_port: state.proxy_port,
-                      proxy_enabled: state.proxy_enabled,
-                      proxy_status: state.proxy_status,
-                      api_key: state.api_key,
-                      started_at: state.started_at,
-                      pid: state.pid,
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
-            };
+        // Try health check with retry logic
+        const healthUrl = `http://127.0.0.1:${state.server_port}/health`;
+        let lastError: Error | null = null;
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const resp = await fetch(healthUrl, {
+              signal: AbortSignal.timeout(5000),
+            });
+            if (resp.ok) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        status: "running",
+                        server_url: `http://127.0.0.1:${state.server_port}`,
+                        proxy_port: state.proxy_port,
+                        proxy_enabled: state.proxy_enabled,
+                        proxy_status: state.proxy_status,
+                        api_key: state.api_key,
+                        started_at: state.started_at,
+                        pid: state.pid,
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            }
+          } catch (e) {
+            lastError = e instanceof Error ? e : new Error(String(e));
+            if (attempt < 2) {
+              // Wait before retry
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
           }
-        } catch {
-          // Health check failed, try to start
+        }
+
+        // Health check failed after retries - log details
+        console.error(
+          `Health check failed after 3 attempts to ${healthUrl}: ${lastError?.message || "Unknown error"}`
+        );
+        console.error(`State file indicates PID ${state.pid} should be running`);
+        console.error("Will attempt to start server...");
+      }
+
+      // Try to start the server - check multiple locations
+      const possibleCommands = [
+        "quern-debug-server start",  // System PATH
+        `${homedir()}/.local/bin/quern-debug-server start`,  // Common user install
+        `${homedir()}/Dev/quern-debug-server/.venv/bin/python -m server.main start`,  // Dev environment
+      ];
+
+      let startError: Error | null = null;
+      let commandTried = "";
+
+      for (const cmd of possibleCommands) {
+        try {
+          console.error(`Trying to start server with: ${cmd}`);
+          execSync(cmd, {
+            timeout: 10000,
+            stdio: "pipe",
+          });
+          commandTried = cmd;
+          break;  // Success - exit loop
+        } catch (e) {
+          startError = e instanceof Error ? e : new Error(String(e));
+          console.error(`Command failed: ${cmd} - ${startError.message}`);
+          // Continue to next command
         }
       }
 
-      // Try to start the server
-      try {
-        execSync("quern-debug-server start", {
-          timeout: 10000,
-          stdio: "pipe",
-        });
-      } catch (e) {
-        // start may "fail" if it can't find the command — check if it actually started
-        const postState = readStateFile();
-        if (!postState) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error: Failed to start Quern Debug Server. Make sure 'quern-debug-server' is on your PATH.\n\nInstall: pip install quern-debug-server\n\n${e instanceof Error ? e.message : String(e)}`,
-              },
-            ],
-            isError: true,
-          };
-        }
+      // Check if server actually started (regardless of command success)
+      const postState = readStateFile();
+      if (!postState) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                "Error: Failed to start Quern Debug Server.",
+                "",
+                "Tried commands:",
+                ...possibleCommands.map(cmd => `  - ${cmd}`),
+                "",
+                "Last error:",
+                `  ${startError?.message || "Unknown error"}`,
+                "",
+                "Troubleshooting:",
+                "1. Check if server is already running:",
+                "   curl http://127.0.0.1:9100/health",
+                "",
+                "2. Try starting manually:",
+                "   cd ~/Dev/quern-debug-server",
+                "   .venv/bin/python -m server.main start",
+                "",
+                "3. Check logs:",
+                "   tail -f ~/.quern/server.log",
+              ].join("\n"),
+            },
+          ],
+          isError: true,
+        };
       }
 
-      // Read freshly-written state
+      // Read freshly-written state and verify connectivity
       const newState = readStateFile();
       if (newState) {
+        // Do a final health check to ensure it's actually reachable
+        try {
+          const verifyUrl = `http://127.0.0.1:${newState.server_port}/health`;
+          const verifyResp = await fetch(verifyUrl, {
+            signal: AbortSignal.timeout(5000),
+          });
+
+          if (!verifyResp.ok) {
+            console.error(
+              `Server started but health check failed: ${verifyResp.status} ${verifyResp.statusText}`
+            );
+          }
+        } catch (e) {
+          console.error(`Server started but not reachable: ${e instanceof Error ? e.message : String(e)}`);
+          console.error("Server may still be starting up, or there may be a network issue");
+        }
+
         return {
           content: [
             {
@@ -1628,17 +1698,164 @@ server.tool(
 );
 
 server.tool(
-  "get_screen_summary",
-  `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Requires idb.`,
+  "get_element_state",
+  `Get a single element's state without fetching the entire UI tree. More efficient than get_ui_tree when you only need to check one element. Returns the element with its current state (enabled, value, etc.). If multiple elements match, returns the first with a match_count field. Requires idb.`,
   {
+    label: z
+      .string()
+      .optional()
+      .describe("Element label (case-insensitive)"),
+    identifier: z
+      .string()
+      .optional()
+      .describe("Element identifier (case-sensitive)"),
+    element_type: z
+      .string()
+      .optional()
+      .describe("Element type to narrow results (e.g., 'Button', 'TextField')"),
     udid: z
       .string()
       .optional()
       .describe("Target device UDID (auto-resolves if omitted)"),
   },
-  async ({ udid }) => {
+  async ({ label, identifier, element_type, udid }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/ui/element", {
+        label,
+        identifier,
+        type: element_type,
+        udid,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "wait_for_element",
+  `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. Requires idb.`,
+  {
+    label: z
+      .string()
+      .optional()
+      .describe("Element label (case-insensitive)"),
+    identifier: z
+      .string()
+      .optional()
+      .describe("Element identifier (case-sensitive)"),
+    element_type: z
+      .string()
+      .optional()
+      .describe("Element type to narrow results (e.g., 'Button', 'TextField')"),
+    condition: z
+      .enum([
+        "exists",
+        "not_exists",
+        "visible",
+        "enabled",
+        "disabled",
+        "value_equals",
+        "value_contains",
+      ])
+      .describe("Condition to wait for"),
+    value: z
+      .string()
+      .optional()
+      .describe("Required for value_equals and value_contains conditions"),
+    timeout: z
+      .number()
+      .default(10)
+      .describe("Max wait time in seconds (default 10, max 60)"),
+    interval: z
+      .number()
+      .default(0.5)
+      .describe("Poll interval in seconds (default 0.5)"),
+    udid: z
+      .string()
+      .optional()
+      .describe("Target device UDID (auto-resolves if omitted)"),
+  },
+  async ({
+    label,
+    identifier,
+    element_type,
+    condition,
+    value,
+    timeout,
+    interval,
+    udid,
+  }) => {
+    try {
+      const body: Record<string, unknown> = {
+        condition,
+        timeout,
+        interval,
+      };
+
+      if (label !== undefined) body.label = label;
+      if (identifier !== undefined) body.identifier = identifier;
+      if (element_type !== undefined) body.type = element_type;
+      if (value !== undefined) body.value = value;
+      if (udid !== undefined) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/wait-for-element",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "get_screen_summary",
+  `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit. Requires idb.`,
+  {
+    max_elements: z
+      .number()
+      .default(20)
+      .describe("Maximum interactive elements to include (0 = unlimited, default 20)"),
+    udid: z
+      .string()
+      .optional()
+      .describe("Target device UDID (auto-resolves if omitted)"),
+  },
+  async ({ max_elements, udid }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/screen-summary", {
+        max_elements,
         udid,
       });
 

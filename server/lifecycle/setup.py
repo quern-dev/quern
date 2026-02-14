@@ -383,6 +383,48 @@ def check_node() -> CheckResult:
     )
 
 
+def check_idb() -> CheckResult:
+    """Check for idb CLI tool (needed for UI automation)."""
+    tool = _which("idb")
+    if tool:
+        # idb doesn't have --version, but we can check if it runs
+        rc, stdout, _ = _run(["idb", "list-targets"], timeout=5)
+        if rc == 0 or "usage:" in stdout.lower():
+            return CheckResult(
+                name="idb (fb-idb)",
+                status=CheckStatus.OK,
+                message="installed",
+            )
+    return CheckResult(
+        name="idb (fb-idb)",
+        status=CheckStatus.MISSING,
+        message="Not installed (needed for simulator UI automation)",
+        detail="Install with: pip install fb-idb\n"
+               "Also requires: brew install idb-companion\n"
+               "Then run: pyenv rehash (if using pyenv)",
+        fixable=True,
+    )
+
+
+def check_idb_companion() -> CheckResult:
+    """Check for idb_companion daemon (needed for idb CLI)."""
+    tool = _which("idb_companion")
+    if tool:
+        version = _get_version(["idb_companion", "--help"])
+        msg = "installed"
+        return CheckResult(
+            name="idb_companion",
+            status=CheckStatus.OK,
+            message=msg,
+        )
+    return CheckResult(
+        name="idb_companion",
+        status=CheckStatus.MISSING,
+        message="Not installed (needed for idb CLI)",
+        fixable=True,
+    )
+
+
 def check_vpn() -> CheckResult:
     """Detect active VPN connections that may interfere with the proxy."""
     if platform.system() != "Darwin":
@@ -630,6 +672,51 @@ def run_setup() -> int:
                     detail="Try manually: brew install node",
                 )
     report.add(node_result)
+
+    # ── idb (for simulator UI automation) ──
+
+    idb_companion_result = check_idb_companion()
+    if idb_companion_result.status == CheckStatus.MISSING:
+        if _prompt_yn("    idb_companion not found. Install via Homebrew?"):
+            if _brew_install("idb-companion"):
+                idb_companion_result = check_idb_companion()  # re-check
+            else:
+                idb_companion_result = CheckResult(
+                    name="idb_companion",
+                    status=CheckStatus.ERROR,
+                    message="Homebrew install failed",
+                    detail="Try manually: brew install idb-companion",
+                )
+    report.add(idb_companion_result)
+
+    idb_result = check_idb()
+    if idb_result.status == CheckStatus.MISSING:
+        print("    idb CLI not found. This is the Python client for idb_companion.")
+        if _prompt_yn("    Install fb-idb via pip?"):
+            pip_cmd = "pip" if _which("pip") else "pip3"
+            print(f"    Installing fb-idb...")
+            try:
+                result = subprocess.run([pip_cmd, "install", "fb-idb"], timeout=120)
+                if result.returncode == 0:
+                    # Rehash pyenv if it's being used
+                    if _which("pyenv"):
+                        subprocess.run(["pyenv", "rehash"], timeout=10)
+                    idb_result = check_idb()  # re-check
+                else:
+                    idb_result = CheckResult(
+                        name="idb (fb-idb)",
+                        status=CheckStatus.ERROR,
+                        message="pip install failed",
+                        detail="Try manually: pip install fb-idb",
+                    )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                idb_result = CheckResult(
+                    name="idb (fb-idb)",
+                    status=CheckStatus.ERROR,
+                    message="pip install failed",
+                    detail="Try manually: pip install fb-idb",
+                )
+    report.add(idb_result)
 
     # ── Proxy / network checks ──
 

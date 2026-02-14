@@ -141,6 +141,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     tools = await device_controller.check_tools()
     logger.info("Device tools: %s", tools)
 
+    # Warn about missing tools
+    if not tools.get("simctl"):
+        logger.warning(
+            "simctl not available — device management and screenshots disabled. "
+            "Install Xcode Command Line Tools: xcode-select --install"
+        )
+    if not tools.get("idb"):
+        logger.warning(
+            "idb not available — UI automation (tap, swipe, accessibility tree) disabled. "
+            "Install with: pip install fb-idb && brew install idb-companion"
+        )
+
     # Launch proxy watchdog if proxy is enabled
     watchdog_task = None
     if app.state.enable_proxy:
@@ -226,12 +238,28 @@ def create_app(
     app.include_router(device_router)
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.1.0"}
+    async def health() -> dict:
+        """Health check with tool availability status."""
+        tools = {}
+        if hasattr(app.state, "device_controller") and app.state.device_controller:
+            tools = await app.state.device_controller.check_tools()
+        return {
+            "status": "ok",
+            "version": "0.1.0",
+            "tools": tools,
+        }
 
     @app.get("/api/v1/health")
-    async def api_health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.1.0"}
+    async def api_health() -> dict:
+        """Health check with tool availability status."""
+        tools = {}
+        if hasattr(app.state, "device_controller") and app.state.device_controller:
+            tools = await app.state.device_controller.check_tools()
+        return {
+            "status": "ok",
+            "version": "0.1.0",
+            "tools": tools,
+        }
 
     return app
 

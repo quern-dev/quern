@@ -403,7 +403,7 @@ class TestScreenSummary:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.get_screen_summary.assert_called_once_with(udid="BBBB-2222")
+        mock_controller.get_screen_summary.assert_called_once_with(max_elements=20, udid="BBBB-2222")
 
 
 # ---------------------------------------------------------------------------

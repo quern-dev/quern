@@ -33,17 +33,34 @@ def parse_elements(raw: list[dict]) -> list[UIElement]:
         else:
             frame = None
 
+        # Handle None values explicitly for required string fields
+        type_val = item.get("type")
+        if type_val is None or type_val == "":
+            type_val = "Unknown"
+
+        role_val = item.get("role")
+        if role_val is None:
+            role_val = ""
+
+        role_desc_val = item.get("role_description")
+        if role_desc_val is None:
+            role_desc_val = ""
+
+        custom_actions_val = item.get("custom_actions")
+        if custom_actions_val is None:
+            custom_actions_val = []
+
         elements.append(UIElement(
-            type=item.get("type", "Unknown"),
+            type=type_val,
             label=item.get("AXLabel") or "",
             identifier=item.get("AXUniqueId"),
             value=str(v) if (v := item.get("AXValue")) is not None else None,
             frame=frame,
             enabled=item.get("enabled", True),
-            role=item.get("role", ""),
-            role_description=item.get("role_description", ""),
+            role=role_val,
+            role_description=role_desc_val,
             help=item.get("help"),
-            custom_actions=item.get("custom_actions", []),
+            custom_actions=custom_actions_val,
         ))
     return elements
 
@@ -68,6 +85,42 @@ def find_by_type(elements: list[UIElement], element_type: str) -> list[UIElement
     return [e for e in elements if e.type.lower() == lower]
 
 
+def find_element(
+    elements: list[UIElement],
+    label: str | None = None,
+    identifier: str | None = None,
+    element_type: str | None = None,
+) -> list[UIElement]:
+    """Find elements matching label/identifier/type filters.
+
+    Combines filters with AND logic. At least one of label or identifier required.
+    Returns list of matching elements (may be empty).
+
+    Args:
+        elements: List of UI elements to search
+        label: Exact case-insensitive label match
+        identifier: Exact case-sensitive identifier match
+        element_type: Exact case-insensitive type match (narrows results)
+
+    Returns:
+        List of matching elements (empty if no matches)
+    """
+    # Start with label or identifier search
+    if label:
+        matches = find_by_label(elements, label)
+    elif identifier:
+        matches = find_by_identifier(elements, identifier)
+    else:
+        # No search criteria provided
+        return []
+
+    # Optional type filter to narrow results
+    if element_type and matches:
+        matches = find_by_type(matches, element_type)
+
+    return matches
+
+
 def get_center(element: UIElement) -> tuple[float, float]:
     """Calculate center point from an element's frame.
 
@@ -85,27 +138,111 @@ def get_center(element: UIElement) -> tuple[float, float]:
 _INTERACTIVE_TYPES = {"button", "textfield", "switch", "slider", "link", "searchfield"}
 
 
-def generate_screen_summary(elements: list[UIElement]) -> dict:
-    """Generate a template-based LLM-optimized screen description.
+def _is_navigation_chrome(el: UIElement) -> bool:
+    """Detect tab bars, nav bars, back buttons, toolbars.
+
+    Uses type-based heuristic to identify navigation chrome that should
+    always be included in summaries regardless of truncation limits.
+    """
+    el_type_lower = el.type.lower()
+    # Common navigation types
+    if el_type_lower in {"tabbar", "navigationbar", "toolbar", "navbar"}:
+        return True
+    # Back buttons and nav items
+    if "back" in el.label.lower() and el_type_lower == "button":
+        return True
+    # Tab bar items
+    if "tab" in el_type_lower:
+        return True
+    return False
+
+
+def _prioritize_element(el: UIElement) -> int:
+    """Assign priority score for truncation.
+
+    Priority levels (higher = more important):
+    - 60: Buttons with identifiers (primary actions)
+    - 40: Form inputs (text fields, switches, pickers)
+    - 20: Buttons without identifiers
+    - 5: Static text/labels
+    """
+    el_type_lower = el.type.lower()
+
+    # Buttons with identifiers = primary actions
+    if el_type_lower == "button" and el.identifier:
+        return 60
+
+    # Form inputs
+    if el_type_lower in {"textfield", "switch", "slider", "searchfield", "picker"}:
+        return 40
+
+    # Buttons without identifiers
+    if el_type_lower == "button":
+        return 20
+
+    # Everything else (static text, labels)
+    return 5
+
+
+def generate_screen_summary(elements: list[UIElement], max_elements: int = 20) -> dict:
+    """Generate a template-based LLM-optimized screen description with smart truncation.
+
+    Args:
+        elements: List of UI elements to summarize
+        max_elements: Maximum interactive elements to include (0 = unlimited)
 
     Returns a dict with:
     - summary: human-readable prose
     - element_count: total elements
     - element_types: {type: count}
     - interactive_elements: list of interactive element dicts
+    - truncated: bool - whether the list was truncated
+    - total_interactive_elements: int - total count before truncation
+    - max_elements: int - the limit that was applied
     """
     type_counts: Counter[str] = Counter()
-    interactive: list[dict] = []
+    all_interactive: list[tuple[UIElement, dict, int]] = []  # (element, dict, priority)
+    navigation_chrome: list[dict] = []
 
     for el in elements:
         type_counts[el.type] += 1
-        if el.type.lower() in _INTERACTIVE_TYPES:
+
+        # Check if this is navigation chrome
+        if _is_navigation_chrome(el):
             entry: dict = {"type": el.type, "label": el.label}
             if el.identifier:
                 entry["identifier"] = el.identifier
             if el.value:
                 entry["value"] = el.value
-            interactive.append(entry)
+            navigation_chrome.append(entry)
+            continue
+
+        # Check if interactive
+        if el.type.lower() in _INTERACTIVE_TYPES:
+            entry = {"type": el.type, "label": el.label}
+            if el.identifier:
+                entry["identifier"] = el.identifier
+            if el.value:
+                entry["value"] = el.value
+            priority = _prioritize_element(el)
+            all_interactive.append((el, entry, priority))
+
+    # Track counts before truncation
+    total_interactive = len(all_interactive)
+
+    # Apply smart truncation if max_elements > 0
+    truncated = False
+    if max_elements > 0 and len(all_interactive) > max_elements:
+        # Sort by priority (descending), take top N
+        all_interactive.sort(key=lambda x: x[2], reverse=True)
+        all_interactive = all_interactive[:max_elements]
+        truncated = True
+
+    # Extract just the dicts from the tuples
+    interactive = [entry for _, entry, _ in all_interactive]
+
+    # Append navigation chrome (not counted against limit)
+    interactive.extend(navigation_chrome)
 
     # Build prose summary
     parts: list[str] = []
@@ -150,4 +287,7 @@ def generate_screen_summary(elements: list[UIElement]) -> dict:
         "element_count": len(elements),
         "element_types": dict(type_counts),
         "interactive_elements": interactive,
+        "truncated": truncated,
+        "total_interactive_elements": total_interactive,
+        "max_elements": max_elements,
     }

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 from server.device.idb import IdbBackend
 from server.device.screenshots import annotate_screenshot, process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.ui_elements import (
-    find_by_identifier,
-    find_by_label,
-    find_by_type,
+    find_element,
     generate_screen_summary,
     get_center,
     parse_elements,
 )
-from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, UIElement
+from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, UIElement, WaitCondition
 
 logger = logging.getLogger("quern-debug-server.device")
 
@@ -145,10 +145,194 @@ class DeviceController:
         raw = await self.idb.describe_all(resolved)
         return parse_elements(raw), resolved
 
-    async def get_screen_summary(self, udid: str | None = None) -> tuple[dict, str]:
-        """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid)."""
+    async def get_element(
+        self,
+        label: str | None = None,
+        identifier: str | None = None,
+        element_type: str | None = None,
+        udid: str | None = None,
+    ) -> tuple[dict, str]:
+        """Get a single element's state without fetching the entire UI tree.
+
+        Returns (element_dict, resolved_udid).
+        Element dict includes match_count if multiple matches found.
+
+        Raises:
+            DeviceError if no matches or validation fails.
+        """
+        if not label and not identifier:
+            raise DeviceError(
+                "Either label or identifier is required",
+                tool="idb",
+            )
+
         elements, resolved = await self.get_ui_elements(udid)
-        return generate_screen_summary(elements), resolved
+        matches = find_element(elements, label=label, identifier=identifier, element_type=element_type)
+
+        if len(matches) == 0:
+            search_desc = f"label='{label}'" if label else f"identifier='{identifier}'"
+            if element_type:
+                search_desc += f", type='{element_type}'"
+            raise DeviceError(
+                f"No element found matching {search_desc}",
+                tool="idb",
+            )
+
+        # Return first match with match_count if ambiguous
+        el = matches[0]
+        result = el.model_dump()
+        if len(matches) > 1:
+            result["match_count"] = len(matches)
+
+        return result, resolved
+
+    async def wait_for_element(
+        self,
+        condition: WaitCondition,
+        label: str | None = None,
+        identifier: str | None = None,
+        element_type: str | None = None,
+        value: str | None = None,
+        timeout: float = 10,
+        interval: float = 0.5,
+        udid: str | None = None,
+    ) -> tuple[dict, str]:
+        """Wait for an element to satisfy a condition (server-side polling).
+
+        Returns (result_dict, resolved_udid).
+        Result dict contains:
+        - matched: bool - whether condition was satisfied
+        - elapsed_seconds: float - time spent polling
+        - polls: int - number of polls performed
+        - element: dict | None - element state if matched
+        - last_state: dict | None - last seen state if timeout
+
+        Raises:
+            DeviceError if validation fails or timeout > 60s.
+        """
+        if not label and not identifier:
+            raise DeviceError(
+                "Either label or identifier is required",
+                tool="idb",
+            )
+
+        if timeout > 60:
+            raise DeviceError(
+                "Timeout cannot exceed 60 seconds",
+                tool="idb",
+            )
+
+        if condition in (WaitCondition.VALUE_EQUALS, WaitCondition.VALUE_CONTAINS):
+            if value is None:
+                raise DeviceError(
+                    f"Condition '{condition}' requires a value parameter",
+                    tool="idb",
+                )
+
+        resolved = await self.resolve_udid(udid)
+
+        # Define condition checker functions
+        def check_exists(el: UIElement | None) -> bool:
+            return el is not None
+
+        def check_not_exists(el: UIElement | None) -> bool:
+            return el is None
+
+        def check_visible(el: UIElement | None) -> bool:
+            # Treat visible as "exists and has a frame"
+            return el is not None and el.frame is not None
+
+        def check_enabled(el: UIElement | None) -> bool:
+            return el is not None and el.enabled
+
+        def check_disabled(el: UIElement | None) -> bool:
+            return el is not None and not el.enabled
+
+        def check_value_equals(el: UIElement | None) -> bool:
+            return el is not None and el.value == value
+
+        def check_value_contains(el: UIElement | None) -> bool:
+            return (
+                el is not None
+                and el.value is not None
+                and value is not None
+                and value in el.value
+            )
+
+        # Map condition to checker
+        checkers = {
+            WaitCondition.EXISTS: check_exists,
+            WaitCondition.NOT_EXISTS: check_not_exists,
+            WaitCondition.VISIBLE: check_visible,
+            WaitCondition.ENABLED: check_enabled,
+            WaitCondition.DISABLED: check_disabled,
+            WaitCondition.VALUE_EQUALS: check_value_equals,
+            WaitCondition.VALUE_CONTAINS: check_value_contains,
+        }
+
+        checker = checkers.get(condition)
+        if not checker:
+            raise DeviceError(
+                f"Unknown condition: {condition}",
+                tool="idb",
+            )
+
+        # Polling loop
+        start_time = time.time()
+        polls = 0
+        last_element: UIElement | None = None
+
+        while True:
+            polls += 1
+            elapsed = time.time() - start_time
+
+            # Fetch UI elements
+            elements, _ = await self.get_ui_elements(resolved)
+            matches = find_element(
+                elements,
+                label=label,
+                identifier=identifier,
+                element_type=element_type,
+            )
+
+            # Get first match (or None if no matches)
+            current_element = matches[0] if matches else None
+            last_element = current_element
+
+            # Check condition
+            if checker(current_element):
+                return {
+                    "matched": True,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "polls": polls,
+                    "element": current_element.model_dump() if current_element else None,
+                }, resolved
+
+            # Check timeout
+            if elapsed >= timeout:
+                return {
+                    "matched": False,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "polls": polls,
+                    "last_state": last_element.model_dump() if last_element else None,
+                }, resolved
+
+            # Sleep before next poll
+            await asyncio.sleep(interval)
+
+    async def get_screen_summary(
+        self,
+        max_elements: int = 20,
+        udid: str | None = None,
+    ) -> tuple[dict, str]:
+        """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
+
+        Args:
+            max_elements: Maximum interactive elements to include (0 = unlimited)
+            udid: Device UDID (auto-resolves if omitted)
+        """
+        elements, resolved = await self.get_ui_elements(udid)
+        return generate_screen_summary(elements, max_elements=max_elements), resolved
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
         """Tap at coordinates. Returns the resolved udid."""
@@ -162,14 +346,28 @@ class DeviceController:
         identifier: str | None = None,
         element_type: str | None = None,
         udid: str | None = None,
+        # Future enhancements to consider:
+        # stability_check_ms: int = 100,  # Configurable stability check interval
+        # verify_disappears: bool = False,  # Verify element disappears after tap
+        # retry_attempts: int = 1,  # Number of retry attempts if tap fails
     ) -> dict:
         """Find an element by label/identifier and tap its center.
+
+        Uses adaptive timing with stability checking to handle animations:
+        - Checks element position after 100ms
+        - If position changed (animating), waits 300ms more
+        - Taps final position for accuracy
 
         Returns:
             {"status": "ok", "tapped": {...}} for single match
             {"status": "ambiguous", "matches": [...], "message": "..."} for multiple
         Raises:
             DeviceError for 0 matches
+
+        Future enhancement ideas:
+        1. Post-tap verification - Verify expected outcome (e.g., element disappears)
+        2. Retry logic - If tap doesn't work, retry with fresh coordinates
+        3. Configurable stability timing - Allow tuning the stability check interval
         """
         if not label and not identifier:
             raise DeviceError(
@@ -179,15 +377,8 @@ class DeviceController:
 
         elements, resolved = await self.get_ui_elements(udid)
 
-        # Filter by label or identifier
-        if label:
-            matches = find_by_label(elements, label)
-        else:
-            matches = find_by_identifier(elements, identifier)  # type: ignore[arg-type]
-
-        # Optional type filter to narrow results
-        if element_type and matches:
-            matches = find_by_type(matches, element_type)
+        # Use shared search helper
+        matches = find_element(elements, label=label, identifier=identifier, element_type=element_type)
 
         if len(matches) == 0:
             search_desc = f"label='{label}'" if label else f"identifier='{identifier}'"
@@ -201,7 +392,43 @@ class DeviceController:
         if len(matches) == 1:
             el = matches[0]
             cx, cy = get_center(el)
+
+            # Stability check: ensure element has stopped moving/animating
+            # Get initial position
+            initial_frame = el.frame
+            await asyncio.sleep(0.1)
+
+            # Re-fetch UI and find element again
+            elements_check, _ = await self.get_ui_elements(resolved)
+            matches_check = find_element(elements_check, label=label, identifier=identifier, element_type=element_type)
+
+            if matches_check:
+                # Check if position changed (element is animating)
+                current_frame = matches_check[0].frame
+                if current_frame != initial_frame:
+                    logger.debug(
+                        "Element position changed (animating), waiting for stability: %s -> %s",
+                        initial_frame, current_frame
+                    )
+                    # Wait longer for animation to complete
+                    await asyncio.sleep(0.3)
+                    # Re-fetch one more time to get final position
+                    elements_final, _ = await self.get_ui_elements(resolved)
+                    matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
+                    if matches_final:
+                        cx, cy = get_center(matches_final[0])
+
             await self.idb.tap(resolved, cx, cy)
+
+            # Future enhancement: Post-tap verification
+            # if verify_disappears:
+            #     await asyncio.sleep(0.2)
+            #     elements_verify, _ = await self.get_ui_elements(resolved)
+            #     matches_verify = find_element(elements_verify, label=label, identifier=identifier, element_type=element_type)
+            #     if matches_verify:
+            #         logger.warning("Element still present after tap, may have failed")
+            #         # Could retry here if retry_attempts > 1
+
             return {
                 "status": "ok",
                 "tapped": {
@@ -212,6 +439,19 @@ class DeviceController:
                     "y": cy,
                 },
             }
+
+        # Future enhancement: Retry logic implementation
+        # If we add retry_attempts parameter, wrap the tap attempt in a loop:
+        # for attempt in range(retry_attempts):
+        #     try:
+        #         # ... existing tap logic ...
+        #         if verify_success():
+        #             break
+        #     except Exception as e:
+        #         if attempt == retry_attempts - 1:
+        #             raise
+        #         logger.debug(f"Tap attempt {attempt + 1} failed, retrying: {e}")
+        #         await asyncio.sleep(0.3)
 
         # Multiple matches — return ambiguous
         match_list = []

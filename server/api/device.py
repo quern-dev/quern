@@ -19,6 +19,7 @@ from server.models import (
     TapRequest,
     TerminateAppRequest,
     TypeTextRequest,
+    WaitForElementRequest,
 )
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -193,15 +194,111 @@ async def get_ui_elements(
         raise _handle_device_error(e)
 
 
+@router.get("/ui/element")
+async def get_element(
+    request: Request,
+    label: str | None = Query(default=None),
+    identifier: str | None = Query(default=None),
+    element_type: str | None = Query(default=None, alias="type"),
+    udid: str | None = Query(default=None),
+):
+    """Get a single element's state without fetching the entire UI tree.
+
+    Query params:
+    - label: Element label (case-insensitive)
+    - identifier: Element identifier (case-sensitive)
+    - type: Element type to narrow results (optional)
+    - udid: Device UDID (auto-resolves if omitted)
+
+    Returns:
+    - 200 with element dict (includes match_count if ambiguous)
+    - 404 if no element found
+    """
+    controller = _get_controller(request)
+    try:
+        element, resolved_udid = await controller.get_element(
+            label=label,
+            identifier=identifier,
+            element_type=element_type,
+            udid=udid,
+        )
+        return {"element": element, "udid": resolved_udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/wait-for-element")
+async def wait_for_element(request: Request, body: WaitForElementRequest):
+    """Wait for an element to satisfy a condition (server-side polling).
+
+    Always returns 200 with matched field to distinguish success/timeout.
+    Only non-200 responses are validation errors (400) or server errors (500/503).
+
+    Request body:
+    - label or identifier: Element search criteria (at least one required)
+    - type: Optional element type to narrow results
+    - condition: Condition to wait for (exists, enabled, value_equals, etc.)
+    - value: Required for value_* conditions
+    - timeout: Max wait time in seconds (default 10, max 60)
+    - interval: Poll interval in seconds (default 0.5)
+    - udid: Device UDID (auto-resolves if omitted)
+
+    Response:
+    - matched: bool - whether condition was satisfied
+    - element: dict | None - element state if matched
+    - last_state: dict | None - last seen state if timeout
+    - elapsed_seconds: float - time spent polling
+    - polls: int - number of polls performed
+    """
+    controller = _get_controller(request)
+
+    # Validation
+    if body.timeout > 60:
+        raise HTTPException(status_code=400, detail="Timeout cannot exceed 60 seconds")
+
+    if body.condition in ("value_equals", "value_contains") and body.value is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Condition '{body.condition}' requires a value parameter",
+        )
+
+    try:
+        result, resolved_udid = await controller.wait_for_element(
+            condition=body.condition,
+            label=body.label,
+            identifier=body.identifier,
+            element_type=body.element_type,
+            value=body.value,
+            timeout=body.timeout,
+            interval=body.interval,
+            udid=body.udid,
+        )
+        result["udid"] = resolved_udid
+        return result
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
 @router.get("/screen-summary")
 async def get_screen_summary(
     request: Request,
+    max_elements: int = Query(default=20, ge=0, le=500),
     udid: str | None = Query(default=None),
 ):
-    """Get an LLM-optimized screen description."""
+    """Get an LLM-optimized screen description with smart truncation.
+
+    Query params:
+    - max_elements: Maximum interactive elements to include (0 = unlimited, default 20)
+    - udid: Device UDID (auto-resolves if omitted)
+
+    Returns summary with truncated, total_interactive_elements fields.
+    """
     controller = _get_controller(request)
     try:
-        summary, resolved_udid = await controller.get_screen_summary(udid=udid)
+        summary, resolved_udid = await controller.get_screen_summary(
+            max_elements=max_elements,
+            udid=udid,
+        )
         summary["udid"] = resolved_udid
         return summary
     except DeviceError as e:

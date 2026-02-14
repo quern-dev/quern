@@ -13,6 +13,7 @@ dependencies = [
     "mitmproxy>=10.0",
     "httpx>=0.27",
     "Pillow>=10.0",
+    "fb-idb>=1.1.0",
 ]
 
 [project.optional-dependencies]
