@@ -255,26 +255,32 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict:
-        """Health check with tool availability status."""
+        """Health check with tool availability status and cache stats."""
         tools = {}
+        cache_stats = {}
         if hasattr(app.state, "device_controller") and app.state.device_controller:
             tools = await app.state.device_controller.check_tools()
+            cache_stats = app.state.device_controller.get_cache_stats()
         return {
             "status": "ok",
             "version": "0.1.0",
             "tools": tools,
+            "ui_cache": cache_stats,
         }
 
     @app.get("/api/v1/health")
     async def api_health() -> dict:
-        """Health check with tool availability status."""
+        """Health check with tool availability status and cache stats."""
         tools = {}
+        cache_stats = {}
         if hasattr(app.state, "device_controller") and app.state.device_controller:
             tools = await app.state.device_controller.check_tools()
+            cache_stats = app.state.device_controller.get_cache_stats()
         return {
             "status": "ok",
             "version": "0.1.0",
             "tools": tools,
+            "ui_cache": cache_stats,
         }
 
     return app

@@ -621,7 +621,7 @@ class WaitForElementRequest(BaseModel):
     element_type: str | None = Field(default=None, alias="type")
     condition: WaitCondition
     value: str | None = None  # Required for value_* conditions
-    timeout: float = Field(default=10, ge=0.1, le=60)
+    timeout: float = Field(default=10, ge=0, le=60)  # ge=0 allows instant checks
     interval: float = Field(default=0.5, ge=0.1, le=5)
     udid: str | None = None
 

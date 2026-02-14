@@ -27,6 +27,11 @@ class DeviceController:
         self.simctl = SimctlBackend()
         self.idb = IdbBackend()
         self._active_udid: str | None = None
+        # UI tree cache: {udid: (elements, timestamp)}
+        self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
+        self._cache_ttl: float = 0.3  # 300ms cache TTL
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
@@ -67,6 +72,27 @@ class DeviceController:
         self._active_udid = booted[0].udid
         return self._active_udid
 
+    def _invalidate_ui_cache(self, udid: str | None = None) -> None:
+        """Invalidate UI tree cache for a device (or all devices if udid=None)."""
+        if udid:
+            self._ui_cache.pop(udid, None)
+            logger.debug(f"UI cache invalidated for device {udid[:8]}")
+        else:
+            self._ui_cache.clear()
+            logger.debug("UI cache cleared for all devices")
+
+    def get_cache_stats(self) -> dict:
+        """Return cache statistics for observability."""
+        total = self._cache_hits + self._cache_misses
+        hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "hit_rate_percent": round(hit_rate, 1),
+            "cached_devices": len(self._ui_cache),
+            "ttl_ms": int(self._cache_ttl * 1000),
+        }
+
     async def list_devices(self) -> list[DeviceInfo]:
         """List all simulators."""
         return await self.simctl.list_devices()
@@ -106,6 +132,7 @@ class DeviceController:
         """Launch an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         await self.simctl.launch_app(resolved, bundle_id)
+        self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
     async def terminate_app(self, bundle_id: str, udid: str | None = None) -> str:
@@ -136,14 +163,41 @@ class DeviceController:
     # UI inspection & interaction (Phase 3b — requires idb)
     # -------------------------------------------------------------------
 
-    async def get_ui_elements(self, udid: str | None = None) -> tuple[list[UIElement], str]:
-        """Get all UI accessibility elements. Returns (elements, resolved_udid).
+    async def get_ui_elements(self, udid: str | None = None, use_cache: bool = True) -> tuple[list[UIElement], str]:
+        """Get all UI accessibility elements with TTL-based caching.
 
+        Returns (elements, resolved_udid).
         Requires idb to be installed.
+
+        Args:
+            udid: Device UDID (auto-resolves if None)
+            use_cache: If False, bypass cache and force fresh fetch (default True)
+
+        Cache TTL: 300ms (configurable via self._cache_ttl)
+        Cache is invalidated on mutation operations (tap, swipe, type, launch).
         """
         resolved = await self.resolve_udid(udid)
+        now = time.time()
+
+        # Check cache (unless explicitly bypassed)
+        if use_cache and resolved in self._ui_cache:
+            cached_elements, cached_time = self._ui_cache[resolved]
+            age = now - cached_time
+            if age < self._cache_ttl:
+                self._cache_hits += 1
+                logger.debug(f"UI cache hit for {resolved[:8]} (age: {int(age*1000)}ms)")
+                return cached_elements, resolved
+
+        # Cache miss or bypassed - fetch from idb
+        self._cache_misses += 1
+        logger.debug(f"UI cache {'bypass' if not use_cache else 'miss'} for {resolved[:8]} - fetching from idb")
         raw = await self.idb.describe_all(resolved)
-        return parse_elements(raw), resolved
+        elements = parse_elements(raw)
+
+        # Update cache (always, even if bypassed)
+        self._ui_cache[resolved] = (elements, now)
+
+        return elements, resolved
 
     async def get_element(
         self,
@@ -338,6 +392,7 @@ class DeviceController:
         """Tap at coordinates. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         await self.idb.tap(resolved, x, y)
+        self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
     async def tap_element(
@@ -398,8 +453,8 @@ class DeviceController:
             initial_frame = el.frame
             await asyncio.sleep(0.1)
 
-            # Re-fetch UI and find element again
-            elements_check, _ = await self.get_ui_elements(resolved)
+            # Re-fetch UI and find element again (bypass cache to detect changes!)
+            elements_check, _ = await self.get_ui_elements(resolved, use_cache=False)
             matches_check = find_element(elements_check, label=label, identifier=identifier, element_type=element_type)
 
             if matches_check:
@@ -412,13 +467,14 @@ class DeviceController:
                     )
                     # Wait longer for animation to complete
                     await asyncio.sleep(0.3)
-                    # Re-fetch one more time to get final position
-                    elements_final, _ = await self.get_ui_elements(resolved)
+                    # Re-fetch one more time to get final position (bypass cache again)
+                    elements_final, _ = await self.get_ui_elements(resolved, use_cache=False)
                     matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
                     if matches_final:
                         cx, cy = get_center(matches_final[0])
 
             await self.idb.tap(resolved, cx, cy)
+            self._invalidate_ui_cache(resolved)  # UI changed
 
             # Future enhancement: Post-tap verification
             # if verify_disappears:
@@ -488,12 +544,14 @@ class DeviceController:
         """Swipe gesture. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         await self.idb.swipe(resolved, start_x, start_y, end_x, end_y, duration)
+        self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
     async def type_text(self, text: str, udid: str | None = None) -> str:
         """Type text into focused field. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         await self.idb.type_text(resolved, text)
+        self._invalidate_ui_cache(resolved)  # UI changed (text field value updated)
         return resolved
 
     async def press_button(self, button: str, udid: str | None = None) -> str:
