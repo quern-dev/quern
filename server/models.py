@@ -558,6 +558,7 @@ class TapElementRequest(BaseModel):
     identifier: str | None = None
     element_type: str | None = None
     udid: str | None = None
+    skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
 
 
 class SwipeRequest(BaseModel):

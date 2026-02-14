@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 
@@ -23,6 +26,7 @@ from server.models import (
 )
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
+logger = logging.getLogger("quern-debug-server.api")
 
 
 # ---------------------------------------------------------------------------
@@ -182,15 +186,23 @@ async def get_ui_elements(
     udid: str | None = Query(default=None),
 ):
     """Get all UI accessibility elements from the current screen."""
+    start = time.perf_counter()
+    logger.info(f"[PERF] API /ui START")
+
     controller = _get_controller(request)
     try:
         elements, resolved_udid = await controller.get_ui_elements(udid=udid)
+
+        end = time.perf_counter()
+        logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
         return {
             "elements": [e.model_dump() for e in elements],
             "element_count": len(elements),
             "udid": resolved_udid,
         }
     except DeviceError as e:
+        end = time.perf_counter()
+        logger.error(f"[PERF] API /ui ERROR: {(end-start)*1000:.1f}ms, error={e}")
         raise _handle_device_error(e)
 
 
@@ -250,6 +262,9 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
     - elapsed_seconds: float - time spent polling
     - polls: int - number of polls performed
     """
+    start = time.perf_counter()
+    logger.info(f"[PERF] API /ui/wait-for-element START: condition={body.condition}, timeout={body.timeout}s")
+
     controller = _get_controller(request)
 
     # Validation
@@ -274,8 +289,13 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
             udid=body.udid,
         )
         result["udid"] = resolved_udid
+
+        end = time.perf_counter()
+        logger.info(f"[PERF] API /ui/wait-for-element SUCCESS: {(end-start)*1000:.1f}ms, matched={result.get('matched')}")
         return result
     except DeviceError as e:
+        end = time.perf_counter()
+        logger.error(f"[PERF] API /ui/wait-for-element ERROR: {(end-start)*1000:.1f}ms, error={e}")
         raise _handle_device_error(e)
 
 
@@ -308,11 +328,19 @@ async def get_screen_summary(
 @router.post("/ui/tap")
 async def tap(request: Request, body: TapRequest):
     """Tap at specific coordinates."""
+    start = time.perf_counter()
+    logger.info(f"[PERF] API /ui/tap START: ({body.x}, {body.y})")
+
     controller = _get_controller(request)
     try:
         udid = await controller.tap(x=body.x, y=body.y, udid=body.udid)
+
+        end = time.perf_counter()
+        logger.info(f"[PERF] API /ui/tap SUCCESS: {(end-start)*1000:.1f}ms")
         return {"status": "ok", "udid": udid, "x": body.x, "y": body.y}
     except DeviceError as e:
+        end = time.perf_counter()
+        logger.error(f"[PERF] API /ui/tap ERROR: {(end-start)*1000:.1f}ms, error={e}")
         raise _handle_device_error(e)
 
 
@@ -325,6 +353,9 @@ async def tap_element(request: Request, body: TapElementRequest):
     - 200 with status "ambiguous" and match list for multiple matches
     - 404 when no element matches
     """
+    start = time.perf_counter()
+    logger.info(f"[PERF] API /ui/tap-element START: label={body.label}, id={body.identifier}")
+
     controller = _get_controller(request)
     try:
         result = await controller.tap_element(
@@ -332,9 +363,15 @@ async def tap_element(request: Request, body: TapElementRequest):
             identifier=body.identifier,
             element_type=body.element_type,
             udid=body.udid,
+            skip_stability_check=body.skip_stability_check,
         )
+
+        end = time.perf_counter()
+        logger.info(f"[PERF] API /ui/tap-element SUCCESS: {(end-start)*1000:.1f}ms")
         return result
     except DeviceError as e:
+        end = time.perf_counter()
+        logger.error(f"[PERF] API /ui/tap-element ERROR: {(end-start)*1000:.1f}ms, error={e}")
         raise _handle_device_error(e)
 
 

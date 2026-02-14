@@ -85,12 +85,21 @@ class DeviceController:
         """Return cache statistics for observability."""
         total = self._cache_hits + self._cache_misses
         hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
+
+        # Add per-device cache age info
+        cache_ages = {}
+        now = time.time()
+        for udid, (elements, timestamp) in self._ui_cache.items():
+            age_ms = (now - timestamp) * 1000
+            cache_ages[udid[:8]] = f"{age_ms:.1f}ms"
+
         return {
             "hits": self._cache_hits,
             "misses": self._cache_misses,
             "hit_rate_percent": round(hit_rate, 1),
             "cached_devices": len(self._ui_cache),
             "ttl_ms": int(self._cache_ttl * 1000),
+            "cache_ages": cache_ages,
         }
 
     async def list_devices(self) -> list[DeviceInfo]:
@@ -163,8 +172,15 @@ class DeviceController:
     # UI inspection & interaction (Phase 3b — requires idb)
     # -------------------------------------------------------------------
 
-    async def get_ui_elements(self, udid: str | None = None, use_cache: bool = True) -> tuple[list[UIElement], str]:
-        """Get all UI accessibility elements with TTL-based caching.
+    async def get_ui_elements(
+        self,
+        udid: str | None = None,
+        use_cache: bool = True,
+        filter_label: str | None = None,
+        filter_identifier: str | None = None,
+        filter_type: str | None = None,
+    ) -> tuple[list[UIElement], str]:
+        """Get UI accessibility elements with TTL-based caching and optional filtering.
 
         Returns (elements, resolved_udid).
         Requires idb to be installed.
@@ -172,30 +188,82 @@ class DeviceController:
         Args:
             udid: Device UDID (auto-resolves if None)
             use_cache: If False, bypass cache and force fresh fetch (default True)
+            filter_label: Only parse elements with this label (performance optimization)
+            filter_identifier: Only parse elements with this identifier (performance optimization)
+            filter_type: Only parse elements with this type (performance optimization)
+
+        Performance note: Filters are applied during parsing, not after. On screens with
+        hundreds of elements (e.g., map with 400+ pins), this can be 100x faster than
+        parsing everything and filtering afterwards.
 
         Cache TTL: 300ms (configurable via self._cache_ttl)
         Cache is invalidated on mutation operations (tap, swipe, type, launch).
+        Filtered results are NOT cached (only full tree is cached).
         """
+        start = time.perf_counter()
+        has_filters = filter_label or filter_identifier or filter_type
+        logger.info(f"[PERF] get_ui_elements START (cache={use_cache}, filters={has_filters})")
+
         resolved = await self.resolve_udid(udid)
         now = time.time()
 
         # Check cache (unless explicitly bypassed)
+        # Strategy: Use cached full tree, then filter in memory (fast)
         if use_cache and resolved in self._ui_cache:
             cached_elements, cached_time = self._ui_cache[resolved]
             age = now - cached_time
             if age < self._cache_ttl:
                 self._cache_hits += 1
-                logger.debug(f"UI cache hit for {resolved[:8]} (age: {int(age*1000)}ms)")
+                end = time.perf_counter()
+                logger.info(f"[PERF] get_ui_elements CACHE HIT: {(end-start)*1000:.1f}ms, age={age*1000:.1f}ms, elements={len(cached_elements)}")
+
+                # If filters provided, apply them to cached elements (in-memory filtering is fast)
+                if has_filters:
+                    filtered = find_element(cached_elements, label=filter_label,
+                                          identifier=filter_identifier, element_type=filter_type)
+                    logger.info(f"[PERF] get_ui_elements: filtered from {len(cached_elements)} to {len(filtered)} elements")
+                    return filtered, resolved
+
                 return cached_elements, resolved
+            else:
+                logger.info(f"[PERF CACHE] EXPIRED for {resolved[:8]}: age={age*1000:.1f}ms > ttl={self._cache_ttl*1000:.1f}ms")
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
-        logger.debug(f"UI cache {'bypass' if not use_cache else 'miss'} for {resolved[:8]} - fetching from idb")
-        raw = await self.idb.describe_all(resolved)
-        elements = parse_elements(raw)
+        t1 = time.perf_counter()
+        logger.info(f"[PERF] get_ui_elements: calling idb.describe_all (+{(t1-start)*1000:.1f}ms)")
 
-        # Update cache (always, even if bypassed)
-        self._ui_cache[resolved] = (elements, now)
+        raw = await self.idb.describe_all(resolved)
+
+        t2 = time.perf_counter()
+        logger.info(f"[PERF] get_ui_elements: idb returned {len(raw)} raw elements (+{(t2-t1)*1000:.1f}ms)")
+
+        # Parse strategy:
+        # - If filters AND will cache: parse full tree (for cache), then filter in memory
+        # - If filters but won't cache (bypass): parse with filters to save time
+        # - If no filters: parse full tree
+        t3 = time.perf_counter()
+        logger.info(f"[PERF] get_ui_elements: starting parse (+{(t3-t2)*1000:.1f}ms)")
+
+        if has_filters and not use_cache:
+            # Bypassing cache - use filtered parsing for speed
+            elements = parse_elements(raw, filter_label, filter_identifier, filter_type)
+        else:
+            # Parse full tree for caching
+            elements = parse_elements(raw)
+
+            # Cache the full tree
+            self._ui_cache[resolved] = (elements, now)
+
+            # Apply filters in memory if needed
+            if has_filters:
+                elements = find_element(elements, label=filter_label,
+                                      identifier=filter_identifier, element_type=filter_type)
+
+        t4 = time.perf_counter()
+        end = time.perf_counter()
+        logger.info(f"[PERF] get_ui_elements: parsed {len(elements)} elements (+{(t4-t3)*1000:.1f}ms)")
+        logger.info(f"[PERF] get_ui_elements COMPLETE: total={( end-start)*1000:.1f}ms")
 
         return elements, resolved
 
@@ -333,15 +401,28 @@ class DeviceController:
 
         # Polling loop
         start_time = time.time()
+        perf_start = time.perf_counter()
         polls = 0
         last_element: UIElement | None = None
 
+        logger.info(f"[PERF] wait_for_element START (condition={condition}, timeout={timeout}s)")
+
         while True:
             polls += 1
+            poll_start = time.perf_counter()
             elapsed = time.time() - start_time
 
-            # Fetch UI elements
-            elements, _ = await self.get_ui_elements(resolved)
+            # Fetch UI elements with filtering for performance
+            elements, _ = await self.get_ui_elements(
+                resolved,
+                filter_label=label,
+                filter_identifier=identifier,
+                filter_type=element_type,
+            )
+
+            poll_fetch = time.perf_counter()
+            logger.debug(f"[PERF] wait_for_element poll #{polls}: fetch took {(poll_fetch-poll_start)*1000:.1f}ms")
+
             matches = find_element(
                 elements,
                 label=label,
@@ -355,6 +436,8 @@ class DeviceController:
 
             # Check condition
             if checker(current_element):
+                perf_end = time.perf_counter()
+                logger.info(f"[PERF] wait_for_element MATCHED: polls={polls}, total={( perf_end-perf_start)*1000:.1f}ms")
                 return {
                     "matched": True,
                     "elapsed_seconds": round(elapsed, 2),
@@ -364,12 +447,17 @@ class DeviceController:
 
             # Check timeout
             if elapsed >= timeout:
+                perf_end = time.perf_counter()
+                logger.info(f"[PERF] wait_for_element TIMEOUT: polls={polls}, total={( perf_end-perf_start)*1000:.1f}ms")
                 return {
                     "matched": False,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "last_state": last_element.model_dump() if last_element else None,
                 }, resolved
+
+            poll_end = time.perf_counter()
+            logger.debug(f"[PERF] wait_for_element poll #{polls} complete: {(poll_end-poll_start)*1000:.1f}ms")
 
             # Sleep before next poll
             await asyncio.sleep(interval)
@@ -401,6 +489,7 @@ class DeviceController:
         identifier: str | None = None,
         element_type: str | None = None,
         udid: str | None = None,
+        skip_stability_check: bool = False,
         # Future enhancements to consider:
         # stability_check_ms: int = 100,  # Configurable stability check interval
         # verify_disappears: bool = False,  # Verify element disappears after tap
@@ -424,16 +513,34 @@ class DeviceController:
         2. Retry logic - If tap doesn't work, retry with fresh coordinates
         3. Configurable stability timing - Allow tuning the stability check interval
         """
+        start = time.perf_counter()
+        logger.info(f"[PERF] tap_element START (label={label}, id={identifier}, skip_stability={skip_stability_check})")
+
         if not label and not identifier:
             raise DeviceError(
                 "Either label or identifier is required for tap-element",
                 tool="idb",
             )
 
-        elements, resolved = await self.get_ui_elements(udid)
+        # Use filtered parsing for performance (avoids parsing hundreds of irrelevant elements)
+        t1 = time.perf_counter()
+        logger.info(f"[PERF] tap_element: fetching UI elements (+{(t1-start)*1000:.1f}ms)")
+
+        elements, resolved = await self.get_ui_elements(
+            udid,
+            filter_label=label,
+            filter_identifier=identifier,
+            filter_type=element_type,
+        )
+
+        t2 = time.perf_counter()
+        logger.info(f"[PERF] tap_element: got {len(elements)} elements (+{(t2-t1)*1000:.1f}ms)")
 
         # Use shared search helper
         matches = find_element(elements, label=label, identifier=identifier, element_type=element_type)
+
+        t3 = time.perf_counter()
+        logger.info(f"[PERF] tap_element: found {len(matches)} matches (+{(t3-t2)*1000:.1f}ms)")
 
         if len(matches) == 0:
             search_desc = f"label='{label}'" if label else f"identifier='{identifier}'"
@@ -449,32 +556,78 @@ class DeviceController:
             cx, cy = get_center(el)
 
             # Stability check: ensure element has stopped moving/animating
-            # Get initial position
-            initial_frame = el.frame
-            await asyncio.sleep(0.1)
+            # Skip for static elements (tab bars, nav bars) to avoid expensive tree fetches
+            if not skip_stability_check:
+                t4 = time.perf_counter()
+                logger.info(f"[PERF] tap_element: starting stability check (+{(t4-t3)*1000:.1f}ms)")
 
-            # Re-fetch UI and find element again (bypass cache to detect changes!)
-            elements_check, _ = await self.get_ui_elements(resolved, use_cache=False)
-            matches_check = find_element(elements_check, label=label, identifier=identifier, element_type=element_type)
+                # Get initial position
+                initial_frame = el.frame
+                await asyncio.sleep(0.1)
 
-            if matches_check:
-                # Check if position changed (element is animating)
-                current_frame = matches_check[0].frame
-                if current_frame != initial_frame:
-                    logger.debug(
-                        "Element position changed (animating), waiting for stability: %s -> %s",
-                        initial_frame, current_frame
-                    )
-                    # Wait longer for animation to complete
-                    await asyncio.sleep(0.3)
-                    # Re-fetch one more time to get final position (bypass cache again)
-                    elements_final, _ = await self.get_ui_elements(resolved, use_cache=False)
-                    matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
-                    if matches_final:
-                        cx, cy = get_center(matches_final[0])
+                t5 = time.perf_counter()
+                logger.info(f"[PERF] tap_element: stability check fetch #1 (+{(t5-t4)*1000:.1f}ms)")
+
+                # Re-fetch UI and find element again (bypass cache to detect changes!)
+                # Use filtering for performance
+                elements_check, _ = await self.get_ui_elements(
+                    resolved,
+                    use_cache=False,
+                    filter_label=label,
+                    filter_identifier=identifier,
+                    filter_type=element_type,
+                )
+
+                t6 = time.perf_counter()
+                logger.info(f"[PERF] tap_element: stability check fetch #1 complete (+{(t6-t5)*1000:.1f}ms)")
+
+                matches_check = find_element(elements_check, label=label, identifier=identifier, element_type=element_type)
+
+                if matches_check:
+                    # Check if position changed (element is animating)
+                    current_frame = matches_check[0].frame
+                    if current_frame != initial_frame:
+                        logger.debug(
+                            "Element position changed (animating), waiting for stability: %s -> %s",
+                            initial_frame, current_frame
+                        )
+                        t7 = time.perf_counter()
+                        logger.info(f"[PERF] tap_element: position changed, waiting 300ms (+{(t7-t6)*1000:.1f}ms)")
+
+                        # Wait longer for animation to complete
+                        await asyncio.sleep(0.3)
+
+                        t8 = time.perf_counter()
+                        logger.info(f"[PERF] tap_element: stability check fetch #2 (+{(t8-t7)*1000:.1f}ms)")
+
+                        # Re-fetch one more time to get final position (bypass cache again)
+                        # Use filtering for performance
+                        elements_final, _ = await self.get_ui_elements(
+                            resolved,
+                            use_cache=False,
+                            filter_label=label,
+                            filter_identifier=identifier,
+                            filter_type=element_type,
+                        )
+
+                        t9 = time.perf_counter()
+                        logger.info(f"[PERF] tap_element: stability check fetch #2 complete (+{(t9-t8)*1000:.1f}ms)")
+
+                        matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
+                        if matches_final:
+                            cx, cy = get_center(matches_final[0])
+
+                t_after_stability = time.perf_counter()
+                logger.info(f"[PERF] tap_element: stability check complete (+{(t_after_stability-t4)*1000:.1f}ms)")
+
+            t_before_tap = time.perf_counter()
+            logger.info(f"[PERF] tap_element: executing tap at ({cx},{cy}) (+{(t_before_tap-t3)*1000:.1f}ms)")
 
             await self.idb.tap(resolved, cx, cy)
             self._invalidate_ui_cache(resolved)  # UI changed
+
+            end = time.perf_counter()
+            logger.info(f"[PERF] tap_element COMPLETE: total={( end-start)*1000:.1f}ms")
 
             # Future enhancement: Post-tap verification
             # if verify_disappears:

@@ -6,22 +6,71 @@ provides search/filter functions for the tap-element workflow.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections import Counter
 
 from server.models import UIElement
 
+logger = logging.getLogger("quern-debug-server.device")
 
-def parse_elements(raw: list[dict]) -> list[UIElement]:
-    """Map idb describe-all output dicts to UIElement models.
+
+def parse_elements(raw: list[dict], filter_label: str | None = None,
+                   filter_identifier: str | None = None,
+                   filter_type: str | None = None) -> list[UIElement]:
+    """Map idb describe-all output dicts to UIElement models with optional filtering.
 
     Handles the field names from real idb output:
     - AXLabel → label
     - AXUniqueId → identifier
     - AXValue → value
     - frame → frame (already a dict with x/y/width/height)
+
+    Performance optimization: When search criteria are provided, only elements matching
+    the criteria are parsed (avoids expensive Pydantic validation for irrelevant elements).
+
+    Args:
+        raw: List of raw element dicts from idb
+        filter_label: If provided, only parse elements with this exact label (case-insensitive)
+        filter_identifier: If provided, only parse elements with this exact identifier
+        filter_type: If provided, only parse elements with this exact type (case-insensitive)
+
+    Returns:
+        List of parsed UIElement objects (only matching elements if filters provided)
     """
+    start = time.perf_counter()
+    has_filters = filter_label or filter_identifier or filter_type
+    logger.info(f"[PERF] parse_elements START: {len(raw)} raw items, filters={'yes' if has_filters else 'no'}")
+
     elements: list[UIElement] = []
+    parsed_count = 0
+    skipped_count = 0
+
+    # Pre-compute lowercase versions for case-insensitive matching
+    filter_label_lower = filter_label.lower() if filter_label else None
+    filter_type_lower = filter_type.lower() if filter_type else None
+
     for item in raw:
+        # Fast string checks before expensive parsing
+        if filter_identifier:
+            item_id = item.get("AXUniqueId")
+            if item_id != filter_identifier:
+                skipped_count += 1
+                continue  # Skip - identifier doesn't match
+
+        if filter_label_lower:
+            item_label = item.get("AXLabel") or ""
+            if item_label.lower() != filter_label_lower:
+                skipped_count += 1
+                continue  # Skip - label doesn't match
+
+        if filter_type_lower:
+            item_type = item.get("type") or ""
+            if item_type.lower() != filter_type_lower:
+                skipped_count += 1
+                continue  # Skip - type doesn't match
+
+        # Element matches filters - proceed with full parsing
         frame = item.get("frame")
         if isinstance(frame, dict):
             frame = {
@@ -62,6 +111,11 @@ def parse_elements(raw: list[dict]) -> list[UIElement]:
             help=item.get("help"),
             custom_actions=custom_actions_val,
         ))
+        parsed_count += 1
+
+    end = time.perf_counter()
+    logger.info(f"[PERF] parse_elements COMPLETE: {(end-start)*1000:.1f}ms, parsed={parsed_count}, skipped={skipped_count}")
+
     return elements
 
 

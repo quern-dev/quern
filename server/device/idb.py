@@ -61,13 +61,32 @@ class IdbBackend:
 
         Raises DeviceError on non-zero exit code.
         """
+        import time
         binary = self._resolve_binary()
+
+        cmd_str = ' '.join(args[:3])  # First 3 args for logging
+        start = time.perf_counter()
+        logger.info(f"[PERF IDB] subprocess START: idb {cmd_str}")
+
+        # Time the process creation
+        t1 = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
             binary, *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        t2 = time.perf_counter()
+        logger.info(f"[PERF IDB] subprocess spawned: {(t2-t1)*1000:.1f}ms")
+
+        # Time the communication (waiting for output)
+        t3 = time.perf_counter()
         stdout, stderr = await proc.communicate()
+        t4 = time.perf_counter()
+        logger.info(f"[PERF IDB] subprocess communicate: {(t4-t3)*1000:.1f}ms, stdout={len(stdout)} bytes")
+
+        end = time.perf_counter()
+        logger.info(f"[PERF IDB] subprocess COMPLETE: total={( end-start)*1000:.1f}ms, returncode={proc.returncode}")
+
         if proc.returncode != 0:
             cmd = args[0] if args else "unknown"
             raise DeviceError(
@@ -87,9 +106,20 @@ class IdbBackend:
         probed with describe-point to discover hidden child elements that
         idb's SimulatorBridge fails to enumerate.
         """
+        import time
+        start = time.perf_counter()
+        logger.info(f"[PERF] idb.describe_all START (udid={udid[:8]})")
+
+        # Before subprocess
+        t1 = time.perf_counter()
         stdout, _ = await self._run(
             "ui", "describe-all", "--udid", udid, "--nested",
         )
+        t2 = time.perf_counter()
+        logger.info(f"[PERF] idb.describe_all: subprocess returned (+{(t2-t1)*1000:.1f}ms)")
+
+        # Before JSON parse
+        t3 = time.perf_counter()
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError as exc:
@@ -97,6 +127,9 @@ class IdbBackend:
                 f"Failed to parse idb describe-all output: {exc}",
                 tool="idb",
             )
+        t4 = time.perf_counter()
+        logger.info(f"[PERF] idb.describe_all: JSON parsed {len(data) if isinstance(data, list) else '?'} items (+{(t4-t3)*1000:.1f}ms)")
+
         if not isinstance(data, list):
             raise DeviceError(
                 f"Expected JSON array from describe-all, got {type(data).__name__}",
@@ -106,15 +139,23 @@ class IdbBackend:
         # Find empty containers before flattening (which pops children)
         empty_containers = self._find_empty_containers(data)
 
-        # Flatten the tree
+        # Before flatten
+        t5 = time.perf_counter()
         flat = self._flatten_nested(data)
+        t6 = time.perf_counter()
+        logger.info(f"[PERF] idb.describe_all: flattened to {len(flat)} elements (+{(t6-t5)*1000:.1f}ms)")
 
         # Probe empty containers concurrently to discover hidden children
         if empty_containers:
-            logger.debug("Probing %d empty container(s)", len(empty_containers))
+            t7 = time.perf_counter()
+            logger.info(f"[PERF] idb.describe_all: probing {len(empty_containers)} containers (+{(t7-t6)*1000:.1f}ms)")
+
             probe_tasks = [self._probe_container(udid, c) for c in empty_containers]
             probe_results = await asyncio.gather(*probe_tasks)
             probed_elements = [el for batch in probe_results for el in batch]
+
+            t8 = time.perf_counter()
+            logger.info(f"[PERF] idb.describe_all: probing complete, found {len(probed_elements)} elements (+{(t8-t7)*1000:.1f}ms)")
 
             # Merge probed elements, deduplicating against existing
             if probed_elements:
@@ -136,6 +177,9 @@ class IdbBackend:
                         if key not in existing_frames:
                             flat.append(el)
                             existing_frames.add(key)
+
+        end = time.perf_counter()
+        logger.info(f"[PERF] idb.describe_all COMPLETE: total={( end-start)*1000:.1f}ms, elements={len(flat)}")
 
         return flat
 
@@ -263,7 +307,14 @@ class IdbBackend:
 
         Coordinates are rounded to integers as idb expects int values.
         """
+        import time
+        start = time.perf_counter()
+        logger.info(f"[PERF] idb.tap START ({int(round(x))},{int(round(y))})")
+
         await self._run("ui", "tap", str(int(round(x))), str(int(round(y))), "--udid", udid)
+
+        end = time.perf_counter()
+        logger.info(f"[PERF] idb.tap COMPLETE: {(end-start)*1000:.1f}ms")
 
     async def swipe(
         self,
