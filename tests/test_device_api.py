@@ -426,6 +426,7 @@ class TestTapElement:
         assert data["tapped"]["label"] == "Settings"
         mock_controller.tap_element.assert_called_once_with(
             label="Settings", identifier=None, element_type=None, udid=None,
+            skip_stability_check=False,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -439,6 +440,7 @@ class TestTapElement:
         assert resp.status_code == 200
         mock_controller.tap_element.assert_called_once_with(
             label=None, identifier="Settings", element_type=None, udid=None,
+            skip_stability_check=False,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -452,6 +454,7 @@ class TestTapElement:
         assert resp.status_code == 200
         mock_controller.tap_element.assert_called_once_with(
             label="Calendar", identifier=None, element_type="Button", udid=None,
+            skip_stability_check=False,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
