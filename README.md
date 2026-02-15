@@ -29,26 +29,19 @@ Quern Debug Server (localhost:9100)
 ```bash
 git clone <repo-url>
 cd quern
-python3 -m server setup      # creates venv, installs deps, checks tools
+./quern setup                # creates venv, installs deps, checks tools
 cd mcp && npm install && npm run build && cd ..
 ```
 
-That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies (Xcode, idb, mitmproxy, etc.). All commands use `python3 -m server` which auto-detects the venv.
+That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies (Xcode, idb, mitmproxy, etc.). The `./quern` wrapper auto-detects the venv for all commands.
 
 ### Run
 
 ```bash
-# Start as a background daemon
-python3 -m server start
-
-# Or run in the foreground (Ctrl-C to stop)
-python3 -m server start -f
-
-# Check status
-python3 -m server status
-
-# Stop
-python3 -m server stop
+./quern start                # start as a background daemon
+./quern start -f             # run in the foreground (Ctrl-C to stop)
+./quern status               # check status
+./quern stop                 # stop
 ```
 
 The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`:
@@ -137,12 +130,12 @@ Device management and screenshots use `xcrun simctl` (always available with Xcod
 Startup is idempotent — running `start` when a server is already running is a no-op. Port conflicts are handled automatically by scanning upward.
 
 ```bash
-python3 -m server start          # Daemonize
-python3 -m server start -f       # Foreground
-python3 -m server stop            # Graceful shutdown
-python3 -m server restart         # Stop + start
-python3 -m server status          # Show PID, URL, uptime
-python3 -m server regenerate-key  # New API key
+./quern start          # Daemonize
+./quern start -f       # Foreground
+./quern stop            # Graceful shutdown
+./quern restart         # Stop + start
+./quern status          # Show PID, URL, uptime
+./quern regenerate-key  # New API key
 ```
 
 `~/.quern/state.json` is the single source of truth for discovering a running instance.
@@ -250,7 +243,7 @@ tests/                 594 tests
 cd mcp && npm run build
 
 # Run with debug logging
-python3 -m server start -f --verbose
+./quern start -f --verbose
 ```
 
 ## License

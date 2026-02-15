@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Thin wrapper — forwards all args to the Python server bootstrap.
+exec python3 -m server "$@"
