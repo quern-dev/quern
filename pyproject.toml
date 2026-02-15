@@ -27,7 +27,7 @@ sqlite = [
 ]
 
 [project.scripts]
-quern-debug-server = "server.main:cli"
+quern-debug-server = "server.__main__:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]

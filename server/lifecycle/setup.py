@@ -550,6 +550,20 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
 
 # ── Main setup flow ──────────────────────────────────────────────────────
 
+def _reexec_in_venv(venv_path: Path) -> int:
+    """Re-execute setup inside the venv so all checks run in the right environment."""
+    venv_python = venv_path / "bin" / "python"
+    if not venv_python.exists():
+        return -1
+    print(f"    Continuing setup inside {venv_path}...")
+    print()
+    result = subprocess.run(
+        [str(venv_python), "-m", "server.main", "setup"],
+        cwd=str(venv_path.parent),  # project root
+    )
+    return result.returncode
+
+
 def run_setup() -> int:
     """Run the interactive setup. Returns 0 on success, 1 on errors."""
     print()
@@ -558,6 +572,7 @@ def run_setup() -> int:
     print()
 
     report = SetupReport()
+    project_root = _find_project_root()
 
     # ── Platform (informational) ──
 
@@ -592,13 +607,7 @@ def run_setup() -> int:
                     message="Python 3.12 installed via Homebrew",
                 ))
                 report.print_summary()
-                print("  Python 3.12 was installed. Restart your shell, then set up your venv:")
-                print()
-                project_root = _find_project_root()
-                venv_path = project_root / ".venv" if project_root else Path(".venv")
-                print(f"    python3.12 -m venv {venv_path}")
-                print(f"    source {venv_path}/bin/activate")
-                print('    pip install -e ".[dev]"')
+                print("  Python 3.12 was installed. Restart your shell, then re-run:")
                 print("    quern-debug-server setup")
                 print()
                 return 0
@@ -611,25 +620,23 @@ def run_setup() -> int:
                 )
     report.add(python_result)
 
-    # ── Virtual environment ──
+    # ── Virtual environment (create + re-exec if needed) ──
 
-    venv_result = check_venv()
-    if venv_result.status == CheckStatus.WARNING and venv_result.fixable:
-        project_root = _find_project_root()
-        if project_root:
+    in_venv = sys.prefix != sys.base_prefix
+    if not in_venv and project_root:
+        venv_path = project_root / ".venv"
+        if venv_path.exists():
+            # Venv exists but not activated — re-exec inside it
+            print("    Virtual environment found but not activated.")
+            print(f"    Re-running setup inside {venv_path}...")
+            return _reexec_in_venv(venv_path)
+        else:
+            # No venv — create it, then re-exec
             if _prompt_yn("    No virtual environment found. Create one?"):
                 if create_venv(project_root):
-                    venv_path = project_root / ".venv"
-                    venv_result = CheckResult(
-                        name="Virtual env",
-                        status=CheckStatus.OK,
-                        message=f"{venv_path} (created)",
-                        detail="Activate it and re-run setup:\n"
-                               f"  source {venv_path}/bin/activate\n"
-                               "  quern-debug-server setup",
-                    )
+                    return _reexec_in_venv(venv_path)
                 else:
-                    venv_result = CheckResult(
+                    report.add(CheckResult(
                         name="Virtual env",
                         status=CheckStatus.ERROR,
                         message="Failed to create virtual environment",
@@ -637,8 +644,16 @@ def run_setup() -> int:
                                f"  python3 -m venv {project_root / '.venv'}\n"
                                f"  source {project_root / '.venv'}/bin/activate\n"
                                '  pip install -e ".[dev]"',
-                    )
-    report.add(venv_result)
+                    ))
+                    report.print_summary()
+                    return 1
+
+    # If we get here, we're inside the venv
+    report.add(CheckResult(
+        name="Virtual env",
+        status=CheckStatus.OK,
+        message=sys.prefix,
+    ))
 
     # ── System dependencies (auto-install via Homebrew) ──
 
