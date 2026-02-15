@@ -1,14 +1,14 @@
 """Quern Debug Server — main entry point.
 
 Usage:
-    quern-debug-server                  Start in foreground (backward compat)
-    quern-debug-server start            Start as daemon
-    quern-debug-server start -f         Start in foreground
-    quern-debug-server stop             Stop a running daemon
-    quern-debug-server restart          Restart the daemon
-    quern-debug-server status           Show server status
-    quern-debug-server setup            Check environment and install dependencies
-    quern-debug-server regenerate-key   Generate a new API key
+    python3 -m server                  Start in foreground (backward compat)
+    python3 -m server start            Start as daemon
+    python3 -m server start -f         Start in foreground
+    python3 -m server stop             Stop a running daemon
+    python3 -m server restart          Restart the daemon
+    python3 -m server status           Show server status
+    python3 -m server setup            Check environment and install dependencies
+    python3 -m server regenerate-key   Generate a new API key
 """
 
 from __future__ import annotations
