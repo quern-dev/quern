@@ -30,10 +30,10 @@ Quern Debug Server (localhost:9100)
 git clone <repo-url>
 cd quern
 ./quern setup                # creates venv, installs deps, checks tools
-cd mcp && npm install && npm run build && cd ..
+./quern mcp-install          # builds MCP server, adds to ~/.claude.json
 ```
 
-That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies (Xcode, idb, mitmproxy, etc.). The `./quern` wrapper auto-detects the venv for all commands.
+That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies. `mcp-install` builds the TypeScript MCP server and registers it with Claude Code.
 
 ### Run
 
@@ -54,17 +54,8 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 
 ### Connect via MCP
 
-Add to your MCP client config (e.g. Claude Code `~/.claude.json`):
-
-```json
-{
-  "mcpServers": {
-    "quern-debug": {
-      "command": "node",
-      "args": ["/path/to/quern-debug-server/mcp/dist/index.js"]
-    }
-  }
-}
+```bash
+./quern mcp-install           # adds quern-debug to ~/.claude.json
 ```
 
 The MCP server auto-discovers the running server via `state.json` — no URL or API key configuration needed.
