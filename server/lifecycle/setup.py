@@ -593,6 +593,13 @@ def _reexec_in_venv(venv_path: Path) -> int:
 
 def run_setup() -> int:
     """Run the interactive setup. Returns 0 on success, 1 on errors."""
+    # Ensure venv bin dir is on PATH so which() finds venv-installed tools
+    if sys.prefix != sys.base_prefix:
+        venv_bin = str(Path(sys.prefix) / "bin")
+        path = os.environ.get("PATH", "")
+        if venv_bin not in path.split(":"):
+            os.environ["PATH"] = venv_bin + ":" + path
+
     print()
     print("  Quern Debug Server — Setup")
     print("  Checking your environment...")
