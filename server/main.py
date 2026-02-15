@@ -453,7 +453,10 @@ def _cmd_start(args: argparse.Namespace) -> None:
         log_level="debug" if args.verbose else "info",
     )
     server = uvicorn.Server(uv_config)
-    server.run()
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass  # Clean shutdown already handled by lifespan
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
