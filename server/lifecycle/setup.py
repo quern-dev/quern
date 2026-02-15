@@ -578,9 +578,15 @@ def _reexec_in_venv(venv_path: Path) -> int:
         return -1
     print(f"    Continuing setup inside {venv_path}...")
     print()
+    # Put the venv's bin dir on PATH so which() finds venv-installed tools
+    env = os.environ.copy()
+    venv_bin = str(venv_path / "bin")
+    env["PATH"] = venv_bin + ":" + env.get("PATH", "")
+    env["VIRTUAL_ENV"] = str(venv_path)
     result = subprocess.run(
         [str(venv_python), "-m", "server.main", "setup"],
-        cwd=str(venv_path.parent),  # project root
+        cwd=str(venv_path.parent),
+        env=env,
     )
     return result.returncode
 
@@ -647,6 +653,29 @@ def run_setup() -> int:
     if not in_venv and project_root:
         venv_path = project_root / ".venv"
         if venv_path.exists():
+            # Check if the venv was created with an unsupported Python
+            venv_python = venv_path / "bin" / "python"
+            if venv_python.exists():
+                rc, stdout, _ = _run([str(venv_python), "--version"])
+                if rc == 0:
+                    # e.g. "Python 3.14.0" → (3, 14)
+                    parts = stdout.split()[-1].split(".")
+                    venv_ver = (int(parts[0]), int(parts[1]))
+                    best = _find_best_python()
+                    best_rc, best_out, _ = _run([best, "--version"])
+                    best_ver = None
+                    if best_rc == 0:
+                        bp = best_out.split()[-1].split(".")
+                        best_ver = (int(bp[0]), int(bp[1]))
+                    if venv_ver > PYTHON_MAX and best_ver and best_ver != venv_ver:
+                        print(f"    Existing venv uses Python {parts[0]}.{parts[1]}"
+                              f" (unsupported). A better version is available.")
+                        if _prompt_yn(f"    Recreate venv with {best}?"):
+                            import shutil as _shutil
+                            _shutil.rmtree(venv_path)
+                            if create_venv(project_root):
+                                return _reexec_in_venv(venv_path)
+
             # Venv exists but not activated — re-exec inside it
             print("    Virtual environment found but not activated.")
             print(f"    Re-running setup inside {venv_path}...")
