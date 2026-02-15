@@ -29,16 +29,11 @@ Quern Debug Server (localhost:9100)
 ```bash
 git clone <repo-url>
 cd quern-debug-server
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Verify system dependencies
-quern-debug-server setup
-
-# Build the MCP server
+python3 -m server setup      # creates venv, installs deps, checks tools
 cd mcp && npm install && npm run build && cd ..
 ```
+
+That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies (Xcode, idb, mitmproxy, etc.). All other commands auto-detect the venv, no activation needed.
 
 ### Run
 
@@ -242,17 +237,14 @@ server/
   device/              Simulator control (simctl, idb backends)
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
-tests/                 428 tests
+tests/                 594 tests
 ```
 
 ## Development
 
 ```bash
-# Activate the venv (if not already active)
-source .venv/bin/activate
-
-# Run tests
-pytest tests/ -v
+# Run tests (venv auto-detected)
+.venv/bin/pytest tests/ -v
 
 # Build MCP server
 cd mcp && npm run build
