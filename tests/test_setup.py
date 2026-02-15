@@ -140,12 +140,29 @@ class TestCheckPython:
             assert result.status == CheckStatus.ERROR
             assert result.fixable
 
-    def test_too_new_version(self):
+    def test_too_new_version_with_supported_available(self):
+        """Above max but a supported python exists — OK with note."""
+        def mock_which(name):
+            if name == "python3.13":
+                return None
+            if name == "python3.12":
+                return "/usr/bin/python3.12"
+            return None
+
         with patch.object(sys, "version_info", (3, 99, 0, "final", 0)):
-            result = check_python()
-            assert result.status == CheckStatus.WARNING
-            assert result.fixable
-            assert "3.11" in result.message  # mentions supported range
+            with patch("server.lifecycle.setup._which", side_effect=mock_which):
+                result = check_python()
+                assert result.status == CheckStatus.OK
+                assert "python3.12" in result.message
+
+    def test_too_new_version_no_supported(self):
+        """Above max and no supported python — WARNING + fixable."""
+        with patch.object(sys, "version_info", (3, 99, 0, "final", 0)):
+            with patch("server.lifecycle.setup._which", return_value=None):
+                result = check_python()
+                assert result.status == CheckStatus.WARNING
+                assert result.fixable
+                assert "3.11" in result.message
 
 
 # ── Virtual environment check ───────────────────────────────────────────

@@ -274,7 +274,16 @@ def check_python() -> CheckResult:
             fixable=True,
         )
 
-    # Above max — might work but untested
+    # Above max — check if a supported version is already installed
+    for ver in ("3.13", "3.12", "3.11"):
+        if _which(f"python{ver}"):
+            return CheckResult(
+                name="Python",
+                status=CheckStatus.OK,
+                message=f"{version_str} (will use python{ver} for venv)",
+            )
+
+    # No supported version found
     return CheckResult(
         name="Python",
         status=CheckStatus.WARNING,
