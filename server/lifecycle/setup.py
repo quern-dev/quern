@@ -1,10 +1,10 @@
-"""quern-debug-server setup — interactive environment checker and installer.
+"""./quern setup — interactive environment checker and installer.
 
 Validates the Python virtual environment, system dependencies, installs
 missing tools via Homebrew, and optionally configures simulators for proxy use.
 
 Usage:
-    quern-debug-server setup
+    ./quern setup
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ class SetupReport:
         print("─" * 50)
         if self.has_errors:
             print("  Some required dependencies are missing.")
-            print("  Re-run 'quern-debug-server setup' after resolving them.")
+            print("  Re-run './quern setup' after resolving them.")
         elif self.has_warnings:
             print("  Setup complete with warnings (see above).")
         else:
@@ -190,13 +190,25 @@ def check_venv() -> CheckResult:
     )
 
 
+def _find_best_python() -> str:
+    """Find the best available Python interpreter (prefer supported versions)."""
+    # Try specific supported versions first (newest to oldest)
+    for ver in ("3.13", "3.12", "3.11"):
+        path = _which(f"python{ver}")
+        if path:
+            return path
+    # Fall back to whatever python3 is
+    return sys.executable
+
+
 def create_venv(project_root: Path) -> bool:
     """Create a .venv and install the project into it. Returns True on success."""
     venv_path = project_root / ".venv"
-    print(f"    Creating virtual environment at {venv_path}...")
+    python = _find_best_python()
+    print(f"    Creating virtual environment at {venv_path} (using {python})...")
 
     rc, _, stderr = _run(
-        [sys.executable, "-m", "venv", str(venv_path)], timeout=60,
+        [python, "-m", "venv", str(venv_path)], timeout=60,
     )
     if rc != 0:
         print(f"    Failed to create venv: {stderr}")
@@ -494,7 +506,7 @@ def check_mitmproxy_cert() -> CheckResult:
         status=CheckStatus.WARNING,
         message="Not generated yet",
         detail="The CA certificate is auto-generated on first proxy start.\n"
-               "Run 'quern-debug-server start -f --no-crash' to generate it,\n"
+               "Run './quern start -f --no-crash' to generate it,\n"
                "then Ctrl+C to stop.",
     )
 
@@ -585,7 +597,7 @@ def run_setup() -> int:
     if brew_result.status == CheckStatus.MISSING:
         report.print_summary()
         print("  Homebrew is required to install system dependencies.")
-        print("  Install it first, then re-run: quern-debug-server setup")
+        print("  Install it first, then re-run: ./quern setup")
         print()
         return 1
 
@@ -608,7 +620,7 @@ def run_setup() -> int:
                 ))
                 report.print_summary()
                 print("  Python 3.12 was installed. Restart your shell, then re-run:")
-                print("    quern-debug-server setup")
+                print("    ./quern setup")
                 print()
                 return 0
             else:
@@ -693,14 +705,19 @@ def run_setup() -> int:
     idb_companion_result = check_idb_companion()
     if idb_companion_result.status == CheckStatus.MISSING:
         if _prompt_yn("    idb_companion not found. Install via Homebrew?"):
-            if _brew_install("idb-companion"):
+            # Try the tap first (facebook/fb), then the plain formula
+            success = _brew_install("facebook/fb/idb-companion")
+            if not success:
+                success = _brew_install("idb-companion")
+            if success:
                 idb_companion_result = check_idb_companion()  # re-check
             else:
                 idb_companion_result = CheckResult(
                     name="idb_companion",
-                    status=CheckStatus.ERROR,
-                    message="Homebrew install failed",
-                    detail="Try manually: brew install idb-companion",
+                    status=CheckStatus.WARNING,
+                    message="Not installed (UI automation unavailable)",
+                    detail="Try manually: brew tap facebook/fb && brew install idb-companion\n"
+                           "Or see https://fbidb.io for alternative install methods",
                 )
     report.add(idb_companion_result)
 
@@ -708,7 +725,11 @@ def run_setup() -> int:
     if idb_result.status == CheckStatus.MISSING:
         print("    idb CLI not found. This is the Python client for idb_companion.")
         if _prompt_yn("    Install fb-idb via pip?"):
-            pip_cmd = "pip" if _which("pip") else "pip3"
+            # Use the venv's pip if we're inside one, otherwise fall back to system
+            if sys.prefix != sys.base_prefix:
+                pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
+            else:
+                pip_cmd = "pip" if _which("pip") else "pip3"
             print(f"    Installing fb-idb...")
             try:
                 result = subprocess.run([pip_cmd, "install", "fb-idb"], timeout=120)
