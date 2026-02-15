@@ -99,6 +99,7 @@ docs/                Architecture docs, API reference
 - Source adapters: All inherit from `BaseSourceAdapter` (see `server/sources/base.py`). Must implement `start()`, `stop()`, and emit entries via callback.
 - Error handling: Source adapters must not crash the server. Catch exceptions, log them, and continue.
 - Testing: Use pytest with async support (`pytest-asyncio`). Fixture log data lives in `tests/fixtures/`.
+- Git: Do NOT add `Co-Authored-By` lines to commit messages. No AI attribution in commits.
 
 ## API Base URL
 
