@@ -157,6 +157,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device pool (Phase 4b-alpha)
     from server.device.pool import DevicePool
     device_pool = DevicePool(device_controller)
+    device_controller._pool = device_pool  # Enable pool-aware resolution
     app.state.device_pool = device_pool
 
     # Refresh pool state on startup

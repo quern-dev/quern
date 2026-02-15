@@ -183,6 +183,30 @@ class IdbBackend:
 
         return flat
 
+    async def describe_all_nested(self, udid: str) -> list[dict]:
+        """Get all UI accessibility elements with hierarchy preserved.
+
+        Same subprocess call as describe_all (--nested), but skips flattening
+        and container probing. Returns raw nested dicts with `children` arrays
+        intact.
+        """
+        stdout, _ = await self._run(
+            "ui", "describe-all", "--udid", udid, "--nested",
+        )
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise DeviceError(
+                f"Failed to parse idb describe-all output: {exc}",
+                tool="idb",
+            )
+        if not isinstance(data, list):
+            raise DeviceError(
+                f"Expected JSON array from describe-all, got {type(data).__name__}",
+                tool="idb",
+            )
+        return data
+
     async def describe_point(self, udid: str, x: float, y: float) -> dict | None:
         """Get the UI element at specific coordinates.
 
@@ -341,3 +365,17 @@ class IdbBackend:
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button. Runs: idb ui button <BUTTON> --udid <udid>"""
         await self._run("ui", "button", button, "--udid", udid)
+
+    async def select_all_and_delete(self, udid: str, x: float, y: float) -> None:
+        """Select all text in focused field and delete it.
+
+        Triple-taps at (x, y) to select all text, then presses Backspace.
+        Coordinates should be the center of the focused text field.
+        """
+        ix, iy = str(int(round(x))), str(int(round(y)))
+        # Triple-tap to select all text in the field
+        for _ in range(3):
+            await self._run("ui", "tap", ix, iy, "--udid", udid)
+        await asyncio.sleep(0.15)
+        # Delete the selection: HID Backspace=42
+        await self._run("ui", "key", "42", "--udid", udid)

@@ -604,3 +604,32 @@ class TestDescribeAllWithProbing:
         assert len(result) == 3
         existing_count = sum(1 for item in result if item.get("AXLabel") == "Existing")
         assert existing_count == 1
+
+
+# ---------------------------------------------------------------------------
+# select_all_and_delete
+# ---------------------------------------------------------------------------
+
+
+class TestSelectAllAndDelete:
+    async def test_triple_tap_and_delete(self):
+        """Triple-taps at coordinates then presses Backspace."""
+        backend = IdbBackend()
+        backend._binary = "/usr/local/bin/idb"
+
+        calls = []
+
+        async def mock_run(*args):
+            calls.append(args)
+            return ("", "")
+
+        with patch.object(backend, "_run", side_effect=mock_run):
+            await backend.select_all_and_delete("AAAA-1111", x=180.5, y=220.7)
+
+        # 4 calls: 3 taps + 1 backspace
+        assert len(calls) == 4
+        # Three taps at rounded coordinates
+        for i in range(3):
+            assert calls[i] == ("ui", "tap", "180", "221", "--udid", "AAAA-1111")
+        # Backspace
+        assert calls[3] == ("ui", "key", "42", "--udid", "AAAA-1111")

@@ -10,6 +10,7 @@ from fastapi.responses import Response
 
 from server.models import (
     BootDeviceRequest,
+    ClearTextRequest,
     DeviceError,
     GrantPermissionRequest,
     InstallAppRequest,
@@ -184,14 +185,23 @@ async def take_screenshot(
 async def get_ui_elements(
     request: Request,
     udid: str | None = Query(default=None),
+    children_of: str | None = Query(default=None, description="Only return children of the element with this identifier or label"),
 ):
-    """Get all UI accessibility elements from the current screen."""
+    """Get all UI accessibility elements from the current screen.
+
+    Optionally scope to children of a specific element using the `children_of` parameter.
+    """
     start = time.perf_counter()
-    logger.info(f"[PERF] API /ui START")
+    logger.info(f"[PERF] API /ui START (children_of={children_of})")
 
     controller = _get_controller(request)
     try:
-        elements, resolved_udid = await controller.get_ui_elements(udid=udid)
+        if children_of:
+            elements, resolved_udid = await controller.get_ui_elements_children_of(
+                children_of=children_of, udid=udid,
+            )
+        else:
+            elements, resolved_udid = await controller.get_ui_elements(udid=udid)
 
         end = time.perf_counter()
         logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
@@ -400,6 +410,17 @@ async def type_text(request: Request, body: TypeTextRequest):
     try:
         udid = await controller.type_text(text=body.text, udid=body.udid)
         return {"status": "ok", "udid": udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/clear")
+async def clear_text(request: Request, body: ClearTextRequest):
+    """Clear text in the currently focused text field (select-all + delete)."""
+    controller = _get_controller(request)
+    try:
+        resolved = await controller.clear_text(udid=body.udid)
+        return {"status": "ok", "udid": resolved}
     except DeviceError as e:
         raise _handle_device_error(e)
 

@@ -1,9 +1,11 @@
 """API routes for device pool management."""
 
+import time
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from server.models import DeviceError
+from server.models import DeviceError, EnsureDevicesRequest, ResolveDeviceRequest
 
 router = APIRouter(prefix="/api/v1/devices", tags=["device-pool"])
 
@@ -19,10 +21,14 @@ def _get_pool(request: Request):
 def _handle_pool_error(e: DeviceError) -> HTTPException:
     """Map a DeviceError to an appropriate HTTPException."""
     msg = str(e)
-    if "not found" in msg.lower():
+    if "not found" in msg.lower() or "no device matching" in msg.lower():
         return HTTPException(status_code=404, detail=msg)
-    if "already claimed" in msg.lower():
+    if "already claimed" in msg.lower() or "are claimed" in msg.lower():
         return HTTPException(status_code=409, detail=msg)
+    if "timed out" in msg.lower():
+        return HTTPException(status_code=408, detail=msg)
+    if "did not boot" in msg.lower():
+        return HTTPException(status_code=503, detail=msg)
     return HTTPException(status_code=500, detail=f"[{e.tool}] {msg}")
 
 
@@ -31,6 +37,7 @@ class ClaimDeviceRequest(BaseModel):
     session_id: str
     udid: str | None = None
     name: str | None = None
+    os_version: str | None = None
 
 
 class ReleaseDeviceRequest(BaseModel):
@@ -122,5 +129,79 @@ async def refresh_pool(request: Request):
             "status": "refreshed",
             "device_count": len(devices),
         }
+    except DeviceError as e:
+        raise _handle_pool_error(e)
+
+
+@router.post("/resolve")
+async def resolve_device(request: Request, body: ResolveDeviceRequest):
+    """Smart device resolution with criteria matching, auto-boot, and wait.
+
+    Returns 200 with device info on success.
+    Returns 404 if no device matching criteria found.
+    Returns 408 if timed out waiting for available device.
+    Returns 409 if device claimed and wait_if_busy=false.
+    Returns 503 if boot failed.
+    """
+    pool = _get_pool(request)
+    start = time.time()
+    try:
+        udid = await pool.resolve_device(
+            udid=body.udid,
+            name=body.name,
+            os_version=body.os_version,
+            auto_boot=body.auto_boot,
+            wait_if_busy=body.wait_if_busy,
+            wait_timeout=body.wait_timeout,
+            session_id=body.session_id,
+        )
+        waited = round(time.time() - start, 2)
+        device = await pool.get_device_state(udid)
+        result = {
+            "udid": udid,
+            "name": device.name if device else "",
+            "state": device.state.value if device else "unknown",
+            "os_version": device.os_version if device else "",
+            "waited_seconds": waited,
+        }
+        if body.session_id and device:
+            result["claimed_by"] = device.claimed_by
+        return result
+    except DeviceError as e:
+        raise _handle_pool_error(e)
+
+
+@router.post("/ensure")
+async def ensure_devices(request: Request, body: EnsureDevicesRequest):
+    """Ensure N devices matching criteria are booted and available.
+
+    Returns 200 with device list on success.
+    Returns 404 if not enough matching devices exist.
+    Returns 503 if boot failed for one or more devices.
+    """
+    pool = _get_pool(request)
+    try:
+        udids = await pool.ensure_devices(
+            count=body.count,
+            name=body.name,
+            os_version=body.os_version,
+            auto_boot=body.auto_boot,
+            session_id=body.session_id,
+        )
+        devices = []
+        for udid in udids:
+            device = await pool.get_device_state(udid)
+            devices.append({
+                "udid": udid,
+                "name": device.name if device else "",
+                "state": device.state.value if device else "unknown",
+            })
+        result = {
+            "devices": devices,
+            "total_available": len(udids),
+        }
+        if body.session_id:
+            result["session_id"] = body.session_id
+        return result
     except DeviceError as e:
         raise _handle_pool_error(e)

@@ -345,3 +345,59 @@ def generate_screen_summary(elements: list[UIElement], max_elements: int = 20) -
         "total_interactive_elements": total_interactive,
         "max_elements": max_elements,
     }
+
+
+# ---------------------------------------------------------------------------
+# Hierarchy queries (Phase 4b-delta)
+# ---------------------------------------------------------------------------
+
+
+def _find_node(tree: list[dict], identifier: str | None, label: str | None) -> dict | None:
+    """Recursively search nested tree for a node matching identifier or label."""
+    for node in tree:
+        # Check identifier (case-sensitive)
+        if identifier and (node.get("AXUniqueId") == identifier):
+            return node
+        # Check label (case-insensitive)
+        node_label = node.get("AXLabel") or ""
+        if label and node_label.lower() == label.lower():
+            return node
+        # Recurse into children
+        children = node.get("children", [])
+        if children:
+            found = _find_node(children, identifier, label)
+            if found:
+                return found
+    return None
+
+
+def _flatten_children(nodes: list[dict]) -> list[dict]:
+    """Flatten nested tree WITHOUT mutating input."""
+    result: list[dict] = []
+    for node in nodes:
+        # Copy without children key to avoid mutation
+        flat_node = {k: v for k, v in node.items() if k != "children"}
+        result.append(flat_node)
+        children = node.get("children", [])
+        if children:
+            result.extend(_flatten_children(children))
+    return result
+
+
+def find_children_of(
+    nested_tree: list[dict],
+    parent_identifier: str | None = None,
+    parent_label: str | None = None,
+) -> list[dict]:
+    """Find all descendants of a specific parent in the nested tree.
+
+    Searches by identifier first, falls back to label (case-insensitive).
+    Returns flat list of raw dicts (not UIElements). Empty if parent not found.
+    """
+    parent = _find_node(nested_tree, identifier=parent_identifier, label=parent_label)
+    if parent is None:
+        return []
+    children = parent.get("children", [])
+    if not children:
+        return []
+    return _flatten_children(children)

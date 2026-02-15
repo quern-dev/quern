@@ -10,6 +10,7 @@ from server.device.idb import IdbBackend
 from server.device.screenshots import annotate_screenshot, process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.ui_elements import (
+    find_children_of,
     find_element,
     generate_screen_summary,
     get_center,
@@ -50,6 +51,7 @@ class DeviceController:
         self.simctl = SimctlBackend()
         self.idb = IdbBackend()
         self._active_udid: str | None = None
+        self._pool = None  # Set by main.py after pool is created; None = no pool
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
         self._cache_ttl: float = 0.3  # 300ms cache TTL
@@ -68,12 +70,15 @@ class DeviceController:
     async def resolve_udid(self, udid: str | None = None) -> str:
         """Resolve which device to target.
 
+        If a DevicePool is attached, attempts pool-based resolution for
+        claim-aware, multi-device-friendly behavior. If pool resolution
+        fails for any reason, silently falls back to the original logic.
+
         Resolution order:
         1. Explicit udid parameter → use it, update active
         2. Stored active_udid → use it
-        3. Auto-detect: exactly 1 booted simulator → use it, update active
-        4. 0 booted → error
-        5. 2+ booted → error
+        3. Pool resolution (if pool attached) → best available booted device
+        4. Fallback: simple auto-detect (original logic, unchanged)
         """
         if udid:
             self._active_udid = udid
@@ -82,6 +87,16 @@ class DeviceController:
         if self._active_udid:
             return self._active_udid
 
+        # Step 3: try pool-based resolution (silent upgrade)
+        if self._pool is not None:
+            try:
+                resolved = await self._pool.resolve_device()
+                self._active_udid = resolved
+                return resolved
+            except Exception as e:
+                logger.debug("Pool resolution failed, falling back: %s", e)
+
+        # Step 4: fallback — original logic, unchanged
         devices = await self.simctl.list_devices()
         booted = [d for d in devices if d.state == DeviceState.BOOTED]
 
@@ -374,6 +389,22 @@ class DeviceController:
         logger.info(f"[PERF] get_ui_elements: parsed {len(elements)} elements (+{(t4-t3)*1000:.1f}ms)")
         logger.info(f"[PERF] get_ui_elements COMPLETE: total={( end-start)*1000:.1f}ms")
 
+        return elements, resolved
+
+    async def get_ui_elements_children_of(
+        self,
+        children_of: str,
+        udid: str | None = None,
+    ) -> tuple[list[UIElement], str]:
+        """Get UI elements scoped to children of a specific parent.
+
+        Uses the nested idb tree to find the parent by identifier or label,
+        then returns its flattened descendants as parsed UIElements.
+        """
+        resolved = await self.resolve_udid(udid)
+        nested = await self.idb.describe_all_nested(resolved)
+        child_dicts = find_children_of(nested, parent_identifier=children_of, parent_label=children_of)
+        elements = parse_elements(child_dicts)
         return elements, resolved
 
     async def get_element(
@@ -901,6 +932,41 @@ class DeviceController:
         resolved = await self.resolve_udid(udid)
         await self.idb.type_text(resolved, text)
         self._invalidate_ui_cache(resolved)  # UI changed (text field value updated)
+        return resolved
+
+    async def clear_text(self, udid: str | None = None) -> str:
+        """Clear text in the currently focused text field.
+
+        Finds a text field with content, triple-taps to select all, then
+        presses Backspace. Returns the resolved udid.
+        """
+        resolved = await self.resolve_udid(udid)
+
+        # Find the focused text field by looking for TextField/SecureTextField with a value
+        elements, _ = await self.get_ui_elements(udid=resolved)
+        text_fields = [
+            e for e in elements
+            if e.type in ("TextField", "SecureTextField", "TextArea", "SearchField")
+            and e.frame
+        ]
+
+        # Prefer fields with a value (text to clear), fall back to first text field
+        target = None
+        for tf in text_fields:
+            if tf.value:
+                target = tf
+                break
+        if target is None and text_fields:
+            target = text_fields[0]
+
+        if target is None or target.frame is None:
+            raise DeviceError("No text field found to clear", tool="idb")
+
+        cx = target.frame["x"] + target.frame["width"] / 2
+        cy = target.frame["y"] + target.frame["height"] / 2
+
+        await self.idb.select_all_and_delete(resolved, x=cx, y=cy)
+        self._invalidate_ui_cache(resolved)
         return resolved
 
     async def press_button(self, button: str, udid: str | None = None) -> str:

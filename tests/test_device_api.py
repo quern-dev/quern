@@ -90,6 +90,7 @@ def mock_controller(app):
     })
     ctrl.swipe = AsyncMock(return_value="AAAA-1111")
     ctrl.type_text = AsyncMock(return_value="AAAA-1111")
+    ctrl.clear_text = AsyncMock(return_value="AAAA-1111")
     ctrl.press_button = AsyncMock(return_value="AAAA-1111")
     ctrl.set_location = AsyncMock(return_value="AAAA-1111")
     ctrl.grant_permission = AsyncMock(return_value="AAAA-1111")
@@ -626,6 +627,41 @@ class TestTypeText:
 # ---------------------------------------------------------------------------
 # POST /device/ui/press (Phase 3c)
 # ---------------------------------------------------------------------------
+
+
+class TestClearText:
+    async def test_clear_text(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/clear",
+                json={},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        assert resp.json()["udid"] == "AAAA-1111"
+        mock_controller.clear_text.assert_called_once_with(udid=None)
+
+    async def test_clear_text_with_udid(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/clear",
+                json={"udid": "BBBB-2222"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        mock_controller.clear_text.assert_called_once_with(udid="BBBB-2222")
+
+    async def test_clear_text_no_auth(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/clear",
+                json={},
+            )
+        assert resp.status_code == 401
 
 
 class TestPressButton:

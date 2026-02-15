@@ -1667,16 +1667,23 @@ server.tool(
 
 server.tool(
   "get_ui_tree",
-  `Get the full accessibility tree (all UI elements) from the current screen. Requires idb.`,
+  `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of. Requires idb.`,
   {
     udid: z
       .string()
       .optional()
       .describe("Target device UDID (auto-resolves if omitted)"),
+    children_of: z
+      .string()
+      .optional()
+      .describe("Only return children of the element with this identifier or label"),
   },
-  async ({ udid }) => {
+  async ({ udid, children_of }) => {
     try {
-      const data = await apiRequest("GET", "/api/v1/device/ui", { udid });
+      const params: Record<string, string> = {};
+      if (udid) params.udid = udid;
+      if (children_of) params.children_of = children_of;
+      const data = await apiRequest("GET", "/api/v1/device/ui", params);
 
       return {
         content: [
@@ -1922,7 +1929,7 @@ server.tool(
 
 server.tool(
   "tap_element",
-  `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match. Requires idb.`,
+  `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results. Requires idb.`,
   {
     label: z
       .string()
@@ -2047,6 +2054,46 @@ server.tool(
       const data = await apiRequest(
         "POST",
         "/api/v1/device/ui/type",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "clear_text",
+  `Clear all text in the currently focused input field (select-all + delete). Use this before type_text when a field has pre-existing content you want to replace. Note: Secure text fields (passwords) may not support select-all. Requires idb.`,
+  {
+    udid: z
+      .string()
+      .optional()
+      .describe("Target device UDID (auto-resolves if omitted)"),
+  },
+  async ({ udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/clear",
         undefined,
         body
       );
@@ -2333,6 +2380,141 @@ server.tool(
   }
 );
 
+server.tool(
+  "resolve_device",
+  `Smartly find and optionally claim a device matching criteria. This is the
+preferred way to get a device — it handles booting, waiting, and claiming
+automatically. Use this instead of manually listing the pool and claiming.`,
+  {
+    name: z
+      .string()
+      .optional()
+      .describe("Device name pattern (e.g., 'iPhone 16 Pro')"),
+    os_version: z
+      .string()
+      .optional()
+      .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts both '18.2' and 'iOS 18.2'."),
+    auto_boot: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "Boot a matching shutdown device if no booted ones available"
+      ),
+    wait_if_busy: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Wait for a claimed device to be released"),
+    wait_timeout: z
+      .number()
+      .optional()
+      .default(30)
+      .describe("Max seconds to wait if wait_if_busy is true"),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Claim the device for this session"),
+  },
+  async ({ name, os_version, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (name) body.name = name;
+      if (os_version) body.os_version = os_version;
+      if (auto_boot !== undefined) body.auto_boot = auto_boot;
+      if (wait_if_busy !== undefined) body.wait_if_busy = wait_if_busy;
+      if (wait_timeout !== undefined) body.wait_timeout = wait_timeout;
+      if (session_id) body.session_id = session_id;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/devices/resolve",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "ensure_devices",
+  `Ensure N devices matching criteria are booted and ready. Use this to set up
+parallel test execution — it finds available devices, boots more if needed,
+and optionally claims them all for a session.`,
+  {
+    count: z
+      .number()
+      .min(1)
+      .max(10)
+      .describe("Number of devices needed"),
+    name: z
+      .string()
+      .optional()
+      .describe("Device name pattern (e.g., 'iPhone 16 Pro')"),
+    os_version: z
+      .string()
+      .optional()
+      .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts both '18.2' and 'iOS 18.2'."),
+    auto_boot: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe("Boot shutdown devices if not enough booted ones"),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Claim all devices for this session"),
+  },
+  async ({ count, name, os_version, auto_boot, session_id }) => {
+    try {
+      const body: Record<string, unknown> = { count };
+      if (name) body.name = name;
+      if (os_version) body.os_version = os_version;
+      if (auto_boot !== undefined) body.auto_boot = auto_boot;
+      if (session_id) body.session_id = session_id;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/devices/ensure",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -2414,6 +2596,7 @@ const GUIDE_CONTENT = `# Quern Debug Server — Tool Selection Guide
 | Tap at coordinates                | \`tap\`                |
 | Swipe gesture                     | \`swipe\`              |
 | Type text                         | \`type_text\`          |
+| Clear text in a field             | \`clear_text\`         |
 | Press hardware button             | \`press_button\`       |
 | Set GPS location                  | \`set_location\`       |
 | Grant app permission              | \`grant_permission\`   |
@@ -2425,6 +2608,61 @@ const GUIDE_CONTENT = `# Quern Debug Server — Tool Selection Guide
 | Mock an API response              | \`set_mock\`           |
 | List active mock rules            | \`list_mocks\`         |
 | Remove mock rules                 | \`clear_mocks\`        |
+
+## REST API Path Reference
+
+When calling the HTTP API directly (without MCP), use these paths:
+
+| MCP Tool             | HTTP Method | REST Path                              |
+|----------------------|-------------|----------------------------------------|
+| \`ensure_server\`      | GET         | \`/health\`                              |
+| \`tail_logs\`          | GET         | \`/api/v1/logs/query\`                   |
+| \`query_logs\`         | GET         | \`/api/v1/logs/query\`                   |
+| \`get_log_summary\`    | GET         | \`/api/v1/logs/summary\`                 |
+| \`get_errors\`         | GET         | \`/api/v1/logs/errors\`                  |
+| \`get_build_result\`   | GET         | \`/api/v1/builds/latest\`                |
+| \`get_latest_crash\`   | GET         | \`/api/v1/crashes/latest\`               |
+| \`set_log_filter\`     | POST        | \`/api/v1/logs/filter\`                  |
+| \`list_log_sources\`   | GET         | \`/api/v1/logs/sources\`                 |
+| \`query_flows\`        | GET         | \`/api/v1/proxy/flows\`                  |
+| \`get_flow_detail\`    | GET         | \`/api/v1/proxy/flows/{id}\`             |
+| \`get_flow_summary\`   | GET         | \`/api/v1/proxy/flows/summary\`          |
+| \`proxy_status\`       | GET         | \`/api/v1/proxy/status\`                 |
+| \`start_proxy\`        | POST        | \`/api/v1/proxy/start\`                  |
+| \`stop_proxy\`         | POST        | \`/api/v1/proxy/stop\`                   |
+| \`set_intercept\`      | POST        | \`/api/v1/proxy/intercept\`              |
+| \`clear_intercept\`    | DELETE      | \`/api/v1/proxy/intercept\`              |
+| \`list_held_flows\`    | GET         | \`/api/v1/proxy/intercept/held\`         |
+| \`release_flow\`       | POST        | \`/api/v1/proxy/intercept/release\`      |
+| \`replay_flow\`        | POST        | \`/api/v1/proxy/replay/{id}\`            |
+| \`set_mock\`           | POST        | \`/api/v1/proxy/mock\`                   |
+| \`list_mocks\`         | GET         | \`/api/v1/proxy/mock\`                   |
+| \`clear_mocks\`        | DELETE      | \`/api/v1/proxy/mock\`                   |
+| \`list_devices\`       | GET         | \`/api/v1/device/list\`                  |
+| \`boot_device\`        | POST        | \`/api/v1/device/boot\`                  |
+| \`shutdown_device\`    | POST        | \`/api/v1/device/shutdown\`              |
+| \`install_app\`        | POST        | \`/api/v1/device/app/install\`           |
+| \`launch_app\`         | POST        | \`/api/v1/device/app/launch\`            |
+| \`terminate_app\`      | POST        | \`/api/v1/device/app/terminate\`         |
+| \`list_apps\`          | GET         | \`/api/v1/device/app/list\`              |
+| \`take_screenshot\`    | GET         | \`/api/v1/device/screenshot\`            |
+| \`get_ui_tree\`        | GET         | \`/api/v1/device/ui\`                    |
+| \`get_element_state\`  | GET         | \`/api/v1/device/ui/element\`            |
+| \`wait_for_element\`   | POST        | \`/api/v1/device/ui/wait-for-element\`   |
+| \`get_screen_summary\` | GET         | \`/api/v1/device/screen-summary\`        |
+| \`tap\`                | POST        | \`/api/v1/device/ui/tap\`                |
+| \`tap_element\`        | POST        | \`/api/v1/device/ui/tap-element\`        |
+| \`swipe\`              | POST        | \`/api/v1/device/ui/swipe\`              |
+| \`type_text\`          | POST        | \`/api/v1/device/ui/type\`               |
+| \`clear_text\`         | POST        | \`/api/v1/device/ui/clear\`              |
+| \`press_button\`       | POST        | \`/api/v1/device/ui/press\`              |
+| \`set_location\`       | POST        | \`/api/v1/device/location\`              |
+| \`grant_permission\`   | POST        | \`/api/v1/device/permission\`            |
+| \`list_device_pool\`   | GET         | \`/api/v1/devices/pool\`                 |
+| \`claim_device\`       | POST        | \`/api/v1/devices/claim\`                |
+| \`release_device\`     | POST        | \`/api/v1/devices/release\`              |
+| \`resolve_device\`     | POST        | \`/api/v1/devices/resolve\`              |
+| \`ensure_devices\`     | POST        | \`/api/v1/devices/ensure\`               |
 
 ## Recommended Workflows
 
@@ -2501,18 +2739,24 @@ Replay a previously captured flow to reproduce behavior:
 
 Use device tools to inspect and interact with the simulator:
 
-1. \`list_devices\` — find available simulators and check tool availability
-2. \`boot_device\` — boot a simulator if needed
+1. \`resolve_device\` — find the best available device matching your criteria (preferred over manual listing)
+2. \`boot_device\` — boot a simulator if needed (or use \`resolve_device\` with \`auto_boot: true\`)
 3. \`install_app\` / \`launch_app\` — deploy and start the app
 4. \`get_screen_summary\` — understand what's on screen (text description)
 5. \`take_screenshot\` — see the actual screen image
 6. \`tap_element\` — interact with UI elements by label/identifier
 7. \`type_text\` — enter text into focused fields
-8. \`get_screen_summary\` — verify the result
+8. \`clear_text\` — clear a pre-filled text field before typing new content
+9. \`get_screen_summary\` — verify the result
 
-**Tip**: \`tap_element\` is preferred over \`tap\` (coordinates) because it finds elements by label, handling layout differences. If multiple elements match, it returns "ambiguous" with a list so you can narrow by \`element_type\` or \`identifier\`.
+**Tip**: \`tap_element\` is preferred over \`tap\` (coordinates) because it finds
+elements by label, handling layout differences. If multiple elements match, it
+returns "ambiguous" with a list — narrow by \`element_type\` or \`identifier\`.
 
-**Tool requirements**: Device management and screenshots use \`simctl\` (always available with Xcode). UI inspection and interaction (\`get_ui_tree\`, \`tap\`, \`swipe\`, \`type_text\`, \`press_button\`) require \`idb\`. Check \`list_devices\` response for tool availability.
+**Tip**: For parallel testing, use \`ensure_devices\` to boot and claim N devices,
+then pass each device's \`udid\` to subsequent tool calls for isolation.
+
+**Tool requirements**: Device management and screenshots use \`simctl\` (always available with Xcode). UI inspection and interaction (\`get_ui_tree\`, \`tap\`, \`swipe\`, \`type_text\`, \`clear_text\`, \`press_button\`) require \`idb\`. Check \`list_devices\` response for tool availability.
 
 ### 10. Debugging a Specific Issue
 

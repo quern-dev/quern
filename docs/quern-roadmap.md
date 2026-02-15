@@ -74,9 +74,11 @@ Everything in this bucket runs locally on one developer's Mac. This is the open-
 | `ensure_server` MCP tool | ✅ Complete | Single entry point for agents |
 | CLI subcommands (`start`, `stop`, `restart`, `status`) | ✅ Complete | |
 | Proxy watchdog (crash detection, degraded status) | ✅ Complete | No auto-restart — agent decides |
-| **4b: Device Resolution Rules** | | |
-| Formalized resolution protocol | 📐 Designed | One booted sim → use silently. Multiple → list and ask. None → list available, ask which to boot. Physical device → prefer it. |
-| CLAUDE.md / MCP guide integration | 💡 Conceptual | Agent needs to know the protocol |
+| **4b: Multi-Device Support** | | |
+| 4b-alpha: Device pool (claim/release, state file, locking) | ✅ Complete | `DevicePool` class, `~/.quern/device-pool.json`, MCP tools |
+| 4b-beta: Session management | 🌱 Seed | Deferred — claim timeout (30 min auto-release) covers most use cases without formal sessions |
+| 4b-gamma: Resolution protocol | ✅ Complete | `resolve_device()`, `ensure_devices()`, criteria matching, auto-boot, wait-for-available, diagnostic errors, controller fallback |
+| 4b-delta: Testing, polish & agent UX | 📐 Designed | MCP guide discoverability, `clear_text` action, hierarchy option for `get_screen_summary`. Informed by real agent feedback. |
 | **4c: Headless CLI Runner** | | |
 | `quern run` command | 📐 Designed | `--device`, `--proxy`, `--prompt`, `--output`. Starts everything, executes scenario via AI agent, captures results, shuts down. Foundation for CI. |
 | Automated scenario support | 💡 Conceptual | Scenario file format, step definitions |

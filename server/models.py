@@ -579,6 +579,12 @@ class TypeTextRequest(BaseModel):
     udid: str | None = None
 
 
+class ClearTextRequest(BaseModel):
+    """Request body for POST /device/ui/clear."""
+
+    udid: str | None = None
+
+
 class PressButtonRequest(BaseModel):
     """Request body for POST /device/ui/press."""
 
@@ -662,3 +668,30 @@ class DevicePoolState(BaseModel):
     version: str = "1.0"
     updated_at: datetime
     devices: dict[str, DevicePoolEntry]
+
+
+# ---------------------------------------------------------------------------
+# Resolution protocol models (Phase 4b-gamma)
+# ---------------------------------------------------------------------------
+
+
+class ResolveDeviceRequest(BaseModel):
+    """Request body for POST /api/v1/devices/resolve."""
+
+    udid: str | None = None
+    name: str | None = None
+    os_version: str | None = None
+    auto_boot: bool = False
+    wait_if_busy: bool = False
+    wait_timeout: float = Field(default=30.0, ge=1.0, le=120.0)
+    session_id: str | None = None
+
+
+class EnsureDevicesRequest(BaseModel):
+    """Request body for POST /api/v1/devices/ensure."""
+
+    count: int = Field(ge=1, le=10)
+    name: str | None = None
+    os_version: str | None = None
+    auto_boot: bool = True
+    session_id: str | None = None

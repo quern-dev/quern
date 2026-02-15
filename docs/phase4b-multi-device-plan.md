@@ -172,20 +172,39 @@ pool.resolve_device(
 # → Finds matching device, boots if needed, claims for session
 ```
 
-### Phase 4b-delta: Testing & Polish (0.5 day)
+### Phase 4b-delta: Testing, Polish & Agent UX (1 day)
 
-**Deliverables:**
+Informed by real-world agent feedback from a 9-step UI test ported to the Quern API.
+
+**Testing:**
 - Unit tests for pool logic (claim/release, race conditions)
 - Integration tests with multiple simulators
-- Documentation (architecture, API reference)
-- MCP guide updates (new tools, best practices)
-- Example scripts
-
-**Test Scenarios:**
 - Concurrent claims (ensure no double-booking)
 - Release on crash/timeout
 - Multiple sessions sharing pool
 - Boot-on-demand flow
+
+**Documentation & Discoverability:**
+- MCP guide: add tool→REST path mapping table (agents guess `/device/swipe` when it's `/device/ui/swipe`)
+- MCP tool descriptions: document `element_type` as a narrowing parameter on `tap_element` (agents don't know it exists when they get "ambiguous" responses)
+- MCP tool descriptions: document `os_version` accepts both `"18.2"` and `"iOS 18.2"` (✅ server-side already fixed)
+- Architecture docs and API reference
+
+**New: `clear_text` composite action (~1hr):**
+- `POST /api/v1/device/ui/clear` — select-all + delete on focused text field
+- Builds on existing idb primitives (triple-tap or cmd+A → delete)
+- Solves pre-filled text field friction (agents currently have to type only the suffix)
+- MCP tool: `clear_text`
+
+**New: `get_screen_summary` hierarchy option (~2hr):**
+- Add optional `include_hierarchy=true` parameter to `GET /api/v1/device/ui` and `get_screen_summary`
+- When true, preserve parent-child nesting from idb output (enables "find the TextArea inside _Post log view")
+- Flat list stays default for token efficiency
+- Alternatively: add `children_of(identifier)` query parameter
+
+**Deferred (not 4b-delta):**
+- Off-screen element enumeration — platform limitation, idb only returns visible accessibility tree. Scroll-and-collect is the correct pattern.
+- Dismiss-all-modals helper — app-specific, not generalizable. Better addressed by test DSL layer (Section 3.1).
 
 ---
 
