@@ -134,6 +134,66 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if app.state.enable_proxy:
         await proxy.start()
 
+        # Check if system proxy is already configured (from previous run or manual setup)
+        try:
+            from server.proxy.system_proxy import (
+                detect_active_interface,
+                snapshot_system_proxy,
+                detect_and_configure,
+            )
+            from server.lifecycle.state import update_state, read_state
+
+            state = read_state()
+            already_tracked = state and state.get("system_proxy_configured")
+
+            # Detect if proxy is already pointing to our port
+            iface = detect_active_interface()
+            if iface:
+                current_snap = await asyncio.to_thread(snapshot_system_proxy, iface)
+                is_pointing_to_us = (
+                    current_snap.http_proxy_enabled
+                    and current_snap.http_proxy_server in ("127.0.0.1", "localhost")
+                    and current_snap.http_proxy_port == app.state.proxy_port
+                )
+
+                if is_pointing_to_us and not already_tracked:
+                    # System proxy is pointing to us but we don't have it tracked
+                    # (probably from a previous crash or manual configuration)
+                    logger.warning(
+                        "Detected system proxy already pointing to port %d on %s — "
+                        "saving snapshot for cleanup on shutdown",
+                        app.state.proxy_port,
+                        iface,
+                    )
+                    try:
+                        update_state(
+                            system_proxy_configured=True,
+                            system_proxy_interface=iface,
+                            system_proxy_snapshot=current_snap.to_dict(),
+                        )
+                    except Exception:
+                        logger.debug("Could not update state file", exc_info=True)
+                elif not is_pointing_to_us:
+                    # System proxy not configured, set it up
+                    snap = await asyncio.to_thread(detect_and_configure, app.state.proxy_port)
+                    if snap:
+                        logger.info(
+                            "Auto-configured system proxy on %s (port %d)",
+                            snap.interface,
+                            app.state.proxy_port,
+                        )
+                        try:
+                            update_state(
+                                system_proxy_configured=True,
+                                system_proxy_interface=snap.interface,
+                                system_proxy_snapshot=snap.to_dict(),
+                            )
+                        except Exception:
+                            logger.debug("Could not update state file", exc_info=True)
+                # else: already pointing to us and tracked, nothing to do
+        except Exception:
+            logger.warning("Failed to auto-configure system proxy", exc_info=True)
+
     app.state.source_adapters = adapters
 
     # Device controller (Phase 3)
@@ -350,7 +410,17 @@ def _is_our_process(pid: int) -> bool:
         if result.returncode != 0:
             return False
         cmd = result.stdout.strip()
-        return "quern-debug-server" in cmd or "server.main" in cmd or "uvicorn" in cmd
+        # Match various ways the server can be invoked:
+        # - "python -m server start" (via ./quern wrapper)
+        # - "python -m server.main" (direct invocation)
+        # - "uvicorn server.main:app" (direct uvicorn)
+        # - "quern-debug-server" (legacy)
+        return (
+            "quern-debug-server" in cmd
+            or "server.main" in cmd
+            or "uvicorn" in cmd
+            or ("-m server" in cmd and "Python" in cmd)  # Matches "Python -m server"
+        )
     except Exception:
         return False
 
