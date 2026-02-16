@@ -81,6 +81,10 @@ def _bind_port(port: int) -> socket.socket:
 class TestStartDaemon:
     """Tests for `quern-debug-server start` (daemon mode)."""
 
+    def setup_method(self):
+        """Clean up any leftover state before each test."""
+        _kill_server()
+
     def teardown_method(self):
         """Kill any leftover server process."""
         _kill_server()
@@ -154,6 +158,9 @@ class TestStartDaemon:
 class TestStop:
     """Tests for `quern-debug-server stop`."""
 
+    def setup_method(self):
+        _kill_server()
+
     def teardown_method(self):
         _kill_server()
 
@@ -204,6 +211,9 @@ class TestStop:
 
 class TestStatus:
     """Tests for `quern-debug-server status`."""
+
+    def setup_method(self):
+        _kill_server()
 
     def teardown_method(self):
         _kill_server()
