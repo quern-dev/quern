@@ -609,6 +609,25 @@ def check_booted_simulators() -> list[dict[str, str]]:
     return booted
 
 
+def _is_cert_installed(udid: str) -> bool:
+    """Check if mitmproxy CA cert is already installed on a simulator."""
+    import asyncio
+    from server.device.controller import DeviceController
+    from server.proxy import cert_manager
+
+    controller = DeviceController()
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                cert_manager.is_cert_installed(controller, udid, verify=True)
+            )
+        finally:
+            loop.close()
+    except Exception:
+        return False
+
+
 def install_cert_simulator(udid: str, name: str) -> CheckResult:
     """Install mitmproxy CA cert into a booted simulator.
 
@@ -916,13 +935,27 @@ def run_setup() -> int:
         if booted:
             cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
             if cert_path.exists():
-                print(f"    Found {len(booted)} booted simulator(s):")
+                # Check which sims already have the cert vs which need it
+                needs_cert = []
                 for sim in booted:
-                    print(f"      • {sim['name']} ({sim['udid'][:8]}…)")
-                if _prompt_yn("    Install mitmproxy CA cert into booted simulators?"):
-                    for sim in booted:
-                        result = install_cert_simulator(sim["udid"], sim["name"])
-                        report.add(result)
+                    installed = _is_cert_installed(sim["udid"])
+                    if installed:
+                        report.add(CheckResult(
+                            name=f"Cert → {sim['name']}",
+                            status=CheckStatus.OK,
+                            message="CA certificate installed and verified",
+                        ))
+                    else:
+                        needs_cert.append(sim)
+
+                if needs_cert:
+                    print(f"    Found {len(needs_cert)} booted simulator(s) needing CA cert:")
+                    for sim in needs_cert:
+                        print(f"      • {sim['name']} ({sim['udid'][:8]}…)")
+                    if _prompt_yn("    Install mitmproxy CA cert into booted simulators?"):
+                        for sim in needs_cert:
+                            result = install_cert_simulator(sim["udid"], sim["name"])
+                            report.add(result)
             else:
                 print("    Booted simulators found but no CA cert yet — skipping cert install.")
                 print("    Start the proxy once, then re-run setup to install certs.")
