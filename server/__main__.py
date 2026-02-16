@@ -183,6 +183,10 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
         sys.exit(_cmd_mcp_install())
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "update":
+        from server.lifecycle.updater import run_update
+        sys.exit(run_update())
+
     # All other commands need the full server stack
     from server.main import cli
     cli()

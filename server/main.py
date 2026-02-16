@@ -38,6 +38,7 @@ from server.lifecycle.ports import (
     DEFAULT_PROXY_PORT,
     DEFAULT_SERVER_PORT,
     find_available_port,
+    reclaim_port,
 )
 from server.lifecycle.state import (
     is_server_healthy,
@@ -402,27 +403,8 @@ def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def _is_our_process(pid: int) -> bool:
     """Check if a PID belongs to a quern-debug-server process (PID reuse guard)."""
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return False
-        cmd = result.stdout.strip()
-        # Match various ways the server can be invoked:
-        # - "python -m server start" (via ./quern wrapper)
-        # - "python -m server.main" (direct invocation)
-        # - "uvicorn server.main:app" (direct uvicorn)
-        # - "quern-debug-server" (legacy)
-        return (
-            "quern-debug-server" in cmd
-            or "server.main" in cmd
-            or "uvicorn" in cmd
-            or ("-m server" in cmd and "Python" in cmd)  # Matches "Python -m server"
-        )
-    except Exception:
-        return False
+    from server.lifecycle.ports import _is_quern_process
+    return _is_quern_process(pid)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
@@ -431,6 +413,15 @@ def _cmd_start(args: argparse.Namespace) -> None:
     from server.__main__ import _ensure_mcp_built
     if not _ensure_mcp_built(quiet=True):
         print("Warning: MCP server build failed — MCP tools may be stale")
+
+    # Non-blocking update check (once per 24h)
+    try:
+        from server.lifecycle.update_check import check_for_updates
+        update_msg = check_for_updates()
+        if update_msg:
+            print(update_msg)
+    except Exception:
+        pass  # Never block startup
 
     # Check for existing instance
     existing = read_state()
@@ -447,24 +438,27 @@ def _cmd_start(args: argparse.Namespace) -> None:
         # Stale state — clean up
         remove_state()
 
-    # Resolve ports (scan for available)
-    # Exclude the proxy port so the server never steals it
-    server_port = find_available_port(
-        args.port, host=args.host, exclude={args.proxy_port},
-    )
-    if server_port != args.port:
-        print(f"Port {args.port} in use, using {server_port}")
+    # Resolve ports — try to reclaim from stale quern processes first,
+    # only scan upward if occupied by something else
+    server_port = args.port
+    if not reclaim_port(server_port, args.host):
+        print(f"Port {server_port} is in use by another application")
+        server_port = find_available_port(
+            server_port + 1, host=args.host, exclude={args.proxy_port},
+        )
+        print(f"Using port {server_port} instead (override with --port)")
 
     proxy_port = args.proxy_port
     enable_proxy = not args.no_proxy
     if enable_proxy:
-        proxy_port = find_available_port(
-            args.proxy_port,
-            host=args.host,
-            exclude={server_port},
-        )
-        if proxy_port != args.proxy_port:
-            print(f"Proxy port {args.proxy_port} in use, using {proxy_port}")
+        if not reclaim_port(proxy_port, args.host):
+            print(f"Proxy port {proxy_port} is in use by another application")
+            proxy_port = find_available_port(
+                proxy_port + 1,
+                host=args.host,
+                exclude={server_port},
+            )
+            print(f"Using proxy port {proxy_port} instead (override with --proxy-port)")
 
     # Daemonize if not foreground mode
     if not args.foreground:
