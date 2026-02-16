@@ -590,6 +590,8 @@ quern-debug-server restart [OPTIONS]
 quern-debug-server status
 ```
 
+**Use the `./quern` wrapper script** instead of calling `.venv/bin/python -m server.main` directly. The wrapper activates the venv properly, which is required for correct tool discovery (idb, mitmdump, etc.). Examples: `./quern setup`, `./quern start`, `./quern stop`.
+
 `--foreground` skips daemonization — essential for debugging the server itself. All existing behavior (direct `quern-debug-server` with no subcommand) should remain as an alias for `start --foreground` for backward compatibility.
 
 ---
