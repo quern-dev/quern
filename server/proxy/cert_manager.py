@@ -140,9 +140,9 @@ async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool
         try:
             verified_at = datetime.fromisoformat(cached["verified_at"])
             age = datetime.now(timezone.utc) - verified_at
-            if age.total_seconds() < CACHE_TTL_SECONDS and cached.get("cert_installed"):
+            if age.total_seconds() < CACHE_TTL_SECONDS:
                 logger.debug(f"Cache hit for {udid} (age: {age.total_seconds():.0f}s)")
-                return True
+                return cached.get("cert_installed", False)
         except (ValueError, TypeError) as e:
             logger.warning(f"Invalid verified_at timestamp for {udid}: {e}")
 

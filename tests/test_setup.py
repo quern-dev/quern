@@ -469,21 +469,47 @@ class TestInstallCertSimulator:
         cert = tmp_path / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         cert.parent.mkdir(parents=True)
         cert.write_text("fake cert")
+
+        async def mock_is_installed(ctrl, udid, verify=False):
+            return False
+
+        async def mock_install(ctrl, udid, force=False):
+            return True
+
         with patch("server.lifecycle.setup.Path.home", return_value=tmp_path), \
-             _patch_run(_mock_run()):
+             patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed), \
+             patch("server.proxy.cert_manager.install_cert", side_effect=mock_install):
             result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.OK
+
+    def test_already_installed(self, tmp_path):
+        cert = tmp_path / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+        cert.parent.mkdir(parents=True)
+        cert.write_text("fake cert")
+
+        async def mock_is_installed(ctrl, udid, verify=False):
+            return True
+
+        with patch("server.lifecycle.setup.Path.home", return_value=tmp_path), \
+             patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed):
+            result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
+            assert result.status == CheckStatus.OK
+            assert "already" in result.message.lower()
 
     def test_no_cert(self, tmp_path):
         with patch("server.lifecycle.setup.Path.home", return_value=tmp_path):
             result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.SKIPPED
 
-    def test_simctl_fails(self, tmp_path):
+    def test_install_fails(self, tmp_path):
         cert = tmp_path / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         cert.parent.mkdir(parents=True)
         cert.write_text("fake cert")
+
+        async def mock_is_installed(ctrl, udid, verify=False):
+            raise RuntimeError("simctl failed")
+
         with patch("server.lifecycle.setup.Path.home", return_value=tmp_path), \
-             _patch_run(_mock_run(stderr="error: invalid udid", returncode=1)):
-            result = install_cert_simulator("bad-udid", "iPhone 15")
+             patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed):
+            result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.ERROR

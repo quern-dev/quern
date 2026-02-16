@@ -177,6 +177,12 @@ class TestCertInstallationIntegration:
         """Test that cache is used within TTL window."""
         from datetime import datetime, timedelta, timezone
         from unittest.mock import patch
+        from server.lifecycle.state import STATE_FILE, read_state, write_state
+
+        # Ensure state.json exists so update_state can persist the cache
+        if not STATE_FILE.exists():
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            write_state({})
 
         # Force a verification to populate the cache
         await cert_manager.is_cert_installed(controller, booted_simulator, verify=True)
