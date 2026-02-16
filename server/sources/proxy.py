@@ -13,8 +13,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import signal as signal_mod
+import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,6 +141,59 @@ class ProxyAdapter(BaseSourceAdapter):
             return found
         raise FileNotFoundError("mitmdump not found")
 
+    @staticmethod
+    def _kill_stale_mitmdump(port: int) -> None:
+        """Find and kill any stale mitmdump holding our listen port."""
+        # Find PIDs listening on the port
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return  # Port is free
+        except Exception:
+            return
+
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                pid = int(pid_str.strip())
+            except ValueError:
+                continue
+
+            # Check if this is OUR mitmdump (has our addon path)
+            try:
+                ps_result = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cmd = ps_result.stdout.strip()
+            except Exception:
+                continue
+
+            addon_marker = str(ADDON_PATH)
+            if "mitmdump" not in cmd or addon_marker not in cmd:
+                logger.warning(
+                    "Port %d held by non-quern process (pid %d): %s",
+                    port, pid, cmd[:120],
+                )
+                continue  # Not ours — don't touch it
+
+            logger.warning("Killing stale mitmdump (pid %d) on port %d", pid, port)
+            try:
+                os.kill(pid, signal_mod.SIGTERM)
+                # Brief wait for clean exit
+                for _ in range(10):
+                    time.sleep(0.1)
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                else:
+                    os.kill(pid, signal_mod.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     async def start(self) -> None:
         """Spawn mitmdump with our addon and begin reading output."""
         try:
@@ -147,6 +204,9 @@ class ProxyAdapter(BaseSourceAdapter):
             )
             logger.warning(self._error)
             return
+
+        # Kill any stale mitmdump from a previous run
+        await asyncio.to_thread(self._kill_stale_mitmdump, self.listen_port)
 
         cmd = [
             mitmdump,

@@ -212,7 +212,7 @@ server/api/proxy.py            /proxy/* route handlers
 #### Phase 2b — API Endpoints
 - [ ] `server/api/proxy.py` — all proxy route handlers
 - [ ] Wire ProxyAdapter into `server/main.py` lifespan
-- [ ] CLI flags: `--proxy` / `--no-proxy`, `--proxy-port`
+- [ ] CLI flags: `--no-proxy`, `--proxy-port` (proxy is enabled by default)
 - [ ] Flow query, detail, summary endpoints
 - [ ] Proxy start/stop/status endpoints
 - [ ] Setup-guide and cert endpoints

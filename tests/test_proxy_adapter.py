@@ -1,13 +1,16 @@
 """Tests for ProxyAdapter — parsing and emission without spawning mitmdump."""
 
 import json
+import os
+import signal
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
 
 from server.models import LogLevel, LogSource
 from server.proxy.flow_store import FlowStore
-from server.sources.proxy import ProxyAdapter, _classify_level, _format_summary
+from server.sources.proxy import ADDON_PATH, ProxyAdapter, _classify_level, _format_summary
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -421,3 +424,84 @@ async def test_handle_status_event_mock_cleared_specific(adapter):
     adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "a"})
     assert len(adapter._mock_rules) == 1
     assert adapter._mock_rules[0]["rule_id"] == "b"
+
+
+# ---------------------------------------------------------------------------
+# Stale mitmdump cleanup tests
+# ---------------------------------------------------------------------------
+
+
+def _mock_run(responses):
+    """Create a side_effect function for subprocess.run that returns responses in order."""
+    calls = iter(responses)
+
+    def side_effect(*args, **kwargs):
+        resp = next(calls)
+        mock = MagicMock()
+        mock.returncode = resp.get("returncode", 0)
+        mock.stdout = resp.get("stdout", "")
+        return mock
+
+    return side_effect
+
+
+def test_kill_stale_mitmdump_kills_our_process():
+    """Should kill a stale mitmdump running our addon."""
+    addon_cmd = f"/usr/bin/mitmdump -s {ADDON_PATH} --listen-port 9101"
+    responses = [
+        {"returncode": 0, "stdout": "12345\n"},      # lsof
+        {"returncode": 0, "stdout": addon_cmd},       # ps
+    ]
+
+    with patch("server.sources.proxy.subprocess.run", side_effect=_mock_run(responses)):
+        with patch("server.sources.proxy.os.kill") as mock_kill:
+            # Make the process disappear after SIGTERM
+            mock_kill.side_effect = lambda pid, sig: (
+                None if sig == signal.SIGTERM
+                else (_ for _ in ()).throw(ProcessLookupError)
+            )
+            # os.kill(pid, 0) check — process gone
+            def kill_effect(pid, sig):
+                if sig == 0:
+                    raise ProcessLookupError
+            mock_kill.side_effect = [None, ProcessLookupError]
+
+            ProxyAdapter._kill_stale_mitmdump(9101)
+
+            # First call: SIGTERM
+            assert mock_kill.call_count >= 1
+            mock_kill.assert_any_call(12345, signal.SIGTERM)
+
+
+def test_kill_stale_mitmdump_skips_foreign_process():
+    """Should NOT kill a process that isn't our mitmdump."""
+    responses = [
+        {"returncode": 0, "stdout": "99999\n"},                      # lsof
+        {"returncode": 0, "stdout": "/usr/bin/nginx -g daemon off;"}, # ps
+    ]
+
+    with patch("server.sources.proxy.subprocess.run", side_effect=_mock_run(responses)):
+        with patch("server.sources.proxy.os.kill") as mock_kill:
+            ProxyAdapter._kill_stale_mitmdump(9101)
+            mock_kill.assert_not_called()
+
+
+def test_kill_stale_mitmdump_port_free():
+    """Should do nothing when the port is free."""
+    responses = [
+        {"returncode": 1, "stdout": ""},  # lsof — nothing found
+    ]
+
+    with patch("server.sources.proxy.subprocess.run", side_effect=_mock_run(responses)):
+        with patch("server.sources.proxy.os.kill") as mock_kill:
+            ProxyAdapter._kill_stale_mitmdump(9101)
+            mock_kill.assert_not_called()
+
+
+def test_kill_stale_mitmdump_lsof_fails():
+    """Should not crash if lsof raises an exception."""
+    with patch("server.sources.proxy.subprocess.run", side_effect=OSError("lsof not found")):
+        with patch("server.sources.proxy.os.kill") as mock_kill:
+            # Should not raise
+            ProxyAdapter._kill_stale_mitmdump(9101)
+            mock_kill.assert_not_called()
