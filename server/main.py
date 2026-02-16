@@ -427,6 +427,11 @@ def _is_our_process(pid: int) -> bool:
 
 def _cmd_start(args: argparse.Namespace) -> None:
     """Start the server (daemon or foreground)."""
+    # Auto-rebuild MCP server if source is newer than dist
+    from server.__main__ import _ensure_mcp_built
+    if not _ensure_mcp_built(quiet=True):
+        print("Warning: MCP server build failed — MCP tools may be stale")
+
     # Check for existing instance
     existing = read_state()
     if existing and is_server_healthy(existing["server_port"]):

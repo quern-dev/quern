@@ -48,6 +48,81 @@ def _maybe_reexec_in_venv() -> None:
     os.execv(str(venv_python), [str(venv_python), "-m", "server"] + sys.argv[1:])
 
 
+def _ensure_mcp_built(quiet: bool = False) -> bool:
+    """Build the MCP TypeScript server if needed.
+
+    Compares mcp/src/index.ts mtime vs mcp/dist/index.js mtime to detect
+    staleness.  Runs ``npm install`` when node_modules/ is missing or when
+    package.json is newer than node_modules/, and ``npm run build`` only
+    when the source is newer than the output (or the output is missing).
+
+    Args:
+        quiet: When True, only print on actual build or failure.
+
+    Returns:
+        True if the build succeeded or was skipped, False on failure.
+    """
+    import subprocess
+
+    project_root = _find_project_root()
+    if project_root is None:
+        if not quiet:
+            print("Warning: could not find project root — skipping MCP build")
+        return False
+
+    mcp_dir = project_root / "mcp"
+    src_file = mcp_dir / "src" / "index.ts"
+    dist_file = mcp_dir / "dist" / "index.js"
+
+    if not src_file.exists():
+        if not quiet:
+            print("Warning: mcp/src/index.ts not found — skipping MCP build")
+        return False
+
+    # Determine if a build is needed
+    needs_build = not dist_file.exists()
+    if not needs_build:
+        src_mtime = src_file.stat().st_mtime
+        dist_mtime = dist_file.stat().st_mtime
+        needs_build = src_mtime > dist_mtime
+
+    if not needs_build:
+        return True  # Already up to date
+
+    # Install node_modules if missing or stale (package.json newer than node_modules/)
+    node_modules = mcp_dir / "node_modules"
+    needs_install = not node_modules.exists()
+    if not needs_install:
+        pkg_json = mcp_dir / "package.json"
+        if pkg_json.exists() and pkg_json.stat().st_mtime > node_modules.stat().st_mtime:
+            needs_install = True
+    if needs_install:
+        if not quiet:
+            print("Installing MCP server dependencies...")
+        result = subprocess.run(
+            ["npm", "install"], cwd=str(mcp_dir), timeout=120,
+            capture_output=quiet,
+        )
+        if result.returncode != 0:
+            print("Error: npm install failed for MCP server")
+            return False
+
+    # Build
+    if not quiet:
+        print("Building MCP server...")
+    result = subprocess.run(
+        ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
+        capture_output=quiet,
+    )
+    if result.returncode != 0:
+        print("Error: npm run build failed for MCP server")
+        return False
+
+    if not quiet:
+        print("MCP server built successfully")
+    return True
+
+
 def _cmd_mcp_install() -> int:
     """Add quern-debug MCP server to ~/.claude.json."""
     import json
@@ -61,22 +136,8 @@ def _cmd_mcp_install() -> int:
     mcp_index = mcp_dir / "dist" / "index.js"
 
     # Build the MCP server if needed
-    if not mcp_index.exists() or not (mcp_dir / "node_modules").exists():
-        import subprocess
-        print("Building MCP server...")
-        result = subprocess.run(
-            ["npm", "install"], cwd=str(mcp_dir), timeout=120,
-        )
-        if result.returncode != 0:
-            print("Error: npm install failed")
-            return 1
-        result = subprocess.run(
-            ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
-        )
-        if result.returncode != 0:
-            print("Error: npm run build failed")
-            return 1
-        print()
+    if not _ensure_mcp_built(quiet=False):
+        return 1
 
     claude_config = Path.home() / ".claude.json"
 
