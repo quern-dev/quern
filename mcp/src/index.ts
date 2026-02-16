@@ -228,9 +228,10 @@ server.tool(
 
       // Try to start the server - check multiple locations
       const possibleCommands = [
-        "quern-debug-server start",  // System PATH
-        `${homedir()}/.local/bin/quern-debug-server start`,  // Common user install
-        `${homedir()}/Dev/quern-debug-server/.venv/bin/python -m server.main start`,  // Dev environment
+        "quern start",  // Wrapper script in PATH (installed by setup)
+        `${homedir()}/.local/bin/quern start`,  // Direct path to wrapper
+        "quern-debug-server start",  // Legacy name
+        `${homedir()}/.local/bin/quern-debug-server start`,  // Legacy direct path
       ];
 
       let startError: Error | null = null;
