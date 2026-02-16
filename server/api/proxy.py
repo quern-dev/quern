@@ -18,6 +18,12 @@ from server.lifecycle.state import update_state
 _proxy_logger = logging.getLogger(__name__)
 
 from server.models import (
+    CertInstallRequest,
+    CertStatusResponse,
+    CertVerifyRequest,
+    CertVerifyResponse,
+    DeviceCertInstallStatus,
+    DeviceCertState,
     FlowQueryParams,
     FlowQueryResponse,
     FlowRecord,
@@ -37,6 +43,7 @@ from server.models import (
     SystemProxyRestoreInfo,
 )
 from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
+from server.proxy import cert_manager
 from server.proxy.summary import generate_flow_summary
 from server.proxy.system_proxy import (
     SystemProxySnapshot,
@@ -59,11 +66,25 @@ router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
 def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     """Build a ProxyStatusResponse from current app state."""
+    from server.lifecycle.state import read_state
+
     adapter = request.app.state.proxy_adapter
     flow_store = request.app.state.flow_store
 
+    # Get cert setup info from state.json
+    cert_setup = None
+    try:
+        state = read_state()
+        if state and state.get("device_certs"):
+            cert_setup = {
+                udid: DeviceCertState(**cert_data)
+                for udid, cert_data in state["device_certs"].items()
+            }
+    except Exception as e:
+        _proxy_logger.debug(f"Failed to load cert_setup: {e}")
+
     if adapter is None:
-        return ProxyStatusResponse(status="stopped")
+        return ProxyStatusResponse(status="stopped", cert_setup=cert_setup)
 
     if adapter._error:
         return ProxyStatusResponse(
@@ -75,6 +96,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
+            cert_setup=cert_setup,
         )
 
     if adapter.is_running:
@@ -87,6 +109,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
+            cert_setup=cert_setup,
         )
 
     return ProxyStatusResponse(
@@ -94,6 +117,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
         port=adapter.listen_port,
         listen_host=adapter.listen_host,
         flows_captured=flow_store.size if flow_store else 0,
+        cert_setup=cert_setup,
     )
 
 
@@ -648,9 +672,184 @@ async def download_cert() -> FileResponse:
     )
 
 
+@router.get("/cert/status", response_model=CertStatusResponse)
+async def cert_status(request: Request) -> CertStatusResponse:
+    """Get certificate installation status for all devices.
+
+    Returns cert file existence, fingerprint, and cached installation state
+    for all known devices. Does not perform SQLite verification - use
+    POST /cert/verify for ground truth.
+    """
+    from server.lifecycle.state import read_state
+
+    cert_path = cert_manager.get_cert_path()
+    cert_exists = cert_path.exists()
+
+    fingerprint = None
+    if cert_exists:
+        try:
+            fingerprint = cert_manager.get_cert_fingerprint(cert_path)
+        except Exception as e:
+            _proxy_logger.warning(f"Failed to get cert fingerprint: {e}")
+
+    # Get cached device cert states from state.json
+    state = read_state()
+    device_certs_dict = state.get("device_certs", {}) if state else {}
+
+    # Convert to DeviceCertState models
+    devices = {
+        udid: DeviceCertState(**cert_data)
+        for udid, cert_data in device_certs_dict.items()
+    }
+
+    return CertStatusResponse(
+        cert_exists=cert_exists,
+        cert_path=str(cert_path),
+        fingerprint=fingerprint,
+        devices=devices,
+    )
+
+
+@router.post("/cert/verify", response_model=CertVerifyResponse)
+async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyResponse:
+    """Verify certificate installation via SQLite TrustStore query.
+
+    Always performs ground-truth verification by querying the simulator's
+    TrustStore database. Updates state.json cache with results.
+
+    Args:
+        body.udid: Specific device UDID. If None, verifies all booted devices.
+
+    Returns:
+        Detailed installation status per device with timestamps.
+    """
+    controller = request.app.state.device_controller
+    if controller is None:
+        raise HTTPException(status_code=503, detail="Device controller not initialized")
+
+    # Determine which devices to verify
+    if body.udid:
+        udids = [body.udid]
+    else:
+        # Verify all booted devices
+        try:
+            all_devices = await controller.list_devices()
+            from server.models import DeviceState
+
+            udids = [d.udid for d in all_devices if d.state == DeviceState.BOOTED]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
+
+    if not udids:
+        raise HTTPException(status_code=400, detail="No booted devices found to verify")
+
+    # Verify each device
+    device_statuses = []
+    for udid in udids:
+        try:
+            cert_state = await cert_manager.get_device_cert_state(
+                controller, udid, verify=True
+            )
+            device_statuses.append(
+                DeviceCertInstallStatus(
+                    udid=udid,
+                    name=cert_state.name,
+                    cert_installed=cert_state.cert_installed,
+                    fingerprint=cert_state.fingerprint,
+                    verified_at=cert_state.verified_at or datetime.now(timezone.utc).isoformat(),
+                )
+            )
+        except Exception as e:
+            _proxy_logger.warning(f"Failed to verify cert for {udid}: {e}")
+            # Continue with other devices rather than failing completely
+            device_statuses.append(
+                DeviceCertInstallStatus(
+                    udid=udid,
+                    name="Unknown Device",
+                    cert_installed=False,
+                    fingerprint=None,
+                    verified_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+
+    # All verified successfully if all devices have cert installed
+    all_verified = all(status.cert_installed for status in device_statuses)
+
+    return CertVerifyResponse(
+        verified=all_verified,
+        devices=device_statuses,
+    )
+
+
+@router.post("/cert/install")
+async def install_cert(request: Request, body: CertInstallRequest) -> dict:
+    """Install mitmproxy CA certificate on simulator(s).
+
+    Idempotent - skips devices that already have the cert installed
+    unless force=True.
+
+    Args:
+        body.udid: Specific device UDID. If None, installs on all booted devices.
+        body.force: Force reinstall even if already present.
+
+    Returns:
+        Installation results per device.
+    """
+    controller = request.app.state.device_controller
+    if controller is None:
+        raise HTTPException(status_code=503, detail="Device controller not initialized")
+
+    # Determine which devices to install on
+    if body.udid:
+        udids = [body.udid]
+    else:
+        # Install on all booted devices
+        try:
+            all_devices = await controller.list_devices()
+            from server.models import DeviceState
+
+            udids = [d.udid for d in all_devices if d.state == DeviceState.BOOTED]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
+
+    if not udids:
+        raise HTTPException(status_code=400, detail="No booted devices found to install on")
+
+    # Install on each device
+    results = []
+    for udid in udids:
+        try:
+            was_installed = await cert_manager.install_cert(
+                controller, udid, force=body.force
+            )
+            results.append({
+                "udid": udid,
+                "status": "installed" if was_installed else "already_installed",
+                "success": True,
+            })
+        except Exception as e:
+            _proxy_logger.error(f"Failed to install cert on {udid}: {e}")
+            results.append({
+                "udid": udid,
+                "status": "failed",
+                "success": False,
+                "error": str(e),
+            })
+
+    success_count = sum(1 for r in results if r["success"])
+    return {
+        "total": len(results),
+        "succeeded": success_count,
+        "failed": len(results) - success_count,
+        "devices": results,
+    }
+
+
 @router.get("/setup-guide")
 async def setup_guide(request: Request) -> dict:
     """Get device proxy setup instructions with auto-detected local IP and network interface."""
+    from server.lifecycle.state import read_state
+
     adapter = request.app.state.proxy_adapter
     port = adapter.listen_port if adapter else 9101
 
@@ -668,6 +867,31 @@ async def setup_guide(request: Request) -> dict:
 
     # Detect VPN and other potential issues
     warnings = _detect_proxy_warnings()
+
+    # Get cert status for booted devices
+    cert_status_by_device = {}
+    try:
+        controller = request.app.state.device_controller
+        if controller:
+            all_devices = await controller.list_devices()
+            from server.models import DeviceState
+
+            booted_devices = [d for d in all_devices if d.state == DeviceState.BOOTED]
+
+            # Load cached cert states
+            state = read_state()
+            device_certs = state.get("device_certs", {}) if state else {}
+
+            for device in booted_devices:
+                cached = device_certs.get(device.udid, {})
+                cert_installed = cached.get("cert_installed", False)
+                cert_status_by_device[device.udid] = {
+                    "name": device.name,
+                    "cert_installed": cert_installed,
+                    "status_icon": "✓" if cert_installed else "✗",
+                }
+    except Exception as e:
+        _proxy_logger.debug(f"Failed to get cert status: {e}")
 
     # Build simulator proxy commands with detected or placeholder interface
     iface_display = active_interface or "<interface>"
@@ -699,12 +923,22 @@ async def setup_guide(request: Request) -> dict:
         f"5. When done, disable the proxy: {clear_proxy_cmd}",
     ])
 
+    # Add cert status to simulator steps if available
+    if cert_status_by_device:
+        cert_status_text = "\n".join([
+            f"   {status['status_icon']} {status['name']}: "
+            f"{'Cert installed' if status['cert_installed'] else 'Cert NOT installed'}"
+            for status in cert_status_by_device.values()
+        ])
+        simulator_steps.insert(0, f"Certificate Status:\n{cert_status_text}")
+
     return {
         "proxy_host": local_ip,
         "proxy_port": port,
         "active_interface": active_interface,
         "warnings": warnings,
         "cert_install_url": "http://mitm.it",
+        "cert_status": cert_status_by_device,
         "steps": [
             {
                 "target": "simulator",

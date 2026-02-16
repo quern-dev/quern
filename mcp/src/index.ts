@@ -810,6 +810,48 @@ server.tool(
 );
 
 server.tool(
+  "verify_proxy_setup",
+  `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps.`,
+  {
+    udid: z
+      .string()
+      .optional()
+      .describe(
+        "Specific simulator UDID to verify. If omitted, verifies all booted simulators."
+      ),
+  },
+  async ({ udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid !== undefined) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/cert/verify",
+        undefined,
+        Object.keys(body).length > 0 ? body : undefined
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
   "start_proxy",
   `Start the mitmproxy network capture. Automatically configures the macOS system proxy so simulator traffic is captured. Optionally specify port and listen host.`,
   {
@@ -2660,6 +2702,7 @@ const GUIDE_CONTENT = `# Quern Debug Server — Tool Selection Guide
 | Check proxy status                | \`proxy_status\`       |
 | Start/stop the proxy              | \`start_proxy\` / \`stop_proxy\` |
 | Set up a device for proxying      | \`proxy_setup_guide\`  |
+| Verify proxy certificate install  | \`verify_proxy_setup\` |
 | Check which sources are active    | \`list_log_sources\`   |
 | List simulators                   | \`list_devices\`       |
 | Boot/shutdown simulator           | \`boot_device\` / \`shutdown_device\` |
@@ -2703,6 +2746,7 @@ When calling the HTTP API directly (without MCP), use these paths:
 | \`get_flow_detail\`    | GET         | \`/api/v1/proxy/flows/{id}\`             |
 | \`get_flow_summary\`   | GET         | \`/api/v1/proxy/flows/summary\`          |
 | \`proxy_status\`       | GET         | \`/api/v1/proxy/status\`                 |
+| \`verify_proxy_setup\` | POST        | \`/api/v1/proxy/cert/verify\`            |
 | \`start_proxy\`        | POST        | \`/api/v1/proxy/start\`                  |
 | \`stop_proxy\`         | POST        | \`/api/v1/proxy/stop\`                   |
 | \`set_intercept\`      | POST        | \`/api/v1/proxy/intercept\`              |
@@ -2775,9 +2819,16 @@ This is the most token-efficient way to stay informed.
 1. \`proxy_status\` — check if the proxy is running and how many flows are captured
 2. \`start_proxy\` — start the proxy (optionally on a custom port)
 3. \`proxy_setup_guide\` — get device setup instructions with auto-detected local IP
-4. \`get_flow_summary\` with \`window: "5m"\` — get a traffic digest
-5. Save the \`cursor\` and use \`since_cursor\` on subsequent calls for efficient delta polling
-6. \`stop_proxy\` — stop the proxy when done
+4. \`verify_proxy_setup\` — verify CA certificate is installed on simulators (ground-truth SQLite check)
+5. \`get_flow_summary\` with \`window: "5m"\` — get a traffic digest
+6. Save the \`cursor\` and use \`since_cursor\` on subsequent calls for efficient delta polling
+7. \`stop_proxy\` — stop the proxy when done
+
+**Certificate Verification Workflow:**
+- After setting up the proxy, use \`verify_proxy_setup\` to confirm the mitmproxy CA certificate is installed
+- This performs a ground-truth check by querying the simulator's TrustStore database
+- Returns detailed status per device with installation timestamps
+- If cert is missing, install it with: \`xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem\`
 
 ### 6. Intercepting & Modifying Requests
 

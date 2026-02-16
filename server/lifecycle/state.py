@@ -35,6 +35,7 @@ class ServerState(TypedDict, total=False):
     system_proxy_configured: bool
     system_proxy_interface: str | None
     system_proxy_snapshot: dict | None
+    device_certs: dict[str, dict]  # udid -> DeviceCertState dict
 
 
 def read_state() -> ServerState | None:

@@ -544,8 +544,15 @@ def check_booted_simulators() -> list[dict[str, str]]:
 
 
 def install_cert_simulator(udid: str, name: str) -> CheckResult:
-    """Install mitmproxy CA cert into a booted simulator."""
-    cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+    """Install mitmproxy CA cert into a booted simulator.
+
+    This function is synchronous but calls async cert_manager functions internally.
+    """
+    import asyncio
+    from server.device.controller import DeviceController
+    from server.proxy import cert_manager
+
+    cert_path = cert_manager.get_cert_path()
     if not cert_path.exists():
         return CheckResult(
             name=f"Cert → {name}",
@@ -553,20 +560,52 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
             message="No CA cert yet (start proxy first)",
         )
 
-    rc, _, stderr = _run([
-        "xcrun", "simctl", "keychain", udid, "add-root-cert", str(cert_path),
-    ])
-    if rc == 0:
+    # Create a controller for cert_manager (it needs it for device name lookup)
+    controller = DeviceController()
+
+    try:
+        # Run async cert installation in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # First verify if cert is already installed (via SQLite)
+            is_installed = loop.run_until_complete(
+                cert_manager.is_cert_installed(controller, udid, verify=True)
+            )
+
+            if is_installed:
+                return CheckResult(
+                    name=f"Cert → {name}",
+                    status=CheckStatus.OK,
+                    message="CA certificate already trusted (verified via TrustStore)",
+                )
+
+            # Install the cert
+            was_installed = loop.run_until_complete(
+                cert_manager.install_cert(controller, udid, force=False)
+            )
+
+            if was_installed:
+                return CheckResult(
+                    name=f"Cert → {name}",
+                    status=CheckStatus.OK,
+                    message="CA certificate installed and verified",
+                )
+            else:
+                # This shouldn't happen (is_installed was False but install returned False)
+                return CheckResult(
+                    name=f"Cert → {name}",
+                    status=CheckStatus.OK,
+                    message="CA certificate trusted",
+                )
+        finally:
+            loop.close()
+    except Exception as e:
         return CheckResult(
             name=f"Cert → {name}",
-            status=CheckStatus.OK,
-            message="CA certificate trusted",
+            status=CheckStatus.ERROR,
+            message=f"Failed to install cert: {e}",
         )
-    return CheckResult(
-        name=f"Cert → {name}",
-        status=CheckStatus.ERROR,
-        message=f"Failed to install cert: {stderr}",
-    )
 
 
 # ── Main setup flow ──────────────────────────────────────────────────────

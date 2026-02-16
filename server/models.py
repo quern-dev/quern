@@ -303,6 +303,7 @@ class ProxyStatusResponse(BaseModel):
     mock_rules_count: int = 0
     error: str | None = None
     system_proxy: SystemProxyInfo | None = None
+    cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
 
 
 class SystemProxyInfo(BaseModel):
@@ -712,3 +713,57 @@ class EnsureDevicesRequest(BaseModel):
     os_version: str | None = None
     auto_boot: bool = True
     session_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Certificate management models (Phase 2 cert verification)
+# ---------------------------------------------------------------------------
+
+
+class DeviceCertState(BaseModel):
+    """State of mitmproxy CA certificate installation for a device."""
+
+    name: str
+    cert_installed: bool = False
+    fingerprint: str | None = None
+    installed_at: str | None = None  # ISO 8601 timestamp
+    verified_at: str | None = None  # Last SQLite check timestamp
+
+
+class CertStatusResponse(BaseModel):
+    """Response from GET /api/v1/proxy/cert/status."""
+
+    cert_exists: bool
+    cert_path: str
+    fingerprint: str | None = None
+    devices: dict[str, DeviceCertState] = Field(default_factory=dict)
+
+
+class CertVerifyRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/cert/verify."""
+
+    udid: str | None = None  # If None, verify all booted devices
+
+
+class DeviceCertInstallStatus(BaseModel):
+    """Installation status for a single device."""
+
+    udid: str
+    name: str
+    cert_installed: bool
+    fingerprint: str | None = None
+    verified_at: str  # ISO 8601 timestamp
+
+
+class CertVerifyResponse(BaseModel):
+    """Response from POST /api/v1/proxy/cert/verify."""
+
+    verified: bool
+    devices: list[DeviceCertInstallStatus]
+
+
+class CertInstallRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/cert/install."""
+
+    udid: str | None = None  # If None, install on all booted devices
+    force: bool = False  # Force reinstall even if already installed
