@@ -32,6 +32,9 @@ class ServerState(TypedDict, total=False):
     started_at: str  # ISO 8601
     api_key: str
     active_devices: list[str]
+    system_proxy_configured: bool
+    system_proxy_interface: str | None
+    system_proxy_snapshot: dict | None
 
 
 def read_state() -> ServerState | None:

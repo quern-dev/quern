@@ -33,9 +33,21 @@ from server.models import (
     ReplayRequest,
     ReplayResponse,
     SetMockRequest,
+    SystemProxyInfo,
+    SystemProxyRestoreInfo,
 )
 from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
 from server.proxy.summary import generate_flow_summary
+from server.proxy.system_proxy import (
+    SystemProxySnapshot,
+    configure_system_proxy,
+    detect_active_interface,
+    detect_and_configure,
+    get_default_route_device,
+    bsd_device_to_service_name,
+    restore_system_proxy,
+    snapshot_system_proxy,
+)
 
 router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
@@ -107,6 +119,8 @@ async def proxy_status(request: Request) -> ProxyStatusResponse:
 @router.post("/start", response_model=ProxyStatusResponse)
 async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatusResponse:
     """Start the mitmproxy network capture."""
+    import asyncio
+
     adapter = request.app.state.proxy_adapter
     if adapter is None:
         raise HTTPException(status_code=503, detail="Proxy adapter not configured")
@@ -125,12 +139,45 @@ async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatus
         update_state(proxy_status="running")
     except Exception:
         _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
-    return _get_proxy_status(request)
+
+    # Auto-configure system proxy unless explicitly disabled
+    want_system_proxy = True
+    if body and body.get("system_proxy") is not None:
+        want_system_proxy = body["system_proxy"]
+
+    system_proxy_info: SystemProxyInfo | None = None
+    if want_system_proxy:
+        try:
+            snap = await asyncio.to_thread(detect_and_configure, adapter.listen_port)
+            if snap:
+                system_proxy_info = SystemProxyInfo(
+                    configured=True,
+                    interface=snap.interface,
+                    original_state="enabled" if snap.http_proxy_enabled else "disabled",
+                )
+                try:
+                    update_state(
+                        system_proxy_configured=True,
+                        system_proxy_interface=snap.interface,
+                        system_proxy_snapshot=snap.to_dict(),
+                    )
+                except Exception:
+                    _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
+        except Exception:
+            _proxy_logger.warning("Failed to configure system proxy", exc_info=True)
+
+    resp = _get_proxy_status(request)
+    resp.system_proxy = system_proxy_info
+    return resp
 
 
-@router.post("/stop", response_model=ProxyStatusResponse)
-async def stop_proxy(request: Request) -> ProxyStatusResponse:
-    """Stop the mitmproxy network capture."""
+@router.post("/stop")
+async def stop_proxy(request: Request) -> dict:
+    """Stop the mitmproxy network capture and restore system proxy if configured."""
+    import asyncio
+
+    from server.lifecycle.state import read_state
+
     adapter = request.app.state.proxy_adapter
     if adapter is None:
         raise HTTPException(status_code=503, detail="Proxy adapter not configured")
@@ -143,7 +190,129 @@ async def stop_proxy(request: Request) -> ProxyStatusResponse:
         update_state(proxy_status="stopped")
     except Exception:
         _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
-    return _get_proxy_status(request)
+
+    # Restore system proxy if we configured it
+    restore_info: SystemProxyRestoreInfo | None = None
+    try:
+        state = read_state()
+        if state and state.get("system_proxy_configured"):
+            snapshot_data = state.get("system_proxy_snapshot")
+            if snapshot_data:
+                snap = SystemProxySnapshot.from_dict(snapshot_data)
+                await asyncio.to_thread(restore_system_proxy, snap)
+                restore_info = SystemProxyRestoreInfo(
+                    restored=True,
+                    interface=snap.interface,
+                    restored_to="enabled" if snap.http_proxy_enabled else "disabled",
+                )
+            try:
+                update_state(
+                    system_proxy_configured=False,
+                    system_proxy_interface=None,
+                    system_proxy_snapshot=None,
+                )
+            except Exception:
+                _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
+    except Exception:
+        _proxy_logger.warning("Failed to restore system proxy", exc_info=True)
+
+    resp = _get_proxy_status(request).model_dump()
+    resp["system_proxy_restore"] = restore_info.model_dump() if restore_info else None
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# System proxy configuration
+# ---------------------------------------------------------------------------
+
+
+@router.post("/configure-system", response_model=SystemProxyInfo)
+async def configure_system(request: Request, body: dict | None = None) -> SystemProxyInfo:
+    """Manually configure macOS system proxy to route through mitmproxy."""
+    import asyncio
+
+    from server.lifecycle.state import read_state
+
+    adapter = request.app.state.proxy_adapter
+    if adapter is None or not adapter.is_running:
+        raise HTTPException(status_code=503, detail="Proxy is not running")
+
+    state = read_state()
+    if state and state.get("system_proxy_configured"):
+        raise HTTPException(status_code=409, detail="System proxy already configured by Quern")
+
+    interface_override = body.get("interface") if body else None
+
+    try:
+        snap = await asyncio.to_thread(
+            detect_and_configure, adapter.listen_port, interface_override,
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"networksetup failed: {e.stderr}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not snap:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not detect active network interface. "
+            "Pass 'interface' in the request body.",
+        )
+
+    try:
+        update_state(
+            system_proxy_configured=True,
+            system_proxy_interface=snap.interface,
+            system_proxy_snapshot=snap.to_dict(),
+        )
+    except Exception:
+        _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
+
+    return SystemProxyInfo(
+        configured=True,
+        interface=snap.interface,
+        original_state="enabled" if snap.http_proxy_enabled else "disabled",
+    )
+
+
+@router.post("/unconfigure-system", response_model=SystemProxyRestoreInfo)
+async def unconfigure_system(request: Request) -> SystemProxyRestoreInfo:
+    """Restore macOS system proxy to its pre-Quern state."""
+    import asyncio
+
+    from server.lifecycle.state import read_state
+
+    state = read_state()
+    if not state or not state.get("system_proxy_configured"):
+        raise HTTPException(status_code=409, detail="System proxy is not configured by Quern")
+
+    snapshot_data = state.get("system_proxy_snapshot")
+    if not snapshot_data:
+        raise HTTPException(
+            status_code=500,
+            detail="No snapshot found — cannot restore. Manually disable system proxy.",
+        )
+
+    snap = SystemProxySnapshot.from_dict(snapshot_data)
+    try:
+        await asyncio.to_thread(restore_system_proxy, snap)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore: {e}")
+
+    try:
+        update_state(
+            system_proxy_configured=False,
+            system_proxy_interface=None,
+            system_proxy_snapshot=None,
+        )
+    except Exception:
+        _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
+
+    return SystemProxyRestoreInfo(
+        restored=True,
+        interface=snap.interface,
+        restored_to="enabled" if snap.http_proxy_enabled else "disabled",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -560,39 +729,8 @@ async def setup_guide(request: Request) -> dict:
 
 
 def _detect_active_interface() -> str | None:
-    """Try to detect the macOS networksetup service name for the active interface.
-
-    Uses _get_default_route_device() to get the BSD device (e.g., en0),
-    then maps it to a networksetup service name (e.g., "Wi-Fi").
-
-    Returns None if detection fails (non-macOS, no default route, etc.).
-    """
-    bsd_device = _get_default_route_device()
-    if not bsd_device:
-        return None
-
-    return _bsd_device_to_service_name(bsd_device)
-
-
-def _bsd_device_to_service_name(bsd_device: str) -> str | None:
-    """Map a BSD device name (en0) to a networksetup service name (Wi-Fi)."""
-    try:
-        result = subprocess.run(
-            ["networksetup", "-listallhardwareports"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-
-        lines = result.stdout.splitlines()
-        for i, line in enumerate(lines):
-            if f"Device: {bsd_device}" in line:
-                for j in range(i - 1, -1, -1):
-                    if lines[j].startswith("Hardware Port:"):
-                        return lines[j].split(":", 1)[1].strip()
-        return None
-    except Exception:
-        return None
+    """Delegate to system_proxy module (kept for local references)."""
+    return detect_active_interface()
 
 
 def _detect_proxy_warnings() -> list[str]:
@@ -613,7 +751,7 @@ def _detect_proxy_warnings() -> list[str]:
         )
 
     # 2. Check if the default route goes through a utun interface
-    default_device = _get_default_route_device()
+    default_device = get_default_route_device()
     if default_device and default_device.startswith("utun"):
         if not connected_vpns:
             # Only add this if we didn't already flag via scutil (avoid redundancy)
@@ -657,19 +795,5 @@ def _get_connected_vpns() -> list[str]:
 
 
 def _get_default_route_device() -> str | None:
-    """Get the BSD device name for the default route (e.g., en0, utun3)."""
-    try:
-        result = subprocess.run(
-            ["route", "-n", "get", "default"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("interface:"):
-                return line.split(":", 1)[1].strip()
-        return None
-    except Exception:
-        return None
+    """Delegate to system_proxy module (kept for local references)."""
+    return get_default_route_device()

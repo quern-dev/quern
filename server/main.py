@@ -197,6 +197,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await adapter.stop()
     await dedup.stop()
 
+    # Restore system proxy if we configured it
+    from server.proxy.system_proxy import restore_from_state
+    restore_from_state()
+
     # Clean up state file (if daemon mode wrote one)
     remove_state()
     logger.info("Server stopped")
@@ -361,6 +365,10 @@ def _cmd_start(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     if existing:
+        # Restore system proxy if stale state has it configured
+        if existing.get("system_proxy_configured"):
+            from server.proxy.system_proxy import restore_from_state_dict
+            restore_from_state_dict(existing)
         # Stale state — clean up
         remove_state()
 
@@ -459,6 +467,14 @@ def _cmd_start(args: argparse.Namespace) -> None:
         pass  # Clean shutdown already handled by lifespan
 
 
+def _restore_system_proxy_if_needed(state: dict) -> None:
+    """Restore system proxy from state dict if configured (for stale/crash recovery)."""
+    if state.get("system_proxy_configured"):
+        from server.proxy.system_proxy import restore_from_state_dict
+        if restore_from_state_dict(state):
+            print("Restored system proxy settings")
+
+
 def _cmd_stop(args: argparse.Namespace) -> None:
     """Stop the running server daemon."""
     state = read_state()
@@ -468,6 +484,7 @@ def _cmd_stop(args: argparse.Namespace) -> None:
 
     pid = state.get("pid")
     if not pid:
+        _restore_system_proxy_if_needed(state)
         remove_state()
         print("No server running (stale state cleaned up)")
         return
@@ -476,17 +493,19 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
+        _restore_system_proxy_if_needed(state)
         remove_state()
         print("No server running (stale state cleaned up)")
         return
 
     # PID reuse guard
     if not _is_our_process(pid):
+        _restore_system_proxy_if_needed(state)
         remove_state()
         print(f"Warning: PID {pid} is not a quern-debug-server process (stale state cleaned up)")
         return
 
-    # Send SIGTERM
+    # Send SIGTERM — the server's lifespan handler will restore system proxy
     print(f"Stopping server (pid {pid})...")
     os.kill(pid, signal.SIGTERM)
 
@@ -500,12 +519,15 @@ def _cmd_stop(args: argparse.Namespace) -> None:
             print("Server stopped")
             return
 
-    # Force kill
+    # Force kill — lifespan didn't run, so we must restore system proxy
     print("Server didn't stop gracefully, sending SIGKILL...")
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    # Re-read state since server may have partially updated it
+    state = read_state() or state
+    _restore_system_proxy_if_needed(state)
     remove_state()
     print("Server killed")
 

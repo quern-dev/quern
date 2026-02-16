@@ -811,7 +811,7 @@ server.tool(
 
 server.tool(
   "start_proxy",
-  `Start the mitmproxy network capture. Optionally specify port and listen host.`,
+  `Start the mitmproxy network capture. Automatically configures the macOS system proxy so simulator traffic is captured. Optionally specify port and listen host.`,
   {
     port: z
       .number()
@@ -821,12 +821,19 @@ server.tool(
       .string()
       .optional()
       .describe("Host to listen on (default: 0.0.0.0)"),
+    system_proxy: z
+      .boolean()
+      .optional()
+      .describe(
+        "Configure macOS system proxy automatically (default: true). Required for simulator traffic capture."
+      ),
   },
-  async ({ port, listen_host }) => {
+  async ({ port, listen_host, system_proxy }) => {
     try {
       const body: Record<string, unknown> = {};
       if (port !== undefined) body.port = port;
       if (listen_host !== undefined) body.listen_host = listen_host;
+      if (system_proxy !== undefined) body.system_proxy = system_proxy;
 
       const data = await apiRequest(
         "POST",
@@ -856,7 +863,7 @@ server.tool(
 
 server.tool(
   "stop_proxy",
-  `Stop the mitmproxy network capture.`,
+  `Stop the mitmproxy network capture. Automatically restores the macOS system proxy to its pre-Quern state if it was configured.`,
   {},
   async () => {
     try {
@@ -946,6 +953,74 @@ server.tool(
           {
             type: "text" as const,
             text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "configure_system_proxy",
+  `Configure macOS system proxy to route traffic through mitmproxy. Required for simulator traffic capture. Auto-detects the active network interface. The proxy must be running first.`,
+  {
+    interface: z
+      .string()
+      .optional()
+      .describe("Network interface name (e.g. 'Wi-Fi'). Auto-detected if omitted."),
+  },
+  async ({ interface: iface }) => {
+    try {
+      const body = iface ? { interface: iface } : undefined;
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/configure-system",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "unconfigure_system_proxy",
+  `Restore macOS system proxy to its pre-Quern state. Use when you want to stop routing traffic through mitmproxy but keep the proxy running.`,
+  {},
+  async () => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/unconfigure-system"
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
           },
         ],
         isError: true,

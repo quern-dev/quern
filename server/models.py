@@ -302,6 +302,23 @@ class ProxyStatusResponse(BaseModel):
     held_flows_count: int = 0
     mock_rules_count: int = 0
     error: str | None = None
+    system_proxy: SystemProxyInfo | None = None
+
+
+class SystemProxyInfo(BaseModel):
+    """System proxy configuration status in API responses."""
+
+    configured: bool
+    interface: str | None = None
+    original_state: str | None = None  # "enabled" or "disabled"
+
+
+class SystemProxyRestoreInfo(BaseModel):
+    """System proxy restore status in API responses."""
+
+    restored: bool
+    interface: str | None = None
+    restored_to: str | None = None  # "enabled" or "disabled"
 
 
 class HostSummary(BaseModel):
