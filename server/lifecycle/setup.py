@@ -145,6 +145,55 @@ def _prompt_yn(question: str, default: bool = True) -> bool:
     return answer in ("y", "yes")
 
 
+def _detect_shell_rc() -> Path | None:
+    """Detect the user's shell config file based on $SHELL."""
+    shell = os.environ.get("SHELL", "")
+    home = Path.home()
+
+    if "zsh" in shell:
+        return home / ".zshrc"
+    elif "bash" in shell:
+        # Check for .bash_profile first (macOS default), then .bashrc
+        bash_profile = home / ".bash_profile"
+        if bash_profile.exists():
+            return bash_profile
+        return home / ".bashrc"
+    elif "fish" in shell:
+        return home / ".config" / "fish" / "config.fish"
+
+    # Fallback to .zshrc on macOS (most common)
+    if platform.system() == "Darwin":
+        return home / ".zshrc"
+
+    return None
+
+
+def _add_to_path(shell_rc: Path, directory: Path) -> bool:
+    """Add directory to PATH in shell config file.
+
+    Returns True if added, False if already present or error.
+    """
+    path_export = f'export PATH="$HOME/.local/bin:$PATH"'
+
+    try:
+        # Create parent directory if needed (e.g., ~/.config/fish)
+        shell_rc.parent.mkdir(parents=True, exist_ok=True)
+
+        # Check if PATH export already exists
+        if shell_rc.exists():
+            content = shell_rc.read_text()
+            if ".local/bin" in content and "PATH" in content:
+                return False  # Already configured
+
+        # Append PATH export with a comment
+        with shell_rc.open("a") as f:
+            f.write(f"\n# Added by Quern setup\n{path_export}\n")
+
+        return True
+    except Exception:
+        return False
+
+
 def install_wrapper_script() -> CheckResult:
     """Install quern wrapper script to ~/.local/bin."""
     local_bin = Path.home() / ".local" / "bin"
@@ -186,12 +235,37 @@ exec "{venv_python}" -m server "$@"
         # Check if ~/.local/bin is in PATH
         path_env = os.environ.get("PATH", "")
         if str(local_bin) not in path_env.split(":"):
+            # Offer to add it automatically
+            shell_rc = _detect_shell_rc()
+            if shell_rc:
+                print(f"\n~/.local/bin is not in your PATH.")
+                if _prompt_yn("Add it to your PATH automatically?", default=True):
+                    if _add_to_path(shell_rc, local_bin):
+                        return CheckResult(
+                            name="Wrapper script",
+                            status=CheckStatus.OK,
+                            message=f"Installed to {wrapper_path}",
+                            detail=(
+                                f"✓ Added to PATH in {shell_rc}\n"
+                                f"  Run: source {shell_rc}\n"
+                                f"  Or restart your shell to use 'quern' command globally"
+                            ),
+                        )
+                    else:
+                        return CheckResult(
+                            name="Wrapper script",
+                            status=CheckStatus.OK,
+                            message=f"Installed to {wrapper_path}",
+                            detail=f"PATH already configured in {shell_rc}",
+                        )
+
+            # User declined or shell detection failed — show manual instructions
             return CheckResult(
                 name="Wrapper script",
                 status=CheckStatus.OK,
                 message=f"Installed to {wrapper_path}",
                 detail=(
-                    f"⚠ Add ~/.local/bin to PATH:\n"
+                    f"⚠ Add ~/.local/bin to PATH manually:\n"
                     f"    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc\n"
                     f"    source ~/.zshrc"
                 ),

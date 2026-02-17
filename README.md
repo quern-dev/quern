@@ -29,20 +29,20 @@ Quern Debug Server (localhost:9100)
 ```bash
 git clone <repo-url>
 cd quern
-./quern setup                # creates venv, installs deps, checks tools
+./quern setup                # creates venv, installs deps, checks tools, adds quern to ~/.local/bin
 ./quern mcp-install          # builds MCP server, adds to ~/.claude.json
 ```
 
-That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies. `mcp-install` builds the TypeScript MCP server and registers it with Claude Code.
+That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies. `mcp-install` builds the TypeScript MCP server and registers it with Claude Code. Setup will offer to add `~/.local/bin` to your PATH, allowing you to use `quern <command>` from anywhere instead of `./quern` from the project folder.
 
 ### Run
 
 ```bash
-./quern start                # start as a background daemon
-./quern start -f             # run in the foreground (Ctrl-C to stop)
-./quern status               # check status
-./quern stop                 # stop
-./quern update               # pull latest changes and rebuild
+quern start                # start as a background daemon
+quern start -f             # run in the foreground (Ctrl-C to stop)
+quern status               # check status
+quern stop                 # stop
+quern update               # pull latest changes and rebuild
 ```
 
 The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`:
@@ -56,7 +56,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 ### Connect via MCP
 
 ```bash
-./quern mcp-install           # adds quern-debug to ~/.claude.json
+quern mcp-install           # adds quern-debug to ~/.claude.json
 ```
 
 The MCP server auto-discovers the running server via `state.json` — no URL or API key configuration needed.
@@ -125,15 +125,15 @@ Device management and screenshots use `xcrun simctl` (always available with Xcod
 Startup is idempotent — running `start` when a server is already running is a no-op. Port conflicts are handled automatically by scanning upward. The MCP server is auto-rebuilt on start when the TypeScript source is newer than the compiled output.
 
 ```bash
-./quern setup          # Check environment, install deps
-./quern start          # Daemonize
-./quern start -f       # Foreground
-./quern stop           # Graceful shutdown
-./quern restart        # Stop + start
-./quern status         # Show PID, URL, uptime
-./quern update         # Pull latest changes, reinstall deps, rebuild MCP
-./quern regenerate-key # New API key
-./quern mcp-install    # Register MCP server with Claude Code
+quern setup          # Check environment, install deps
+quern start          # Daemonize
+quern start -f       # Foreground
+quern stop           # Graceful shutdown
+quern restart        # Stop + start
+quern status         # Show PID, URL, uptime
+quern update         # Pull latest changes, reinstall deps, rebuild MCP
+quern regenerate-key # New API key
+quern mcp-install    # Register MCP server with Claude Code
 ```
 
 `~/.quern/state.json` is the single source of truth for discovering a running instance.
@@ -267,7 +267,7 @@ tests/                 676 tests
 cd mcp && npm run build
 
 # Run with debug logging
-./quern start -f --verbose
+quern start -f --verbose
 ```
 
 ## License
