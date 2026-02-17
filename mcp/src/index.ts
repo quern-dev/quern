@@ -764,6 +764,20 @@ server.tool(
         `/api/v1/proxy/flows/${encodeURIComponent(flow_id)}`
       );
 
+      // Try to parse JSON body strings into objects so they render
+      // as structured JSON instead of escaped strings
+      const record = data as Record<string, Record<string, unknown>>;
+      for (const key of ["request", "response"]) {
+        const section = record?.[key];
+        if (section?.body && typeof section.body === "string") {
+          try {
+            section.body = JSON.parse(section.body as string);
+          } catch {
+            // Not JSON — keep as string
+          }
+        }
+      }
+
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(data, null, 2) },
@@ -1998,7 +2012,9 @@ server.tool(
 
 server.tool(
   "get_screen_summary",
-  `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit. Requires idb.`,
+  `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit. Requires idb.
+
+This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.`,
   {
     max_elements: z
       .number()
@@ -2037,7 +2053,9 @@ server.tool(
 
 server.tool(
   "tap",
-  `Tap at specific screen coordinates on the simulator. Requires idb.`,
+  `Tap at specific screen coordinates on the simulator. Requires idb.
+
+PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element.`,
   {
     x: z.number().describe("X coordinate"),
     y: z.number().describe("Y coordinate"),
@@ -2079,7 +2097,9 @@ server.tool(
 
 server.tool(
   "tap_element",
-  `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results. Requires idb.`,
+  `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results. Requires idb.
+
+This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.`,
   {
     label: z
       .string()
