@@ -166,6 +166,7 @@ class TestTap:
             await backend.tap("AAAA-1111", 100.5, 200.3)
             mock_exec.assert_called_once_with(
                 "/usr/local/bin/idb", "ui", "tap", "100", "200",
+                "--duration", "0.05",
                 "--udid", "AAAA-1111",
                 stdout=-1, stderr=-1,
             )
