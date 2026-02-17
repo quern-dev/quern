@@ -241,7 +241,65 @@ Add to pyproject.toml:
 
 See `docs/phase2-architecture.md` for complete details including addon protocol, data models, API schemas, and iOS device setup instructions.
 
+---
 
+### Proxy Best Practices (for AI Agents)
+
+The Quern proxy follows a **background service + opt-in capture** model:
+
+#### Architecture
+- **Proxy server**: Runs in background (always ready)
+- **System proxy**: OFF by default (keeps user's browser working)
+- **Capture session**: Explicitly enable → test → disable
+
+#### Recommended Workflow
+
+**1. Start the proxy server** (one-time setup):
+```
+start_proxy()  // Proxy listens, system proxy stays OFF
+```
+
+**2. When ready to capture traffic**:
+```
+configure_system_proxy()   // Enable capture
+launch_app(...)            // Run your tests
+query_flows()              // Check captured traffic
+unconfigure_system_proxy() // IMPORTANT: Restore user's browser
+```
+
+**3. Proxy keeps running** for next capture session
+
+#### Why This Matters
+- User's browser keeps working between test sessions
+- VPN conflicts are minimized
+- Clear separation between "proxy available" and "actively capturing"
+- Easier to recover from crashes (proxy off = normal system state)
+
+#### Common Patterns
+
+**Quick test with auto-cleanup:**
+```
+configure_system_proxy()
+launch_app("com.example.app")
+# ... do testing ...
+unconfigure_system_proxy()  // Don't forget!
+```
+
+**Check current state:**
+```
+proxy_status()  // Look for system_proxy.configured field
+```
+
+#### What NOT to Do
+- ❌ Don't call `start_proxy(system_proxy=true)` unless you have a specific reason
+- ❌ Don't leave system proxy configured when not actively testing
+- ❌ Don't assume the proxy is capturing just because it's running
+
+#### Troubleshooting
+- **No flows appearing**: Check if system proxy is configured with `proxy_status()`
+- **Browser not working**: Check if system proxy is stuck on with `proxy_status()`, then call `unconfigure_system_proxy()`
+
+---
 
 ### Phase 3 Context: Device Inspection & Control
 

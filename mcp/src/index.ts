@@ -785,7 +785,12 @@ server.tool(
 
 server.tool(
   "proxy_status",
-  `Check proxy state and configuration. Returns status (running/stopped/error), port, flows captured, intercept state, mock rules count, and any errors.`,
+  `Check proxy state and configuration. Returns status (running/stopped/error),
+port, flows captured, intercept state, mock rules count, and system proxy state.
+
+The system_proxy field shows whether the macOS system proxy is currently
+configured. If null/false, the user's browser works normally and traffic
+is NOT being captured.`,
   {},
   async () => {
     try {
@@ -854,7 +859,19 @@ server.tool(
 
 server.tool(
   "start_proxy",
-  `Start the mitmproxy network capture. Automatically configures the macOS system proxy so simulator traffic is captured. Optionally specify port and listen host.`,
+  `Start the mitmproxy network capture.
+
+IMPORTANT: By default, this does NOT configure the system proxy.
+The proxy will listen on the specified port but traffic won't be
+routed through it until you call configure_system_proxy.
+
+WORKFLOW:
+1. Call start_proxy (proxy listens, system proxy stays OFF)
+2. When ready to capture: call configure_system_proxy
+3. Run your tests/capture traffic
+4. When done: call unconfigure_system_proxy (restore user's browser)
+
+This keeps the user's browser working normally when not actively capturing.`,
   {
     port: z
       .number()
@@ -868,7 +885,7 @@ server.tool(
       .boolean()
       .optional()
       .describe(
-        "Configure macOS system proxy automatically (default: true). Required for simulator traffic capture."
+        "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control."
       ),
   },
   async ({ port, listen_host, system_proxy }) => {
@@ -1006,7 +1023,12 @@ server.tool(
 
 server.tool(
   "configure_system_proxy",
-  `Configure macOS system proxy to route traffic through mitmproxy. Required for simulator traffic capture. Auto-detects the active network interface. The proxy must be running first.`,
+  `Manually configure macOS system proxy to route through mitmproxy.
+
+Use this after start_proxy when you're ready to begin capturing traffic.
+Remember to call unconfigure_system_proxy when done to restore the user's browser.
+
+NOTE: The proxy must be running first (call start_proxy).`,
   {
     interface: z
       .string()
@@ -1044,7 +1066,11 @@ server.tool(
 
 server.tool(
   "unconfigure_system_proxy",
-  `Restore macOS system proxy to its pre-Quern state. Use when you want to stop routing traffic through mitmproxy but keep the proxy running.`,
+  `Restore macOS system proxy to its pre-Quern state.
+
+IMPORTANT: Always call this when you finish capturing traffic to restore
+the user's browser functionality. The proxy server will keep running in
+the background and can be re-enabled with configure_system_proxy.`,
   {},
   async () => {
     try {
@@ -1601,7 +1627,13 @@ server.tool(
 
 server.tool(
   "launch_app",
-  `Launch an app by bundle ID on a simulator.`,
+  `Launch an app by bundle ID on a simulator.
+
+NOTE: If you want to capture network traffic from this app:
+1. Ensure the proxy is running (start_proxy)
+2. Enable system proxy (configure_system_proxy)
+3. Launch the app (this tool)
+4. When done, disable system proxy (unconfigure_system_proxy)`,
   {
     bundle_id: z.string().describe("App bundle identifier (e.g. com.example.MyApp)"),
     udid: z

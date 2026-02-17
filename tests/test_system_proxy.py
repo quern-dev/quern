@@ -471,7 +471,8 @@ class TestStartProxySystemProxy:
         mock_detect.assert_not_called()
         assert resp.json()["system_proxy"] is None
 
-    def test_start_detection_failure(self, client, mock_proxy_adapter):
+    def test_start_default_no_system_proxy(self, client, mock_proxy_adapter):
+        """Test that start_proxy() without params does NOT configure system proxy."""
         mock_proxy_adapter.is_running = False
 
         async def fake_start():
@@ -479,11 +480,12 @@ class TestStartProxySystemProxy:
 
         mock_proxy_adapter.start = fake_start
 
-        with patch("server.api.proxy.detect_and_configure", return_value=None), \
+        with patch("server.api.proxy.detect_and_configure") as mock_detect, \
              patch("server.api.proxy.update_state"):
-            resp = client.post("/api/v1/proxy/start")
+            resp = client.post("/api/v1/proxy/start")  # No body
 
         assert resp.status_code == 200
+        mock_detect.assert_not_called()  # Should NOT be called
         assert resp.json()["system_proxy"] is None
 
 

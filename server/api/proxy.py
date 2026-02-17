@@ -71,20 +71,35 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     adapter = request.app.state.proxy_adapter
     flow_store = request.app.state.flow_store
 
-    # Get cert setup info from state.json
+    # Read cert setup and system proxy state from state.json
     cert_setup = None
+    system_proxy_info: SystemProxyInfo | None = None
     try:
         state = read_state()
-        if state and state.get("device_certs"):
-            cert_setup = {
-                udid: DeviceCertState(**cert_data)
-                for udid, cert_data in state["device_certs"].items()
-            }
+        if state:
+            # Populate cert_setup
+            if state.get("device_certs"):
+                cert_setup = {
+                    udid: DeviceCertState(**cert_data)
+                    for udid, cert_data in state["device_certs"].items()
+                }
+
+            # Populate system_proxy status
+            if state.get("system_proxy_configured"):
+                system_proxy_info = SystemProxyInfo(
+                    configured=True,
+                    interface=state.get("system_proxy_interface"),
+                    original_state="unknown",  # Don't need to reconstruct this
+                )
     except Exception as e:
-        _proxy_logger.debug(f"Failed to load cert_setup: {e}")
+        _proxy_logger.debug(f"Failed to load state: {e}")
 
     if adapter is None:
-        return ProxyStatusResponse(status="stopped", cert_setup=cert_setup)
+        return ProxyStatusResponse(
+            status="stopped",
+            cert_setup=cert_setup,
+            system_proxy=system_proxy_info,
+        )
 
     if adapter._error:
         return ProxyStatusResponse(
@@ -97,6 +112,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
             cert_setup=cert_setup,
+            system_proxy=system_proxy_info,
         )
 
     if adapter.is_running:
@@ -110,6 +126,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
             cert_setup=cert_setup,
+            system_proxy=system_proxy_info,
         )
 
     return ProxyStatusResponse(
@@ -118,6 +135,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
         listen_host=adapter.listen_host,
         flows_captured=flow_store.size if flow_store else 0,
         cert_setup=cert_setup,
+        system_proxy=system_proxy_info,
     )
 
 
@@ -164,8 +182,8 @@ async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatus
     except Exception:
         _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
 
-    # Auto-configure system proxy unless explicitly disabled
-    want_system_proxy = True
+    # Auto-configure system proxy only if explicitly enabled
+    want_system_proxy = False
     if body and body.get("system_proxy") is not None:
         want_system_proxy = body["system_proxy"]
 
