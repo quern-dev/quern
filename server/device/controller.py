@@ -14,6 +14,7 @@ from server.device.ui_elements import (
     find_element,
     generate_screen_summary,
     get_center,
+    get_tap_point,
     parse_elements,
 )
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, UIElement, WaitCondition
@@ -780,7 +781,7 @@ class DeviceController:
 
         if len(matches) == 1:
             el = matches[0]
-            cx, cy = get_center(el)
+            cx, cy = get_tap_point(el)
 
             # Stability check: ensure element has stopped moving/animating
             # Skip for static elements (tab bars, nav bars) to avoid expensive tree fetches
@@ -842,7 +843,7 @@ class DeviceController:
 
                         matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
                         if matches_final:
-                            cx, cy = get_center(matches_final[0])
+                            cx, cy = get_tap_point(matches_final[0])
 
                 t_after_stability = time.perf_counter()
                 logger.info(f"[PERF] tap_element: stability check complete (+{(t_after_stability-t4)*1000:.1f}ms)")

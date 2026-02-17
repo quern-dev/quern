@@ -13,6 +13,7 @@ from server.device.ui_elements import (
     find_by_type,
     generate_screen_summary,
     get_center,
+    get_tap_point,
     parse_elements,
 )
 from server.models import UIElement
@@ -224,6 +225,57 @@ class TestGetCenter:
         cx, cy = get_center(el)
         assert cx == 50.0
         assert cy == 50.0
+
+
+# ---------------------------------------------------------------------------
+# get_tap_point
+# ---------------------------------------------------------------------------
+
+
+class TestGetTapPoint:
+    def test_regular_element_uses_center(self):
+        el = UIElement(type="Button", frame={"x": 100, "y": 200, "width": 50, "height": 30})
+        x, y = get_tap_point(el)
+        assert x == 125.0
+        assert y == 215.0
+
+    def test_checkbox_taps_right_side(self):
+        """CheckBox elements (iOS toggles) should tap the right side where the switch knob is."""
+        el = UIElement(
+            type="CheckBox",
+            role_description="switch",
+            frame={"x": 16, "y": 151, "width": 370, "height": 52},
+        )
+        x, y = get_tap_point(el)
+        # 85% of width: 16 + 370 * 0.85 = 330.5
+        assert x == 330.5
+        # Vertical center: 151 + 52 / 2 = 177
+        assert y == 177.0
+
+    def test_switch_type_taps_right_side(self):
+        el = UIElement(
+            type="Switch",
+            frame={"x": 0, "y": 0, "width": 200, "height": 40},
+        )
+        x, y = get_tap_point(el)
+        assert x == 170.0  # 0 + 200 * 0.85
+        assert y == 20.0
+
+    def test_role_description_switch_taps_right_side(self):
+        """Even if type isn't CheckBox, role_description='switch' should trigger right-side tap."""
+        el = UIElement(
+            type="Other",
+            role_description="switch",
+            frame={"x": 10, "y": 100, "width": 300, "height": 50},
+        )
+        x, y = get_tap_point(el)
+        assert x == 265.0  # 10 + 300 * 0.85
+        assert y == 125.0
+
+    def test_no_frame_raises(self):
+        el = UIElement(type="CheckBox", label="NoFrame")
+        with pytest.raises(ValueError, match="has no frame"):
+            get_tap_point(el)
 
 
 # ---------------------------------------------------------------------------

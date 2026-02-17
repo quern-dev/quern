@@ -188,6 +188,33 @@ def get_center(element: UIElement) -> tuple[float, float]:
     return round(x, 2), round(y, 2)
 
 
+# Element types where the tappable control is on the right side of the frame
+# (e.g. iOS toggle switches exposed as CheckBox by idb)
+_RIGHT_ALIGNED_TYPES = {"checkbox", "switch"}
+
+
+def get_tap_point(element: UIElement) -> tuple[float, float]:
+    """Calculate the best tap point for an element.
+
+    For most elements, this is the center. For CheckBox/Switch elements
+    (iOS toggles), the actual switch control is on the right side of the
+    frame, so we offset the tap to the right 85% of the width.
+    """
+    if element.frame is None:
+        raise ValueError(f"Element '{element.label or element.type}' has no frame")
+
+    el_type = (element.type or "").lower()
+    role_desc = (element.role_description or "").lower()
+
+    if el_type in _RIGHT_ALIGNED_TYPES or role_desc == "switch":
+        # Tap the right side where the toggle knob lives
+        x = element.frame["x"] + element.frame["width"] * 0.85
+        y = element.frame["y"] + element.frame["height"] / 2
+        return round(x, 2), round(y, 2)
+
+    return get_center(element)
+
+
 # Element types considered interactive for screen summaries
 _INTERACTIVE_TYPES = {"button", "textfield", "switch", "slider", "link", "searchfield"}
 
