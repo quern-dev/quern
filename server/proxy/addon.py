@@ -65,7 +65,8 @@ def _encode_body(raw: bytes | None) -> tuple[str | None, int, bool, str]:
 
 def _serialize_request(request: http.Request) -> dict[str, Any]:
     """Serialize an mitmproxy Request to a dict."""
-    body_str, body_size, truncated, encoding = _encode_body(request.raw_content)
+    # Use .content (auto-decoded) instead of .raw_content (may be compressed)
+    body_str, body_size, truncated, encoding = _encode_body(request.content)
 
     # Flatten headers — last value wins for duplicate keys
     headers = {}
@@ -87,7 +88,8 @@ def _serialize_request(request: http.Request) -> dict[str, Any]:
 
 def _serialize_response(response: http.Response) -> dict[str, Any]:
     """Serialize an mitmproxy Response to a dict."""
-    body_str, body_size, truncated, encoding = _encode_body(response.raw_content)
+    # Use .content (auto-decoded gzip/deflate/br) instead of .raw_content
+    body_str, body_size, truncated, encoding = _encode_body(response.content)
 
     headers = {}
     for k, v in response.headers.items():

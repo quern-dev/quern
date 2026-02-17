@@ -69,7 +69,7 @@ class FlowStore:
             return list(self._flows.values())
 
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
-        """Apply query filters. Must be called under lock."""
+        """Apply query filters. Returns newest-first. Must be called under lock."""
         results: list[FlowRecord] = []
 
         for flow in self._flows.values():
@@ -97,4 +97,6 @@ class FlowStore:
                 continue
             results.append(flow)
 
+        # Newest first — most useful for debugging
+        results.reverse()
         return results
