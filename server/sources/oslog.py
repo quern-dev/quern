@@ -40,7 +40,7 @@ OSLOG_TIMESTAMP_RE = re.compile(
 )
 
 
-def _parse_oslog_timestamp(ts_str: str) -> datetime:
+def parse_oslog_timestamp(ts_str: str) -> datetime:
     """Parse an OSLog timestamp string into a UTC datetime."""
     match = OSLOG_TIMESTAMP_RE.match(ts_str)
     if not match:
@@ -59,7 +59,7 @@ def _parse_oslog_timestamp(ts_str: str) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _extract_process_name(image_path: str) -> str:
+def extract_process_name(image_path: str) -> str:
     """Extract the process name from a processImagePath."""
     if not image_path:
         return ""
@@ -215,10 +215,10 @@ class OslogAdapter(BaseSourceAdapter):
         level = OSLOG_LEVEL_MAP.get(message_type, LogLevel.INFO)
 
         timestamp_str = data.get("timestamp", "")
-        timestamp = _parse_oslog_timestamp(timestamp_str) if timestamp_str else self._now()
+        timestamp = parse_oslog_timestamp(timestamp_str) if timestamp_str else self._now()
 
         process_path = data.get("processImagePath", "")
-        process_name = _extract_process_name(process_path)
+        process_name = extract_process_name(process_path)
 
         return LogEntry(
             id=uuid.uuid4().hex[:8],

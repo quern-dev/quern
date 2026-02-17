@@ -197,6 +197,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.source_adapters = adapters
 
+    # Simulator log adapters — managed on-demand via API
+    app.state.sim_log_adapters: dict[str, "SimulatorLogAdapter"] = {}
+
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
@@ -256,6 +259,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     for adapter in adapters.values():
         await adapter.stop()
+    for sim_adapter in app.state.sim_log_adapters.values():
+        await sim_adapter.stop()
     await dedup.stop()
 
     # Restore system proxy if we configured it
@@ -307,6 +312,7 @@ def create_app(
     app.state.flow_store = None
     app.state.device_controller = None
     app.state.device_pool = None
+    app.state.sim_log_adapters = {}
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)

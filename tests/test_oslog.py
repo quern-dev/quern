@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from server.models import LogLevel, LogSource
-from server.sources.oslog import OslogAdapter, _extract_process_name, _parse_oslog_timestamp
+from server.sources.oslog import OslogAdapter, extract_process_name, parse_oslog_timestamp
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def test_parse_json_with_leading_comma(adapter: OslogAdapter, sample_lines: list
 
 def test_timestamp_parsing():
     """OSLog timestamps should be correctly parsed to UTC."""
-    ts = _parse_oslog_timestamp("2026-02-07 14:23:01.234567-0800")
+    ts = parse_oslog_timestamp("2026-02-07 14:23:01.234567-0800")
     assert ts.year == 2026
     assert ts.month == 2
     assert ts.day == 7
@@ -101,11 +101,11 @@ def test_timestamp_parsing():
 
 def test_process_name_extraction():
     """Process name should be extracted from the image path."""
-    assert _extract_process_name(
+    assert extract_process_name(
         "/private/var/containers/Bundle/Application/ABC123/MyApp"
     ) == "MyApp"
-    assert _extract_process_name("") == ""
-    assert _extract_process_name("/usr/bin/logd") == "logd"
+    assert extract_process_name("") == ""
+    assert extract_process_name("/usr/bin/logd") == "logd"
 
 
 def test_build_command_no_filters(adapter: OslogAdapter):

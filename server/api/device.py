@@ -18,6 +18,8 @@ from server.models import (
     PressButtonRequest,
     SetLocationRequest,
     ShutdownDeviceRequest,
+    StartSimLogRequest,
+    StopSimLogRequest,
     SwipeRequest,
     TapElementRequest,
     TapRequest,
@@ -480,6 +482,77 @@ async def grant_permission(request: Request, body: GrantPermissionRequest):
 # ---------------------------------------------------------------------------
 # Annotated screenshots
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Simulator logging
+# ---------------------------------------------------------------------------
+
+
+@router.post("/logging/start")
+async def start_simulator_logging(request: Request, body: StartSimLogRequest):
+    """Start capturing logs from a simulator app via unified logging."""
+    from server.sources.simulator_log import SimulatorLogAdapter
+
+    controller = _get_controller(request)
+
+    # Resolve UDID
+    try:
+        udid = await controller.resolve_udid(body.udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+    # Check if already running for this UDID
+    sim_adapters: dict = request.app.state.sim_log_adapters
+    if udid in sim_adapters and sim_adapters[udid].is_running:
+        return {"status": "already_running", "udid": udid, "adapter_id": sim_adapters[udid].adapter_id}
+
+    # Get the deduplicator as the entry callback (same pipeline as other adapters)
+    dedup = request.app.state.deduplicator
+
+    adapter = SimulatorLogAdapter(
+        udid=udid,
+        on_entry=dedup.process,
+        process_filter=body.process,
+        subsystem_filter=body.subsystem,
+        level=body.level,
+    )
+
+    await adapter.start()
+
+    if adapter._error:
+        raise HTTPException(status_code=500, detail=adapter._error)
+
+    # Register in both dicts so it appears in list_log_sources
+    sim_adapters[udid] = adapter
+    request.app.state.source_adapters[adapter.adapter_id] = adapter
+
+    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id}
+
+
+@router.post("/logging/stop")
+async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
+    """Stop capturing logs from a simulator."""
+    controller = _get_controller(request)
+
+    # Resolve UDID
+    try:
+        udid = await controller.resolve_udid(body.udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+    sim_adapters: dict = request.app.state.sim_log_adapters
+    adapter = sim_adapters.get(udid)
+    if not adapter:
+        raise HTTPException(status_code=404, detail=f"No simulator logging active for UDID {udid}")
+
+    await adapter.stop()
+
+    # Remove from both dicts
+    del sim_adapters[udid]
+    request.app.state.source_adapters.pop(adapter.adapter_id, None)
+
+    return {"status": "stopped", "udid": udid}
 
 
 @router.get("/screenshot/annotated")

@@ -35,6 +35,7 @@ class LogSource(str, enum.Enum):
     BUILD = "build"
     PROXY = "proxy"
     APP_DRAIN = "app_drain"
+    SIMULATOR = "simulator"
 
 
 class LogEntry(BaseModel):
@@ -767,3 +768,23 @@ class CertInstallRequest(BaseModel):
 
     udid: str | None = None  # If None, install on all booted devices
     force: bool = False  # Force reinstall even if already installed
+
+
+# ---------------------------------------------------------------------------
+# Simulator logging models
+# ---------------------------------------------------------------------------
+
+
+class StartSimLogRequest(BaseModel):
+    """Request body for POST /api/v1/device/logging/start."""
+
+    udid: str | None = None
+    process: str | None = None
+    subsystem: str | None = None
+    level: str = "debug"
+
+
+class StopSimLogRequest(BaseModel):
+    """Request body for POST /api/v1/device/logging/stop."""
+
+    udid: str | None = None
