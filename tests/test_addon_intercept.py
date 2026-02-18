@@ -180,6 +180,37 @@ def test_request_mock_match_returns_response(addon, output):
     flow.intercept.assert_not_called()
 
 
+def test_request_mock_custom_status_code(addon, output):
+    """Mock with non-200 status_code should pass it through to Response.make."""
+    addon._mock_rules.append({
+        "rule_id": "mock_404",
+        "pattern_str": "~d api.example.com",
+        "compiled": lambda f: f.request.pretty_host == "api.example.com",
+        "response": {
+            "status_code": 404,
+            "headers": {"content-type": "text/plain"},
+            "body": '{"error": "not found"}',
+        },
+    })
+
+    flow = _make_mock_flow(host="api.example.com")
+    flow.response = None
+
+    with patch("server.proxy.addon.http.Response.make") as mock_make:
+        mock_make.return_value = MagicMock()
+        addon.request(flow)
+        mock_make.assert_called_once_with(
+            404,
+            b'{"error": "not found"}',
+            {"content-type": "text/plain"},
+        )
+
+    events = output.of_type("mock_hit")
+    assert len(events) == 1
+    assert events[0]["response"]["status_code"] == 404
+    assert events[0]["response"]["body"] == '{"error": "not found"}'
+
+
 def test_mock_priority_over_intercept(addon, output):
     """When both mock and intercept match, mock should win."""
     addon._intercept_compiled = lambda f: f.request.pretty_host == "api.example.com"
@@ -380,6 +411,22 @@ def test_handle_set_mock_invalid(addon, output):
         "rule_id": "mock_bad",
         "pattern": "~invalid_garbage !!!",
         "response": {"status_code": 200},
+    })
+
+    with addon._mock_lock:
+        assert len(addon._mock_rules) == 0
+
+    errors = output.of_type("error")
+    assert len(errors) == 1
+    assert errors[0]["event"] == "invalid_mock_pattern"
+
+
+def test_handle_set_mock_tilde_p_is_invalid(addon, output):
+    """~p is not a valid mitmproxy filter operator and should be rejected."""
+    addon._handle_set_mock({
+        "rule_id": "mock_path",
+        "pattern": "~p /api/v2/filters",
+        "response": {"status_code": 404, "body": "not found"},
     })
 
     with addon._mock_lock:

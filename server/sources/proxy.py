@@ -23,6 +23,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mitmproxy import flowfilter
+
 from server.models import (
     FlowRecord,
     FlowRequest,
@@ -36,6 +38,16 @@ from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter, EntryCallback
 
 logger = logging.getLogger(__name__)
+
+
+def validate_filter_pattern(pattern: str) -> None:
+    """Validate a mitmproxy filter pattern. Raises ValueError if invalid."""
+    try:
+        result = flowfilter.parse(pattern)
+    except ValueError as e:
+        raise ValueError(str(e)) from e
+    if result is None:
+        raise ValueError(f"Invalid filter expression: {pattern!r}")
 
 # Path to the addon script (lives alongside this module's parent)
 ADDON_PATH = Path(__file__).resolve().parent.parent / "proxy" / "addon.py"
@@ -285,7 +297,8 @@ class ProxyAdapter(BaseSourceAdapter):
     # -------------------------------------------------------------------
 
     async def set_intercept(self, pattern: str) -> None:
-        """Set an intercept pattern on the addon."""
+        """Set an intercept pattern on the addon. Raises ValueError if pattern is invalid."""
+        validate_filter_pattern(pattern)
         self._intercept_pattern = pattern
         await self.send_command({"action": "set_intercept", "pattern": pattern})
 
@@ -312,7 +325,8 @@ class ProxyAdapter(BaseSourceAdapter):
         await self.send_command({"action": "release_all"})
 
     async def set_mock(self, pattern: str, response: dict, rule_id: str | None = None) -> str:
-        """Add a mock response rule. Returns the rule_id."""
+        """Add a mock response rule. Returns the rule_id. Raises ValueError if pattern is invalid."""
+        validate_filter_pattern(pattern)
         if rule_id is None:
             rule_id = f"mock_{uuid.uuid4().hex[:8]}"
         self._mock_rules.append({"rule_id": rule_id, "pattern": pattern, "response": response})

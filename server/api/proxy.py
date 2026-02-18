@@ -476,7 +476,10 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
 async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
     """Set an intercept pattern. Matching requests will be held."""
     adapter = _require_running_proxy(request)
-    await adapter.set_intercept(body.pattern)
+    try:
+        await adapter.set_intercept(body.pattern)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {
         "status": "accepted",
         "pattern": body.pattern,
@@ -627,10 +630,13 @@ async def replay_flow(
 async def set_mock(request: Request, body: SetMockRequest) -> dict:
     """Add a mock response rule. Matching requests get a synthetic response."""
     adapter = _require_running_proxy(request)
-    rule_id = await adapter.set_mock(
-        pattern=body.pattern,
-        response=body.response.model_dump(),
-    )
+    try:
+        rule_id = await adapter.set_mock(
+            pattern=body.pattern,
+            response=body.response.model_dump(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"status": "accepted", "rule_id": rule_id, "pattern": body.pattern}
 
 

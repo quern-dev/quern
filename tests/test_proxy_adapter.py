@@ -427,6 +427,57 @@ async def test_handle_status_event_mock_cleared_specific(adapter):
 
 
 # ---------------------------------------------------------------------------
+# Server-side pattern validation (set_mock / set_intercept)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_mock_validates_pattern(adapter):
+    """set_mock should reject invalid patterns before sending to addon."""
+    adapter.send_command = MagicMock()  # should never be called
+
+    with pytest.raises(ValueError, match="Invalid filter expression"):
+        await adapter.set_mock(
+            pattern="~p /api/v2/filters",
+            response={"status_code": 404, "body": "not found"},
+        )
+
+    assert len(adapter._mock_rules) == 0
+    adapter.send_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_intercept_validates_pattern(adapter):
+    """set_intercept should reject invalid patterns before sending to addon."""
+    adapter.send_command = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid filter expression"):
+        await adapter.set_intercept("~p /api/v2/filters")
+
+    assert adapter._intercept_pattern is None
+    adapter.send_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_mock_stores_response(adapter):
+    """set_mock should store the response dict in _mock_rules for list_mocks."""
+    from unittest.mock import AsyncMock
+    adapter.send_command = AsyncMock()
+
+    response = {"status_code": 404, "body": '{"error": "not found"}', "headers": {"content-type": "text/plain"}}
+    rule_id = await adapter.set_mock(
+        pattern="~d api.example.com",
+        response=response,
+    )
+
+    assert len(adapter._mock_rules) == 1
+    stored = adapter._mock_rules[0]
+    assert stored["rule_id"] == rule_id
+    assert stored["response"] == response
+    assert stored["response"]["status_code"] == 404
+
+
+# ---------------------------------------------------------------------------
 # Stale mitmdump cleanup tests
 # ---------------------------------------------------------------------------
 
