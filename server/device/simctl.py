@@ -131,6 +131,10 @@ class SimctlBackend:
         """Terminate an app on a simulator."""
         await self._run_simctl("terminate", udid, bundle_id)
 
+    async def uninstall_app(self, udid: str, bundle_id: str) -> None:
+        """Uninstall an app from a simulator."""
+        await self._run_simctl("uninstall", udid, bundle_id)
+
     async def list_apps(self, udid: str) -> list[AppInfo]:
         """List installed apps on a simulator.
 

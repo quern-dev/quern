@@ -169,6 +169,14 @@ class DevicectlBackend:
 
         self._launched_pids.pop((uuid, bundle_id), None)
 
+    async def uninstall_app(self, uuid: str, bundle_id: str) -> None:
+        """Uninstall an app from a physical device."""
+        await self._run_devicectl(
+            "device", "uninstall", "app",
+            "--device", uuid,
+            bundle_id,
+        )
+
     async def list_apps(self, uuid: str) -> list[AppInfo]:
         """List installed apps on a physical device."""
         stdout, _ = await self._run_devicectl(

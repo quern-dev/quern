@@ -203,6 +203,15 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.terminate_app(resolved, bundle_id)
         return resolved
 
+    async def uninstall_app(self, bundle_id: str, udid: str | None = None) -> str:
+        """Uninstall an app. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        if self._is_physical(resolved):
+            await self.devicectl.uninstall_app(resolved, bundle_id)
+        else:
+            await self.simctl.uninstall_app(resolved, bundle_id)
+        return resolved
+
     async def list_apps(self, udid: str | None = None) -> tuple[list[AppInfo], str]:
         """List installed apps. Returns (apps, resolved_udid)."""
         resolved = await self.resolve_udid(udid)

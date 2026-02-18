@@ -543,6 +543,13 @@ class TerminateAppRequest(BaseModel):
     udid: str | None = None
 
 
+class UninstallAppRequest(BaseModel):
+    """Request body for POST /device/app/uninstall."""
+
+    bundle_id: str
+    udid: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # UI inspection models (Phase 3b)
 # ---------------------------------------------------------------------------

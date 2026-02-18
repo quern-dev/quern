@@ -18,6 +18,7 @@ from server.models import (
     StartSimLogRequest,
     StopSimLogRequest,
     TerminateAppRequest,
+    UninstallAppRequest,
 )
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -130,6 +131,17 @@ async def terminate_app(request: Request, body: TerminateAppRequest):
     try:
         udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
         return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/app/uninstall")
+async def uninstall_app(request: Request, body: UninstallAppRequest):
+    """Uninstall an app from a simulator or physical device."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
+        return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
     except DeviceError as e:
         raise _handle_device_error(e)
 
