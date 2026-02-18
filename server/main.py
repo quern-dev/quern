@@ -59,6 +59,7 @@ from server.storage.ring_buffer import RingBuffer
 from server.api.builds import router as builds_router
 from server.api.crashes import router as crashes_router
 from server.api.device import router as device_router
+from server.api.device_ui import router as device_ui_router
 from server.api.device_pool import router as device_pool_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
@@ -310,6 +311,7 @@ def create_app(
     app.include_router(proxy_intercept_router)
     app.include_router(proxy_certs_router)
     app.include_router(device_router)
+    app.include_router(device_ui_router)
     app.include_router(device_pool_router)
 
     @app.get("/health")
