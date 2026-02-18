@@ -364,7 +364,7 @@ async def test_replay_success(app, auth_headers, running_adapter):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Mock the httpx client to avoid real HTTP call
-        with patch("server.api.proxy.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.api.proxy_intercept.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_resp = AsyncMock()
             mock_resp.status_code = 200
@@ -392,7 +392,7 @@ async def test_replay_with_modifications(app, auth_headers, running_adapter):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch("server.api.proxy.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.api.proxy_intercept.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_resp = AsyncMock()
             mock_resp.status_code = 201
@@ -423,7 +423,7 @@ async def test_replay_error_handling(app, auth_headers, running_adapter):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch("server.api.proxy.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.api.proxy_intercept.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=Exception("Connection refused"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)

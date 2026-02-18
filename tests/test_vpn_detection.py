@@ -2,7 +2,7 @@
 
 from unittest.mock import patch, MagicMock
 
-from server.api.proxy import (
+from server.api.proxy_certs import (
     _get_connected_vpns,
     _detect_proxy_warnings,
 )
@@ -23,7 +23,7 @@ class TestGetConnectedVpns:
             '* (Disconnected)  "Work VPN"          [com.apple.something]\n'
             '* (Disconnected)  "Personal VPN"       [com.apple.something]\n'
         )
-        with patch("server.api.proxy.subprocess.run", return_value=_mock_run(output)):
+        with patch("server.api.proxy_certs.subprocess.run", return_value=_mock_run(output)):
             assert _get_connected_vpns() == []
 
     def test_one_connected(self):
@@ -31,7 +31,7 @@ class TestGetConnectedVpns:
             '* (Connected)     "Corporate VPN"      [com.apple.something]\n'
             '* (Disconnected)  "Personal VPN"       [com.apple.something]\n'
         )
-        with patch("server.api.proxy.subprocess.run", return_value=_mock_run(output)):
+        with patch("server.api.proxy_certs.subprocess.run", return_value=_mock_run(output)):
             assert _get_connected_vpns() == ["Corporate VPN"]
 
     def test_multiple_connected(self):
@@ -40,15 +40,15 @@ class TestGetConnectedVpns:
             '* (Connected)     "VPN B"              [com.apple.something]\n'
             '* (Disconnected)  "VPN C"              [com.apple.something]\n'
         )
-        with patch("server.api.proxy.subprocess.run", return_value=_mock_run(output)):
+        with patch("server.api.proxy_certs.subprocess.run", return_value=_mock_run(output)):
             assert _get_connected_vpns() == ["VPN A", "VPN B"]
 
     def test_command_fails(self):
-        with patch("server.api.proxy.subprocess.run", return_value=_mock_run("", returncode=1)):
+        with patch("server.api.proxy_certs.subprocess.run", return_value=_mock_run("", returncode=1)):
             assert _get_connected_vpns() == []
 
     def test_command_raises(self):
-        with patch("server.api.proxy.subprocess.run", side_effect=FileNotFoundError):
+        with patch("server.api.proxy_certs.subprocess.run", side_effect=FileNotFoundError):
             assert _get_connected_vpns() == []
 
 
@@ -83,14 +83,14 @@ class TestGetDefaultRouteDevice:
 class TestDetectProxyWarnings:
     def test_no_issues(self):
         """No VPNs, normal interface → no warnings."""
-        with patch("server.api.proxy._get_connected_vpns", return_value=[]), \
-             patch("server.api.proxy.get_default_route_device", return_value="en0"):
+        with patch("server.api.proxy_certs._get_connected_vpns", return_value=[]), \
+             patch("server.api.proxy_certs.get_default_route_device", return_value="en0"):
             assert _detect_proxy_warnings() == []
 
     def test_connected_vpn(self):
         """Connected VPN → warning about traffic bypass."""
-        with patch("server.api.proxy._get_connected_vpns", return_value=["Work VPN"]), \
-             patch("server.api.proxy.get_default_route_device", return_value="en0"):
+        with patch("server.api.proxy_certs._get_connected_vpns", return_value=["Work VPN"]), \
+             patch("server.api.proxy_certs.get_default_route_device", return_value="en0"):
             warnings = _detect_proxy_warnings()
             assert len(warnings) == 1
             assert "Work VPN" in warnings[0]
@@ -98,8 +98,8 @@ class TestDetectProxyWarnings:
 
     def test_utun_default_route_without_scutil_vpn(self):
         """Default route via utun but no scutil VPN → warn about tunnel + suggest disconnect."""
-        with patch("server.api.proxy._get_connected_vpns", return_value=[]), \
-             patch("server.api.proxy.get_default_route_device", return_value="utun3"):
+        with patch("server.api.proxy_certs._get_connected_vpns", return_value=[]), \
+             patch("server.api.proxy_certs.get_default_route_device", return_value="utun3"):
             warnings = _detect_proxy_warnings()
             assert len(warnings) == 2
             assert "utun3" in warnings[0]
@@ -107,8 +107,8 @@ class TestDetectProxyWarnings:
 
     def test_vpn_plus_utun_route(self):
         """VPN connected AND utun route → VPN warning + remediation advice (no redundant tunnel warning)."""
-        with patch("server.api.proxy._get_connected_vpns", return_value=["Corp VPN"]), \
-             patch("server.api.proxy.get_default_route_device", return_value="utun0"):
+        with patch("server.api.proxy_certs._get_connected_vpns", return_value=["Corp VPN"]), \
+             patch("server.api.proxy_certs.get_default_route_device", return_value="utun0"):
             warnings = _detect_proxy_warnings()
             # Should have: VPN detected warning + remediation suggestion
             assert any("Corp VPN" in w for w in warnings)
@@ -116,6 +116,6 @@ class TestDetectProxyWarnings:
 
     def test_detection_failure_graceful(self):
         """If all detection fails, return empty list (no crash)."""
-        with patch("server.api.proxy._get_connected_vpns", return_value=[]), \
-             patch("server.api.proxy.get_default_route_device", return_value=None):
+        with patch("server.api.proxy_certs._get_connected_vpns", return_value=[]), \
+             patch("server.api.proxy_certs.get_default_route_device", return_value=None):
             assert _detect_proxy_warnings() == []

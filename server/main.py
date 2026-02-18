@@ -62,6 +62,8 @@ from server.api.device import router as device_router
 from server.api.device_pool import router as device_pool_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
+from server.api.proxy_intercept import router as proxy_intercept_router
+from server.api.proxy_certs import router as proxy_certs_router
 
 logger = logging.getLogger("quern-debug-server")
 
@@ -305,6 +307,8 @@ def create_app(
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
+    app.include_router(proxy_intercept_router)
+    app.include_router(proxy_certs_router)
     app.include_router(device_router)
     app.include_router(device_pool_router)
 
