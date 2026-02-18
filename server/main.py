@@ -140,7 +140,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from server.proxy.system_proxy import (
                 detect_active_interface,
                 snapshot_system_proxy,
-                detect_and_configure,
             )
             from server.lifecycle.state import update_state, read_state
 
@@ -174,24 +173,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         )
                     except Exception:
                         logger.debug("Could not update state file", exc_info=True)
-                elif not is_pointing_to_us:
-                    # System proxy not configured, set it up
-                    snap = await asyncio.to_thread(detect_and_configure, app.state.proxy_port)
-                    if snap:
-                        logger.info(
-                            "Auto-configured system proxy on %s (port %d)",
-                            snap.interface,
-                            app.state.proxy_port,
-                        )
-                        try:
-                            update_state(
-                                system_proxy_configured=True,
-                                system_proxy_interface=snap.interface,
-                                system_proxy_snapshot=snap.to_dict(),
-                            )
-                        except Exception:
-                            logger.debug("Could not update state file", exc_info=True)
-                # else: already pointing to us and tracked, nothing to do
+                # else: system proxy not pointing to us — leave it alone.
+                # Agents opt in via configure_system_proxy when ready to capture.
         except Exception:
             logger.warning("Failed to auto-configure system proxy", exc_info=True)
 
