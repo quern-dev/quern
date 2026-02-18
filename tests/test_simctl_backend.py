@@ -236,6 +236,16 @@ class TestSimctlCommands:
                 stdout=-1, stderr=-1,
             )
 
+    async def test_uninstall_app(self):
+        backend = SimctlBackend()
+        proc = _mock_proc()
+        with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+            await backend.uninstall_app("AAAA-1111", "com.example.App")
+            mock_exec.assert_called_once_with(
+                "xcrun", "simctl", "uninstall", "AAAA-1111", "com.example.App",
+                stdout=-1, stderr=-1,
+            )
+
 
 # ---------------------------------------------------------------------------
 # list_apps

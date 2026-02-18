@@ -265,6 +265,47 @@ NOTE: If you want to capture network traffic from this app:
   );
 
   server.tool(
+    "uninstall_app",
+    `Uninstall an app from a simulator or physical device by bundle ID.`,
+    {
+      bundle_id: z.string().describe("App bundle identifier"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (auto-resolves if omitted)"),
+    },
+    async ({ bundle_id, udid }) => {
+      try {
+        const body: Record<string, unknown> = { bundle_id };
+        if (udid) body.udid = udid;
+
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/device/app/uninstall",
+          undefined,
+          body
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "list_apps",
     `List installed apps on a simulator or physical device.`,
     {

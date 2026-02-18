@@ -206,6 +206,14 @@ class TestAppDelegation:
         ctrl.simctl.terminate_app.assert_called_once_with("AAAA-1111", "com.example.App")
         assert udid == "AAAA-1111"
 
+    async def test_uninstall_app(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.uninstall_app = AsyncMock()
+        udid = await ctrl.uninstall_app("com.example.App")
+        ctrl.simctl.uninstall_app.assert_called_once_with("AAAA-1111", "com.example.App")
+        assert udid == "AAAA-1111"
+
     async def test_list_apps(self):
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"

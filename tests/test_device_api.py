@@ -59,6 +59,7 @@ def mock_controller(app):
     ctrl.install_app = AsyncMock(return_value="AAAA-1111")
     ctrl.launch_app = AsyncMock(return_value="AAAA-1111")
     ctrl.terminate_app = AsyncMock(return_value="AAAA-1111")
+    ctrl.uninstall_app = AsyncMock(return_value="AAAA-1111")
     ctrl.list_apps = AsyncMock(return_value=(
         [AppInfo(bundle_id="com.example.App", name="My App", app_type="User")],
         "AAAA-1111",
@@ -232,6 +233,20 @@ class TestAppEndpoints:
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "terminated"
+
+    async def test_uninstall_app(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/app/uninstall",
+                json={"bundle_id": "com.example.App"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "uninstalled"
+        assert data["bundle_id"] == "com.example.App"
+        assert data["udid"] == "AAAA-1111"
 
     async def test_list_apps(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)

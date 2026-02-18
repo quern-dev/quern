@@ -187,6 +187,25 @@ class TestTerminateApp:
 
 
 # ---------------------------------------------------------------------------
+# uninstall_app
+# ---------------------------------------------------------------------------
+
+
+class TestUninstallApp:
+    async def test_uninstall_app(self):
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=("", ""))
+
+        await backend.uninstall_app("UUID", "com.example.app")
+
+        backend._run_devicectl.assert_called_once_with(
+            "device", "uninstall", "app",
+            "--device", "UUID",
+            "com.example.app",
+        )
+
+
+# ---------------------------------------------------------------------------
 # list_apps
 # ---------------------------------------------------------------------------
 
