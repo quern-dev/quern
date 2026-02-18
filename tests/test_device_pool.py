@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -171,7 +171,7 @@ class TestStaleClaimCleanup:
 
         # Manually backdate claim
         state = pool._read_state()
-        state.devices[device.udid].claimed_at = datetime.utcnow() - timedelta(minutes=31)
+        state.devices[device.udid].claimed_at = datetime.now(timezone.utc) - timedelta(minutes=31)
         pool._write_state(state)
 
         released = await pool.cleanup_stale_claims()
@@ -249,7 +249,7 @@ class TestRefreshCaching:
         assert mock_controller.list_devices.call_count == first_call_count
 
         # After 2.1 seconds, should refresh again
-        pool._last_refresh_at = datetime.utcnow() - timedelta(seconds=2.1)
+        pool._last_refresh_at = datetime.now(timezone.utc) - timedelta(seconds=2.1)
         await pool.refresh_from_simctl()
         assert mock_controller.list_devices.call_count == first_call_count + 1
 

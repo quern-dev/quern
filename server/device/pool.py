@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from server.device.controller import DeviceController
@@ -126,11 +126,11 @@ class DevicePool:
             # Claim it
             device.claim_status = DeviceClaimStatus.CLAIMED
             device.claimed_by = session_id
-            device.claimed_at = datetime.utcnow()
-            device.last_used = datetime.utcnow()
+            device.claimed_at = datetime.now(timezone.utc)
+            device.last_used = datetime.now(timezone.utc)
 
             state.devices[device.udid] = device
-            state.updated_at = datetime.utcnow()
+            state.updated_at = datetime.now(timezone.utc)
             self._write_state(state)
 
             logger.info(
@@ -176,10 +176,10 @@ class DevicePool:
             device.claim_status = DeviceClaimStatus.AVAILABLE
             device.claimed_by = None
             device.claimed_at = None
-            device.last_used = datetime.utcnow()
+            device.last_used = datetime.now(timezone.utc)
 
             state.devices[device.udid] = device
-            state.updated_at = datetime.utcnow()
+            state.updated_at = datetime.now(timezone.utc)
             self._write_state(state)
 
             logger.info("Device released: %s (%s)", device.udid, device.name)
@@ -193,7 +193,7 @@ class DevicePool:
         """Release devices with expired claims. Returns list of released UDIDs."""
         with self._lock_pool_file():
             state = self._read_state()
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             released = []
 
             for udid, device in state.devices.items():
@@ -227,7 +227,7 @@ class DevicePool:
         (e.g., parallel test execution claiming multiple devices).
         """
         # Check cache
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if self._last_refresh_at and (now - self._last_refresh_at) < REFRESH_CACHE_TTL:
             return
 
@@ -236,7 +236,7 @@ class DevicePool:
 
         with self._lock_pool_file():
             state = self._read_state()
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             # Update or add devices
             for device_info in simctl_devices:
@@ -501,9 +501,9 @@ class DevicePool:
                         )
                     device.claim_status = DeviceClaimStatus.CLAIMED
                     device.claimed_by = session_id
-                    device.claimed_at = datetime.utcnow()
-                    device.last_used = datetime.utcnow()
-                    state.updated_at = datetime.utcnow()
+                    device.claimed_at = datetime.now(timezone.utc)
+                    device.last_used = datetime.now(timezone.utc)
+                    state.updated_at = datetime.now(timezone.utc)
                     self._write_state(state)
                 return udid
 
@@ -544,9 +544,9 @@ class DevicePool:
                         )
                     device.claim_status = DeviceClaimStatus.CLAIMED
                     device.claimed_by = session_id
-                    device.claimed_at = datetime.utcnow()
-                    device.last_used = datetime.utcnow()
-                    state.updated_at = datetime.utcnow()
+                    device.claimed_at = datetime.now(timezone.utc)
+                    device.last_used = datetime.now(timezone.utc)
+                    state.updated_at = datetime.now(timezone.utc)
                     self._write_state(state)
             return chosen.udid
 
@@ -565,9 +565,9 @@ class DevicePool:
                     device = state.devices[chosen.udid]
                     device.claim_status = DeviceClaimStatus.CLAIMED
                     device.claimed_by = session_id
-                    device.claimed_at = datetime.utcnow()
-                    device.last_used = datetime.utcnow()
-                    state.updated_at = datetime.utcnow()
+                    device.claimed_at = datetime.now(timezone.utc)
+                    device.last_used = datetime.now(timezone.utc)
+                    state.updated_at = datetime.now(timezone.utc)
                     self._write_state(state)
             return chosen.udid
 
@@ -582,9 +582,9 @@ class DevicePool:
                         if device.claim_status == DeviceClaimStatus.AVAILABLE:
                             device.claim_status = DeviceClaimStatus.CLAIMED
                             device.claimed_by = session_id
-                            device.claimed_at = datetime.utcnow()
-                            device.last_used = datetime.utcnow()
-                            state.updated_at = datetime.utcnow()
+                            device.claimed_at = datetime.now(timezone.utc)
+                            device.last_used = datetime.now(timezone.utc)
+                            state.updated_at = datetime.now(timezone.utc)
                             self._write_state(state)
                 return found.udid
 
@@ -678,10 +678,10 @@ class DevicePool:
                         device = state.devices[udid]
                         device.claim_status = DeviceClaimStatus.CLAIMED
                         device.claimed_by = session_id
-                        device.claimed_at = datetime.utcnow()
-                        device.last_used = datetime.utcnow()
+                        device.claimed_at = datetime.now(timezone.utc)
+                        device.last_used = datetime.now(timezone.utc)
                         claimed_udids.append(udid)
-                    state.updated_at = datetime.utcnow()
+                    state.updated_at = datetime.now(timezone.utc)
                     self._write_state(state)
 
             return selected_udids
@@ -703,14 +703,14 @@ class DevicePool:
     def _read_state(self) -> DevicePoolState:
         """Read pool state from disk."""
         if not self._pool_file.exists():
-            return DevicePoolState(updated_at=datetime.utcnow(), devices={})
+            return DevicePoolState(updated_at=datetime.now(timezone.utc), devices={})
 
         try:
             data = json.loads(self._pool_file.read_text())
             return DevicePoolState.model_validate(data)
         except Exception as e:
             logger.error("Failed to parse pool state file: %s", e)
-            return DevicePoolState(updated_at=datetime.utcnow(), devices={})
+            return DevicePoolState(updated_at=datetime.now(timezone.utc), devices={})
 
     def _write_state(self, state: DevicePoolState) -> None:
         """Write pool state to disk."""
