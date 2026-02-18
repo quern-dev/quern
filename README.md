@@ -1,18 +1,40 @@
-# Quern Debug Server
+# Quern
 
-A local server that captures iOS simulator logs, network traffic, crash reports, and build output — then exposes everything through an HTTP API and MCP tools designed for AI coding agents.
+**Eyes, ears, and hands for AI-assisted mobile development.**
+
+Quern is a local debug server that lets AI coding agents — Claude Code, Cursor, Windsurf, and others — actually *see* what your app is doing. Logs, network traffic, crash reports, screenshots, UI state: instead of guessing from stack traces and stale error messages, your agent gets live, structured access to everything happening on the device.
+
+No cloud. No telemetry. Just a daemon on your Mac that bridges the gap between "build succeeded" and "it actually works."
+
+<!-- TODO: Hero image — screenshot of an agent session using Quern to diagnose a bug
+     (e.g. agent reads a 500 response body via network proxy and identifies the issue)
+     ![Agent session with Quern](docs/images/agent-session.png)
+-->
+
+> Currently supports iOS Simulators, with iOS device, Android emulator, and Android device support on the roadmap.
 
 ```
-iOS Simulator
+Simulator / Device
     │
-Quern Debug Server (localhost:9100)
+Quern (localhost:9100)
     ├── Log capture (syslog, oslog, crash reports, build output)
-    ├── Network proxy (mitmproxy — intercept, mock, replay)
+    ├── Network proxy (intercept, mock, replay HTTP traffic)
     ├── Device control (boot, screenshot, tap, swipe, type)
     │
     ├── HTTP API ──→ Any tool or script
     └── MCP tools ──→ Claude Code, Cursor, etc.
 ```
+
+## Why
+
+AI agents are good at writing code. They're bad at knowing whether it worked. A build error gets caught; a silent API failure, a wrong screen, or a crash on launch usually doesn't — unless you paste logs back into the chat yourself.
+
+Quern closes that loop. It gives agents direct, token-efficient access to everything they need to diagnose and fix problems autonomously: structured logs, network request/response pairs, parsed crash reports, screenshots, and the ability to interact with the running app.
+
+<!-- TODO: Terminal recording (asciinema gif) — quern setup, quern start, then a short
+     agent interaction showing log tailing or network inspection
+     ![Quern in action](docs/images/demo.gif)
+-->
 
 ## Quick Start
 
@@ -80,7 +102,7 @@ curl -H "Authorization: Bearer $API_KEY" \
      "http://localhost:9100/api/v1/logs/summary?window=5m"
 ```
 
-## Features
+## What It Does
 
 ### Log Capture
 
@@ -113,6 +135,9 @@ Manage iOS simulators and interact with running apps.
 - **Device management** — list, boot, shutdown simulators
 - **App management** — install, launch, terminate, list apps
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays
+<!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
+     ![Annotated screenshot](docs/images/annotated-screenshot.png)
+-->
 - **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
 - **Interaction** — tap (by element label or coordinates), swipe, type text, clear text, press hardware buttons
 - **Configuration** — set GPS location, grant permissions
