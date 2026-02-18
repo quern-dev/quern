@@ -1,21 +1,19 @@
 # Quern Agent Guide
 
-**For**: AI agents using Quern MCP server for iOS debugging and testing
-**Last Updated**: February 15, 2026
-**Status**: Living document based on real-world usage
+**For**: AI agents using Quern MCP tools for mobile app debugging and testing
+**Last Updated**: February 17, 2026
 
 ---
 
-## Philosophy: Eyes, Ears, and Fingers
+## Philosophy
 
-Quern is designed to be your **sensory and motor interface** to iOS apps. Like humans don't consciously think "rotate eyeballs 15 degrees left" - they just **look** - you shouldn't think about tool mechanics. The tools should feel natural and automatic.
+Quern is your sensory and motor interface to mobile apps. The tools give you three capabilities:
 
-**Your capabilities through Quern**:
-- 👀 **Eyes**: See UI state, network traffic, logs
-- 👂 **Ears**: Hear app events, crashes, errors
-- 👊 **Fingers**: Control UI, intercept network, trigger actions
+- **Eyes**: See UI state, network traffic, logs
+- **Ears**: Hear app events, crashes, errors
+- **Hands**: Control UI, intercept network, trigger actions
 
-The more you use these tools, the better you'll get at using them together.
+The tools should feel natural — you don't think about mechanics, you just look, listen, and act.
 
 ---
 
@@ -23,12 +21,10 @@ The more you use these tools, the better you'll get at using them together.
 
 Every Quern session should start with:
 
-```
-1. ensure_server()              # Start/verify Quern is running
-2. resolve_device(...)          # Get a device to work with
-3. get_screen_summary()         # See what's on screen
-4. proxy_status()               # Check if network capture is active
-```
+1. `ensure_server` — start or verify Quern is running
+2. `resolve_device` — get a device to work with
+3. `get_screen_summary` — see what's on screen
+4. `proxy_status` — check if network capture is active
 
 From there, use the right tool for your task.
 
@@ -36,658 +32,301 @@ From there, use the right tool for your task.
 
 ## Core Principles
 
-### 1. **Use Structured Data, Not Visual Parsing**
+### 1. Prefer Structured Data for Decision-Making
 
-❌ **Don't**:
-```python
-screenshot()  # Then try to parse pixels?
-```
+Use `get_screen_summary` for a curated text description or `get_ui_tree` for the full accessibility hierarchy. These are cheaper, faster, and easier to reason about programmatically than screenshots.
 
-✅ **Do**:
-```python
-get_screen_summary()  # Curated text description
-get_ui_tree()         # Full accessibility hierarchy
-```
-
-**Why**: You're an AI agent. Structured data (JSON, text) is your native format. Screenshots are for humans.
-
-**Exception**: Screenshots are great for documentation, bug reports, or showing state to humans.
+Screenshots are still useful — for verifying visual layout, catching rendering bugs, documenting state for humans, or when you need to see something the accessibility tree doesn't capture. Use both, but reach for structured data first when you need to make decisions or find elements to interact with.
 
 ---
 
-### 2. **Prefer Accessibility Over Coordinates**
+### 2. Prefer Accessibility Over Coordinates
 
-❌ **Don't**:
-```python
-tap(x=300, y=450)  # Brittle, breaks on different devices/orientations
-```
-
-✅ **Do**:
-```python
-tap_element(label="Submit", element_type="Button")
-```
-
-**Why**:
-- Works across screen sizes
-- Survives UI layout changes
-- Self-documenting (readable intent)
+Use `tap_element` with a label and element type instead of `tap` with raw coordinates. Accessibility-based taps work across screen sizes, survive layout changes, and are self-documenting.
 
 **When coordinates are OK**: Gestures that aren't tied to specific elements (swipe to refresh, drag to reorder).
 
 ---
 
-### 3. **Summarize First, Drill Down Second**
+### 3. Summarize First, Drill Down Second
 
-❌ **Don't**:
-```python
-all_logs = query_logs(limit=10000)        # Overwhelming
-all_flows = query_flows(limit=1000)       # Too much data
-tree = get_ui_tree()                      # 500+ elements
-```
+Don't start with `query_logs(limit=10000)` or `query_flows(limit=1000)`. Start with the summary tools:
 
-✅ **Do**:
-```python
-log_summary = get_log_summary(window="5m")     # Overview
-flow_summary = get_flow_summary(window="5m")   # By-host aggregation
-screen_summary = get_screen_summary(max_elements=20)  # Curated elements
+- `get_log_summary` — overview of recent log activity
+- `get_flow_summary` — traffic grouped by host with error highlights
+- `get_screen_summary` — curated interactive elements on screen
 
-# Then drill down based on what you learned
-specific_logs = query_logs(search="Error", limit=50)
-failed_flows = query_flows(status_min=400, limit=10)
-full_tree = get_ui_tree(children_of="Login Form")
-```
-
-**Why**: Summaries are designed for agent consumption - they give you context to make smart decisions about what to investigate.
+Then drill down based on what you learned: filter logs by a specific error message, query flows for a specific failing host, or scope the UI tree to a specific container.
 
 ---
 
-### 4. **Verify State Before Acting**
+### 4. Verify State Before Acting
 
-❌ **Don't**:
-```python
-# Assume proxy is running
-query_flows(method="POST")  # Might be empty!
-
-# Assume element exists
-tap_element(label="Submit")  # Might fail!
-```
-
-✅ **Do**:
-```python
-# Check proxy state
-status = proxy_status()
-if status["status"] != "running":
-    start_proxy()
-
-# Check element exists
-summary = get_screen_summary()
-if "Submit" in summary:
-    tap_element(label="Submit")
-else:
-    # Element not visible, handle accordingly
-```
-
-**Why**: State can change. Always verify before acting.
+Don't assume the proxy is running — check with `proxy_status` first. Don't assume an element exists — check with `get_screen_summary` before tapping. State can change between tool calls. Always verify before acting.
 
 ---
 
-### 5. **Use Server-Side Waiting, Not Client-Side Polling**
+### 5. Use Server-Side Waiting, Not Client-Side Polling
 
-❌ **Don't**:
-```python
-# Client-side polling loop
-for i in range(10):
-    tree = get_ui_tree()
-    if find_element(tree, "Success"):
-        break
-    time.sleep(1)
-```
+Use `wait_for_element` instead of calling `get_ui_tree` in a loop. It polls server-side at sub-second intervals, returns immediately on match, handles timeouts, and uses fewer API round-trips.
 
-✅ **Do**:
-```python
-result = wait_for_element(
-    label="Success",
-    condition="exists",
-    timeout=10
-)
-if result["matched"]:
-    # Element appeared
-```
-
-**Why**:
-- Fewer API round-trips
-- More efficient (server polls at sub-second intervals)
-- Built-in timeout handling
-- Returns immediately on match
+Similarly, `list_held_flows` supports a `timeout` parameter for long-polling — use it instead of repeatedly checking for intercepted flows.
 
 ---
 
-### 6. **Filter Aggressively**
+### 6. Filter Aggressively
 
-Logs, network flows, and UI trees can be **huge**. Always filter to what you need.
+Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
-**Logs**:
-```python
-# Too broad
-all_logs = query_logs(limit=1000)
+**Logs**: Filter by `level`, `process`, `search` text, and time range. Don't fetch 1,000 entries when 50 filtered ones will do.
 
-# Better
-errors = query_logs(level="error", limit=50)
-app_logs = query_logs(process="MyApp", search="timeout")
-recent = query_logs(since="2026-02-15T10:00:00Z")
-```
+**Flows**: Filter by `host`, `method`, `path_contains`, and `status_min`/`status_max`. Use `get_flow_summary` first to identify which hosts or patterns to investigate.
 
-**Flows**:
-```python
-# Too broad
-all_flows = query_flows(limit=500)
-
-# Better
-api_calls = query_flows(path_contains="/api/", limit=20)
-failures = query_flows(status_min=400)
-slow_requests = query_flows(...)  # Use flow_summary to find slow patterns first
-```
-
-**UI Tree**:
-```python
-# Too broad (500+ elements)
-full_tree = get_ui_tree()
-
-# Better
-summary = get_screen_summary(max_elements=20)  # Curated
-login_form = get_ui_tree(children_of="Login Form")  # Scoped
-```
+**UI Tree**: Use `get_screen_summary` with a reasonable `max_elements` limit. If you need detail, scope `get_ui_tree` with `children_of` to a specific container rather than fetching the full 500+ element hierarchy.
 
 ---
 
 ## Common Workflows
 
-### Workflow 1: Debugging Network Issues
+### Debugging Network Issues
 
-```python
-# 1. Ensure proxy is running
-ensure_server()
-status = proxy_status()
-if status["status"] != "running":
-    start_proxy()
-
-# 2. Get baseline
-summary = get_flow_summary(window="1m")  # See current traffic
-
-# 3. Trigger the issue
-get_screen_summary()
-tap_element(label="Submit")
-
-# 4. Query for relevant flows
-flows = query_flows(
-    method="POST",
-    path_contains="/api/submit",
-    limit=5
-)
-
-# 5. Examine specific flow
-if flows["flows"]:
-    detail = get_flow_detail(flow_id=flows["flows"][0]["id"])
-    # Check request/response bodies, headers, status
-```
+1. Call `ensure_server`, then check `proxy_status` — start the proxy if it isn't running
+2. Get a baseline with `get_flow_summary` to see current traffic patterns
+3. Trigger the issue (tap a button, navigate to a screen)
+4. Query for relevant flows — filter by method, path, or status code
+5. Use `get_flow_detail` on the specific flow to inspect headers, request body, and response body
 
 **Key insight**: Start with summary, trigger action, drill down to specific flows.
 
+**Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
+1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database
+2. Returns detailed status per device with installation timestamps
+3. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
+
 ---
 
-### Workflow 2: Debugging UI Issues
+### Debugging UI Issues
 
-```python
-# 1. See current state
-summary = get_screen_summary()
-
-# 2. Trigger the issue
-tap_element(label="Delete")
-
-# 3. Check new state
-after_summary = get_screen_summary()
-
-# 4. If unexpected, get full tree for details
-if "Confirm" not in after_summary:
-    tree = get_ui_tree()
-    # Inspect full hierarchy to find what actually appeared
-```
+1. Call `get_screen_summary` to see current state
+2. Trigger the issue (tap, swipe, type)
+3. Call `get_screen_summary` again to see what changed
+4. If the result is unexpected, use `get_ui_tree` (optionally scoped with `children_of`) to inspect the full hierarchy
 
 **Key insight**: Use summary for quick checks, full tree when you need details.
 
 ---
 
-### Workflow 3: Debugging Crashes
+### Debugging Crashes
 
-```python
-# 1. Check recent crashes
-crashes = get_latest_crash(limit=5)
+1. Check recent crashes with `get_latest_crash`
+2. Get logs around the crash time — query for error-level entries in the seconds leading up to the crash
+3. Check network activity around the same time with `query_flows`
+4. Correlate: crash report + logs + network activity = full picture
 
-if crashes["crashes"]:
-    latest = crashes["crashes"][0]
-
-    # 2. Get logs around crash time
-    crash_time = latest["timestamp"]
-    logs = query_logs(
-        since=crash_time - 30,  # 30 seconds before
-        until=crash_time,
-        level="error"
-    )
-
-    # 3. Check network activity before crash
-    flows = query_flows(...)  # Around crash time
-
-    # Correlate: crash + logs + network = full picture
-```
-
-**Key insight**: Crashes leave traces in multiple places. Correlate logs + network + crash report.
+**Key insight**: Crashes leave traces in multiple places. Cross-referencing sources is where you find root causes.
 
 ---
 
-### Workflow 4: Reproducing Bug Reports
+### Reproducing Bug Reports
 
-```python
-# 1. Navigate to starting screen
-navigate_to_screen("Profile")
+1. Use `get_screen_summary` to verify your starting state
+2. Follow the reported steps using `tap_element`, `type_text`, `swipe`, etc.
+3. After each step, call `get_screen_summary` to verify the expected state before continuing — this catches where the reproduction diverges from expectations
+4. Check logs and network flows alongside UI state to build the full picture
+5. If the bug reproduces, capture a diagnostic bundle: screenshot, logs, network flows, and UI tree
 
-# 2. Perform reported steps
-tap_element(label="Settings")
-tap_element(label="Edit Profile")
-type_text("New Name")
-tap_element(label="Save")
-
-# 3. Capture state at each step
-screenshots = []
-logs = []
-
-# Take snapshot
-screenshots.append(take_screenshot())
-logs.append(query_logs(since="5s ago"))
-
-# 4. Check for expected vs actual
-summary = get_screen_summary()
-if "Success" not in summary:
-    # Bug reproduced! Capture diagnostic bundle:
-    # - Screenshots
-    # - Logs
-    # - Network flows
-    # - UI tree
-```
-
-**Key insight**: Capture state at each step for a complete reproduction.
+**Key insight**: Verify state at each step. The step where expected and actual diverge is where the bug lives.
 
 ---
 
 ## Tool Selection Guide
 
 **"I need to see what's on screen"**
-- Quick overview → `get_screen_summary()`
-- Full detail → `get_ui_tree()`
-- Visual for humans → `take_screenshot()`
+- Quick overview: `get_screen_summary`
+- Full detail: `get_ui_tree`
+- Visual for humans: `take_screenshot`
 
 **"I need to tap/interact with UI"**
-- Known element → `tap_element(label="...", element_type="...")`
-- Coordinates (rare) → `tap(x, y)`
-- Gesture → `swipe(start_x, start_y, end_x, end_y)`
-- Text input → Focus element, then `type_text("...")`
+- Known element: `tap_element` with label and element_type
+- Coordinates (rare): `tap`
+- Gesture: `swipe`
+- Text input: focus the element, then `type_text`
 
 **"I need to see network traffic"**
-- Overview → `get_flow_summary(window="5m")`
-- Specific requests → `query_flows(method="...", path_contains="...")`
-- Full detail → `get_flow_detail(flow_id="...")`
-- Modify traffic → `set_intercept(pattern="...")` + `release_flow(modifications=...)`
-- Mock responses → `set_mock(pattern="...", status_code=200, body="...")`
+- Overview: `get_flow_summary`
+- Specific requests: `query_flows` with filters
+- Full detail: `get_flow_detail`
+- Modify traffic: `set_intercept` + `release_flow` with modifications
+- Mock responses: `set_mock`
 
 **"I need to see logs"**
-- Recent activity → `tail_logs(count=50)`
-- Overview → `get_log_summary(window="5m")`
-- Specific search → `query_logs(search="...", level="...")`
-- Errors only → `get_errors(limit=50)`
+- Recent activity: `tail_logs`
+- Overview: `get_log_summary`
+- Specific search: `query_logs` with filters
+- Errors only: `get_errors`
 
 **"I need to control the device"**
-- Boot → `boot_device(name="...")` or `resolve_device(auto_boot=True)`
-- Install app → `install_app(app_path="...")`
-- Launch app → `launch_app(bundle_id="...")`
-- Screenshot → `take_screenshot()`
-- Location → `set_location(lat=..., lon=...)`
-- Permissions → `grant_permission(bundle_id="...", permission="...")`
+- Boot: `boot_device` or `resolve_device` with auto_boot
+- Install app: `install_app`
+- Launch app: `launch_app`
+- Screenshot: `take_screenshot`
+- Location: `set_location`
+- Permissions: `grant_permission`
+
+---
+
+## REST API Reference
+
+When calling the HTTP API directly (without MCP), use these paths:
+
+| MCP Tool             | HTTP Method | REST Path                              |
+|----------------------|-------------|----------------------------------------|
+| `ensure_server`      | GET         | `/health`                              |
+| `tail_logs`          | GET         | `/api/v1/logs/query`                   |
+| `query_logs`         | GET         | `/api/v1/logs/query`                   |
+| `get_log_summary`    | GET         | `/api/v1/logs/summary`                 |
+| `get_errors`         | GET         | `/api/v1/logs/errors`                  |
+| `get_build_result`   | GET         | `/api/v1/builds/latest`                |
+| `get_latest_crash`   | GET         | `/api/v1/crashes/latest`               |
+| `set_log_filter`     | POST        | `/api/v1/logs/filter`                  |
+| `list_log_sources`   | GET         | `/api/v1/logs/sources`                 |
+| `query_flows`        | GET         | `/api/v1/proxy/flows`                  |
+| `get_flow_detail`    | GET         | `/api/v1/proxy/flows/{id}`             |
+| `get_flow_summary`   | GET         | `/api/v1/proxy/flows/summary`          |
+| `proxy_status`       | GET         | `/api/v1/proxy/status`                 |
+| `verify_proxy_setup` | POST        | `/api/v1/proxy/cert/verify`            |
+| `start_proxy`        | POST        | `/api/v1/proxy/start`                  |
+| `stop_proxy`         | POST        | `/api/v1/proxy/stop`                   |
+| `set_intercept`      | POST        | `/api/v1/proxy/intercept`              |
+| `clear_intercept`    | DELETE      | `/api/v1/proxy/intercept`              |
+| `list_held_flows`    | GET         | `/api/v1/proxy/intercept/held`         |
+| `release_flow`       | POST        | `/api/v1/proxy/intercept/release`      |
+| `replay_flow`        | POST        | `/api/v1/proxy/replay/{id}`            |
+| `set_mock`           | POST        | `/api/v1/proxy/mock`                   |
+| `list_mocks`         | GET         | `/api/v1/proxy/mock`                   |
+| `clear_mocks`        | DELETE      | `/api/v1/proxy/mock`                   |
+| `list_devices`       | GET         | `/api/v1/device/list`                  |
+| `boot_device`        | POST        | `/api/v1/device/boot`                  |
+| `shutdown_device`    | POST        | `/api/v1/device/shutdown`              |
+| `install_app`        | POST        | `/api/v1/device/app/install`           |
+| `launch_app`         | POST        | `/api/v1/device/app/launch`            |
+| `terminate_app`      | POST        | `/api/v1/device/app/terminate`         |
+| `list_apps`          | GET         | `/api/v1/device/app/list`              |
+| `take_screenshot`    | GET         | `/api/v1/device/screenshot`            |
+| `get_ui_tree`        | GET         | `/api/v1/device/ui`                    |
+| `get_element_state`  | GET         | `/api/v1/device/ui/element`            |
+| `wait_for_element`   | POST        | `/api/v1/device/ui/wait-for-element`   |
+| `get_screen_summary` | GET         | `/api/v1/device/screen-summary`        |
+| `tap`                | POST        | `/api/v1/device/ui/tap`                |
+| `tap_element`        | POST        | `/api/v1/device/ui/tap-element`        |
+| `swipe`              | POST        | `/api/v1/device/ui/swipe`              |
+| `type_text`          | POST        | `/api/v1/device/ui/type`               |
+| `clear_text`         | POST        | `/api/v1/device/ui/clear`              |
+| `press_button`       | POST        | `/api/v1/device/ui/press`              |
+| `set_location`       | POST        | `/api/v1/device/location`              |
+| `grant_permission`   | POST        | `/api/v1/device/permission`            |
+| `list_device_pool`   | GET         | `/api/v1/devices/pool`                 |
+| `claim_device`       | POST        | `/api/v1/devices/claim`                |
+| `release_device`     | POST        | `/api/v1/devices/release`              |
+| `resolve_device`     | POST        | `/api/v1/devices/resolve`              |
+| `ensure_devices`     | POST        | `/api/v1/devices/ensure`               |
 
 ---
 
 ## Advanced Patterns
 
-### Pattern 1: Correlation (The Superpower)
+### Correlation
 
-Humans struggle to correlate millisecond-level timing across logs, network, and UI. You don't.
-
-**Example**: Finding the exact moment a request fails
-```python
-# Trigger action
-tap_element(label="Submit")
-timestamp = time.time()
-
-# Get everything that happened in the next 2 seconds
-logs = query_logs(since=timestamp, until=timestamp+2)
-flows = query_flows(...)  # Filter by recent
-ui_state_after = get_screen_summary()
-
-# Correlate
-for flow in flows:
-    for log in logs:
-        if abs(flow["timestamp"] - log["timestamp"]) < 0.1:  # Within 100ms
-            # These are related!
-```
-
-**Why this matters**: The 26ms gap between POST and DELETE in today's debugging session? You'll catch these patterns instantly.
+Humans struggle to correlate millisecond-level timing across logs, network, and UI. You don't. After triggering an action, query logs, flows, and UI state for the same narrow time window. Events that occur within milliseconds of each other are almost certainly related — this lets you trace causation across system boundaries.
 
 ---
 
-### Pattern 2: Intercept-Modify-Release for Testing Edge Cases
+### Intercept-Modify-Release for Testing Edge Cases
 
 Test error handling without breaking the backend:
 
-```python
-# Set up intercept
-set_intercept(pattern="~d api.example.com & ~m POST")
+1. Set up an intercept pattern matching the target endpoint (e.g., `~d api.example.com & ~m POST`)
+2. Trigger the action in the app
+3. Wait for the request to be held with `list_held_flows` (use the timeout parameter)
+4. Release the flow with modifications — change the status code to 500, inject an error body, or alter headers
+5. Observe how the app handles the modified response via `get_screen_summary` and `query_logs`
 
-# Trigger action
-tap_element(label="Submit")
-
-# Wait for request to be held
-held = list_held_flows(timeout=5)
-
-if held["flows"]:
-    # Release with 500 error instead of real response
-    release_flow(
-        flow_id=held["flows"][0]["id"],
-        modifications={
-            "status_code": 500,
-            "body": '{"error": "Server error"}'
-        }
-    )
-
-    # See how app handles it
-    summary = get_screen_summary()
-    logs = query_logs(search="error", limit=10)
-```
-
-**Use case**: Test error handling, slow networks, malformed responses.
+Use this to test error handling, slow network conditions, and malformed responses without needing backend changes.
 
 ---
 
-### Pattern 3: Mock for Deterministic Testing
+### Mocking for Deterministic Testing
 
-Create reliable test scenarios:
+Use `set_mock` to return synthetic responses for specific endpoints. This lets you create reliable, repeatable test scenarios — fixed user data, specific error conditions, or edge-case payloads — without depending on backend state.
 
-```python
-# Mock a specific endpoint
-set_mock(
-    pattern="~d api.example.com & ~u /users/me",
-    status_code=200,
-    body='{"name": "Test User", "id": "123"}'
-)
-
-# Now every request to /users/me gets this response
-# Test flows that depend on user data
-```
-
-**Use case**: Onboarding flows, user-specific features, consistent test data.
+Mock rules take priority over intercept rules. Clear them with `clear_mocks` when done.
 
 ---
 
-### Pattern 4: Device Pool for Parallel Testing
+### Device Pool for Parallel Testing
 
-```python
-# Claim multiple devices
-devices = ensure_devices(
-    count=3,
-    name="iPhone 16 Pro",
-    session_id="my-session"
-)
-
-# Run tests in parallel on each
-for device in devices:
-    # Each device is isolated
-    # Run different test scenarios simultaneously
-
-# Clean up
-for device in devices:
-    release_device(udid=device["udid"], session_id="my-session")
-```
-
-**Use case**: Faster test execution, testing on multiple OS versions.
+Use `ensure_devices` to boot and claim multiple simulators at once, then run different test scenarios on each in parallel. Each claimed device is isolated — no other session can use it until you call `release_device`. Always release devices when done to avoid resource exhaustion.
 
 ---
 
 ## Common Mistakes
 
-### Mistake 1: Not Calling `ensure_server` First
+**Not calling `ensure_server` first** — Tools fail with connection errors. Always start with `ensure_server`.
 
-**Problem**: Tools fail with connection errors.
+**Using only screenshots to understand UI state** — Screenshots work, but `get_screen_summary` and `get_ui_tree` are faster, cheaper, and return structured data you can act on directly. Use screenshots to complement structured data, not replace it.
 
-**Solution**: Always start with `ensure_server()`.
+**Forgetting element_type when label is ambiguous** — `tap_element(label="Cancel")` might match a StaticText instead of the Button. Specify `element_type="Button"` when the label might not be unique.
 
----
+**Not filtering logs/flows** — Unfiltered queries return overwhelming amounts of data. Always filter by level, process, host, status code, or search text.
 
-### Mistake 2: Using Screenshots to Understand UI State
+**Hardcoding device UDIDs** — Use `resolve_device` with a name and let Quern find the right device. UDIDs differ across machines.
 
-**Problem**: You try to parse pixels or describe images.
+**Client-side polling instead of server-side waiting** — Use `wait_for_element` instead of looping on `get_ui_tree`. Use `list_held_flows` with a timeout instead of polling for intercepted flows.
 
-**Solution**: Use `get_screen_summary()` or `get_ui_tree()` - they return structured text.
+**Not clearing text before typing** — Use `clear_text` before `type_text` when a field has pre-existing content. Otherwise you'll append to whatever's already there.
 
----
+**Confusing `tail_logs` and `query_logs`** — Use `tail_logs` for "show me recent stuff" (defaults to 50, newest first). Use `query_logs` for searching with filters and time ranges.
 
-### Mistake 3: Forgetting Element Type When Label is Ambiguous
+**Ignoring log source names** — `syslog` = device system log, `oslog` = macOS unified log, `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic, `simulator` = simulator unified logging.
 
-**Problem**: `tap_element(label="Cancel")` matches a StaticText instead of the Button.
+**Using mock when you need intercept (or vice versa)** — Mocks return instant synthetic responses for stable test fixtures. Intercept pauses real requests for ad-hoc inspection and modification. Mock rules take priority over intercept.
 
-**Solution**: Always specify type when label might not be unique:
-```python
-tap_element(label="Cancel", element_type="Button")
-```
+**Not checking idb availability** — Device management and screenshots use `simctl` (always available with Xcode). UI inspection and interaction (`get_ui_tree`, `tap`, `swipe`, `type_text`, `clear_text`, `press_button`) require `idb`. Check `list_devices` response for tool availability.
 
----
-
-### Mistake 4: Not Filtering Logs/Flows
-
-**Problem**: Query returns 10,000 logs, overwhelming context.
-
-**Solution**: Always filter:
-```python
-query_logs(process="MyApp", level="error", limit=50)
-```
-
----
-
-### Mistake 5: Hardcoding Device UDIDs
-
-**Problem**: Scripts break when run on different machines.
-
-**Solution**: Use device resolution:
-```python
-resolve_device(name="iPhone 16 Pro", auto_boot=True)
-```
-
----
-
-### Mistake 6: Client-Side Polling Instead of Server-Side Waiting
-
-**Problem**: Slow, wasteful API calls in a loop.
-
-**Solution**: Use `wait_for_element(condition="exists", timeout=10)`.
+**Holding flows too long** — Held flows auto-release after 30 seconds to prevent hanging clients. Use `list_held_flows` with `timeout` for long-polling instead of rapid polling.
 
 ---
 
 ## Performance Tips
 
-### Tip 1: Use Summaries Before Full Queries
+**Use summaries before full queries.** Summaries are cheap and curated. Use them to decide what to investigate, then make targeted queries.
 
-Summaries are cheap and curated. Use them to decide what to investigate:
-```python
-summary = get_flow_summary()  # Fast
-# See errors in summary for api.example.com
-flows = query_flows(host="api.example.com", status_min=400)  # Targeted
-```
+**Limit result counts.** Fetch 50 entries, not 10,000. You can always query for more if needed.
 
----
+**Use cursors for incremental updates.** `get_log_summary` and `get_flow_summary` return a cursor. Pass it back with `since_cursor` to get only new activity since your last call — critical for token efficiency. The continuous monitoring pattern: call the summary tool, save the cursor, and on each subsequent check pass `since_cursor` to get a lightweight delta instead of re-fetching everything.
 
-### Tip 2: Limit Result Counts
-
-Don't fetch more than you need:
-```python
-query_logs(limit=50)  # Not limit=10000
-```
-
----
-
-### Tip 3: Use Cursors for Pagination
-
-If you need to process large result sets:
-```python
-summary1 = get_log_summary()
-# Later, get only new activity
-summary2 = get_log_summary(since_cursor=summary1["cursor"])
-```
-
----
-
-### Tip 4: Scope UI Tree Queries
-
-Don't fetch 500 elements when you need 5:
-```python
-get_ui_tree(children_of="Settings Panel")  # Scoped
-get_screen_summary(max_elements=20)  # Curated
-```
+**Scope UI tree queries.** Use `get_ui_tree` with `children_of` to fetch a subtree instead of the full hierarchy. Use `get_screen_summary` with a reasonable `max_elements` limit.
 
 ---
 
 ## Troubleshooting
 
-### "No element found matching label"
+**"No element found matching label"** — The element may not exist, the label may be wrong, or multiple elements match. Use `get_screen_summary` to see what's actually on screen, then refine your query with the exact label and an element_type.
 
-**Causes**:
-1. Element doesn't exist (check with `get_screen_summary`)
-2. Label is wrong (check actual label in UI tree)
-3. Multiple matches, need `element_type` to disambiguate
+**"Proxy not running"** — Check with `proxy_status` and call `start_proxy` if needed.
 
-**Solution**:
-```python
-summary = get_screen_summary()  # See what's actually there
-tree = get_ui_tree()  # Get exact labels
-tap_element(label="Exact Label", element_type="Button")
-```
+**"No flows captured"** — The proxy may not be running, the device may not be configured to route through it, or the app may use certificate pinning. Check `proxy_status`, then `proxy_setup_guide` for device configuration steps.
+
+**"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
 
 ---
 
-### "Proxy not running"
-
-**Cause**: Proxy crashed or wasn't started.
-
-**Solution**:
-```python
-status = proxy_status()
-if status["status"] != "running":
-    start_proxy()
-```
-
----
-
-### "No flows captured"
-
-**Causes**:
-1. Proxy not running
-2. Device not configured to use proxy
-3. Traffic is HTTPS pinned (can't be intercepted)
-
-**Solution**:
-```python
-# 1. Check proxy status
-proxy_status()
-
-# 2. Get setup instructions
-guide = proxy_setup_guide()
-# Follow instructions to configure device
-
-# 3. Check if traffic is visible at all
-get_flow_summary()  # Any traffic?
-```
-
----
-
-### "Wait for element timed out"
-
-**Causes**:
-1. Element never appeared (bug or wrong expectation)
-2. Timeout too short
-3. Element has different label than expected
-
-**Solution**:
-```python
-# Try longer timeout
-wait_for_element(label="Success", timeout=30)
-
-# Or check what actually appeared
-summary = get_screen_summary()
-```
-
----
-
-## Future Features (Roadmap Preview)
-
-These patterns will become available as Quern evolves:
-
-### App Graph (Coming in Phase 3.1)
-Navigate by intent, not manual steps:
-```python
-# Instead of manual navigation
-tap_element(label="Profile")
-tap_element(label="Settings")
-tap_element(label="Edit Profile")
-
-# Future: Graph-based navigation
-navigate_to(screen="Edit Profile")  # Quern figures out the path
-```
-
-### Test DSL (Coming in Phase 3.2)
-Write tests in natural language:
-```quern
-test "delete post preserves on cancel":
-  navigate_to "post detail"
-  tap "Delete & re-draft"
-  verify "compose editor open"
-  tap "Cancel"
-  verify "original post exists"
-```
-
-### Self-Validation (Coming in Phase 3.3)
-Agents verify their own code changes:
-```python
-# After making code change
-result = quern_run(
-    prompt="Verify the delete & redraft flow works",
-    device="iPhone 16 Pro"
-)
-
-if result["status"] == "pass":
-    # Change validated!
-else:
-    # Fix based on diagnostic bundle
-```
-
----
-
-## Summary: The Quern Mindset
+## Summary
 
 1. **Think in structured data**, not visuals
 2. **Verify state before acting**
 3. **Summarize first, drill down second**
-4. **Filter aggressively** (logs, flows, UI)
+4. **Filter aggressively** — logs, flows, UI
 5. **Use accessibility over coordinates**
-6. **Correlate across sources** (logs + network + UI = full picture)
+6. **Correlate across sources** — logs + network + UI = full picture
 7. **Let the server wait**, don't poll client-side
-
-The more you use Quern, the more natural it becomes. These tools are your eyes, ears, and fingers. Use them like part of your body.
-
----
-
-**Next**: See `quick-reference.md` for a scannable cheat sheet of common patterns.

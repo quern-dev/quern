@@ -12,8 +12,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ---------------------------------------------------------------------------
 // Configuration & State Discovery
@@ -2794,20 +2798,29 @@ server.tool(
 // Resources
 // ---------------------------------------------------------------------------
 
+function readResourceFile(filename: string): string {
+  try {
+    const filePath = join(__dirname, "..", "..", "docs", filename);
+    return readFileSync(filePath, "utf-8");
+  } catch (e) {
+    return `Error: Could not read ${filename} — ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
 server.resource(
   "guide",
-  "logserver://guide",
+  "quern://guide",
   {
     description:
-      "Tool selection guide, recommended workflows, and cursor-based polling patterns",
+      "Agent guide: principles, workflows, tool selection, REST API reference, and performance tips",
     mimeType: "text/markdown",
   },
   async () => ({
     contents: [
       {
-        uri: "logserver://guide",
+        uri: "quern://guide",
         mimeType: "text/markdown",
-        text: GUIDE_CONTENT,
+        text: readResourceFile("agent-guide.md"),
       },
     ],
   })
@@ -2815,323 +2828,25 @@ server.resource(
 
 server.resource(
   "troubleshooting",
-  "logserver://troubleshooting",
+  "quern://troubleshooting",
   {
     description:
-      "Common iOS error patterns, crash report reading guide, and debugging tips",
+      "iOS error patterns, crash report reading guide, and debugging tips",
     mimeType: "text/markdown",
   },
   async () => ({
     contents: [
       {
-        uri: "logserver://troubleshooting",
+        uri: "quern://troubleshooting",
         mimeType: "text/markdown",
-        text: TROUBLESHOOTING_CONTENT,
+        text: readResourceFile("troubleshooting.md"),
       },
     ],
   })
 );
 
-// ---------------------------------------------------------------------------
-// Resource content
-// ---------------------------------------------------------------------------
-
-const GUIDE_CONTENT = `# Quern Debug Server — Tool Selection Guide
-
-## Getting Started
-
-**Always call \`ensure_server\` first.** This tool checks if the server is running and starts it if needed. It returns the server URL, API key, and proxy port — everything you need to connect. You don't need to start the server manually.
-
-## Quick Reference
-
-| I want to…                        | Use this tool        |
-|-----------------------------------|----------------------|
-| Start/check the server            | \`ensure_server\`      |
-| See what just happened            | \`tail_logs\`          |
-| Search for specific errors        | \`query_logs\`         |
-| Get an AI-friendly status update  | \`get_log_summary\`    |
-| See only errors and crashes       | \`get_errors\`         |
-| Check build results               | \`get_build_result\`   |
-| Investigate a crash               | \`get_latest_crash\`   |
-| Change what's being captured      | \`set_log_filter\`     |
-| See captured HTTP traffic         | \`query_flows\`        |
-| Inspect a specific HTTP flow      | \`get_flow_detail\`    |
-| Get HTTP traffic summary          | \`get_flow_summary\`   |
-| Check proxy status                | \`proxy_status\`       |
-| Start/stop the proxy              | \`start_proxy\` / \`stop_proxy\` |
-| Set up a device for proxying      | \`proxy_setup_guide\`  |
-| Verify proxy certificate install  | \`verify_proxy_setup\` |
-| Check which sources are active    | \`list_log_sources\`   |
-| List simulators                   | \`list_devices\`       |
-| Boot/shutdown simulator           | \`boot_device\` / \`shutdown_device\` |
-| Install/launch/terminate app      | \`install_app\` / \`launch_app\` / \`terminate_app\` |
-| List installed apps               | \`list_apps\`          |
-| Take a screenshot                 | \`take_screenshot\`    |
-| See what's on screen              | \`get_screen_summary\` / \`get_ui_tree\` |
-| Tap an element by label           | \`tap_element\`        |
-| Tap at coordinates                | \`tap\`                |
-| Swipe gesture                     | \`swipe\`              |
-| Type text                         | \`type_text\`          |
-| Clear text in a field             | \`clear_text\`         |
-| Press hardware button             | \`press_button\`       |
-| Set GPS location                  | \`set_location\`       |
-| Grant app permission              | \`grant_permission\`   |
-| Intercept matching requests       | \`set_intercept\`      |
-| Stop intercepting                 | \`clear_intercept\`    |
-| See held/intercepted flows        | \`list_held_flows\`    |
-| Release a held flow               | \`release_flow\`       |
-| Replay a captured request         | \`replay_flow\`        |
-| Mock an API response              | \`set_mock\`           |
-| List active mock rules            | \`list_mocks\`         |
-| Remove mock rules                 | \`clear_mocks\`        |
-
-## REST API Path Reference
-
-When calling the HTTP API directly (without MCP), use these paths:
-
-| MCP Tool             | HTTP Method | REST Path                              |
-|----------------------|-------------|----------------------------------------|
-| \`ensure_server\`      | GET         | \`/health\`                              |
-| \`tail_logs\`          | GET         | \`/api/v1/logs/query\`                   |
-| \`query_logs\`         | GET         | \`/api/v1/logs/query\`                   |
-| \`get_log_summary\`    | GET         | \`/api/v1/logs/summary\`                 |
-| \`get_errors\`         | GET         | \`/api/v1/logs/errors\`                  |
-| \`get_build_result\`   | GET         | \`/api/v1/builds/latest\`                |
-| \`get_latest_crash\`   | GET         | \`/api/v1/crashes/latest\`               |
-| \`set_log_filter\`     | POST        | \`/api/v1/logs/filter\`                  |
-| \`list_log_sources\`   | GET         | \`/api/v1/logs/sources\`                 |
-| \`query_flows\`        | GET         | \`/api/v1/proxy/flows\`                  |
-| \`get_flow_detail\`    | GET         | \`/api/v1/proxy/flows/{id}\`             |
-| \`get_flow_summary\`   | GET         | \`/api/v1/proxy/flows/summary\`          |
-| \`proxy_status\`       | GET         | \`/api/v1/proxy/status\`                 |
-| \`verify_proxy_setup\` | POST        | \`/api/v1/proxy/cert/verify\`            |
-| \`start_proxy\`        | POST        | \`/api/v1/proxy/start\`                  |
-| \`stop_proxy\`         | POST        | \`/api/v1/proxy/stop\`                   |
-| \`set_intercept\`      | POST        | \`/api/v1/proxy/intercept\`              |
-| \`clear_intercept\`    | DELETE      | \`/api/v1/proxy/intercept\`              |
-| \`list_held_flows\`    | GET         | \`/api/v1/proxy/intercept/held\`         |
-| \`release_flow\`       | POST        | \`/api/v1/proxy/intercept/release\`      |
-| \`replay_flow\`        | POST        | \`/api/v1/proxy/replay/{id}\`            |
-| \`set_mock\`           | POST        | \`/api/v1/proxy/mock\`                   |
-| \`list_mocks\`         | GET         | \`/api/v1/proxy/mock\`                   |
-| \`clear_mocks\`        | DELETE      | \`/api/v1/proxy/mock\`                   |
-| \`list_devices\`       | GET         | \`/api/v1/device/list\`                  |
-| \`boot_device\`        | POST        | \`/api/v1/device/boot\`                  |
-| \`shutdown_device\`    | POST        | \`/api/v1/device/shutdown\`              |
-| \`install_app\`        | POST        | \`/api/v1/device/app/install\`           |
-| \`launch_app\`         | POST        | \`/api/v1/device/app/launch\`            |
-| \`terminate_app\`      | POST        | \`/api/v1/device/app/terminate\`         |
-| \`list_apps\`          | GET         | \`/api/v1/device/app/list\`              |
-| \`take_screenshot\`    | GET         | \`/api/v1/device/screenshot\`            |
-| \`get_ui_tree\`        | GET         | \`/api/v1/device/ui\`                    |
-| \`get_element_state\`  | GET         | \`/api/v1/device/ui/element\`            |
-| \`wait_for_element\`   | POST        | \`/api/v1/device/ui/wait-for-element\`   |
-| \`get_screen_summary\` | GET         | \`/api/v1/device/screen-summary\`        |
-| \`tap\`                | POST        | \`/api/v1/device/ui/tap\`                |
-| \`tap_element\`        | POST        | \`/api/v1/device/ui/tap-element\`        |
-| \`swipe\`              | POST        | \`/api/v1/device/ui/swipe\`              |
-| \`type_text\`          | POST        | \`/api/v1/device/ui/type\`               |
-| \`clear_text\`         | POST        | \`/api/v1/device/ui/clear\`              |
-| \`press_button\`       | POST        | \`/api/v1/device/ui/press\`              |
-| \`set_location\`       | POST        | \`/api/v1/device/location\`              |
-| \`grant_permission\`   | POST        | \`/api/v1/device/permission\`            |
-| \`list_device_pool\`   | GET         | \`/api/v1/devices/pool\`                 |
-| \`claim_device\`       | POST        | \`/api/v1/devices/claim\`                |
-| \`release_device\`     | POST        | \`/api/v1/devices/release\`              |
-| \`resolve_device\`     | POST        | \`/api/v1/devices/resolve\`              |
-| \`ensure_devices\`     | POST        | \`/api/v1/devices/ensure\`               |
-
-## Recommended Workflows
-
-### 1. Continuous Monitoring (Cursor-Based Polling)
-
-Use \`get_log_summary\` with cursor support for efficient polling:
-
-1. Call \`get_log_summary\` with \`window: "5m"\`
-2. Save the \`cursor\` from the response
-3. On next check, pass \`since_cursor\` — you'll only get new activity
-4. Repeat — each call is a lightweight delta
-
-This is the most token-efficient way to stay informed.
-
-### 2. Investigating a Crash
-
-1. \`get_latest_crash\` — see the crash type, signal, and top frames
-2. \`get_errors\` with \`since\` set to just before the crash — see what led up to it
-3. \`query_logs\` with \`process\` filter — get the full log trail for the crashed process
-
-### 3. After a Build
-
-1. \`get_build_result\` — see errors, warnings, and test results
-2. If tests failed, \`query_logs\` with \`source: "build"\` for full output
-
-### 4. Investigating Network Issues
-
-1. \`query_flows\` with \`status_min: 400\` — see all failed HTTP requests
-2. \`get_flow_detail\` with the flow ID — inspect full headers and body
-3. \`query_flows\` with \`host\` filter — narrow to a specific API
-4. \`query_logs\` with \`source: "proxy"\` — see network events in the log timeline
-
-### 5. Proxy Control & Monitoring
-
-1. \`proxy_status\` — check if the proxy is running and how many flows are captured
-2. \`start_proxy\` — start the proxy (optionally on a custom port)
-3. \`proxy_setup_guide\` — get device setup instructions with auto-detected local IP
-4. \`verify_proxy_setup\` — verify CA certificate is installed on simulators (ground-truth SQLite check)
-5. \`get_flow_summary\` with \`window: "5m"\` — get a traffic digest
-6. Save the \`cursor\` and use \`since_cursor\` on subsequent calls for efficient delta polling
-7. \`stop_proxy\` — stop the proxy when done
-
-**Certificate Verification Workflow:**
-- After setting up the proxy, use \`verify_proxy_setup\` to confirm the mitmproxy CA certificate is installed
-- This performs a ground-truth check by querying the simulator's TrustStore database
-- Returns detailed status per device with installation timestamps
-- If cert is missing, install it with: \`xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem\`
-
-### 6. Intercepting & Modifying Requests
-
-Use intercept to pause matching requests, inspect them, and optionally modify before releasing:
-
-1. \`set_intercept\` with pattern (e.g. \`"~d api.example.com & ~m POST"\`)
-2. \`list_held_flows\` with \`timeout: 30\` — long-poll blocks until a flow is caught
-3. Inspect the held flow's request details
-4. \`release_flow\` with the flow ID — optionally pass \`modifications\` to change headers, body, URL, or method
-5. \`clear_intercept\` when done — releases all remaining held flows
-
-**Important**: Held flows auto-release after 30 seconds to prevent hanging clients.
-
-### 7. Mocking API Responses
-
-Use mocks to return synthetic responses without hitting the real server:
-
-1. \`set_mock\` with a pattern and response spec (status code, headers, body)
-2. Matching requests immediately get the mock response — they appear in flow captures as "MOCK" entries
-3. \`list_mocks\` to see active rules
-4. \`clear_mocks\` to remove rules (specific by rule_id, or all)
-
-**Note**: Mock rules take priority over intercept — if a request matches both a mock and an intercept pattern, the mock wins.
-
-### 8. Replaying Requests
-
-Replay a previously captured flow to reproduce behavior:
-
-1. \`query_flows\` to find the flow you want to replay
-2. \`replay_flow\` with the flow ID — optionally modify headers or body
-3. The replayed request goes through the proxy, so it appears as a new captured flow
-
-### 9. Device Control Workflow
-
-Use device tools to inspect and interact with the simulator:
-
-1. \`resolve_device\` — find the best available device matching your criteria (preferred over manual listing)
-2. \`boot_device\` — boot a simulator if needed (or use \`resolve_device\` with \`auto_boot: true\`)
-3. \`install_app\` / \`launch_app\` — deploy and start the app
-4. \`get_screen_summary\` — understand what's on screen (text description)
-5. \`take_screenshot\` — see the actual screen image
-6. \`tap_element\` — interact with UI elements by label/identifier
-7. \`type_text\` — enter text into focused fields
-8. \`clear_text\` — clear a pre-filled text field before typing new content
-9. \`get_screen_summary\` — verify the result
-
-**Tip**: \`tap_element\` is preferred over \`tap\` (coordinates) because it finds
-elements by label, handling layout differences. If multiple elements match, it
-returns "ambiguous" with a list — narrow by \`element_type\` or \`identifier\`.
-
-**Tip**: For parallel testing, use \`ensure_devices\` to boot and claim N devices,
-then pass each device's \`udid\` to subsequent tool calls for isolation.
-
-**Tool requirements**: Device management and screenshots use \`simctl\` (always available with Xcode). UI inspection and interaction (\`get_ui_tree\`, \`tap\`, \`swipe\`, \`type_text\`, \`clear_text\`, \`press_button\`) require \`idb\`. Check \`list_devices\` response for tool availability.
-
-### 10. Debugging a Specific Issue
-
-1. \`query_logs\` with \`search\` to find relevant messages
-2. \`query_logs\` with \`process\` and time range to narrow down
-3. \`get_log_summary\` for the big picture
-
-## Tips
-
-- **tail_logs vs query_logs**: Use \`tail_logs\` for "show me recent stuff" (defaults to 50, newest first). Use \`query_logs\` for searching with filters and time ranges.
-- **Level filtering**: \`level: "error"\` returns ERROR and FAULT entries.
-- **Sources**: \`syslog\` = device system log, \`oslog\` = macOS unified log, \`crash\` = crash reports, \`build\` = xcodebuild output, \`proxy\` = network traffic.
-- **Long-polling**: \`list_held_flows\` with \`timeout: 30\` is more efficient than polling every second — one blocking call instead of 30 rapid calls.
-- **Mock vs Intercept**: Mocks return instant synthetic responses. Intercept pauses real requests for inspection. Use mocks for stable test fixtures, intercept for ad-hoc debugging.
-`;
-
-const TROUBLESHOOTING_CONTENT = `# Quern Debug Server — Troubleshooting Guide
-
-## Common iOS Error Patterns
-
-### Sandbox Violations
-\`\`\`
-Sandbox: MyApp(1234) deny(1) file-read-data /path/to/file
-\`\`\`
-**Cause**: App is trying to access a file outside its sandbox.
-**Fix**: Check entitlements and file access patterns. Use proper APIs (FileManager, UIDocumentPickerViewController).
-
-### AMFI / Code Signing
-\`\`\`
-AMFI: code signature validation failed
-\`\`\`
-**Cause**: Code signature is invalid or missing.
-**Fix**: Clean build folder, re-sign the app, check provisioning profiles.
-
-### AutoLayout Constraint Conflicts
-\`\`\`
-Unable to simultaneously satisfy constraints
-\`\`\`
-**Cause**: Conflicting layout constraints.
-**Fix**: Look for the constraint dump in the log. Set \`translatesAutoresizingMaskIntoConstraints = false\`. Use constraint priorities.
-
-### Memory Warnings
-\`\`\`
-Received memory warning
-\`\`\`
-**Cause**: App is using too much memory.
-**Fix**: Profile with Instruments (Leaks, Allocations). Check for retain cycles, large image buffers, or unbounded caches.
-
-### Network / TLS Issues
-\`\`\`
-NSURLSession/NSURLConnection HTTP load failed
-TIC TCP Conn Failed
-boringssl_context_error_print
-\`\`\`
-**Cause**: Network request failed, often due to ATS or certificate issues.
-**Fix**: Check App Transport Security settings. Verify server certificates. Check network connectivity.
-
-### CoreData
-\`\`\`
-CoreData: error: Failed to call designated initializer
-\`\`\`
-**Cause**: CoreData model/migration issue.
-**Fix**: Check data model version, migration mappings, and entity class names.
-
-## Reading Crash Reports
-
-### Key Fields
-
-- **Exception Type**: The Mach exception (e.g., \`EXC_BAD_ACCESS\`, \`EXC_CRASH\`)
-- **Exception Codes**: Specific error codes (e.g., \`KERN_INVALID_ADDRESS at 0x0\`)
-- **Signal**: Unix signal (\`SIGSEGV\` = bad memory access, \`SIGABRT\` = abort, \`SIGTRAP\` = breakpoint/assertion)
-- **Faulting Thread**: The thread that crashed — look at its stack frames
-
-### Common Crash Types
-
-| Exception | Signal | Meaning |
-|-----------|--------|---------|
-| EXC_BAD_ACCESS | SIGSEGV | Dereferenced bad pointer (null, dangling, wild) |
-| EXC_BAD_ACCESS | SIGBUS | Misaligned memory access |
-| EXC_CRASH | SIGABRT | Deliberate abort (assertion, fatalError, uncaught exception) |
-| EXC_BREAKPOINT | SIGTRAP | Swift runtime trap (force unwrap nil, array bounds, etc.) |
-| EXC_BAD_INSTRUCTION | SIGILL | Illegal instruction (corrupted code or deliberate trap) |
-
-### Investigation Steps
-
-1. Find the **faulting thread** and read its stack frames top-to-bottom
-2. Look for **your code** in the frames (not system frameworks)
-3. Check the **exception type** to understand the category of crash
-4. Look at logs just before the crash time for context
-5. If symbolication is incomplete, use \`atos\` to resolve addresses
-`;
+// Resources are now loaded from docs/ at call time by readResourceFile()
+// (GUIDE_CONTENT and TROUBLESHOOTING_CONTENT constants removed)
 
 // ---------------------------------------------------------------------------
 // Main
