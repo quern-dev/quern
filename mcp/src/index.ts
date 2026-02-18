@@ -17,6 +17,7 @@ import { registerLogTools } from "./tools/logs.js";
 import { registerProxyTools } from "./tools/proxy.js";
 import { registerInterceptTools } from "./tools/intercept.js";
 import { registerDeviceTools } from "./tools/device.js";
+import { registerDeviceUITools } from "./tools/device-ui.js";
 import { registerDevicePoolTools } from "./tools/device-pool.js";
 import { registerSimulatorLogTools } from "./tools/simulator-log.js";
 
@@ -35,6 +36,7 @@ registerLogTools(server);
 registerProxyTools(server);
 registerInterceptTools(server);
 registerDeviceTools(server);
+registerDeviceUITools(server);
 registerDevicePoolTools(server);
 registerSimulatorLogTools(server);
 
