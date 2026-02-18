@@ -143,5 +143,11 @@ def run_update() -> int:
         print("Warning: MCP server build failed — MCP tools may be stale")
 
     # 6. Summary
-    print(f"\nUpdated successfully — pulled {behind_count} commit{'s' if behind_count != 1 else ''}.")
+    print(f"\nUpdated successfully — pulled {behind_count} commit{'s' if behind_count != 1 else ''}.\n")
+
+    # 7. Run setup to check for new external dependencies
+    from server.lifecycle.setup import run_setup
+
+    run_setup()
+
     return 0
