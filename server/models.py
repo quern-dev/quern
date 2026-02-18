@@ -487,6 +487,7 @@ class DeviceInfo(BaseModel):
     os_version: str = ""
     runtime: str = ""
     is_available: bool = True
+    connection_type: str = ""  # "usb", "wifi", or "" for simulators
 
 
 class AppInfo(BaseModel):

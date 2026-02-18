@@ -57,6 +57,7 @@ class TestResolveUdid:
             _device(udid="auto-udid", state=DeviceState.BOOTED),
             _device(udid="other-udid", state=DeviceState.SHUTDOWN),
         ])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         result = await ctrl.resolve_udid()
         assert result == "auto-udid"
         assert ctrl._active_udid == "auto-udid"
@@ -67,7 +68,8 @@ class TestResolveUdid:
         ctrl.simctl.list_devices = AsyncMock(return_value=[
             _device(udid="off1", state=DeviceState.SHUTDOWN),
         ])
-        with pytest.raises(DeviceError, match="No booted simulator"):
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        with pytest.raises(DeviceError, match="No booted device"):
             await ctrl.resolve_udid()
 
     async def test_multiple_booted_error(self):
@@ -77,7 +79,8 @@ class TestResolveUdid:
             _device(udid="dev1", name="iPhone A", state=DeviceState.BOOTED),
             _device(udid="dev2", name="iPhone B", state=DeviceState.BOOTED),
         ])
-        with pytest.raises(DeviceError, match="Multiple simulators booted"):
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        with pytest.raises(DeviceError, match="Multiple devices booted"):
             await ctrl.resolve_udid()
 
 
@@ -87,26 +90,32 @@ class TestResolveUdid:
 
 
 class TestCheckTools:
-    async def test_both_available(self):
+    async def test_all_available(self):
         ctrl = DeviceController()
         ctrl.simctl.is_available = AsyncMock(return_value=True)
         ctrl.idb.is_available = AsyncMock(return_value=True)
-        tools = await ctrl.check_tools()
-        assert tools == {"simctl": True, "idb": True}
+        ctrl.devicectl.is_available = AsyncMock(return_value=True)
+        with patch("server.device.tunneld.is_tunneld_running", return_value=True):
+            tools = await ctrl.check_tools()
+        assert tools == {"simctl": True, "idb": True, "devicectl": True, "tunneld": True}
 
     async def test_simctl_only(self):
         ctrl = DeviceController()
         ctrl.simctl.is_available = AsyncMock(return_value=True)
         ctrl.idb.is_available = AsyncMock(return_value=False)
-        tools = await ctrl.check_tools()
-        assert tools == {"simctl": True, "idb": False}
+        ctrl.devicectl.is_available = AsyncMock(return_value=False)
+        with patch("server.device.tunneld.is_tunneld_running", return_value=False):
+            tools = await ctrl.check_tools()
+        assert tools == {"simctl": True, "idb": False, "devicectl": False, "tunneld": False}
 
-    async def test_neither_available(self):
+    async def test_none_available(self):
         ctrl = DeviceController()
         ctrl.simctl.is_available = AsyncMock(return_value=False)
         ctrl.idb.is_available = AsyncMock(return_value=False)
-        tools = await ctrl.check_tools()
-        assert tools == {"simctl": False, "idb": False}
+        ctrl.devicectl.is_available = AsyncMock(return_value=False)
+        with patch("server.device.tunneld.is_tunneld_running", return_value=False):
+            tools = await ctrl.check_tools()
+        assert tools == {"simctl": False, "idb": False, "devicectl": False, "tunneld": False}
 
 
 # ---------------------------------------------------------------------------

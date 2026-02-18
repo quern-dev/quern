@@ -660,6 +660,62 @@ def check_mitmproxy_cert() -> CheckResult:
     )
 
 
+def check_pymobiledevice3() -> CheckResult:
+    """Check if pymobiledevice3 is installed (needed for physical device screenshots)."""
+    from server.device.tunneld import find_pymobiledevice3_binary
+
+    binary = find_pymobiledevice3_binary()
+    if binary:
+        rc, stdout, _ = _run([str(binary), "version"])
+        version = stdout.strip() if rc == 0 else "installed"
+        return CheckResult(
+            name="pymobiledevice3",
+            status=CheckStatus.OK,
+            message=version,
+        )
+    return CheckResult(
+        name="pymobiledevice3",
+        status=CheckStatus.WARNING,
+        message="Not installed (needed for physical device screenshots)",
+        detail="Install with: pipx install pymobiledevice3",
+    )
+
+
+def check_tunneld() -> CheckResult:
+    """Check if the tunneld LaunchDaemon is installed and running."""
+    from server.device.tunneld import PLIST_PATH, TUNNELD_URL
+
+    if not PLIST_PATH.exists():
+        return CheckResult(
+            name="tunneld",
+            status=CheckStatus.WARNING,
+            message="Not installed",
+            detail="Install with: ./quern tunneld install\n"
+                   "Required for physical device screenshots.",
+        )
+
+    # Check if running
+    try:
+        import urllib.request
+        req = urllib.request.Request(TUNNELD_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                return CheckResult(
+                    name="tunneld",
+                    status=CheckStatus.OK,
+                    message=f"Running on {TUNNELD_URL}",
+                )
+    except Exception:
+        pass
+
+    return CheckResult(
+        name="tunneld",
+        status=CheckStatus.WARNING,
+        message="Installed but not running",
+        detail="Try: ./quern tunneld restart",
+    )
+
+
 def check_booted_simulators() -> list[dict[str, str]]:
     """Return a list of booted simulators [{name, udid}]."""
     rc, stdout, _ = _run(["xcrun", "simctl", "list", "devices", "--json"])
@@ -996,6 +1052,11 @@ def run_setup() -> int:
                     detail="Try manually: pip install fb-idb",
                 )
     report.add(idb_result)
+
+    # ── Physical device support (pymobiledevice3 + tunneld) ──
+
+    report.add(check_pymobiledevice3())
+    report.add(check_tunneld())
 
     # ── Proxy / network checks ──
 

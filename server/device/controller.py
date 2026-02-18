@@ -6,10 +6,11 @@ import logging
 import time
 
 from server.device.controller_ui import DeviceControllerUI
+from server.device.devicectl import DevicectlBackend
 from server.device.screenshots import process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.idb import IdbBackend
-from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, UIElement
+from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 logger = logging.getLogger("quern-debug-server.device")
 
@@ -20,6 +21,7 @@ class DeviceController(DeviceControllerUI):
     def __init__(self) -> None:
         self.simctl = SimctlBackend()
         self.idb = IdbBackend()
+        self.devicectl = DevicectlBackend()
         self._active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
         # UI tree cache: {udid: (elements, timestamp)}
@@ -29,13 +31,34 @@ class DeviceController(DeviceControllerUI):
         self._cache_misses: int = 0
         # Device info cache for screen dimensions
         self._device_info_cache: dict[str, DeviceInfo] = {}
+        # Device type cache: udid -> DeviceType (populated by list_devices)
+        self._device_type_cache: dict[str, DeviceType] = {}
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
+        from server.device.tunneld import is_tunneld_running
+
         return {
             "simctl": await self.simctl.is_available(),
             "idb": await self.idb.is_available(),
+            "devicectl": await self.devicectl.is_available(),
+            "tunneld": await is_tunneld_running(),
         }
+
+    def _device_type(self, udid: str) -> DeviceType:
+        """Look up device type from cache. Defaults to simulator if unknown."""
+        return self._device_type_cache.get(udid, DeviceType.SIMULATOR)
+
+    def _is_physical(self, udid: str) -> bool:
+        return self._device_type(udid) == DeviceType.DEVICE
+
+    def _require_simulator(self, udid: str, operation: str) -> None:
+        """Raise DeviceError if the device is physical (operation not supported)."""
+        if self._is_physical(udid):
+            raise DeviceError(
+                f"{operation} is only supported on simulators",
+                tool="simctl",
+            )
 
     async def resolve_udid(self, udid: str | None = None) -> str:
         """Resolve which device to target.
@@ -66,16 +89,16 @@ class DeviceController(DeviceControllerUI):
             except Exception as e:
                 logger.debug("Pool resolution failed, falling back: %s", e)
 
-        # Step 4: fallback — original logic, unchanged
-        devices = await self.simctl.list_devices()
+        # Step 4: fallback — auto-detect from all backends
+        devices = await self.list_devices()
         booted = [d for d in devices if d.state == DeviceState.BOOTED]
 
         if len(booted) == 0:
-            raise DeviceError("No booted simulator found", tool="simctl")
+            raise DeviceError("No booted device found", tool="simctl")
         if len(booted) > 1:
             names = ", ".join(f"{d.name} ({d.udid[:8]})" for d in booted)
             raise DeviceError(
-                f"Multiple simulators booted ({names}), specify udid",
+                f"Multiple devices booted ({names}), specify udid",
                 tool="simctl",
             )
 
@@ -113,12 +136,22 @@ class DeviceController(DeviceControllerUI):
         }
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List all simulators."""
-        return await self.simctl.list_devices()
+        """List all devices (simulators + physical)."""
+        sim_devices = await self.simctl.list_devices()
+        physical_devices = await self.devicectl.list_devices()
+
+        # Populate device type cache
+        for d in sim_devices:
+            self._device_type_cache[d.udid] = DeviceType.SIMULATOR
+        for d in physical_devices:
+            self._device_type_cache[d.udid] = DeviceType.DEVICE
+
+        return sim_devices + physical_devices
 
     async def boot(self, udid: str | None = None, name: str | None = None) -> str:
         """Boot a simulator by udid or name. Returns the udid that was booted."""
         if udid:
+            self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
             self._active_udid = udid
             return udid
@@ -137,6 +170,7 @@ class DeviceController(DeviceControllerUI):
 
     async def shutdown(self, udid: str) -> None:
         """Shutdown a simulator."""
+        self._require_simulator(udid, "Shutdown")
         await self.simctl.shutdown(udid)
         if self._active_udid == udid:
             self._active_udid = None
@@ -144,26 +178,38 @@ class DeviceController(DeviceControllerUI):
     async def install_app(self, app_path: str, udid: str | None = None) -> str:
         """Install an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.simctl.install_app(resolved, app_path)
+        if self._is_physical(resolved):
+            await self.devicectl.install_app(resolved, app_path)
+        else:
+            await self.simctl.install_app(resolved, app_path)
         return resolved
 
     async def launch_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Launch an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.simctl.launch_app(resolved, bundle_id)
+        if self._is_physical(resolved):
+            await self.devicectl.launch_app(resolved, bundle_id)
+        else:
+            await self.simctl.launch_app(resolved, bundle_id)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
     async def terminate_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Terminate an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.simctl.terminate_app(resolved, bundle_id)
+        if self._is_physical(resolved):
+            await self.devicectl.terminate_app(resolved, bundle_id)
+        else:
+            await self.simctl.terminate_app(resolved, bundle_id)
         return resolved
 
     async def list_apps(self, udid: str | None = None) -> tuple[list[AppInfo], str]:
         """List installed apps. Returns (apps, resolved_udid)."""
         resolved = await self.resolve_udid(udid)
-        apps = await self.simctl.list_apps(resolved)
+        if self._is_physical(resolved):
+            apps = await self.devicectl.list_apps(resolved)
+        else:
+            apps = await self.simctl.list_apps(resolved)
         return apps, resolved
 
     async def screenshot(
@@ -175,7 +221,10 @@ class DeviceController(DeviceControllerUI):
     ) -> tuple[bytes, str]:
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
         resolved = await self.resolve_udid(udid)
-        raw_png = await self.simctl.screenshot(resolved)
+        if self._is_physical(resolved):
+            raw_png = await self.devicectl.screenshot(resolved)
+        else:
+            raw_png = await self.simctl.screenshot(resolved)
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
 
     async def set_location(
@@ -183,6 +232,7 @@ class DeviceController(DeviceControllerUI):
     ) -> str:
         """Set simulated GPS location. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        self._require_simulator(resolved, "Set location")
         await self.simctl.set_location(resolved, latitude, longitude)
         return resolved
 
@@ -191,5 +241,6 @@ class DeviceController(DeviceControllerUI):
     ) -> str:
         """Grant an app permission. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        self._require_simulator(resolved, "Grant permission")
         await self.simctl.grant_permission(resolved, bundle_id, permission)
         return resolved

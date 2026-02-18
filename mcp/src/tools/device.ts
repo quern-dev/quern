@@ -6,7 +6,7 @@ import { apiRequest } from "../http.js";
 export function registerDeviceTools(server: McpServer): void {
   server.tool(
     "list_devices",
-    `List available iOS simulators and tool availability (simctl, idb). Returns device UDIDs, names, states, and OS versions.`,
+    `List available iOS simulators and physical devices, plus tool availability (simctl, idb, devicectl). Returns device UDIDs, names, states, and OS versions.`,
     {
       state: z
         .enum(["booted", "shutdown"])
@@ -61,7 +61,7 @@ export function registerDeviceTools(server: McpServer): void {
 
   server.tool(
     "boot_device",
-    `Boot an iOS simulator by UDID or name.`,
+    `Boot an iOS simulator by UDID or name. Simulator only — not supported for physical devices.`,
     {
       udid: z.string().optional().describe("Device UDID to boot"),
       name: z
@@ -103,7 +103,7 @@ export function registerDeviceTools(server: McpServer): void {
 
   server.tool(
     "shutdown_device",
-    `Shutdown an iOS simulator.`,
+    `Shutdown an iOS simulator. Simulator only — not supported for physical devices.`,
     {
       udid: z.string().describe("Device UDID to shutdown"),
     },
@@ -137,7 +137,7 @@ export function registerDeviceTools(server: McpServer): void {
 
   server.tool(
     "install_app",
-    `Install an app (.app or .ipa) on a simulator.`,
+    `Install an app (.app or .ipa) on a simulator or physical device.`,
     {
       app_path: z.string().describe("Path to the .app or .ipa file"),
       udid: z
@@ -178,7 +178,7 @@ export function registerDeviceTools(server: McpServer): void {
 
   server.tool(
     "launch_app",
-    `Launch an app by bundle ID on a simulator.
+    `Launch an app by bundle ID on a simulator or physical device.
 
 NOTE: If you want to capture network traffic from this app:
 1. Ensure the proxy is running (start_proxy)
@@ -266,7 +266,7 @@ NOTE: If you want to capture network traffic from this app:
 
   server.tool(
     "list_apps",
-    `List installed apps on a simulator.`,
+    `List installed apps on a simulator or physical device.`,
     {
       udid: z
         .string()
@@ -300,7 +300,7 @@ NOTE: If you want to capture network traffic from this app:
 
   server.tool(
     "take_screenshot",
-    `Capture a screenshot from the simulator. Returns the image as base64-encoded data.`,
+    `Capture a screenshot from a simulator or physical device. Returns the image as base64-encoded data.`,
     {
       udid: z
         .string()

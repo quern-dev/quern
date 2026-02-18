@@ -674,10 +674,12 @@ class TestControllerPoolFallback:
 
         ctrl = DeviceController()
         ctrl.simctl = mock_controller.simctl
+        ctrl.devicectl = AsyncMock()
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl._pool = None
 
         # With 3 booted devices, old logic should fail
-        with pytest.raises(DeviceError, match="Multiple simulators booted"):
+        with pytest.raises(DeviceError, match="Multiple devices booted"):
             await ctrl.resolve_udid()
 
     async def test_pool_exception_falls_back_silently(self, mock_controller):
@@ -686,6 +688,8 @@ class TestControllerPoolFallback:
 
         ctrl = DeviceController()
         ctrl.simctl = mock_controller.simctl
+        ctrl.devicectl = AsyncMock()
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
 
         broken_pool = AsyncMock()
         broken_pool.resolve_device = AsyncMock(
@@ -695,7 +699,7 @@ class TestControllerPoolFallback:
 
         # Pool failed, but old logic should still run
         # With 3 booted devices, old fallback also fails — that's expected
-        with pytest.raises(DeviceError, match="Multiple simulators booted"):
+        with pytest.raises(DeviceError, match="Multiple devices booted"):
             await ctrl.resolve_udid()
 
     async def test_pool_exception_with_single_booted(self):
@@ -717,6 +721,8 @@ class TestControllerPoolFallback:
                 ),
             ]
         )
+        ctrl.devicectl = AsyncMock()
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         broken_pool = AsyncMock()
         broken_pool.resolve_device = AsyncMock(
             side_effect=Exception("pool broken")

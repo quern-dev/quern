@@ -187,6 +187,10 @@ def main() -> None:
         from server.lifecycle.updater import run_update
         sys.exit(run_update())
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
+        from server.device.tunneld import cli_tunneld
+        sys.exit(cli_tunneld(sys.argv[2:]))
+
     # All other commands need the full server stack
     from server.main import cli
     cli()

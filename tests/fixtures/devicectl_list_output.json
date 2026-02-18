@@ -1,0 +1,81 @@
+{
+  "info": {
+    "arguments": ["devicectl", "list", "devices"],
+    "commandType": "devicectl.list.devices",
+    "outcome": "success"
+  },
+  "result": {
+    "devices": [
+      {
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "lastConnectionDate": "2026-02-18T10:30:00.000Z",
+          "pairingState": "paired",
+          "transportType": "usb",
+          "tunnelIPAddress": "fd00::1",
+          "tunnelState": "connected",
+          "tunnelTransportProtocol": "tcp"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "bootedFromSnapshot": false,
+          "bootedSnapshotName": null,
+          "ddiServicesAvailable": true,
+          "developerModeStatus": "enabled",
+          "hasInternalOSBuild": false,
+          "name": "John's iPhone",
+          "osBuildUpdate": "22D63",
+          "osVersionNumber": "18.3.2",
+          "rootFileSystemIsWritable": false
+        },
+        "hardwareProperties": {
+          "cpuType": {
+            "name": "arm64e",
+            "subType": 2,
+            "type": 16777228
+          },
+          "deviceType": "iPhone",
+          "ecid": 1234567890123,
+          "hardwareModel": "D83AP",
+          "internalStorageCapacity": 256000000000,
+          "isProductionFused": true,
+          "marketingName": "iPhone 15 Pro",
+          "platform": "iOS",
+          "productType": "iPhone16,1",
+          "serialNumber": "ABC123DEF456",
+          "supportedCPUTypes": [
+            {"name": "arm64e", "subType": 2, "type": 16777228}
+          ],
+          "supportedDeviceFamilies": [1],
+          "tpiMeasuredValues": {}
+        },
+        "identifier": "53DA57AA-1234-5678-9ABC-DEF012345678",
+        "visibilityClass": "default"
+      },
+      {
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "lastConnectionDate": "2026-02-17T08:00:00.000Z",
+          "pairingState": "paired",
+          "transportType": "wifi",
+          "tunnelState": "disconnected",
+          "tunnelTransportProtocol": "tcp"
+        },
+        "deviceProperties": {
+          "name": "Old iPad",
+          "osVersionNumber": "17.5",
+          "developerModeStatus": "enabled"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPad",
+          "marketingName": "iPad Air",
+          "platform": "iOS"
+        },
+        "identifier": "BBBB2222-3333-4444-5555-666677778888",
+        "visibilityClass": "default"
+      }
+    ]
+  }
+}

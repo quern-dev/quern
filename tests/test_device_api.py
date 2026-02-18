@@ -163,7 +163,7 @@ class TestBootDevice:
 
     async def test_boot_no_booted_device_error(self, app, auth_headers, mock_controller):
         mock_controller.boot = AsyncMock(
-            side_effect=DeviceError("No booted simulator found", tool="simctl")
+            side_effect=DeviceError("No booted device found", tool="simctl")
         )
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -295,7 +295,7 @@ class TestScreenshot:
 
     async def test_screenshot_error(self, app, auth_headers, mock_controller):
         mock_controller.screenshot = AsyncMock(
-            side_effect=DeviceError("No booted simulator found", tool="simctl")
+            side_effect=DeviceError("No booted device found", tool="simctl")
         )
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -371,7 +371,7 @@ class TestGetUIElements:
 
     async def test_get_ui_elements_no_booted(self, app, auth_headers, mock_controller):
         mock_controller.get_ui_elements = AsyncMock(
-            side_effect=DeviceError("No booted simulator found", tool="simctl")
+            side_effect=DeviceError("No booted device found", tool="simctl")
         )
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -819,7 +819,7 @@ class TestAnnotatedScreenshot:
 
     async def test_annotated_screenshot_error(self, app, auth_headers, mock_controller):
         mock_controller.screenshot_annotated = AsyncMock(
-            side_effect=DeviceError("No booted simulator found", tool="simctl")
+            side_effect=DeviceError("No booted device found", tool="simctl")
         )
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

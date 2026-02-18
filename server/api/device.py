@@ -40,7 +40,9 @@ def _get_controller(request: Request):
 def _handle_device_error(e: DeviceError) -> HTTPException:
     """Map a DeviceError to an appropriate HTTPException."""
     msg = str(e)
-    if "No booted simulator" in msg or "Multiple simulators booted" in msg:
+    if "No booted device" in msg or "Multiple devices booted" in msg:
+        return HTTPException(status_code=400, detail=msg)
+    if "only supported on simulators" in msg:
         return HTTPException(status_code=400, detail=msg)
     if "not found" in msg.lower() and e.tool == "idb" and "element" not in msg.lower():
         return HTTPException(status_code=503, detail=msg)
@@ -58,7 +60,7 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 
 @router.get("/list")
 async def list_devices(request: Request):
-    """List all simulators and tool availability."""
+    """List all devices (simulators + physical) and tool availability."""
     controller = _get_controller(request)
     try:
         devices = await controller.list_devices()

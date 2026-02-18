@@ -29,6 +29,8 @@ def controller_with_pool(tmp_path):
             ),
         ]
     )
+    ctrl.devicectl = AsyncMock()
+    ctrl.devicectl.list_devices = AsyncMock(return_value=[])
 
     pool = DevicePool(ctrl)
     pool._pool_file = tmp_path / "device-pool.json"
@@ -56,6 +58,8 @@ class TestPoolFallback:
                 ),
             ]
         )
+        ctrl.devicectl = AsyncMock()
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         udid = await ctrl.resolve_udid()
         assert udid == "ONLY"
 
