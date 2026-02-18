@@ -251,7 +251,16 @@ async def list_sources(request: Request) -> SourcesResponse:
 async def set_filter(request: Request, filter_req: FilterRequest) -> dict[str, str]:
     """Reconfigure capture filters for a source adapter.
 
-    Note: In Phase 1a, this restarts the adapter with new filter settings.
+    Spec (phase1-architecture.md): Let agents dynamically narrow log capture
+    without restarting the server — e.g., filter to a single process or exclude
+    noisy subsystems. Request body: {"source": "syslog", "process": "MyApp",
+    "exclude_patterns": ["noise_keyword"]}.
+
+    Current limitation: BaseSourceAdapter only accepts filter args at construction
+    (process_filter, subsystem_filter, etc.). There is no reconfigure() method.
+    Implementation path: stop the adapter, rebuild it with new filter args, restart
+    it, and re-wire the on_entry callback. The exclude_patterns field would need
+    new support in the adapters or the processing pipeline.
     """
-    # TODO: Implement dynamic filter reconfiguration
+    # TODO: Implement dynamic filter reconfiguration (see docstring for plan)
     return {"status": "accepted", "note": "Filter reconfiguration not yet implemented"}
