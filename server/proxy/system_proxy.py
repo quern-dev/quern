@@ -220,6 +220,45 @@ def restore_system_proxy(snapshot: SystemProxySnapshot) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_stale_snapshot(snap: SystemProxySnapshot, proxy_port: int) -> SystemProxySnapshot:
+    """If the snapshot looks like a stale Quern config, treat it as disabled.
+
+    This handles the case where a previous Quern instance configured the proxy
+    but didn't clean up (crash, kill -9, etc.). Without this, the snapshot
+    would capture Quern's own settings as the "original" state, and restore
+    would be a no-op — leaving the proxy configured forever.
+    """
+    stale_http = (
+        snap.http_proxy_enabled
+        and snap.http_proxy_server == "127.0.0.1"
+        and snap.http_proxy_port == proxy_port
+    )
+    stale_https = (
+        snap.https_proxy_enabled
+        and snap.https_proxy_server == "127.0.0.1"
+        and snap.https_proxy_port == proxy_port
+    )
+
+    if stale_http or stale_https:
+        logger.warning(
+            "Detected stale Quern proxy config on %s (127.0.0.1:%d) — "
+            "treating original state as disabled so restore will clear it.",
+            snap.interface, proxy_port,
+        )
+        return SystemProxySnapshot(
+            interface=snap.interface,
+            http_proxy_enabled=False if stale_http else snap.http_proxy_enabled,
+            http_proxy_server="" if stale_http else snap.http_proxy_server,
+            http_proxy_port=0 if stale_http else snap.http_proxy_port,
+            https_proxy_enabled=False if stale_https else snap.https_proxy_enabled,
+            https_proxy_server="" if stale_https else snap.https_proxy_server,
+            https_proxy_port=0 if stale_https else snap.https_proxy_port,
+            timestamp=snap.timestamp,
+        )
+
+    return snap
+
+
 def detect_and_configure(proxy_port: int, interface: str | None = None) -> SystemProxySnapshot | None:
     """Detect interface, snapshot, configure.  Returns None on detection failure."""
     iface = interface or detect_active_interface()
@@ -231,6 +270,7 @@ def detect_and_configure(proxy_port: int, interface: str | None = None) -> Syste
         return None
 
     snap = snapshot_system_proxy(iface)
+    snap = _sanitize_stale_snapshot(snap, proxy_port)
     configure_system_proxy(iface, "127.0.0.1", proxy_port)
     return snap
 

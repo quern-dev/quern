@@ -10,6 +10,7 @@ import pytest
 
 from server.proxy.system_proxy import (
     SystemProxySnapshot,
+    _sanitize_stale_snapshot,
     configure_system_proxy,
     detect_and_configure,
     parse_networksetup_output,
@@ -273,6 +274,79 @@ class TestSnapshotSerialization:
         serialized = json.dumps(snap.to_dict())
         deserialized = SystemProxySnapshot.from_dict(json.loads(serialized))
         assert deserialized == snap
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_stale_snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeStaleSnapshot:
+    def test_stale_quern_config_treated_as_disabled(self):
+        """If snapshot shows Quern's own proxy, treat as disabled."""
+        snap = SystemProxySnapshot(
+            interface="Ethernet",
+            http_proxy_enabled=True,
+            http_proxy_server="127.0.0.1",
+            http_proxy_port=9101,
+            https_proxy_enabled=True,
+            https_proxy_server="127.0.0.1",
+            https_proxy_port=9101,
+            timestamp="t",
+        )
+        result = _sanitize_stale_snapshot(snap, 9101)
+        assert result.http_proxy_enabled is False
+        assert result.http_proxy_server == ""
+        assert result.http_proxy_port == 0
+        assert result.https_proxy_enabled is False
+        assert result.https_proxy_server == ""
+        assert result.https_proxy_port == 0
+        assert result.interface == "Ethernet"
+
+    def test_clean_snapshot_unchanged(self):
+        """Non-Quern proxy settings should be preserved."""
+        snap = SystemProxySnapshot(
+            interface="Wi-Fi",
+            http_proxy_enabled=True,
+            http_proxy_server="10.0.0.1",
+            http_proxy_port=3128,
+            https_proxy_enabled=False,
+            https_proxy_server="",
+            https_proxy_port=0,
+            timestamp="t",
+        )
+        result = _sanitize_stale_snapshot(snap, 9101)
+        assert result is snap  # unchanged, same object
+
+    def test_disabled_snapshot_unchanged(self):
+        """Already-disabled proxy should pass through."""
+        snap = SystemProxySnapshot(
+            interface="Wi-Fi",
+            http_proxy_enabled=False,
+            http_proxy_server="",
+            http_proxy_port=0,
+            https_proxy_enabled=False,
+            https_proxy_server="",
+            https_proxy_port=0,
+            timestamp="t",
+        )
+        result = _sanitize_stale_snapshot(snap, 9101)
+        assert result is snap
+
+    def test_different_port_not_treated_as_stale(self):
+        """127.0.0.1 on a different port is not Quern's config."""
+        snap = SystemProxySnapshot(
+            interface="Wi-Fi",
+            http_proxy_enabled=True,
+            http_proxy_server="127.0.0.1",
+            http_proxy_port=8080,
+            https_proxy_enabled=True,
+            https_proxy_server="127.0.0.1",
+            https_proxy_port=8080,
+            timestamp="t",
+        )
+        result = _sanitize_stale_snapshot(snap, 9101)
+        assert result is snap
 
 
 # ---------------------------------------------------------------------------
