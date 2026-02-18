@@ -70,20 +70,20 @@ def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
     """Parent process: poll for server health, print status, and exit."""
     timeout = 5.0
     interval = 0.1
-    elapsed = 0.0
+    deadline = time.monotonic() + timeout
 
-    while elapsed < timeout:
+    while time.monotonic() < deadline:
         time.sleep(interval)
-        elapsed += interval
 
         # Check if child is still alive
         try:
             os.waitpid(child_pid, os.WNOHANG)
         except ChildProcessError:
-            print(f"Error: Server process exited unexpectedly", file=sys.stderr)
+            print("Error: Server process exited unexpectedly", file=sys.stderr)
             sys.exit(1)
 
-        if is_server_healthy(server_port):
+        # Use a short timeout so the health check doesn't eat into our deadline
+        if is_server_healthy(server_port, timeout=0.5):
             state = read_state()
             if state:
                 _print_status(state)

@@ -40,21 +40,25 @@ def _get_pid_on_port(port: int) -> int | None:
 
 
 def _is_quern_process(pid: int) -> bool:
-    """Check if a PID belongs to a quern-debug-server process."""
+    """Check if a PID belongs to a quern-debug-server process.
+
+    Uses ``ps -o args=`` which shows the command-line arguments without
+    resolving the executable to its full filesystem path.  This avoids
+    false positives when *any* process (e.g. pytest) happens to run from
+    a directory whose path contains "quern".
+    """
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-p", str(pid), "-o", "args="],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
             return False
-        cmd = result.stdout.strip()
+        args = result.stdout.strip()
         return (
-            "quern-debug-server" in cmd
-            or "quern" in cmd
-            or "server.main" in cmd
-            or "uvicorn" in cmd
-            or ("-m server" in cmd and "ython" in cmd)
+            "server.main" in args
+            or "uvicorn" in args
+            or "-m server" in args
         )
     except Exception:
         return False

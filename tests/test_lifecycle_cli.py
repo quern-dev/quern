@@ -69,6 +69,24 @@ def _wait_for_health(port: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _free_port(port: int) -> None:
+    """Kill any process listening on the given port."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for pid_str in result.stdout.split():
+            try:
+                os.kill(int(pid_str), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    # Brief wait for the socket to fully close
+    time.sleep(0.1)
+
+
 def _bind_port(port: int) -> socket.socket:
     """Bind a port to simulate it being in use. Returns the socket (caller must close)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -135,8 +153,9 @@ class TestStartDaemon:
 
     def test_port_conflict_scans_next(self):
         """If preferred port is taken, start should scan upward."""
-        # Use a high port to avoid TIME_WAIT from previous tests
         test_port = 59200
+        # Kill anything occupying the port from prior test runs
+        _free_port(test_port)
         sock = _bind_port(test_port)
         try:
             result = subprocess.run(
