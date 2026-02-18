@@ -31,6 +31,14 @@ AI agents are good at writing code. They're bad at knowing whether it worked. A 
 
 Quern closes that loop. It gives agents direct, token-efficient access to everything they need to diagnose and fix problems autonomously: structured logs, network request/response pairs, parsed crash reports, screenshots, and the ability to interact with the running app.
 
+Quern isn't a cloud testing platform. It's local infrastructure that makes the AI tools you already use actually effective at debugging.
+
+- **Local-first** — No cloud, no accounts, no third-party API keys. Your code and logs never leave your machine.
+- **Works with your existing AI** — Not a replacement for Claude, Cursor, or Codex. It makes them better by giving them live access to what your app is actually doing.
+- **Built for your editor and CLI** — Designed for agents already in your workflow, not a separate QA portal.
+- **Great for test automation** — Network interception, mock responses, and device control make it easy to automate setup-heavy tests like verifying analytics events, API call sequences, or end-to-end flows.
+- **Free and open source** — Apache 2.0 licensed. Run it forever on your own hardware.
+
 <!-- TODO: Terminal recording (asciinema gif) — quern setup, quern start, then a short
      agent interaction showing log tailing or network inspection
      ![Quern in action](docs/images/demo.gif)
@@ -297,4 +305,4 @@ quern start -f --verbose
 
 ## License
 
-MIT with Commons Clause — free to use and modify, but not for commercial resale. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
