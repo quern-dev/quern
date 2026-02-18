@@ -645,7 +645,7 @@ async def list_mocks(request: Request) -> MockListResponse:
         MockRuleInfo(
             rule_id=r["rule_id"],
             pattern=r["pattern"],
-            response=MockResponseSpec(),  # Server-side only tracks rule_id + pattern
+            response=MockResponseSpec(**r["response"]) if r.get("response") else MockResponseSpec(),
         )
         for r in adapter._mock_rules
     ]

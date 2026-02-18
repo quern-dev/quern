@@ -315,7 +315,7 @@ class ProxyAdapter(BaseSourceAdapter):
         """Add a mock response rule. Returns the rule_id."""
         if rule_id is None:
             rule_id = f"mock_{uuid.uuid4().hex[:8]}"
-        self._mock_rules.append({"rule_id": rule_id, "pattern": pattern})
+        self._mock_rules.append({"rule_id": rule_id, "pattern": pattern, "response": response})
         await self.send_command({
             "action": "set_mock",
             "rule_id": rule_id,
