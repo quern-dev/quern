@@ -14,6 +14,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1055,8 +1056,76 @@ def run_setup() -> int:
 
     # ── Physical device support (pymobiledevice3 + tunneld) ──
 
-    report.add(check_pymobiledevice3())
-    report.add(check_tunneld())
+    pmd3_result = check_pymobiledevice3()
+    if pmd3_result.status == CheckStatus.WARNING:
+        # Need pipx to install pymobiledevice3
+        if not _which("pipx"):
+            if _which("brew") and _prompt_yn("    pipx not found (needed for pymobiledevice3). Install via Homebrew?"):
+                if _brew_install("pipx"):
+                    # pipx needs its PATH entry ensured
+                    subprocess.run(["pipx", "ensurepath"], timeout=30, capture_output=True)
+        if _which("pipx"):
+            if _prompt_yn("    pymobiledevice3 not found. Install via pipx?"):
+                print("    Installing pymobiledevice3 via pipx...")
+                try:
+                    result = subprocess.run(
+                        ["pipx", "install", "pymobiledevice3"],
+                        timeout=300,
+                    )
+                    if result.returncode == 0:
+                        pmd3_result = check_pymobiledevice3()  # re-check
+                    else:
+                        pmd3_result = CheckResult(
+                            name="pymobiledevice3",
+                            status=CheckStatus.ERROR,
+                            message="pipx install failed",
+                            detail="Try manually: pipx install pymobiledevice3",
+                        )
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pmd3_result = CheckResult(
+                        name="pymobiledevice3",
+                        status=CheckStatus.ERROR,
+                        message="pipx install failed",
+                        detail="Try manually: pipx install pymobiledevice3",
+                    )
+    report.add(pmd3_result)
+
+    # tunneld depends on pymobiledevice3 — only offer install if it's available
+    tunneld_result = check_tunneld()
+    if tunneld_result.status == CheckStatus.WARNING and "Not installed" in (tunneld_result.message or ""):
+        if pmd3_result.status == CheckStatus.OK:
+            if _prompt_yn("    tunneld not installed. Install LaunchDaemon now (requires sudo)?"):
+                from server.device.tunneld import install_daemon
+                if install_daemon() == 0:
+                    # Wait for the daemon to start (launchd RunAtLoad)
+                    print("    Waiting for tunneld to start...", end="", flush=True)
+                    from server.device.tunneld import TUNNELD_URL
+                    import urllib.request
+                    for _ in range(20):  # up to 10 seconds
+                        time.sleep(0.5)
+                        try:
+                            req = urllib.request.Request(TUNNELD_URL, method="GET")
+                            with urllib.request.urlopen(req, timeout=1):
+                                break
+                        except Exception:
+                            print(".", end="", flush=True)
+                    print()
+                    tunneld_result = check_tunneld()  # re-check
+                else:
+                    tunneld_result = CheckResult(
+                        name="tunneld",
+                        status=CheckStatus.ERROR,
+                        message="Installation failed",
+                        detail="Try manually: ./quern tunneld install",
+                    )
+        else:
+            tunneld_result = CheckResult(
+                name="tunneld",
+                status=CheckStatus.WARNING,
+                message="Not installed (install pymobiledevice3 first)",
+                detail="Install with: pipx install pymobiledevice3 && ./quern tunneld install",
+            )
+    report.add(tunneld_result)
 
     # ── Proxy / network checks ──
 
