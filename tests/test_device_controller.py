@@ -478,7 +478,7 @@ class TestScreenshotAnnotated:
         ctrl.simctl.screenshot = AsyncMock(return_value=fake_png)
         ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
 
-        with patch("server.device.controller.annotate_screenshot") as mock_annotate:
+        with patch("server.device.controller_ui.annotate_screenshot") as mock_annotate:
             mock_annotate.return_value = (b"annotated-png", "image/png")
             result_bytes, media_type = await ctrl.screenshot_annotated(scale=0.5)
 
