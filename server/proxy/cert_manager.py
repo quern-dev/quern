@@ -217,13 +217,16 @@ async def is_cert_installed(
     return is_installed
 
 
-async def install_cert(controller, udid: str, force: bool = False) -> bool:
+async def install_cert(
+    controller, udid: str, force: bool = False, *, device_name: str | None = None,
+) -> bool:
     """Install mitmproxy CA cert if not already present.
 
     Args:
         controller: DeviceController instance
         udid: Device UDID
         force: If True, install even if already present
+        device_name: Pre-resolved device name to avoid redundant list_devices calls.
 
     Returns:
         True if cert was newly installed, False if already installed
@@ -232,7 +235,9 @@ async def install_cert(controller, udid: str, force: bool = False) -> bool:
         RuntimeError: If installation fails
     """
     # Check if already installed (unless force=True)
-    if not force and await is_cert_installed(controller, udid, verify=True):
+    if not force and await is_cert_installed(
+        controller, udid, verify=True, device_name=device_name,
+    ):
         logger.info(f"Cert already installed on {udid}")
         return False  # Already installed
 
@@ -248,7 +253,8 @@ async def install_cert(controller, udid: str, force: bool = False) -> bool:
 
     # Update state (no need to verify, we just installed it)
     fingerprint = get_cert_fingerprint(cert_path)
-    device_name = await _get_device_name(controller, udid)
+    if device_name is None:
+        device_name = await _get_device_name(controller, udid)
     now = datetime.now(timezone.utc).isoformat()
 
     cert_state = DeviceCertState(

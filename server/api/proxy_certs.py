@@ -208,18 +208,21 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
     if controller is None:
         raise HTTPException(status_code=503, detail="Device controller not initialized")
 
+    # Fetch all devices once to avoid repeated simctl calls
+    try:
+        all_devices = await controller.list_devices()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
+
+    device_name_map = {d.udid: d.name for d in all_devices}
+
     # Determine which devices to install on
     if body.udid:
         udids = [body.udid]
     else:
-        # Install on all booted devices
-        try:
-            all_devices = await controller.list_devices()
-            from server.models import DeviceState
+        from server.models import DeviceState
 
-            udids = [d.udid for d in all_devices if d.state == DeviceState.BOOTED]
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
+        udids = [d.udid for d in all_devices if d.state == DeviceState.BOOTED]
 
     if not udids:
         raise HTTPException(status_code=400, detail="No booted devices found to install on")
@@ -228,8 +231,9 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
     results = []
     for udid in udids:
         try:
+            name = device_name_map.get(udid, "Unknown Device")
             was_installed = await cert_manager.install_cert(
-                controller, udid, force=body.force
+                controller, udid, force=body.force, device_name=name,
             )
             results.append({
                 "udid": udid,
