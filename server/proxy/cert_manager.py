@@ -148,7 +148,9 @@ def check_truststore_status(
     return "not_installed"
 
 
-async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool:
+async def is_cert_installed(
+    controller, udid: str, verify: bool = False, *, device_name: str | None = None,
+) -> bool:
     """Check if mitmproxy CA cert is installed on simulator.
 
     Hybrid approach:
@@ -162,6 +164,7 @@ async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool
         controller: DeviceController instance
         udid: Device UDID
         verify: If True, always check SQLite. If False, trust cache.
+        device_name: Pre-resolved device name to avoid redundant list_devices calls.
 
     Returns:
         True if certificate is installed, False otherwise
@@ -200,7 +203,8 @@ async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool
         )
 
     # Update persistent cache
-    device_name = await _get_device_name(controller, udid)
+    if device_name is None:
+        device_name = await _get_device_name(controller, udid)
     cert_state = DeviceCertState(
         name=device_name,
         cert_installed=is_installed,
@@ -261,19 +265,23 @@ async def install_cert(controller, udid: str, force: bool = False) -> bool:
     return True  # Newly installed
 
 
-async def get_device_cert_state(controller, udid: str, verify: bool = False) -> DeviceCertState:
+async def get_device_cert_state(
+    controller, udid: str, verify: bool = False, *, device_name: str | None = None,
+) -> DeviceCertState:
     """Get certificate installation state for a device.
 
     Args:
         controller: DeviceController instance
         udid: Device UDID
         verify: If True, force SQLite verification
+        device_name: Pre-resolved device name to avoid redundant list_devices calls.
 
     Returns:
         DeviceCertState with current installation status
     """
     cert_path = get_cert_path()
-    device_name = await _get_device_name(controller, udid)
+    if device_name is None:
+        device_name = await _get_device_name(controller, udid)
 
     if not cert_path.exists():
         # Cert file doesn't exist
@@ -284,7 +292,9 @@ async def get_device_cert_state(controller, udid: str, verify: bool = False) -> 
             verified_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    is_installed = await is_cert_installed(controller, udid, verify=verify)
+    is_installed = await is_cert_installed(
+        controller, udid, verify=verify, device_name=device_name,
+    )
     fingerprint = get_cert_fingerprint(cert_path) if is_installed else None
 
     # Get timestamps from persistent state

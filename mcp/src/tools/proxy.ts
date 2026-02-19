@@ -155,13 +155,15 @@ is NOT being captured.`,
 
   server.tool(
     "verify_proxy_setup",
-    `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Works for both booted and shutdown simulators. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps, and detects devices that may have been erased.`,
+    `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Works for both booted and shutdown simulators. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps, and detects devices that may have been erased.
+
+IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s total). Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips. Filter the results client-side if you only need a subset (e.g. iPhones only).`,
     {
       udid: z
         .string()
         .optional()
         .describe(
-          "Specific simulator UDID to verify. If omitted, verifies all simulators (booted + shutdown)."
+          "Specific simulator UDID to verify. If omitted, verifies all simulators (booted + shutdown). Prefer omitting this for batch checks."
         ),
     },
     async ({ udid }) => {

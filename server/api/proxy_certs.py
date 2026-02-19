@@ -106,16 +106,19 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
     if controller is None:
         raise HTTPException(status_code=503, detail="Device controller not initialized")
 
+    # Fetch all devices once to avoid repeated simctl calls
+    try:
+        all_devices = await controller.list_devices()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
+
+    device_name_map = {d.udid: d.name for d in all_devices}
+
     # Determine which devices to verify
     if body.udid:
         udids = [body.udid]
     else:
-        # Verify ALL simulators (booted + shutdown)
-        try:
-            all_devices = await controller.list_devices()
-            udids = [d.udid for d in all_devices]
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
+        udids = [d.udid for d in all_devices]
 
     if not udids:
         raise HTTPException(status_code=400, detail="No simulators found")
@@ -138,8 +141,9 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
             prev_state = read_cert_state_for_device(udid)
             was_installed = prev_state.get("cert_installed", False) if prev_state else False
 
+            name = device_name_map.get(udid, "Unknown Device")
             cert_state = await cert_manager.get_device_cert_state(
-                controller, udid, verify=True
+                controller, udid, verify=True, device_name=name,
             )
 
             # Determine detailed status
@@ -168,7 +172,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
             device_statuses.append(
                 DeviceCertInstallStatus(
                     udid=udid,
-                    name="Unknown Device",
+                    name=device_name_map.get(udid, "Unknown Device"),
                     cert_installed=False,
                     fingerprint=None,
                     verified_at=datetime.now(timezone.utc).isoformat(),
