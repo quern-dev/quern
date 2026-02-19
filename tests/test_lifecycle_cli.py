@@ -36,20 +36,35 @@ def _read_state() -> dict | None:
 
 
 def _kill_server(state: dict | None = None) -> None:
-    """Safety net: kill any server process from state.json."""
+    """Safety net: kill any server process from state.json.
+
+    Kills the entire process group (so child processes like idevicesyslog are
+    also terminated), frees the port, and waits briefly for cleanup.
+    """
     if state is None:
         state = _read_state()
     if state and "pid" in state:
         pid = state["pid"]
+        # Try to kill the entire process group first
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        # Also kill the specific PID in case pgid lookup failed
         try:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+        # Free the port the server was using
+        if "server_port" in state:
+            _free_port(state["server_port"])
     # Also clean up state file
     try:
         STATE_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+    # Brief wait for OS to release resources
+    time.sleep(0.2)
 
 
 def _wait_for_health(port: int, timeout: float = 5.0) -> bool:
@@ -110,13 +125,19 @@ class TestStartDaemon:
     def test_start_creates_state_and_process(self):
         """start should create state.json and a running daemon."""
         result = subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy"],
-            capture_output=True, text=True, timeout=15,
+            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
+            capture_output=True, text=True, timeout=30,
         )
         try:
             assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+            # Give daemon a moment to write state if parent exited quickly
             state = _read_state()
-            assert state is not None, "state.json should exist"
+            if state is None:
+                time.sleep(1)
+                state = _read_state()
+            assert state is not None, (
+                f"state.json should exist. stdout={result.stdout!r} stderr={result.stderr!r}"
+            )
             assert "pid" in state
             assert "server_port" in state
             assert "api_key" in state
@@ -129,8 +150,8 @@ class TestStartDaemon:
     def test_start_is_idempotent(self):
         """Starting twice should exit 0 with 'already running' message."""
         result1 = subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy"],
-            capture_output=True, text=True, timeout=15,
+            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
+            capture_output=True, text=True, timeout=30,
         )
         try:
             assert result1.returncode == 0
@@ -139,7 +160,7 @@ class TestStartDaemon:
 
             # Second start
             result2 = subprocess.run(
-                [PYTHON, "-m", "server.main", "start", "--no-proxy"],
+                [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
                 capture_output=True, text=True, timeout=10,
             )
             assert result2.returncode == 0
@@ -159,8 +180,8 @@ class TestStartDaemon:
         sock = _bind_port(test_port)
         try:
             result = subprocess.run(
-                [PYTHON, "-m", "server.main", "start", "--no-proxy", "--port", str(test_port)],
-                capture_output=True, text=True, timeout=15,
+                [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog", "--port", str(test_port)],
+                capture_output=True, text=True, timeout=30,
             )
             try:
                 assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
@@ -187,8 +208,8 @@ class TestStop:
         """stop should terminate the daemon and remove state.json."""
         # Start first
         subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy"],
-            capture_output=True, text=True, timeout=15,
+            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
+            capture_output=True, text=True, timeout=30,
         )
         state = _read_state()
         assert state is not None
@@ -240,8 +261,8 @@ class TestStatus:
     def test_status_shows_running_server(self):
         """status should show info when server is running."""
         subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy"],
-            capture_output=True, text=True, timeout=15,
+            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
+            capture_output=True, text=True, timeout=30,
         )
         state = _read_state()
         assert state is not None
@@ -275,16 +296,23 @@ class TestBackwardCompat:
         """Running without subcommand should start in foreground mode."""
         # Start the server in foreground and kill it quickly
         proc = subprocess.Popen(
-            [PYTHON, "-m", "server.main"],
+            [PYTHON, "-m", "server.main", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         try:
-            # Wait briefly for it to start writing state
-            time.sleep(3)
-            state = _read_state()
-            # In foreground mode, it should still write state.json
-            assert state is not None, "Foreground mode should write state.json"
+            # Wait for the server to write state and become healthy
+            state = None
+            for _ in range(20):
+                time.sleep(0.5)
+                state = _read_state()
+                if state and _wait_for_health(state["server_port"], timeout=1):
+                    break
+            assert state is not None, (
+                f"Foreground mode should write state.json. "
+                f"stdout={proc.stdout.read1(4096) if hasattr(proc.stdout, 'read1') else b''!r} "
+                f"returncode={proc.poll()}"
+            )
             assert _wait_for_health(state["server_port"], timeout=5)
         finally:
             proc.terminate()

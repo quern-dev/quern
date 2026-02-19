@@ -65,6 +65,7 @@ from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.proxy_certs import router as proxy_certs_router
+from server.api.wda import router as wda_router
 
 logger = logging.getLogger("quern-debug-server")
 
@@ -83,13 +84,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start source adapters (all feed into the deduplicator)
     adapters: dict[str, BaseSourceAdapter] = {}
 
-    syslog = SyslogAdapter(
-        device_id=config.default_device_id,
-        on_entry=dedup.process,
-        process_filter=app.state.process_filter,
-    )
-    adapters["syslog"] = syslog
-    await syslog.start()
+    if app.state.enable_syslog:
+        syslog = SyslogAdapter(
+            device_id=config.default_device_id,
+            on_entry=dedup.process,
+            process_filter=app.state.process_filter,
+        )
+        adapters["syslog"] = syslog
+        await syslog.start()
 
     # OSLog adapter (macOS only)
     if app.state.enable_oslog:
@@ -263,6 +265,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app(
     config: ServerConfig | None = None,
     process_filter: str | None = None,
+    enable_syslog: bool = True,
     enable_oslog: bool = True,
     subsystem_filter: str | None = None,
     enable_crash: bool = True,
@@ -288,6 +291,7 @@ def create_app(
     app.state.config = config
     app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size)
     app.state.process_filter = process_filter
+    app.state.enable_syslog = enable_syslog
     app.state.enable_oslog = enable_oslog
     app.state.subsystem_filter = subsystem_filter
     app.state.enable_crash = enable_crash
@@ -319,6 +323,7 @@ def create_app(
     app.include_router(device_router)
     app.include_router(device_ui_router)
     app.include_router(device_pool_router)
+    app.include_router(wda_router)
 
     @app.get("/health")
     async def health() -> dict:
@@ -390,6 +395,10 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--crash-process-filter", default=None, type=str,
         help="Only capture crashes whose process name contains this string",
+    )
+    parser.add_argument(
+        "--no-syslog", action="store_true", default=False,
+        help="Disable idevicesyslog capture from USB-connected devices",
     )
     parser.add_argument(
         "--no-proxy", action="store_true", default=False,
@@ -486,6 +495,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         ring_buffer_size=args.buffer_size,
     )
 
+    enable_syslog = not args.no_syslog
     enable_oslog = not args.no_oslog and (
         args.oslog is True or platform.system() == "Darwin"
     )
@@ -531,6 +541,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     app = create_app(
         config=config,
         process_filter=args.process,
+        enable_syslog=enable_syslog,
         enable_oslog=enable_oslog,
         subsystem_filter=args.subsystem,
         enable_crash=enable_crash,
@@ -695,13 +706,14 @@ def cli() -> None:
     # regenerate-key (preserved)
     subparsers.add_parser("regenerate-key", help="Generate a new API key")
 
-    args = parser.parse_args()
+    args, remaining = parser.parse_known_args()
 
     # Backward compat: no subcommand → start --foreground
     if args.command is None:
         # Re-parse with start defaults + foreground=True
-        # Check if any server flags were passed on the bare command
-        start_parser.parse_args(sys.argv[1:], namespace=args)
+        # Server flags (--no-proxy, etc.) live on start_parser, not the
+        # top-level parser, so use remaining args from parse_known_args.
+        start_parser.parse_args(remaining, namespace=args)
         args.command = "start"
         args.foreground = True
 
