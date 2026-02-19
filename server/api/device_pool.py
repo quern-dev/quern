@@ -38,6 +38,7 @@ class ClaimDeviceRequest(BaseModel):
     udid: str | None = None
     name: str | None = None
     os_version: str | None = None
+    device_family: str | None = None
 
 
 class ReleaseDeviceRequest(BaseModel):
@@ -83,6 +84,7 @@ async def claim_device(request: Request, body: ClaimDeviceRequest):
             session_id=body.session_id,
             udid=body.udid,
             name=body.name,
+            device_family=body.device_family,
         )
         return {
             "status": "claimed",
@@ -150,6 +152,7 @@ async def resolve_device(request: Request, body: ResolveDeviceRequest):
             udid=body.udid,
             name=body.name,
             os_version=body.os_version,
+            device_family=body.device_family,
             auto_boot=body.auto_boot,
             wait_if_busy=body.wait_if_busy,
             wait_timeout=body.wait_timeout,
@@ -185,6 +188,7 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
             count=body.count,
             name=body.name,
             os_version=body.os_version,
+            device_family=body.device_family,
             auto_boot=body.auto_boot,
             session_id=body.session_id,
         )

@@ -488,6 +488,8 @@ class DeviceInfo(BaseModel):
     runtime: str = ""
     is_available: bool = True
     connection_type: str = ""  # "usb", "wifi", or "" for simulators
+    device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
+    is_connected: bool = True  # True for simulators; physical devices: True when reachable (tunnel not "unavailable")
 
 
 class AppInfo(BaseModel):
@@ -681,6 +683,7 @@ class DevicePoolEntry(BaseModel):
     device_type: DeviceType
     os_version: str
     runtime: str
+    device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
 
     claim_status: DeviceClaimStatus
     claimed_by: str | None = None
@@ -708,6 +711,7 @@ class ResolveDeviceRequest(BaseModel):
     udid: str | None = None
     name: str | None = None
     os_version: str | None = None
+    device_family: str | None = None
     auto_boot: bool = False
     wait_if_busy: bool = False
     wait_timeout: float = Field(default=30.0, ge=1.0, le=120.0)
@@ -720,6 +724,7 @@ class EnsureDevicesRequest(BaseModel):
     count: int = Field(ge=1, le=10)
     name: str | None = None
     os_version: str | None = None
+    device_family: str | None = None
     auto_boot: bool = True
     session_id: str | None = None
 

@@ -60,7 +60,7 @@
           "lastConnectionDate": "2026-02-17T08:00:00.000Z",
           "pairingState": "paired",
           "transportType": "wifi",
-          "tunnelState": "disconnected",
+          "tunnelState": "unavailable",
           "tunnelTransportProtocol": "tcp"
         },
         "deviceProperties": {

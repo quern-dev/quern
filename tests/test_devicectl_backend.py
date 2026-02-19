@@ -60,7 +60,7 @@ class TestIsAvailable:
 
 class TestListDevices:
     async def test_parses_paired_devices(self):
-        """All paired devices are returned with correct state."""
+        """All paired devices are returned with correct state and connectivity."""
         fixture = _load_fixture("devicectl_list_output.json")
         backend = DevicectlBackend()
 
@@ -79,13 +79,15 @@ class TestListDevices:
         assert dev.device_type == DeviceType.DEVICE
         assert dev.os_version == "iOS 18.3.2"
         assert dev.connection_type == "usb"
+        assert dev.is_connected is True
 
-        # Second device: disconnected, no bootState → shutdown
+        # Second device: disconnected, no bootState → shutdown, not connected
         dev2 = devices[1]
         assert dev2.udid == "BBBB2222-3333-4444-5555-666677778888"
         assert dev2.name == "Old iPad"
         assert dev2.state == DeviceState.SHUTDOWN
         assert dev2.device_type == DeviceType.DEVICE
+        assert dev2.is_connected is False
 
     async def test_unpaired_devices_excluded(self):
         """Devices that aren't paired are skipped."""

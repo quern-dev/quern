@@ -27,7 +27,7 @@ from server.models import (
 
 @pytest.fixture
 def mock_controller():
-    """Mock DeviceController with a rich 5-device set."""
+    """Mock DeviceController with a rich 7-device set (5 iPhones + 2 iPads)."""
     from server.device.controller import DeviceController
 
     ctrl = DeviceController()
@@ -43,6 +43,7 @@ def mock_controller():
                 os_version="iOS 18.2",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
                 is_available=True,
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="BBBB",
@@ -52,6 +53,7 @@ def mock_controller():
                 os_version="iOS 18.2",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
                 is_available=True,
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="CCCC",
@@ -61,6 +63,7 @@ def mock_controller():
                 os_version="iOS 18.2",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
                 is_available=True,
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="DDDD",
@@ -70,6 +73,7 @@ def mock_controller():
                 os_version="iOS 17.5",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-17-5",
                 is_available=True,
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="EEEE",
@@ -79,6 +83,27 @@ def mock_controller():
                 os_version="iOS 17.5",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-17-5",
                 is_available=True,
+                device_family="iPhone",
+            ),
+            DeviceInfo(
+                udid="FFFF",
+                name="iPad Pro 13-inch (M4)",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR,
+                os_version="iOS 18.2",
+                runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                is_available=True,
+                device_family="iPad",
+            ),
+            DeviceInfo(
+                udid="GGGG",
+                name="iPad Air 13-inch (M2)",
+                state=DeviceState.SHUTDOWN,
+                device_type=DeviceType.SIMULATOR,
+                os_version="iOS 18.2",
+                runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                is_available=True,
+                device_family="iPad",
             ),
         ]
     )
@@ -137,16 +162,7 @@ class TestOsVersionMatches:
 
 
 class TestCriteriaMatching:
-    """Test _match_criteria() filtering logic."""
-
-    async def test_match_by_name_substring(self, pool):
-        await pool.refresh_from_simctl()
-        state = pool._read_state()
-        device = state.devices["AAAA"]
-        assert pool._match_criteria(device, name="iPhone 16 Pro")
-        assert pool._match_criteria(device, name="iPhone 16")
-        assert pool._match_criteria(device, name="iphone 16")  # case insensitive
-        assert not pool._match_criteria(device, name="iPhone 15")
+    """Test _match_criteria() and _filter_by_name() filtering logic."""
 
     async def test_match_by_os_version_prefix(self, pool):
         await pool.refresh_from_simctl()
@@ -157,12 +173,15 @@ class TestCriteriaMatching:
         assert not pool._match_criteria(device, os_version="18.6")
         assert not pool._match_criteria(device, os_version="17")
 
-    async def test_match_combined_criteria(self, pool):
+    async def test_match_by_device_family(self, pool):
         await pool.refresh_from_simctl()
         state = pool._read_state()
-        device = state.devices["AAAA"]
-        assert pool._match_criteria(device, name="iPhone 16", os_version="18")
-        assert not pool._match_criteria(device, name="iPhone 16", os_version="17")
+        iphone = state.devices["AAAA"]
+        ipad = state.devices["FFFF"]
+        assert pool._match_criteria(iphone, device_family="iPhone")
+        assert not pool._match_criteria(iphone, device_family="iPad")
+        assert pool._match_criteria(ipad, device_family="iPad")
+        assert not pool._match_criteria(ipad, device_family="iPhone")
 
     async def test_no_criteria_matches_all(self, pool):
         await pool.refresh_from_simctl()
@@ -177,6 +196,21 @@ class TestCriteriaMatching:
         device = state.devices["AAAA"]
         device.is_available = False
         assert not pool._match_criteria(device)
+
+    async def test_find_candidates_combined(self, pool):
+        """_find_candidates applies name + os_version + device_family."""
+        await pool.refresh_from_simctl()
+        state = pool._read_state()
+        all_devices = list(state.devices.values())
+        results = pool._find_candidates(
+            all_devices, name="iPhone 16", os_version="18", device_family="iPhone",
+        )
+        assert all(d.name == "iPhone 16 Pro" for d in results)
+        # No results for mismatched OS
+        results2 = pool._find_candidates(
+            all_devices, name="iPhone 16", os_version="17", device_family="iPhone",
+        )
+        assert len(results2) == 0
 
 
 # ----------------------------------------------------------------
@@ -263,6 +297,7 @@ class TestResolveDevice:
                     os_version="iOS 18.2",
                     runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
                     is_available=True,
+                    device_family="iPhone",
                 ),
             ]
         )
@@ -302,13 +337,13 @@ class TestResolveDevice:
         """Should error with diagnostic message when no devices match."""
         await pool.refresh_from_simctl()
         with pytest.raises(DeviceError, match="No device matching"):
-            await pool.resolve_device(name="iPad Pro")
+            await pool.resolve_device(name="Pixel 9")
 
-    async def test_no_args_resolves_any_booted(self, pool):
-        """resolve_device() with no args should resolve any booted device."""
+    async def test_no_args_resolves_any_booted_iphone(self, pool):
+        """resolve_device() with no args should resolve any booted iPhone (default family)."""
         await pool.refresh_from_simctl()
         udid = await pool.resolve_device()
-        assert udid in ("AAAA", "BBBB", "DDDD")
+        assert udid in ("AAAA", "BBBB", "DDDD")  # iPhones only, not FFFF (iPad)
 
     async def test_explicit_udid_with_claim(self, pool):
         """Explicit UDID with session_id should claim the device."""
@@ -416,7 +451,7 @@ class TestWaitForAvailable:
 
         release_task = asyncio.create_task(delayed_release())
         found = await pool._wait_for_available(
-            {"name": "iPhone 16 Pro"}, timeout=5.0, poll_interval=0.2
+            name="iPhone 16 Pro", timeout=5.0, poll_interval=0.2
         )
         assert found is not None
         assert found.udid == "AAAA"
@@ -452,7 +487,7 @@ class TestWaitForAvailable:
 
         boot_task = asyncio.create_task(delayed_external_boot())
         found = await pool._wait_for_available(
-            {"name": "iPhone 16 Pro"}, timeout=5.0, poll_interval=0.2
+            name="iPhone 16 Pro", timeout=5.0, poll_interval=0.2
         )
         assert found is not None
         assert found.udid == "CCCC"  # Newly booted and unclaimed
@@ -465,7 +500,7 @@ class TestWaitForAvailable:
         await pool.claim_device(session_id="s2", udid="BBBB")
 
         found = await pool._wait_for_available(
-            {"name": "iPhone 16 Pro"}, timeout=0.3, poll_interval=0.1
+            name="iPhone 16 Pro", timeout=0.3, poll_interval=0.1
         )
         assert found is None
 
@@ -477,7 +512,7 @@ class TestWaitForAvailable:
 
         start = time.time()
         found = await pool._wait_for_available(
-            {"name": "iPhone 16 Pro"}, timeout=0.5, poll_interval=1.0
+            name="iPhone 16 Pro", timeout=0.5, poll_interval=1.0
         )
         elapsed = time.time() - start
         assert found is None
@@ -600,10 +635,10 @@ class TestBuildResolutionError:
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
-        err = pool._build_resolution_error({"name": "iPad Pro"}, all_devices)
+        err = pool._build_resolution_error(all_devices, name="Pixel 9")
         msg = str(err)
         assert "No device matching" in msg
-        assert "iPad Pro" in msg
+        assert "Pixel 9" in msg
 
     async def test_os_mismatch_lists_versions(self, pool):
         """Error for OS mismatch should list available versions."""
@@ -611,7 +646,7 @@ class TestBuildResolutionError:
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
-        err = pool._build_resolution_error({"os_version": "19"}, all_devices)
+        err = pool._build_resolution_error(all_devices, os_version="19")
         msg = str(err)
         assert "No device matching" in msg
         assert "Available OS versions" in msg
@@ -623,7 +658,7 @@ class TestBuildResolutionError:
         all_devices = list(state.devices.values())
 
         err = pool._build_resolution_error(
-            {"name": "iPhone 16 Pro", "os_version": "17"}, all_devices
+            all_devices, name="iPhone 16 Pro", os_version="17",
         )
         msg = str(err)
         assert "matched name" in msg
@@ -639,7 +674,7 @@ class TestBuildResolutionError:
         claimed_devices = [state.devices["AAAA"], state.devices["BBBB"]]
 
         err = pool._build_resolution_error(
-            {"name": "iPhone 16 Pro"}, claimed_devices
+            claimed_devices, name="iPhone 16 Pro",
         )
         msg = str(err)
         assert "claimed" in msg.lower()
@@ -653,7 +688,7 @@ class TestBuildResolutionError:
         shutdown_devices = [state.devices["CCCC"]]
 
         err = pool._build_resolution_error(
-            {"name": "iPhone 16 Pro"}, shutdown_devices
+            shutdown_devices, name="iPhone 16 Pro",
         )
         msg = str(err)
         assert "shutdown" in msg.lower()
@@ -861,3 +896,282 @@ class TestResolveDeviceWait:
             )
         elapsed = time.time() - start
         assert elapsed < 2.0, f"Expected ~1s timeout, took {elapsed:.1f}s"
+
+
+# ----------------------------------------------------------------
+# TestFilterByName
+# ----------------------------------------------------------------
+
+
+class TestFilterByName:
+    """Test _filter_by_name() exact-match preference."""
+
+    async def test_exact_match_preferred_over_substring(self, pool):
+        """'iPhone 15' should NOT match 'iPhone 15 Pro Max' when exact match exists."""
+        await pool.refresh_from_simctl()
+        state = pool._read_state()
+        all_devices = list(state.devices.values())
+
+        # Add an "iPhone 15 Pro Max" device
+        from server.models import DevicePoolEntry
+        from datetime import timezone
+        pro_max = DevicePoolEntry(
+            udid="XMAX",
+            name="iPhone 15 Pro Max",
+            state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR,
+            os_version="iOS 17.5",
+            runtime="...",
+            device_family="iPhone",
+            claim_status=DeviceClaimStatus.AVAILABLE,
+            last_used=datetime.now(timezone.utc),
+            is_available=True,
+        )
+        all_devices.append(pro_max)
+
+        results = DevicePool._filter_by_name(all_devices, "iPhone 15")
+        # Should return only exact "iPhone 15" matches, not "iPhone 15 Pro Max"
+        assert all(d.name == "iPhone 15" for d in results)
+        assert len(results) >= 1
+
+    async def test_substring_fallback_when_no_exact(self, pool):
+        """'iPhone 16' should match 'iPhone 16 Pro' via substring when no exact match."""
+        await pool.refresh_from_simctl()
+        state = pool._read_state()
+        all_devices = list(state.devices.values())
+
+        results = DevicePool._filter_by_name(all_devices, "iPhone 16")
+        assert len(results) > 0
+        assert all("iPhone 16" in d.name for d in results)
+
+    def test_none_name_returns_all(self):
+        """None name should return all devices."""
+        from server.models import DevicePoolEntry
+        from datetime import timezone
+        devices = [
+            DevicePoolEntry(
+                udid="X", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
+                runtime="...", claim_status=DeviceClaimStatus.AVAILABLE,
+                last_used=datetime.now(timezone.utc), is_available=True,
+            ),
+        ]
+        assert DevicePool._filter_by_name(devices, None) == devices
+
+    def test_case_insensitive_exact_match(self):
+        """Exact matching should be case-insensitive."""
+        from server.models import DevicePoolEntry
+        from datetime import timezone
+        devices = [
+            DevicePoolEntry(
+                udid="X", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
+                runtime="...", claim_status=DeviceClaimStatus.AVAILABLE,
+                last_used=datetime.now(timezone.utc), is_available=True,
+            ),
+        ]
+        results = DevicePool._filter_by_name(devices, "iphone 16 pro")
+        assert len(results) == 1
+
+
+# ----------------------------------------------------------------
+# TestParseDeviceFamily
+# ----------------------------------------------------------------
+
+
+class TestParseDeviceFamily:
+    """Test SimctlBackend._parse_device_family()."""
+
+    def test_iphone(self):
+        from server.device.simctl import SimctlBackend
+        assert SimctlBackend._parse_device_family(
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
+        ) == "iPhone"
+
+    def test_ipad(self):
+        from server.device.simctl import SimctlBackend
+        assert SimctlBackend._parse_device_family(
+            "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4"
+        ) == "iPad"
+
+    def test_apple_watch(self):
+        from server.device.simctl import SimctlBackend
+        assert SimctlBackend._parse_device_family(
+            "com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Series-10-46mm"
+        ) == "Apple Watch"
+
+    def test_apple_tv(self):
+        from server.device.simctl import SimctlBackend
+        assert SimctlBackend._parse_device_family(
+            "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K"
+        ) == "Apple TV"
+
+    def test_unknown(self):
+        from server.device.simctl import SimctlBackend
+        assert SimctlBackend._parse_device_family("") == ""
+        assert SimctlBackend._parse_device_family("com.apple.CoreSimulator.SimDeviceType.Unknown-Device") == ""
+
+
+# ----------------------------------------------------------------
+# TestDeviceFamilyInference
+# ----------------------------------------------------------------
+
+
+class TestDeviceFamilyInference:
+    """Test _infer_device_family() logic."""
+
+    def test_explicit_family_takes_precedence(self):
+        assert DevicePool._infer_device_family("iPhone 16 Pro", "iPad") == "iPad"
+
+    def test_name_contains_ipad(self):
+        assert DevicePool._infer_device_family("iPad Pro", None) == "iPad"
+
+    def test_name_contains_iphone(self):
+        assert DevicePool._infer_device_family("iPhone 15", None) == "iPhone"
+
+    def test_no_name_defaults_to_config(self):
+        """No name and no explicit family → config default (iPhone)."""
+        result = DevicePool._infer_device_family(None, None)
+        assert result == "iPhone"  # Default from get_default_device_family()
+
+
+# ----------------------------------------------------------------
+# TestDeviceFamilyFiltering
+# ----------------------------------------------------------------
+
+
+class TestDeviceFamilyFiltering:
+    """Test that device_family filtering excludes iPads by default."""
+
+    async def test_resolve_excludes_ipad_by_default(self, pool):
+        """resolve_device with no device_family should return iPhone, not iPad."""
+        await pool.refresh_from_simctl()
+        udid = await pool.resolve_device(os_version="18")
+        assert udid in ("AAAA", "BBBB")  # iPhones, not FFFF (iPad)
+
+    async def test_resolve_explicit_ipad(self, pool):
+        """resolve_device with device_family='iPad' should return iPad."""
+        await pool.refresh_from_simctl()
+        udid = await pool.resolve_device(os_version="18", device_family="iPad")
+        assert udid == "FFFF"  # The booted iPad
+
+    async def test_ensure_excludes_ipad_by_default(self, pool):
+        """ensure_devices with os_version should return iPhones, not iPads."""
+        await pool.refresh_from_simctl()
+        udids = await pool.ensure_devices(count=2, os_version="18")
+        assert "FFFF" not in udids  # iPad excluded
+        assert set(udids) == {"AAAA", "BBBB"}
+
+    async def test_ensure_explicit_ipad(self, pool):
+        """ensure_devices with device_family='iPad' should return iPad."""
+        await pool.refresh_from_simctl()
+        udids = await pool.ensure_devices(count=1, os_version="18", device_family="iPad")
+        assert udids == ["FFFF"]
+
+    async def test_name_ipad_infers_family(self, pool):
+        """Passing name='iPad' should infer device_family='iPad'."""
+        await pool.refresh_from_simctl()
+        udid = await pool.resolve_device(name="iPad Pro")
+        assert udid == "FFFF"
+
+
+# ----------------------------------------------------------------
+# TestSessionOwnedDevices
+# ----------------------------------------------------------------
+
+
+class TestSessionOwnedDevices:
+    """Test that session-owned devices are reused, not skipped."""
+
+    async def test_resolve_reuses_session_owned(self, pool):
+        """resolve_device should be able to use a device already claimed by the same session."""
+        await pool.refresh_from_simctl()
+        # Claim both booted devices for sessions
+        await pool.claim_device(session_id="my-session", udid="AAAA")
+        await pool.claim_device(session_id="other-session", udid="BBBB")
+
+        # Resolve for my-session: AAAA is owned by us, BBBB is claimed by another session
+        # Should return AAAA (session-owned, not blocked), not fail
+        udid = await pool.resolve_device(name="iPhone 16 Pro", session_id="my-session")
+        assert udid == "AAAA"
+
+    async def test_ensure_reuses_session_owned(self, pool):
+        """ensure_devices should count session-owned devices as available."""
+        await pool.refresh_from_simctl()
+        # First call claims 2 devices
+        udids1 = await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
+        assert len(udids1) == 2
+
+        # Second call should reuse the same devices, not error about all being claimed
+        udids2 = await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
+        assert set(udids2) == set(udids1)
+
+    async def test_ensure_does_not_reclaim(self, pool):
+        """ensure_devices should not re-claim devices already owned by the session."""
+        await pool.refresh_from_simctl()
+        udids = await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
+
+        # Verify claimed_at is set
+        state1 = await pool.get_device_state(udids[0])
+        claimed_at1 = state1.claimed_at
+
+        # Call again — should not re-set claimed_at
+        await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
+        state2 = await pool.get_device_state(udids[0])
+        assert state2.claimed_at == claimed_at1
+
+    async def test_explicit_udid_reuses_session_owned(self, pool):
+        """resolve_device with explicit UDID should work for session-owned device."""
+        await pool.refresh_from_simctl()
+        await pool.resolve_device(udid="AAAA", session_id="my-session")
+
+        # Should succeed, not raise "already claimed"
+        udid = await pool.resolve_device(udid="AAAA", session_id="my-session")
+        assert udid == "AAAA"
+
+
+# ----------------------------------------------------------------
+# TestEnsureDevicesRanking
+# ----------------------------------------------------------------
+
+
+class TestEnsureDevicesRanking:
+    """Test that ensure_devices uses ranking (booted first, most recent)."""
+
+    async def test_ensure_prefers_booted_over_shutdown(self, pool):
+        """ensure_devices should prefer booted devices over shutdown ones."""
+        await pool.refresh_from_simctl()
+        # Request 1 device matching iPhone 16 Pro — should pick booted (AAAA or BBBB), not CCCC
+        udids = await pool.ensure_devices(count=1, name="iPhone 16 Pro")
+        assert udids[0] in ("AAAA", "BBBB")
+
+
+# ----------------------------------------------------------------
+# TestConfigReading
+# ----------------------------------------------------------------
+
+
+class TestConfigReading:
+    """Test config file reading for default_device_family."""
+
+    def test_missing_config_returns_iphone(self, tmp_path, monkeypatch):
+        """Missing config file defaults to 'iPhone'."""
+        import server.config
+        monkeypatch.setattr(server.config, "USER_CONFIG_FILE", tmp_path / "missing.json")
+        assert server.config.get_default_device_family() == "iPhone"
+
+    def test_config_with_ipad_default(self, tmp_path, monkeypatch):
+        """Config with default_device_family='iPad' returns 'iPad'."""
+        import server.config
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"default_device_family": "iPad"}')
+        monkeypatch.setattr(server.config, "USER_CONFIG_FILE", config_file)
+        assert server.config.get_default_device_family() == "iPad"
+
+    def test_invalid_json_returns_iphone(self, tmp_path, monkeypatch):
+        """Invalid JSON defaults to 'iPhone'."""
+        import server.config
+        config_file = tmp_path / "config.json"
+        config_file.write_text("not json")
+        monkeypatch.setattr(server.config, "USER_CONFIG_FILE", config_file)
+        assert server.config.get_default_device_family() == "iPhone"

@@ -55,12 +55,17 @@ export function registerDevicePoolTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Device name pattern to match (e.g., 'iPhone 16 Pro')"),
+      device_family: z
+        .string()
+        .optional()
+        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
     },
-    async ({ session_id, udid, name }) => {
+    async ({ session_id, udid, name, device_family }) => {
       try {
         const body: Record<string, unknown> = { session_id };
         if (udid) body.udid = udid;
         if (name) body.name = name;
+        if (device_family) body.device_family = device_family;
 
         const data = await apiRequest(
           "POST",
@@ -138,11 +143,15 @@ automatically. Use this instead of manually listing the pool and claiming.`,
       name: z
         .string()
         .optional()
-        .describe("Device name pattern (e.g., 'iPhone 16 Pro')"),
+        .describe("Device name pattern (e.g., 'iPhone 16 Pro'). Exact matches are preferred over substring matches."),
       os_version: z
         .string()
         .optional()
         .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts both '18.2' and 'iOS 18.2'."),
+      device_family: z
+        .string()
+        .optional()
+        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
       auto_boot: z
         .boolean()
         .optional()
@@ -163,13 +172,14 @@ automatically. Use this instead of manually listing the pool and claiming.`,
       session_id: z
         .string()
         .optional()
-        .describe("Claim the device for this session"),
+        .describe("Claim the device for this session. Devices already claimed by this session are reused without re-claiming."),
     },
-    async ({ name, os_version, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
+    async ({ name, os_version, device_family, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
       try {
         const body: Record<string, unknown> = {};
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
+        if (device_family) body.device_family = device_family;
         if (auto_boot !== undefined) body.auto_boot = auto_boot;
         if (wait_if_busy !== undefined) body.wait_if_busy = wait_if_busy;
         if (wait_timeout !== undefined) body.wait_timeout = wait_timeout;
@@ -215,11 +225,15 @@ and optionally claims them all for a session.`,
       name: z
         .string()
         .optional()
-        .describe("Device name pattern (e.g., 'iPhone 16 Pro')"),
+        .describe("Device name pattern (e.g., 'iPhone 16 Pro'). Exact matches are preferred over substring matches."),
       os_version: z
         .string()
         .optional()
         .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts both '18.2' and 'iOS 18.2'."),
+      device_family: z
+        .string()
+        .optional()
+        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
       auto_boot: z
         .boolean()
         .optional()
@@ -228,13 +242,14 @@ and optionally claims them all for a session.`,
       session_id: z
         .string()
         .optional()
-        .describe("Claim all devices for this session"),
+        .describe("Claim all devices for this session. Devices already claimed by this session are reused without re-claiming."),
     },
-    async ({ count, name, os_version, auto_boot, session_id }) => {
+    async ({ count, name, os_version, device_family, auto_boot, session_id }) => {
       try {
         const body: Record<string, unknown> = { count };
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
+        if (device_family) body.device_family = device_family;
         if (auto_boot !== undefined) body.auto_boot = auto_boot;
         if (session_id) body.session_id = session_id;
 

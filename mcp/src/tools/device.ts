@@ -16,8 +16,15 @@ export function registerDeviceTools(server: McpServer): void {
         .enum(["simulator", "device"])
         .optional()
         .describe("Filter by device type"),
+      include_disconnected: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include physical devices that are paired but not currently reachable. By default, only connected devices are shown."
+        ),
     },
-    async ({ state, type }) => {
+    async ({ state, type, include_disconnected }) => {
       try {
         const data = (await apiRequest("GET", "/api/v1/device/list")) as {
           devices: Array<Record<string, unknown>>;
@@ -26,6 +33,9 @@ export function registerDeviceTools(server: McpServer): void {
         };
 
         let devices = data.devices;
+        if (!include_disconnected) {
+          devices = devices.filter((d) => d.is_connected !== false);
+        }
         if (state) {
           devices = devices.filter((d) => d.state === state);
         }

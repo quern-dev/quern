@@ -84,6 +84,9 @@ class SimctlBackend:
                 except ValueError:
                     state = DeviceState.SHUTDOWN
 
+                device_type_id = dev.get("deviceTypeIdentifier", "")
+                device_family = self._parse_device_family(device_type_id)
+
                 devices.append(DeviceInfo(
                     udid=dev["udid"],
                     name=dev["name"],
@@ -92,6 +95,7 @@ class SimctlBackend:
                     os_version=os_version,
                     runtime=runtime_key,
                     is_available=True,
+                    device_family=device_family,
                 ))
 
         return devices
@@ -110,6 +114,30 @@ class SimctlBackend:
         if len(parts) == 2:
             return f"{parts[0]} {parts[1].replace('-', '.')}"
         return raw
+
+    @staticmethod
+    def _parse_device_family(device_type_identifier: str) -> str:
+        """Extract device family from a deviceTypeIdentifier.
+
+        e.g. 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro' -> 'iPhone'
+             'com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4' -> 'iPad'
+             'com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Series-10-46mm' -> 'Apple Watch'
+             'com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K' -> 'Apple TV'
+        """
+        # Extract the part after SimDeviceType.
+        match = re.search(r"SimDeviceType\.(.+)$", device_type_identifier)
+        if not match:
+            return ""
+        name = match.group(1)  # e.g. 'iPhone-16-Pro'
+        if name.startswith("iPhone"):
+            return "iPhone"
+        if name.startswith("iPad"):
+            return "iPad"
+        if name.startswith("Apple-Watch"):
+            return "Apple Watch"
+        if name.startswith("Apple-TV"):
+            return "Apple TV"
+        return ""
 
     async def boot(self, udid: str) -> None:
         """Boot a simulator."""

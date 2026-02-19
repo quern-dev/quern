@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
+logger = logging.getLogger("quern-debug-server.config")
+
 CONFIG_DIR = Path.home() / ".quern"
 API_KEY_FILE = CONFIG_DIR / "api-key"
+USER_CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
 @dataclass
@@ -48,3 +53,19 @@ class ServerConfig:
         API_KEY_FILE.write_text(key)
         API_KEY_FILE.chmod(0o600)
         return key
+
+
+def read_user_config() -> dict:
+    """Read user config from ~/.quern/config.json. Returns {} if missing or invalid."""
+    if not USER_CONFIG_FILE.exists():
+        return {}
+    try:
+        return json.loads(USER_CONFIG_FILE.read_text())
+    except Exception as e:
+        logger.warning("Failed to read config file %s: %s", USER_CONFIG_FILE, e)
+        return {}
+
+
+def get_default_device_family() -> str:
+    """Return the configured default device family, defaulting to 'iPhone'."""
+    return read_user_config().get("default_device_family", "iPhone")
