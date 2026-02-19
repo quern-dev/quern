@@ -35,6 +35,12 @@ class DeviceControllerUI:
     - self._invalidate_ui_cache(udid) -> None
     """
 
+    # Bottom safe area inset for devices with home indicator (Face ID / Dynamic Island)
+    _HOME_INDICATOR_INSET = 34  # points
+
+    # Maximum scroll-into-view attempts before giving up
+    _MAX_SCROLL_ATTEMPTS = 3
+
     # Known screen dimensions by device model (portrait orientation)
     _SCREEN_DIMENSIONS = {
         "iPhone 16": {"width": 402, "height": 844},
@@ -75,6 +81,119 @@ class DeviceControllerUI:
         except Exception:
             pass
 
+        return None
+
+    def _is_obscured_by_home_indicator(
+        self,
+        element: UIElement,
+        screen_height: float,
+    ) -> bool:
+        """Check if an element's tap point falls in the home indicator zone."""
+        if element.frame is None:
+            return False
+        _, cy = get_tap_point(element)
+        safe_bottom = screen_height - self._HOME_INDICATOR_INSET
+        return cy > safe_bottom
+
+    def _get_screen_height_from_elements(self, elements: list) -> float | None:
+        """Extract screen height from the Application element in the UI tree."""
+        for el in elements:
+            if el.type == "Application" and el.frame:
+                return el.frame["height"]
+        return None
+
+    def _get_screen_width_from_elements(self, elements: list) -> float | None:
+        """Extract screen width from the Application element in the UI tree."""
+        for el in elements:
+            if el.type == "Application" and el.frame:
+                return el.frame["width"]
+        return None
+
+    async def _scroll_element_into_view(
+        self,
+        resolved: str,
+        label: str | None,
+        identifier: str | None,
+        element_type: str | None,
+        screen_height: float,
+        screen_width: float = 393,
+    ) -> UIElement | None:
+        """Scroll an obscured element into the tappable area.
+
+        Performs a small upward swipe, re-fetches the element, and checks
+        whether it moved. If it moved into the safe zone, returns the updated
+        element. If it didn't move (fixed-position element), returns None
+        to signal the caller that scrolling won't help.
+        """
+        safe_bottom = screen_height - self._HOME_INDICATOR_INSET
+        scroll_amount = 100  # points to scroll per attempt
+        mid_x = screen_width / 2
+
+        for attempt in range(self._MAX_SCROLL_ATTEMPTS):
+            # Get element position before scroll
+            elements_before, _ = await self.get_ui_elements(
+                resolved, use_cache=False,
+                filter_label=label, filter_identifier=identifier,
+                filter_type=element_type,
+            )
+
+            matches_before = find_element(
+                elements_before, label=label,
+                identifier=identifier, element_type=element_type,
+            )
+            if not matches_before:
+                return None
+
+            before_frame = matches_before[0].frame
+            _, before_cy = get_tap_point(matches_before[0])
+
+            # Already in safe zone?
+            if before_cy <= safe_bottom:
+                return matches_before[0]
+
+            # Swipe up (start lower, end higher)
+            swipe_start_y = screen_height * 0.7
+            swipe_end_y = swipe_start_y - scroll_amount
+            await self.idb.swipe(resolved, mid_x, swipe_start_y, mid_x, swipe_end_y, 0.3)
+            self._invalidate_ui_cache(resolved)
+
+            # Re-fetch and check
+            elements_after, _ = await self.get_ui_elements(
+                resolved, use_cache=False,
+                filter_label=label, filter_identifier=identifier,
+                filter_type=element_type,
+            )
+
+            matches_after = find_element(
+                elements_after, label=label,
+                identifier=identifier, element_type=element_type,
+            )
+            if not matches_after:
+                return None
+
+            after_frame = matches_after[0].frame
+
+            # Did the element move? If not, it's fixed — scrolling won't help
+            if after_frame == before_frame:
+                logger.info("scroll-into-view: element did not move (fixed-position), aborting")
+                return None
+
+            _, after_cy = get_tap_point(matches_after[0])
+            if after_cy <= safe_bottom:
+                logger.info(
+                    "scroll-into-view: success after %d attempt(s) (y: %.1f -> %.1f)",
+                    attempt + 1, before_cy, after_cy,
+                )
+                return matches_after[0]
+
+            logger.info(
+                "scroll-into-view attempt %d: element moved (y: %.1f -> %.1f) but still obscured",
+                attempt + 1, before_cy, after_cy,
+            )
+
+        logger.warning(
+            "scroll-into-view: failed after %d attempts", self._MAX_SCROLL_ATTEMPTS,
+        )
         return None
 
     async def _try_fast_path_element_check(
@@ -170,9 +289,7 @@ class DeviceControllerUI:
         Cache is invalidated on mutation operations (tap, swipe, type, launch).
         Filtered results are NOT cached (only full tree is cached).
         """
-        start = time.perf_counter()
         has_filters = filter_label or filter_identifier or filter_type
-        logger.info(f"[PERF] get_ui_elements START (cache={use_cache}, filters={has_filters})")
 
         resolved = await self.resolve_udid(udid)
         now = time.time()
@@ -184,36 +301,24 @@ class DeviceControllerUI:
             age = now - cached_time
             if age < self._cache_ttl:
                 self._cache_hits += 1
-                end = time.perf_counter()
-                logger.info(f"[PERF] get_ui_elements CACHE HIT: {(end-start)*1000:.1f}ms, age={age*1000:.1f}ms, elements={len(cached_elements)}")
 
                 # If filters provided, apply them to cached elements (in-memory filtering is fast)
                 if has_filters:
                     filtered = find_element(cached_elements, label=filter_label,
                                           identifier=filter_identifier, element_type=filter_type)
-                    logger.info(f"[PERF] get_ui_elements: filtered from {len(cached_elements)} to {len(filtered)} elements")
                     return filtered, resolved
 
                 return cached_elements, resolved
-            else:
-                logger.info(f"[PERF CACHE] EXPIRED for {resolved[:8]}: age={age*1000:.1f}ms > ttl={self._cache_ttl*1000:.1f}ms")
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
-        t1 = time.perf_counter()
-        logger.info(f"[PERF] get_ui_elements: calling idb.describe_all (+{(t1-start)*1000:.1f}ms)")
 
         raw = await self.idb.describe_all(resolved)
-
-        t2 = time.perf_counter()
-        logger.info(f"[PERF] get_ui_elements: idb returned {len(raw)} raw elements (+{(t2-t1)*1000:.1f}ms)")
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
         # - If filters but won't cache (bypass): parse with filters to save time
         # - If no filters: parse full tree
-        t3 = time.perf_counter()
-        logger.info(f"[PERF] get_ui_elements: starting parse (+{(t3-t2)*1000:.1f}ms)")
 
         if has_filters and not use_cache:
             # Bypassing cache - use filtered parsing for speed
@@ -229,11 +334,6 @@ class DeviceControllerUI:
             if has_filters:
                 elements = find_element(elements, label=filter_label,
                                       identifier=filter_identifier, element_type=filter_type)
-
-        t4 = time.perf_counter()
-        end = time.perf_counter()
-        logger.info(f"[PERF] get_ui_elements: parsed {len(elements)} elements (+{(t4-t3)*1000:.1f}ms)")
-        logger.info(f"[PERF] get_ui_elements COMPLETE: total={( end-start)*1000:.1f}ms")
 
         return elements, resolved
 
@@ -387,15 +487,11 @@ class DeviceControllerUI:
 
         # Polling loop
         start_time = time.time()
-        perf_start = time.perf_counter()
         polls = 0
         last_element: UIElement | None = None
 
-        logger.info(f"[PERF] wait_for_element START (condition={condition}, timeout={timeout}s)")
-
         while True:
             polls += 1
-            poll_start = time.perf_counter()
             elapsed = time.time() - start_time
 
             # Try fast path first (describe-point for known static elements)
@@ -416,8 +512,6 @@ class DeviceControllerUI:
 
                 # Check condition
                 if checker(current_element):
-                    perf_end = time.perf_counter()
-                    logger.info(f"[PERF] wait_for_element MATCHED (fast path): polls={polls}, total={(perf_end-perf_start)*1000:.1f}ms")
                     return (
                         {
                             "matched": True,
@@ -430,8 +524,6 @@ class DeviceControllerUI:
 
                 # Condition not met yet, but fast path worked - check timeout
                 if elapsed >= timeout:
-                    perf_end = time.perf_counter()
-                    logger.info(f"[PERF] wait_for_element TIMEOUT (fast path): polls={polls}, total={(perf_end-perf_start)*1000:.1f}ms")
                     return (
                         {
                             "matched": False,
@@ -455,9 +547,6 @@ class DeviceControllerUI:
                 filter_type=element_type,
             )
 
-            poll_fetch = time.perf_counter()
-            logger.debug(f"[PERF] wait_for_element poll #{polls}: fetch took {(poll_fetch-poll_start)*1000:.1f}ms")
-
             matches = find_element(
                 elements,
                 label=label,
@@ -471,8 +560,6 @@ class DeviceControllerUI:
 
             # Check condition
             if checker(current_element):
-                perf_end = time.perf_counter()
-                logger.info(f"[PERF] wait_for_element MATCHED: polls={polls}, total={( perf_end-perf_start)*1000:.1f}ms")
                 return {
                     "matched": True,
                     "elapsed_seconds": round(elapsed, 2),
@@ -482,17 +569,12 @@ class DeviceControllerUI:
 
             # Check timeout
             if elapsed >= timeout:
-                perf_end = time.perf_counter()
-                logger.info(f"[PERF] wait_for_element TIMEOUT: polls={polls}, total={( perf_end-perf_start)*1000:.1f}ms")
                 return {
                     "matched": False,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "last_state": last_element.model_dump() if last_element else None,
                 }, resolved
-
-            poll_end = time.perf_counter()
-            logger.debug(f"[PERF] wait_for_element poll #{polls} complete: {(poll_end-poll_start)*1000:.1f}ms")
 
             # Sleep before next poll
             await asyncio.sleep(interval)
@@ -548,9 +630,6 @@ class DeviceControllerUI:
         2. Retry logic - If tap doesn't work, retry with fresh coordinates
         3. Configurable stability timing - Allow tuning the stability check interval
         """
-        start = time.perf_counter()
-        logger.info(f"[PERF] tap_element START (label={label}, id={identifier}, skip_stability={skip_stability_check})")
-
         if not label and not identifier:
             raise DeviceError(
                 "Either label or identifier is required for tap-element",
@@ -581,9 +660,6 @@ class DeviceControllerUI:
                     # Tap directly without fetching UI tree
                     await self.idb.tap(resolved, x, y)
 
-                    end = time.perf_counter()
-                    logger.info(f"[PERF] tap_element COMPLETE (fast path): total={(end-start)*1000:.1f}ms")
-
                     return {
                         "status": "ok",
                         "tapped": {
@@ -595,9 +671,6 @@ class DeviceControllerUI:
                     }
 
         # Traditional path: fetch full UI tree
-        t1 = time.perf_counter()
-        logger.info(f"[PERF] tap_element: fetching UI elements (+{(t1-start)*1000:.1f}ms)")
-
         elements, resolved = await self.get_ui_elements(
             udid,
             filter_label=label,
@@ -605,14 +678,8 @@ class DeviceControllerUI:
             filter_type=element_type,
         )
 
-        t2 = time.perf_counter()
-        logger.info(f"[PERF] tap_element: got {len(elements)} elements (+{(t2-t1)*1000:.1f}ms)")
-
         # Use shared search helper
         matches = find_element(elements, label=label, identifier=identifier, element_type=element_type)
-
-        t3 = time.perf_counter()
-        logger.info(f"[PERF] tap_element: found {len(matches)} matches (+{(t3-t2)*1000:.1f}ms)")
 
         if len(matches) == 0:
             search_desc = f"label='{label}'" if label else f"identifier='{identifier}'"
@@ -627,18 +694,44 @@ class DeviceControllerUI:
             el = matches[0]
             cx, cy = get_tap_point(el)
 
+            # Home indicator obstruction check: if the element's tap point
+            # falls in the bottom safe area (home indicator zone), try to
+            # scroll it into view before tapping.
+            screen_height = self._get_screen_height_from_elements(elements)
+            screen_width = self._get_screen_width_from_elements(elements)
+            if not screen_height or not screen_width:
+                # Filtered element list may not include the Application element;
+                # fall back to the device dimensions lookup table.
+                dims = await self._get_screen_dimensions(resolved)
+                if dims:
+                    screen_height = screen_height or dims["height"]
+                    screen_width = screen_width or dims["width"]
+            screen_width = screen_width or 393
+            if screen_height and self._is_obscured_by_home_indicator(el, screen_height):
+                logger.info(
+                    "tap_element: element '%s' obscured by home indicator — scrolling into view",
+                    el.label or el.identifier,
+                )
+                scrolled_el = await self._scroll_element_into_view(
+                    resolved, label, identifier, element_type,
+                    screen_height, screen_width,
+                )
+                if scrolled_el is not None:
+                    el = scrolled_el
+                    cx, cy = get_tap_point(el)
+                else:
+                    logger.warning(
+                        "tap_element: scroll-into-view failed for '%s' (fixed-position). "
+                        "Tapping at original coordinates.",
+                        el.label or el.identifier,
+                    )
+
             # Stability check: ensure element has stopped moving/animating
             # Skip for static elements (tab bars, nav bars) to avoid expensive tree fetches
             if not skip_stability_check:
-                t4 = time.perf_counter()
-                logger.info(f"[PERF] tap_element: starting stability check (+{(t4-t3)*1000:.1f}ms)")
-
                 # Get initial position
                 initial_frame = el.frame
                 await asyncio.sleep(0.1)
-
-                t5 = time.perf_counter()
-                logger.info(f"[PERF] tap_element: stability check fetch #1 (+{(t5-t4)*1000:.1f}ms)")
 
                 # Re-fetch UI and find element again (bypass cache to detect changes!)
                 # Use filtering for performance
@@ -650,9 +743,6 @@ class DeviceControllerUI:
                     filter_type=element_type,
                 )
 
-                t6 = time.perf_counter()
-                logger.info(f"[PERF] tap_element: stability check fetch #1 complete (+{(t6-t5)*1000:.1f}ms)")
-
                 matches_check = find_element(elements_check, label=label, identifier=identifier, element_type=element_type)
 
                 if matches_check:
@@ -663,14 +753,9 @@ class DeviceControllerUI:
                             "Element position changed (animating), waiting for stability: %s -> %s",
                             initial_frame, current_frame
                         )
-                        t7 = time.perf_counter()
-                        logger.info(f"[PERF] tap_element: position changed, waiting 300ms (+{(t7-t6)*1000:.1f}ms)")
 
                         # Wait longer for animation to complete
                         await asyncio.sleep(0.3)
-
-                        t8 = time.perf_counter()
-                        logger.info(f"[PERF] tap_element: stability check fetch #2 (+{(t8-t7)*1000:.1f}ms)")
 
                         # Re-fetch one more time to get final position (bypass cache again)
                         # Use filtering for performance
@@ -682,24 +767,12 @@ class DeviceControllerUI:
                             filter_type=element_type,
                         )
 
-                        t9 = time.perf_counter()
-                        logger.info(f"[PERF] tap_element: stability check fetch #2 complete (+{(t9-t8)*1000:.1f}ms)")
-
                         matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
                         if matches_final:
                             cx, cy = get_tap_point(matches_final[0])
 
-                t_after_stability = time.perf_counter()
-                logger.info(f"[PERF] tap_element: stability check complete (+{(t_after_stability-t4)*1000:.1f}ms)")
-
-            t_before_tap = time.perf_counter()
-            logger.info(f"[PERF] tap_element: executing tap at ({cx},{cy}) (+{(t_before_tap-t3)*1000:.1f}ms)")
-
             await self.idb.tap(resolved, cx, cy)
             self._invalidate_ui_cache(resolved)  # UI changed
-
-            end = time.perf_counter()
-            logger.info(f"[PERF] tap_element COMPLETE: total={( end-start)*1000:.1f}ms")
 
             # Future enhancement: Post-tap verification
             # if verify_disappears:
