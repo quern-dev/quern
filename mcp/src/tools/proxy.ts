@@ -155,13 +155,13 @@ is NOT being captured.`,
 
   server.tool(
     "verify_proxy_setup",
-    `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps.`,
+    `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Works for both booted and shutdown simulators. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps, and detects devices that may have been erased.`,
     {
       udid: z
         .string()
         .optional()
         .describe(
-          "Specific simulator UDID to verify. If omitted, verifies all booted simulators."
+          "Specific simulator UDID to verify. If omitted, verifies all simulators (booted + shutdown)."
         ),
     },
     async ({ udid }) => {
@@ -173,7 +173,7 @@ is NOT being captured.`,
           "POST",
           "/api/v1/proxy/cert/verify",
           undefined,
-          Object.keys(body).length > 0 ? body : undefined
+          body
         );
 
         return {

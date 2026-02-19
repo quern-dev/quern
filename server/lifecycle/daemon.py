@@ -67,10 +67,19 @@ def _redirect_stdio() -> None:
 
 
 def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
-    """Parent process: poll for server health, print status, and exit."""
-    timeout = 5.0
+    """Parent process: poll for server health, print status, and exit.
+
+    Uses a two-phase approach:
+    - Phase 1: Quick 0.5s HTTP timeout (port not yet bound)
+    - Phase 2: Once the port accepts connections but hasn't responded yet,
+      switch to a single long timeout for the remaining deadline (uvicorn is
+      bound but the lifespan startup hasn't finished)
+    """
+    timeout = 30.0
     interval = 0.1
-    deadline = time.monotonic() + timeout
+    start = time.monotonic()
+    deadline = start + timeout
+    debug = os.environ.get("QUERN_DEBUG_STARTUP")
 
     while time.monotonic() < deadline:
         time.sleep(interval)
@@ -82,14 +91,25 @@ def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
             print("Error: Server process exited unexpectedly", file=sys.stderr)
             sys.exit(1)
 
-        # Use a short timeout so the health check doesn't eat into our deadline
-        if is_server_healthy(server_port, timeout=0.5):
+        # Use remaining time as timeout — once uvicorn binds the port,
+        # the connection succeeds but the request blocks until startup
+        # completes. A short timeout wastes the entire budget on retries.
+        remaining = deadline - time.monotonic()
+        check_timeout = min(remaining, 2.0) if remaining > 0 else 0.5
+        healthy = is_server_healthy(server_port, timeout=check_timeout)
+        if debug:
+            elapsed = time.monotonic() - start
+            print(f"  [{elapsed:.1f}s] health: {'OK' if healthy else 'waiting'}",
+                  file=sys.stderr)
+        if healthy:
             state = read_state()
             if state:
                 _print_status(state)
                 sys.exit(0)
 
-    print(f"Warning: Server started (pid {child_pid}) but health check timed out", file=sys.stderr)
+    elapsed_total = time.monotonic() - start
+    print(f"Warning: Server started (pid {child_pid}) but health check timed out "
+          f"after {elapsed_total:.1f}s", file=sys.stderr)
     print(f"Check logs: {LOG_FILE}", file=sys.stderr)
     sys.exit(0)
 

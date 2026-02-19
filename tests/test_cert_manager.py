@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.lifecycle.state import ServerState, write_state
 from server.models import DeviceCertState, DeviceInfo, DeviceState, DeviceType
 from server.proxy import cert_manager
 
@@ -65,11 +64,12 @@ def mock_controller():
 
 
 @pytest.fixture
-def clean_state(tmp_path):
-    """Ensure clean state.json for each test."""
-    # Mock CONFIG_DIR to use tmp_path
-    with patch("server.lifecycle.state.STATE_FILE", tmp_path / "state.json"):
-        yield tmp_path / "state.json"
+def clean_cert_state(tmp_path):
+    """Ensure clean cert-state.json for each test."""
+    cert_state_file = tmp_path / "cert-state.json"
+    with patch("server.proxy.cert_state.CERT_STATE_FILE", cert_state_file), \
+         patch("server.proxy.cert_state.CONFIG_DIR", tmp_path):
+        yield cert_state_file
 
 
 class TestGetCertPath:
@@ -183,181 +183,233 @@ class TestVerifyCertInTruststore:
         assert result is False
 
 
+class TestCheckTruststoreStatus:
+    def test_installed(self, mock_truststore_db, tmp_path):
+        """Test check_truststore_status returns 'installed' when cert exists."""
+        test_sha256 = "9b6fc9af52d10a4923fa9323714176155a9eac388a8ee214fc671ba15aea72c3"
+        conn = sqlite3.connect(str(mock_truststore_db))
+        conn.execute(
+            "INSERT INTO tsettings (sha256, uuid) VALUES (?, ?)",
+            (bytes.fromhex(test_sha256), b"test-uuid"),
+        )
+        conn.commit()
+        conn.close()
+
+        # trustd dir exists (parent of parent of TrustStore)
+        trustd_dir = mock_truststore_db.parent.parent
+
+        with patch("server.proxy.cert_manager.get_trustd_dir", return_value=trustd_dir):
+            with patch("server.proxy.cert_manager.get_truststore_path", return_value=mock_truststore_db):
+                result = cert_manager.check_truststore_status("test-udid", test_sha256)
+
+        assert result == "installed"
+
+    def test_not_installed(self, mock_truststore_db, tmp_path):
+        """Test check_truststore_status returns 'not_installed' when trustd exists but no cert."""
+        trustd_dir = mock_truststore_db.parent.parent
+
+        with patch("server.proxy.cert_manager.get_trustd_dir", return_value=trustd_dir):
+            with patch("server.proxy.cert_manager.get_truststore_path", return_value=mock_truststore_db):
+                result = cert_manager.check_truststore_status("test-udid", "abc123")
+
+        assert result == "not_installed"
+
+    def test_never_booted(self, tmp_path):
+        """Test check_truststore_status returns 'never_booted' when trustd dir missing."""
+        nonexistent_dir = tmp_path / "nonexistent_trustd"
+
+        with patch("server.proxy.cert_manager.get_trustd_dir", return_value=nonexistent_dir):
+            result = cert_manager.check_truststore_status("test-udid", "abc123")
+
+        assert result == "never_booted"
+
+
 class TestIsCertInstalled:
     @pytest.mark.asyncio
-    async def test_is_cert_installed_cache_hit(self, mock_controller, mock_cert_path, clean_state):
+    async def test_is_cert_installed_cache_hit(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test is_cert_installed uses cache when fresh."""
-        # Set up state with recent verification
+        import json
         now = datetime.now(timezone.utc)
-        state: ServerState = {
-            "device_certs": {
-                "test-udid": {
-                    "name": "iPhone 16 Pro",
-                    "cert_installed": True,
-                    "fingerprint": "abc123",
-                    "verified_at": now.isoformat(),
-                }
+        cert_state_data = {
+            "test-udid": {
+                "name": "iPhone 16 Pro",
+                "cert_installed": True,
+                "fingerprint": "abc123",
+                "verified_at": now.isoformat(),
             }
         }
+        clean_cert_state.write_text(json.dumps(cert_state_data))
 
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            write_state(state)
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.verify_cert_in_truststore") as mock_verify:
+                    mock_verify.side_effect = AssertionError("Should not call SQLite!")
 
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.verify_cert_in_truststore") as mock_verify:
-                        mock_verify.side_effect = AssertionError("Should not call SQLite!")
-
-                        result = await cert_manager.is_cert_installed(
-                            mock_controller, "test-udid", verify=False
-                        )
+                    result = await cert_manager.is_cert_installed(
+                        mock_controller, "test-udid", verify=False
+                    )
 
         assert result is True
         mock_verify.assert_not_called()  # Cache hit, no SQLite query
 
     @pytest.mark.asyncio
-    async def test_is_cert_installed_cache_stale(self, mock_controller, mock_cert_path, clean_state):
+    async def test_is_cert_installed_cache_stale(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test is_cert_installed queries SQLite when cache is stale."""
-        # Set up state with old verification (2 hours ago)
+        import json
         old_time = datetime.now(timezone.utc) - timedelta(hours=2)
-        state: ServerState = {
-            "device_certs": {
-                "test-udid": {
-                    "name": "iPhone 16 Pro",
-                    "cert_installed": True,
-                    "fingerprint": "abc123",
-                    "verified_at": old_time.isoformat(),
-                }
+        cert_state_data = {
+            "test-udid": {
+                "name": "iPhone 16 Pro",
+                "cert_installed": True,
+                "fingerprint": "abc123",
+                "verified_at": old_time.isoformat(),
             }
         }
+        clean_cert_state.write_text(json.dumps(cert_state_data))
 
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            write_state(state)
-
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.verify_cert_in_truststore", return_value=True) as mock_verify:
-                        result = await cert_manager.is_cert_installed(
-                            mock_controller, "test-udid", verify=False
-                        )
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.verify_cert_in_truststore", return_value=True) as mock_verify:
+                    result = await cert_manager.is_cert_installed(
+                        mock_controller, "test-udid", verify=False
+                    )
 
         assert result is True
         mock_verify.assert_called_once()  # Cache stale, should verify
 
     @pytest.mark.asyncio
-    async def test_is_cert_installed_force_verify(self, mock_controller, mock_cert_path, clean_state):
+    async def test_is_cert_installed_force_verify(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test is_cert_installed always queries SQLite when verify=True."""
-        # Set up state with recent verification
+        import json
         now = datetime.now(timezone.utc)
-        state: ServerState = {
-            "device_certs": {
-                "test-udid": {
-                    "name": "iPhone 16 Pro",
-                    "cert_installed": True,
-                    "fingerprint": "abc123",
-                    "verified_at": now.isoformat(),
-                }
+        cert_state_data = {
+            "test-udid": {
+                "name": "iPhone 16 Pro",
+                "cert_installed": True,
+                "fingerprint": "abc123",
+                "verified_at": now.isoformat(),
             }
         }
+        clean_cert_state.write_text(json.dumps(cert_state_data))
 
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            write_state(state)
-
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.verify_cert_in_truststore", return_value=True) as mock_verify:
-                        result = await cert_manager.is_cert_installed(
-                            mock_controller, "test-udid", verify=True
-                        )
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.verify_cert_in_truststore", return_value=True) as mock_verify:
+                    result = await cert_manager.is_cert_installed(
+                        mock_controller, "test-udid", verify=True
+                    )
 
         assert result is True
         mock_verify.assert_called_once()  # Force verify, always check
 
     @pytest.mark.asyncio
-    async def test_is_cert_installed_cert_missing(self, mock_controller, tmp_path, clean_state):
+    async def test_is_cert_installed_cert_missing(self, mock_controller, tmp_path, clean_cert_state):
         """Test is_cert_installed when cert file doesn't exist."""
         nonexistent_cert = tmp_path / "nonexistent.pem"
 
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=nonexistent_cert):
-                result = await cert_manager.is_cert_installed(
-                    mock_controller, "test-udid", verify=False
-                )
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=nonexistent_cert):
+            result = await cert_manager.is_cert_installed(
+                mock_controller, "test-udid", verify=False
+            )
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_is_cert_installed_erase_detection(self, mock_controller, mock_cert_path, clean_cert_state):
+        """Test is_cert_installed detects device erase (was installed, now gone)."""
+        import json
+        old_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        cert_state_data = {
+            "test-udid": {
+                "name": "iPhone 16 Pro",
+                "cert_installed": True,
+                "fingerprint": "abc123",
+                "verified_at": old_time.isoformat(),
+            }
+        }
+        clean_cert_state.write_text(json.dumps(cert_state_data))
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.verify_cert_in_truststore", return_value=False):
+                    with patch("server.proxy.cert_manager.logger") as mock_logger:
+                        result = await cert_manager.is_cert_installed(
+                            mock_controller, "test-udid", verify=True
+                        )
+
+        assert result is False
+        # Should have logged a warning about probable erase
+        mock_logger.warning.assert_any_call(
+            "Certificate was previously installed on test-udid but is now missing. "
+            "Device may have been erased."
+        )
 
 
 class TestInstallCert:
     @pytest.mark.asyncio
-    async def test_install_cert_success(self, mock_controller, mock_cert_path, clean_state):
+    async def test_install_cert_success(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test install_cert installs successfully."""
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.is_cert_installed", return_value=False):
-                        result = await cert_manager.install_cert(mock_controller, "test-udid")
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.is_cert_installed", return_value=False):
+                    result = await cert_manager.install_cert(mock_controller, "test-udid")
 
         assert result is True  # Newly installed
         mock_controller.simctl._run_simctl.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_install_cert_already_installed(self, mock_controller, mock_cert_path, clean_state):
+    async def test_install_cert_already_installed(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test install_cert skips when already installed."""
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.is_cert_installed", return_value=True):
-                        result = await cert_manager.install_cert(mock_controller, "test-udid")
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.is_cert_installed", return_value=True):
+                    result = await cert_manager.install_cert(mock_controller, "test-udid")
 
         assert result is False  # Already installed
         mock_controller.simctl._run_simctl.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_install_cert_force(self, mock_controller, mock_cert_path, clean_state):
+    async def test_install_cert_force(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test install_cert with force=True installs even if already present."""
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    result = await cert_manager.install_cert(
-                        mock_controller, "test-udid", force=True
-                    )
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                result = await cert_manager.install_cert(
+                    mock_controller, "test-udid", force=True
+                )
 
         assert result is True
         mock_controller.simctl._run_simctl.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_install_cert_file_missing(self, mock_controller, tmp_path, clean_state):
+    async def test_install_cert_file_missing(self, mock_controller, tmp_path, clean_cert_state):
         """Test install_cert fails when cert file doesn't exist."""
         nonexistent_cert = tmp_path / "nonexistent.pem"
 
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=nonexistent_cert):
-                with pytest.raises(RuntimeError, match="Cert file does not exist"):
-                    await cert_manager.install_cert(mock_controller, "test-udid", force=True)
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=nonexistent_cert):
+            with pytest.raises(RuntimeError, match="Cert file does not exist"):
+                await cert_manager.install_cert(mock_controller, "test-udid", force=True)
 
     @pytest.mark.asyncio
-    async def test_install_cert_simctl_fails(self, mock_controller, mock_cert_path, clean_state):
+    async def test_install_cert_simctl_fails(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test install_cert handles simctl failure."""
         mock_controller.simctl._run_simctl.side_effect = Exception("simctl failed")
 
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with pytest.raises(RuntimeError, match="Failed to install cert"):
-                        await cert_manager.install_cert(mock_controller, "test-udid", force=True)
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with pytest.raises(RuntimeError, match="Failed to install cert"):
+                    await cert_manager.install_cert(mock_controller, "test-udid", force=True)
 
 
 class TestGetDeviceCertState:
     @pytest.mark.asyncio
-    async def test_get_device_cert_state_installed(self, mock_controller, mock_cert_path, clean_state):
+    async def test_get_device_cert_state_installed(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test get_device_cert_state when cert is installed."""
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.is_cert_installed", return_value=True):
-                        state = await cert_manager.get_device_cert_state(
-                            mock_controller, "test-udid-1234"
-                        )
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.is_cert_installed", return_value=True):
+                    state = await cert_manager.get_device_cert_state(
+                        mock_controller, "test-udid-1234"
+                    )
 
         assert isinstance(state, DeviceCertState)
         assert state.name == "iPhone 16 Pro"
@@ -365,15 +417,14 @@ class TestGetDeviceCertState:
         assert state.fingerprint == "abc123"
 
     @pytest.mark.asyncio
-    async def test_get_device_cert_state_not_installed(self, mock_controller, mock_cert_path, clean_state):
+    async def test_get_device_cert_state_not_installed(self, mock_controller, mock_cert_path, clean_cert_state):
         """Test get_device_cert_state when cert is not installed."""
-        with patch("server.lifecycle.state.STATE_FILE", clean_state):
-            with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                    with patch("server.proxy.cert_manager.is_cert_installed", return_value=False):
-                        state = await cert_manager.get_device_cert_state(
-                            mock_controller, "test-udid-1234"
-                        )
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch("server.proxy.cert_manager.is_cert_installed", return_value=False):
+                    state = await cert_manager.get_device_cert_state(
+                        mock_controller, "test-udid-1234"
+                    )
 
         assert state.cert_installed is False
         assert state.fingerprint is None

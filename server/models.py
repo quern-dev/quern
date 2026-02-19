@@ -751,7 +751,7 @@ class CertStatusResponse(BaseModel):
 class CertVerifyRequest(BaseModel):
     """Request body for POST /api/v1/proxy/cert/verify."""
 
-    udid: str | None = None  # If None, verify all booted devices
+    udid: str | None = None  # If None, verify all simulators (booted + shutdown)
 
 
 class DeviceCertInstallStatus(BaseModel):
@@ -762,6 +762,7 @@ class DeviceCertInstallStatus(BaseModel):
     cert_installed: bool
     fingerprint: str | None = None
     verified_at: str  # ISO 8601 timestamp
+    status: str = "unknown"  # "installed", "not_installed", "never_booted", "error"
 
 
 class CertVerifyResponse(BaseModel):
@@ -769,6 +770,7 @@ class CertVerifyResponse(BaseModel):
 
     verified: bool
     devices: list[DeviceCertInstallStatus]
+    erased_devices: list[str] = Field(default_factory=list)  # UDIDs where erase was detected
 
 
 class CertInstallRequest(BaseModel):

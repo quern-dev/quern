@@ -99,9 +99,10 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 **Key insight**: Start with summary, trigger action, drill down to specific flows.
 
 **Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
-1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database
-2. Returns detailed status per device with installation timestamps
-3. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
+1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database (works for both booted and shutdown simulators)
+2. Returns per-device `status`: `installed`, `not_installed`, `never_booted`, or `error`
+3. Returns `erased_devices` — UDIDs where a previously installed cert is now missing (probable device erase)
+4. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
 
 ---
 

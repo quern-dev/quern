@@ -20,6 +20,7 @@ from server.models import (
     DeviceCertState,
 )
 from server.proxy import cert_manager
+from server.proxy.cert_state import read_cert_state, read_cert_state_for_device
 from server.proxy.system_proxy import (
     detect_active_interface,
     get_default_route_device,
@@ -59,8 +60,6 @@ async def cert_status(request: Request) -> CertStatusResponse:
     for all known devices. Does not perform SQLite verification - use
     POST /cert/verify for ground truth.
     """
-    from server.lifecycle.state import read_state
-
     cert_path = cert_manager.get_cert_path()
     cert_exists = cert_path.exists()
 
@@ -71,9 +70,8 @@ async def cert_status(request: Request) -> CertStatusResponse:
         except Exception as e:
             _logger.warning(f"Failed to get cert fingerprint: {e}")
 
-    # Get cached device cert states from state.json
-    state = read_state()
-    device_certs_dict = state.get("device_certs", {}) if state else {}
+    # Get cached device cert states from persistent cert-state.json
+    device_certs_dict = read_cert_state()
 
     # Convert to DeviceCertState models
     devices = {
@@ -94,10 +92,12 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
     """Verify certificate installation via SQLite TrustStore query.
 
     Always performs ground-truth verification by querying the simulator's
-    TrustStore database. Updates state.json cache with results.
+    TrustStore database. Updates persistent cert-state.json with results.
+
+    Works for both booted and shutdown simulators (TrustStore is readable on disk).
 
     Args:
-        body.udid: Specific device UDID. If None, verifies all booted devices.
+        body.udid: Specific device UDID. If None, verifies all simulators.
 
     Returns:
         Detailed installation status per device with timestamps.
@@ -110,25 +110,48 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
     if body.udid:
         udids = [body.udid]
     else:
-        # Verify all booted devices
+        # Verify ALL simulators (booted + shutdown)
         try:
             all_devices = await controller.list_devices()
-            from server.models import DeviceState
-
-            udids = [d.udid for d in all_devices if d.state == DeviceState.BOOTED]
+            udids = [d.udid for d in all_devices]
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
 
     if not udids:
-        raise HTTPException(status_code=400, detail="No booted devices found to verify")
+        raise HTTPException(status_code=400, detail="No simulators found")
+
+    # Get cert fingerprint for truststore status checks
+    cert_path = cert_manager.get_cert_path()
+    fingerprint = None
+    if cert_path.exists():
+        try:
+            fingerprint = cert_manager.get_cert_fingerprint(cert_path)
+        except Exception:
+            pass
 
     # Verify each device
     device_statuses = []
+    erased_devices = []
     for udid in udids:
         try:
+            # Check previous state for erase detection
+            prev_state = read_cert_state_for_device(udid)
+            was_installed = prev_state.get("cert_installed", False) if prev_state else False
+
             cert_state = await cert_manager.get_device_cert_state(
                 controller, udid, verify=True
             )
+
+            # Determine detailed status
+            if fingerprint:
+                status = cert_manager.check_truststore_status(udid, fingerprint)
+            else:
+                status = "not_installed"
+
+            # Detect erase
+            if was_installed and not cert_state.cert_installed:
+                erased_devices.append(udid)
+
             device_statuses.append(
                 DeviceCertInstallStatus(
                     udid=udid,
@@ -136,6 +159,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
                     cert_installed=cert_state.cert_installed,
                     fingerprint=cert_state.fingerprint,
                     verified_at=cert_state.verified_at or datetime.now(timezone.utc).isoformat(),
+                    status=status,
                 )
             )
         except Exception as e:
@@ -148,6 +172,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
                     cert_installed=False,
                     fingerprint=None,
                     verified_at=datetime.now(timezone.utc).isoformat(),
+                    status="error",
                 )
             )
 
@@ -157,6 +182,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
     return CertVerifyResponse(
         verified=all_verified,
         devices=device_statuses,
+        erased_devices=erased_devices,
     )
 
 
@@ -232,8 +258,6 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
 @router.get("/setup-guide")
 async def setup_guide(request: Request) -> dict:
     """Get device proxy setup instructions with auto-detected local IP and network interface."""
-    from server.lifecycle.state import read_state
-
     adapter = request.app.state.proxy_adapter
     port = adapter.listen_port if adapter else 9101
 
@@ -252,7 +276,7 @@ async def setup_guide(request: Request) -> dict:
     # Detect VPN and other potential issues
     warnings = _detect_proxy_warnings()
 
-    # Get cert status for booted devices
+    # Get cert status for booted devices from persistent state
     cert_status_by_device = {}
     try:
         controller = request.app.state.device_controller
@@ -262,9 +286,8 @@ async def setup_guide(request: Request) -> dict:
 
             booted_devices = [d for d in all_devices if d.state == DeviceState.BOOTED]
 
-            # Load cached cert states
-            state = read_state()
-            device_certs = state.get("device_certs", {}) if state else {}
+            # Load cached cert states from persistent cert-state.json
+            device_certs = read_cert_state()
 
             for device in booted_devices:
                 cached = device_certs.get(device.udid, {})

@@ -50,20 +50,23 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     adapter = request.app.state.proxy_adapter
     flow_store = request.app.state.flow_store
 
-    # Read cert setup and system proxy state from state.json
+    # Read cert setup from persistent cert-state.json and system proxy from state.json
     cert_setup = None
     system_proxy_info: SystemProxyInfo | None = None
     try:
+        from server.proxy.cert_state import read_cert_state
+        device_certs = read_cert_state()
+        if device_certs:
+            cert_setup = {
+                udid: DeviceCertState(**cert_data)
+                for udid, cert_data in device_certs.items()
+            }
+    except Exception as e:
+        _proxy_logger.debug(f"Failed to load cert state: {e}")
+
+    try:
         state = read_state()
         if state:
-            # Populate cert_setup
-            if state.get("device_certs"):
-                cert_setup = {
-                    udid: DeviceCertState(**cert_data)
-                    for udid, cert_data in state["device_certs"].items()
-                }
-
-            # Populate system_proxy status
             if state.get("system_proxy_configured"):
                 system_proxy_info = SystemProxyInfo(
                     configured=True,

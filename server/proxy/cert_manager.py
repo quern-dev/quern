@@ -1,9 +1,10 @@
 """Certificate installation verification for iOS simulators.
 
 Hybrid verification approach:
-- Fast path: Check state.json cache (recent verification < 1 hour)
+- Fast path: Check persistent cert-state.json cache (recent verification < 1 hour)
 - Slow path: Query simulator's TrustStore.sqlite3 via SQLite
 - Always update cache after SQLite verification
+- Detects device erasure (cert was installed, now missing)
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
-from server.lifecycle.state import read_state, update_state
+from server.proxy.cert_state import read_cert_state, read_cert_state_for_device, update_cert_state
 from server.models import DeviceCertState
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,20 @@ def get_truststore_path(udid: str) -> Path:
     )
 
 
+def get_trustd_dir(udid: str) -> Path:
+    """Get path to simulator's trustd directory.
+
+    This directory is created when the simulator first boots and trustd runs.
+    If it doesn't exist, the device has never been booted.
+    """
+    return (
+        Path.home()
+        / "Library/Developer/CoreSimulator/Devices"
+        / udid
+        / "data/private/var/protected/trustd"
+    )
+
+
 def verify_cert_in_truststore(udid: str, expected_sha256: str) -> bool:
     """Check if cert with given SHA256 exists in TrustStore (SQLite query).
 
@@ -108,17 +124,44 @@ def verify_cert_in_truststore(udid: str, expected_sha256: str) -> bool:
         return False
 
 
+def check_truststore_status(
+    udid: str, expected_sha256: str
+) -> Literal["installed", "not_installed", "never_booted"]:
+    """Check TrustStore status, distinguishing "no cert" from "never booted".
+
+    Args:
+        udid: Device UDID
+        expected_sha256: Expected SHA256 fingerprint (lowercase hex, no colons)
+
+    Returns:
+        "installed" if cert is in TrustStore,
+        "never_booted" if trustd directory doesn't exist,
+        "not_installed" if trustd exists but cert is not present
+    """
+    trustd_dir = get_trustd_dir(udid)
+    if not trustd_dir.exists():
+        return "never_booted"
+
+    if verify_cert_in_truststore(udid, expected_sha256):
+        return "installed"
+
+    return "not_installed"
+
+
 async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool:
     """Check if mitmproxy CA cert is installed on simulator.
 
     Hybrid approach:
-    - If verify=False: Check state.json first, only query SQLite if cache is stale
+    - If verify=False: Check cert-state.json first, only query SQLite if cache is stale
     - If verify=True: Always query SQLite (ground truth)
+
+    Detects device erasure: if cert was previously installed but is now missing,
+    logs a warning about probable erase.
 
     Args:
         controller: DeviceController instance
         udid: Device UDID
-        verify: If True, always check SQLite. If False, trust state.json cache.
+        verify: If True, always check SQLite. If False, trust cache.
 
     Returns:
         True if certificate is installed, False otherwise
@@ -131,9 +174,7 @@ async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool
     expected_fingerprint = get_cert_fingerprint(cert_path)
 
     # Fast path: Check cache
-    state = read_state()
-    device_certs = state.get("device_certs", {}) if state else {}
-    cached = device_certs.get(udid)
+    cached = read_cert_state_for_device(udid)
 
     # Check cache age
     if not verify and cached and cached.get("verified_at"):
@@ -150,7 +191,15 @@ async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool
     logger.debug(f"Verifying cert for {udid} via SQLite")
     is_installed = verify_cert_in_truststore(udid, expected_fingerprint)
 
-    # Update cache
+    # Detect erase: was installed before, now it's gone
+    was_installed = cached.get("cert_installed", False) if cached else False
+    if was_installed and not is_installed:
+        logger.warning(
+            f"Certificate was previously installed on {udid} but is now missing. "
+            "Device may have been erased."
+        )
+
+    # Update persistent cache
     device_name = await _get_device_name(controller, udid)
     cert_state = DeviceCertState(
         name=device_name,
@@ -159,9 +208,7 @@ async def is_cert_installed(controller, udid: str, verify: bool = False) -> bool
         verified_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    # Update state.json
-    device_certs[udid] = cert_state.model_dump()
-    update_state(device_certs=device_certs)
+    update_cert_state(udid, cert_state.model_dump())
 
     return is_installed
 
@@ -208,10 +255,7 @@ async def install_cert(controller, udid: str, force: bool = False) -> bool:
         verified_at=now,
     )
 
-    state = read_state()
-    device_certs = state.get("device_certs", {}) if state else {}
-    device_certs[udid] = cert_state.model_dump()
-    update_state(device_certs=device_certs)
+    update_cert_state(udid, cert_state.model_dump())
 
     logger.info(f"Installed mitmproxy CA cert on {udid}")
     return True  # Newly installed
@@ -243,10 +287,8 @@ async def get_device_cert_state(controller, udid: str, verify: bool = False) -> 
     is_installed = await is_cert_installed(controller, udid, verify=verify)
     fingerprint = get_cert_fingerprint(cert_path) if is_installed else None
 
-    # Get timestamps from state if available
-    state = read_state()
-    device_certs = state.get("device_certs", {}) if state else {}
-    cached = device_certs.get(udid, {})
+    # Get timestamps from persistent state
+    cached = read_cert_state_for_device(udid) or {}
 
     return DeviceCertState(
         name=device_name,

@@ -79,7 +79,9 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 
 | File | Purpose |
 |------|---------|
-| `state.json` | Running instance info (port, PID, API key) |
+| `state.json` | Running instance info (port, PID, API key) — deleted on stop |
+| `cert-state.json` | Per-device certificate installation state — persists across restarts |
+| `device-pool.json` | Device pool claim/release state — persists across restarts |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
 
@@ -231,7 +233,7 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | DELETE | `/api/v1/proxy/mocks` | Clear all mock rules |
 | GET | `/api/v1/proxy/cert` | Download CA certificate |
 | GET | `/api/v1/proxy/cert/status` | Check certificate installation status |
-| POST | `/api/v1/proxy/cert/verify` | Verify certificate chain for a host |
+| POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation on simulators (booted + shutdown) |
 | POST | `/api/v1/proxy/cert/install` | Install CA certificate |
 | GET | `/api/v1/proxy/setup-guide` | Device setup instructions |
 
@@ -287,7 +289,7 @@ server/
   device/              Simulator control (simctl, idb backends), device pool
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
-tests/                 676 tests
+tests/                 760 tests
 ```
 
 ## Development

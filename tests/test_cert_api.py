@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from server.config import ServerConfig
 from server.main import create_app
 from server.models import DeviceCertState, DeviceInfo, DeviceState, DeviceType
-from server.lifecycle.state import write_state, ServerState
 
 
 @pytest.fixture
@@ -51,26 +50,25 @@ def mock_cert_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def mock_state_file(tmp_path, monkeypatch):
-    """Mock state file location."""
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr("server.lifecycle.state.STATE_FILE", state_file)
-    return state_file
+def mock_cert_state(tmp_path, monkeypatch):
+    """Mock cert state file location."""
+    cert_state_file = tmp_path / "cert-state.json"
+    monkeypatch.setattr("server.proxy.cert_state.CERT_STATE_FILE", cert_state_file)
+    monkeypatch.setattr("server.proxy.cert_state.CONFIG_DIR", tmp_path)
+    return cert_state_file
 
 
 class TestCertStatus:
-    def test_cert_status_cert_exists(self, client, auth_headers, mock_cert_path, mock_state_file):
+    def test_cert_status_cert_exists(self, client, auth_headers, mock_cert_path, mock_cert_state):
         """Test GET /cert/status when cert exists."""
         with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-            with patch("server.lifecycle.state.read_state") as mock_read_state:
-                mock_read_state.return_value = {
-                    "device_certs": {
-                        "test-udid": {
-                            "name": "iPhone 16 Pro",
-                            "cert_installed": True,
-                            "fingerprint": "abc123",
-                            "verified_at": datetime.now(timezone.utc).isoformat(),
-                        }
+            with patch("server.api.proxy_certs.read_cert_state") as mock_read:
+                mock_read.return_value = {
+                    "test-udid": {
+                        "name": "iPhone 16 Pro",
+                        "cert_installed": True,
+                        "fingerprint": "abc123",
+                        "verified_at": datetime.now(timezone.utc).isoformat(),
                     }
                 }
 
@@ -83,7 +81,7 @@ class TestCertStatus:
         assert "test-udid" in data["devices"]
         assert data["devices"]["test-udid"]["cert_installed"] is True
 
-    def test_cert_status_cert_missing(self, client, auth_headers, tmp_path, monkeypatch, mock_state_file):
+    def test_cert_status_cert_missing(self, client, auth_headers, tmp_path, monkeypatch, mock_cert_state):
         """Test GET /cert/status when cert doesn't exist."""
         nonexistent_cert = tmp_path / "nonexistent.pem"
 
@@ -92,7 +90,7 @@ class TestCertStatus:
 
         monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", mock_get_cert_path)
 
-        with patch("server.lifecycle.state.read_state", return_value=None):
+        with patch("server.api.proxy_certs.read_cert_state", return_value={}):
             response = client.get("/api/v1/proxy/cert/status", headers=auth_headers)
 
         assert response.status_code == 200
@@ -100,10 +98,10 @@ class TestCertStatus:
         assert data["cert_exists"] is False
         assert data["fingerprint"] is None
 
-    def test_cert_status_no_devices(self, client, auth_headers, mock_cert_path, mock_state_file):
+    def test_cert_status_no_devices(self, client, auth_headers, mock_cert_path, mock_cert_state):
         """Test GET /cert/status when no devices in state."""
         with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-            with patch("server.lifecycle.state.read_state", return_value=None):
+            with patch("server.api.proxy_certs.read_cert_state", return_value={}):
                 response = client.get("/api/v1/proxy/cert/status", headers=auth_headers)
 
         assert response.status_code == 200
@@ -114,7 +112,7 @@ class TestCertStatus:
 
 class TestCertVerify:
     @pytest.mark.asyncio
-    async def test_cert_verify_specific_device(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    async def test_cert_verify_specific_device(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/verify with specific UDID."""
         app.state.device_controller.list_devices = AsyncMock(return_value=[
             DeviceInfo(
@@ -132,12 +130,14 @@ class TestCertVerify:
                 fingerprint="abc123",
                 verified_at=datetime.now(timezone.utc).isoformat(),
             )
-
-            response = client.post(
-                "/api/v1/proxy/cert/verify",
-                json={"udid": "test-udid"},
-                headers=auth_headers,
-            )
+            with patch("server.proxy.cert_manager.check_truststore_status", return_value="installed"):
+                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                    with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=None):
+                        response = client.post(
+                            "/api/v1/proxy/cert/verify",
+                            json={"udid": "test-udid"},
+                            headers=auth_headers,
+                        )
 
         assert response.status_code == 200
         data = response.json()
@@ -145,10 +145,12 @@ class TestCertVerify:
         assert len(data["devices"]) == 1
         assert data["devices"][0]["udid"] == "test-udid"
         assert data["devices"][0]["cert_installed"] is True
+        assert data["devices"][0]["status"] == "installed"
+        assert data["erased_devices"] == []
 
     @pytest.mark.asyncio
-    async def test_cert_verify_all_booted(self, client, auth_headers, mock_cert_path, mock_state_file, app):
-        """Test POST /cert/verify with no UDID (all booted devices)."""
+    async def test_cert_verify_all_simulators(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
+        """Test POST /cert/verify with no UDID (all simulators, not just booted)."""
         app.state.device_controller.list_devices = AsyncMock(return_value=[
             DeviceInfo(
                 udid="test-udid-1",
@@ -177,20 +179,94 @@ class TestCertVerify:
                 fingerprint="abc123",
                 verified_at=datetime.now(timezone.utc).isoformat(),
             )
-
-            response = client.post(
-                "/api/v1/proxy/cert/verify",
-                json={},
-                headers=auth_headers,
-            )
+            with patch("server.proxy.cert_manager.check_truststore_status", return_value="installed"):
+                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                    with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=None):
+                        response = client.post(
+                            "/api/v1/proxy/cert/verify",
+                            json={},
+                            headers=auth_headers,
+                        )
 
         assert response.status_code == 200
         data = response.json()
-        # Should only verify the 2 booted devices
-        assert len(data["devices"]) == 2
-        assert {d["udid"] for d in data["devices"]} == {"test-udid-1", "test-udid-2"}
+        # Should verify ALL 3 simulators (booted + shutdown)
+        assert len(data["devices"]) == 3
+        assert {d["udid"] for d in data["devices"]} == {"test-udid-1", "test-udid-2", "test-udid-3"}
 
-    def test_cert_verify_no_controller(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    @pytest.mark.asyncio
+    async def test_cert_verify_shutdown_device(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
+        """Test POST /cert/verify works for shutdown device."""
+        app.state.device_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="shutdown-udid",
+                name="iPhone 15",
+                state=DeviceState.SHUTDOWN,
+                device_type=DeviceType.SIMULATOR,
+            ),
+        ])
+
+        with patch("server.proxy.cert_manager.get_device_cert_state") as mock_get_state:
+            mock_get_state.return_value = DeviceCertState(
+                name="iPhone 15",
+                cert_installed=False,
+                fingerprint=None,
+                verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+            with patch("server.proxy.cert_manager.check_truststore_status", return_value="never_booted"):
+                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                    with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=None):
+                        response = client.post(
+                            "/api/v1/proxy/cert/verify",
+                            json={"udid": "shutdown-udid"},
+                            headers=auth_headers,
+                        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["devices"]) == 1
+        assert data["devices"][0]["status"] == "never_booted"
+
+    @pytest.mark.asyncio
+    async def test_cert_verify_erase_detection(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
+        """Test POST /cert/verify detects erased devices."""
+        app.state.device_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="erased-udid",
+                name="iPhone 16 Pro",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR,
+            ),
+        ])
+
+        # Previous state says cert was installed
+        prev_state = {
+            "name": "iPhone 16 Pro",
+            "cert_installed": True,
+            "fingerprint": "abc123",
+        }
+
+        with patch("server.proxy.cert_manager.get_device_cert_state") as mock_get_state:
+            mock_get_state.return_value = DeviceCertState(
+                name="iPhone 16 Pro",
+                cert_installed=False,  # Now it's gone
+                fingerprint=None,
+                verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+            with patch("server.proxy.cert_manager.check_truststore_status", return_value="not_installed"):
+                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                    with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=prev_state):
+                        response = client.post(
+                            "/api/v1/proxy/cert/verify",
+                            json={"udid": "erased-udid"},
+                            headers=auth_headers,
+                        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["erased_devices"] == ["erased-udid"]
+
+    def test_cert_verify_no_controller(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/verify when device controller not initialized."""
         app.state.device_controller = None
 
@@ -206,7 +282,7 @@ class TestCertVerify:
 
 class TestCertInstall:
     @pytest.mark.asyncio
-    async def test_cert_install_specific_device(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    async def test_cert_install_specific_device(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/install with specific UDID."""
         app.state.device_controller.list_devices = AsyncMock()
 
@@ -228,7 +304,7 @@ class TestCertInstall:
         mock_install.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_cert_install_already_installed(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    async def test_cert_install_already_installed(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/install when cert already installed."""
         with patch("server.proxy.cert_manager.install_cert") as mock_install:
             mock_install.return_value = False  # Already installed
@@ -244,7 +320,7 @@ class TestCertInstall:
         assert data["devices"][0]["status"] == "already_installed"
 
     @pytest.mark.asyncio
-    async def test_cert_install_all_booted(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    async def test_cert_install_all_booted(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/install with no UDID (all booted devices)."""
         app.state.device_controller.list_devices = AsyncMock(return_value=[
             DeviceInfo(
@@ -277,7 +353,7 @@ class TestCertInstall:
         assert mock_install.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_cert_install_force(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    async def test_cert_install_force(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/install with force=True."""
         with patch("server.proxy.cert_manager.install_cert") as mock_install:
             mock_install.return_value = True
@@ -292,7 +368,7 @@ class TestCertInstall:
         mock_install.assert_called_once_with(app.state.device_controller, "test-udid", force=True)
 
     @pytest.mark.asyncio
-    async def test_cert_install_failure(self, client, auth_headers, mock_cert_path, mock_state_file, app):
+    async def test_cert_install_failure(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
         """Test POST /cert/install when installation fails."""
         with patch("server.proxy.cert_manager.install_cert") as mock_install:
             mock_install.side_effect = Exception("simctl failed")
