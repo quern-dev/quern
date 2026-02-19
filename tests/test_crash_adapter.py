@@ -177,6 +177,138 @@ async def test_ignores_non_crash_files(tmp_crash_dir):
 # ------------------------------------------------------------------
 
 
+# ------------------------------------------------------------------
+# Extra watch dirs
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extra_watch_dirs_scanned(tmp_crash_dir, tmp_path):
+    """Crash files in extra_watch_dirs should be detected."""
+    extra_dir = tmp_path / "diagnostic_reports"
+    extra_dir.mkdir()
+
+    adapter = CrashAdapter(
+        watch_dir=tmp_crash_dir,
+        poll_interval=0.1,
+        extra_watch_dirs=[extra_dir],
+    )
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+
+    # Add a crash file to the extra dir
+    src = FIXTURES / "crash_sample.ips"
+    (extra_dir / "sim_crash.ips").write_text(src.read_text())
+
+    await asyncio.sleep(0.5)
+    await adapter.stop()
+
+    assert len(entries) == 1
+    report = adapter.crash_reports[0]
+    assert report.process == "MyApp"
+
+
+@pytest.mark.asyncio
+async def test_extra_watch_dirs_indexed_at_start(tmp_crash_dir, tmp_path):
+    """Files already in extra dirs at startup should be indexed, not emitted."""
+    extra_dir = tmp_path / "diagnostic_reports"
+    extra_dir.mkdir()
+
+    src = FIXTURES / "crash_sample.ips"
+    (extra_dir / "old_crash.ips").write_text(src.read_text())
+
+    adapter = CrashAdapter(
+        watch_dir=tmp_crash_dir,
+        poll_interval=0.1,
+        extra_watch_dirs=[extra_dir],
+    )
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+    await asyncio.sleep(0.5)
+    await adapter.stop()
+
+    assert len(entries) == 0
+
+
+# ------------------------------------------------------------------
+# Process filter
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_filter_skips_non_matching(tmp_crash_dir):
+    """Crashes from non-matching processes should be ignored."""
+    adapter = CrashAdapter(
+        watch_dir=tmp_crash_dir,
+        poll_interval=0.1,
+        process_filter="Geocaching",
+    )
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+
+    # crash_sample.ips has procName="MyApp" — should not match
+    src = FIXTURES / "crash_sample.ips"
+    (tmp_crash_dir / "myapp_crash.ips").write_text(src.read_text())
+
+    await asyncio.sleep(0.5)
+    await adapter.stop()
+
+    assert len(entries) == 0
+    assert len(adapter.crash_reports) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_filter_allows_matching(tmp_crash_dir):
+    """Crashes from matching processes should be captured."""
+    adapter = CrashAdapter(
+        watch_dir=tmp_crash_dir,
+        poll_interval=0.1,
+        process_filter="MyApp",
+    )
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+
+    src = FIXTURES / "crash_sample.ips"
+    (tmp_crash_dir / "myapp_crash.ips").write_text(src.read_text())
+
+    await asyncio.sleep(0.5)
+    await adapter.stop()
+
+    assert len(entries) == 1
+    assert adapter.crash_reports[0].process == "MyApp"
+
+
+@pytest.mark.asyncio
+async def test_process_filter_skips_non_matching_crash_text(tmp_crash_dir):
+    """Process filter should also work for .crash text format."""
+    adapter = CrashAdapter(
+        watch_dir=tmp_crash_dir,
+        poll_interval=0.1,
+        process_filter="Geocaching",
+    )
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+
+    # crash_sample.crash has Process: MyApp — should not match
+    src = FIXTURES / "crash_sample.crash"
+    (tmp_crash_dir / "myapp.crash").write_text(src.read_text())
+
+    await asyncio.sleep(0.5)
+    await adapter.stop()
+
+    assert len(entries) == 0
+
+
+# ------------------------------------------------------------------
+# Status
+# ------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_status_watching(tmp_crash_dir):
     adapter = CrashAdapter(watch_dir=tmp_crash_dir)

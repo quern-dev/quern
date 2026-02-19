@@ -51,7 +51,7 @@ from server.processing.deduplicator import Deduplicator
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter
 from server.sources.build import BuildAdapter
-from server.sources.crash import CrashAdapter
+from server.sources.crash import CrashAdapter, DIAGNOSTIC_REPORTS_DIR
 from server.sources.oslog import OslogAdapter
 from server.sources.proxy import ProxyAdapter
 from server.sources.syslog import SyslogAdapter
@@ -109,6 +109,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             on_entry=dedup.process,
             watch_dir=app.state.crash_dir,
             pull_from_device=app.state.pull_crashes,
+            extra_watch_dirs=app.state.crash_extra_watch_dirs,
+            process_filter=app.state.crash_process_filter,
         )
         adapters["crash"] = crash
         app.state.crash_adapter = crash
@@ -266,6 +268,8 @@ def create_app(
     enable_crash: bool = True,
     crash_dir: Path | None = None,
     pull_crashes: bool = False,
+    crash_extra_watch_dirs: list[Path] | None = None,
+    crash_process_filter: str | None = None,
     enable_proxy: bool = True,
     proxy_port: int = 9101,
 ) -> FastAPI:
@@ -289,6 +293,8 @@ def create_app(
     app.state.enable_crash = enable_crash
     app.state.crash_dir = crash_dir
     app.state.pull_crashes = pull_crashes
+    app.state.crash_extra_watch_dirs = crash_extra_watch_dirs or []
+    app.state.crash_process_filter = crash_process_filter
     app.state.enable_proxy = enable_proxy
     app.state.proxy_port = proxy_port
     app.state.source_adapters = {}
@@ -376,6 +382,14 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pull-crashes", action="store_true", default=False,
         help="Run idevicecrashreport to pull crashes from device",
+    )
+    parser.add_argument(
+        "--simulator-crashes", action="store_true", default=False,
+        help="Also watch ~/Library/Logs/DiagnosticReports/ for simulator crash reports",
+    )
+    parser.add_argument(
+        "--crash-process-filter", default=None, type=str,
+        help="Only capture crashes whose process name contains this string",
     )
     parser.add_argument(
         "--no-proxy", action="store_true", default=False,
@@ -502,9 +516,17 @@ def _cmd_start(args: argparse.Namespace) -> None:
         if enable_crash:
             crash_path = args.crash_dir or "~/.quern/crashes"
             print(f"  Crash watcher: enabled (dir: {crash_path})")
+            if args.simulator_crashes:
+                print(f"  Simulator crashes: enabled ({DIAGNOSTIC_REPORTS_DIR})")
+            if args.crash_process_filter:
+                print(f"  Crash process filter: {args.crash_process_filter}")
         if enable_proxy:
             print(f"  Proxy: enabled (port: {proxy_port})")
         print()
+
+    crash_extra_watch_dirs = []
+    if args.simulator_crashes:
+        crash_extra_watch_dirs.append(DIAGNOSTIC_REPORTS_DIR)
 
     app = create_app(
         config=config,
@@ -514,6 +536,8 @@ def _cmd_start(args: argparse.Namespace) -> None:
         enable_crash=enable_crash,
         crash_dir=args.crash_dir,
         pull_crashes=args.pull_crashes,
+        crash_extra_watch_dirs=crash_extra_watch_dirs,
+        crash_process_filter=args.crash_process_filter,
         enable_proxy=enable_proxy,
         proxy_port=proxy_port,
     )

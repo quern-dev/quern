@@ -25,6 +25,7 @@ from server.sources import BaseSourceAdapter, EntryCallback
 logger = logging.getLogger(__name__)
 
 CRASH_DIR = Path.home() / ".quern" / "crashes"
+DIAGNOSTIC_REPORTS_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
 POLL_INTERVAL = 10  # seconds
 PULL_TIMEOUT = 30  # seconds
 
@@ -39,6 +40,8 @@ class CrashAdapter(BaseSourceAdapter):
         watch_dir: Path | None = None,
         pull_from_device: bool = False,
         poll_interval: float = POLL_INTERVAL,
+        extra_watch_dirs: list[Path] | None = None,
+        process_filter: str | None = None,
     ) -> None:
         super().__init__(
             adapter_id="crash",
@@ -49,6 +52,8 @@ class CrashAdapter(BaseSourceAdapter):
         self.watch_dir = watch_dir or CRASH_DIR
         self.pull_from_device = pull_from_device
         self.poll_interval = poll_interval
+        self.extra_watch_dirs = extra_watch_dirs or []
+        self.process_filter = process_filter
         self._poll_task: asyncio.Task | None = None
         self._seen_files: set[str] = set()
         self.crash_reports: list[CrashReport] = []
@@ -58,17 +63,22 @@ class CrashAdapter(BaseSourceAdapter):
         self.watch_dir.mkdir(parents=True, exist_ok=True)
 
         # Index existing files so we don't re-emit on restart
-        for f in self.watch_dir.iterdir():
-            if f.suffix in (".ips", ".crash"):
-                self._seen_files.add(f.name)
+        for d in self._all_watch_dirs():
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                if f.suffix in (".ips", ".crash"):
+                    self._seen_files.add(str(f))
 
         self._running = True
         self.started_at = self._now()
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "Crash adapter started (watch_dir=%s, pull=%s)",
+            "Crash adapter started (watch_dir=%s, extra_dirs=%s, pull=%s, filter=%s)",
             self.watch_dir,
+            self.extra_watch_dirs,
             self.pull_from_device,
+            self.process_filter,
         )
 
     async def stop(self) -> None:
@@ -132,18 +142,25 @@ class CrashAdapter(BaseSourceAdapter):
         except Exception:
             logger.exception("idevicecrashreport failed")
 
+    def _all_watch_dirs(self) -> list[Path]:
+        """Return the primary watch dir plus any extra watch dirs."""
+        return [self.watch_dir] + self.extra_watch_dirs
+
     async def _scan_for_new_files(self) -> None:
-        """Scan watch directory for new crash files."""
-        if not self.watch_dir.exists():
-            return
-
-        for f in sorted(self.watch_dir.iterdir(), key=lambda p: p.stat().st_mtime):
-            if f.name in self._seen_files:
+        """Scan all watch directories for new crash files."""
+        all_files: list[Path] = []
+        for d in self._all_watch_dirs():
+            if not d.exists():
                 continue
-            if f.suffix not in (".ips", ".crash"):
+            for f in d.iterdir():
+                if f.suffix in (".ips", ".crash"):
+                    all_files.append(f)
+
+        for f in sorted(all_files, key=lambda p: p.stat().st_mtime):
+            if str(f) in self._seen_files:
                 continue
 
-            self._seen_files.add(f.name)
+            self._seen_files.add(str(f))
 
             try:
                 content = f.read_text(errors="replace")
@@ -192,6 +209,9 @@ class CrashAdapter(BaseSourceAdapter):
 
         crash_id = uuid.uuid4().hex[:12]
         proc_name = data.get("procName", "") or data.get("name", "") or path.stem
+
+        if self.process_filter and self.process_filter not in proc_name:
+            return None
 
         # Extract exception info
         exception = data.get("exception", {})
@@ -244,6 +264,10 @@ class CrashAdapter(BaseSourceAdapter):
         codes_match = re.search(r"^Exception Codes:\s+(.+)$", content, re.MULTILINE)
 
         proc_name = proc_match.group(1) if proc_match else path.stem
+
+        if self.process_filter and self.process_filter not in proc_name:
+            return None
+
         exc_type = exc_match.group(1).strip() if exc_match else ""
         exc_codes = codes_match.group(1).strip() if codes_match else ""
 
