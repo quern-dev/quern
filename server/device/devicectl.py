@@ -108,8 +108,10 @@ class DevicectlBackend:
             identifier = dev.get("identifier", "")
             name = dev.get("deviceProperties", {}).get("name", "Unknown")
             os_version_str = dev.get("deviceProperties", {}).get("osVersionNumber", "")
-            connection_type = connection_props.get("transportType", "")
+            raw_transport = connection_props.get("transportType", "")
+            connection_type = "usb" if raw_transport == "wired" else raw_transport
             tunnel_state = connection_props.get("tunnelState", "")
+            device_type_str = dev.get("hardwareProperties", {}).get("deviceType", "")
 
             # Map state: connected tunnel = booted, otherwise check bootState
             boot_state = dev.get("deviceProperties", {}).get("bootState", "")
@@ -120,6 +122,10 @@ class DevicectlBackend:
             else:
                 state = DeviceState.SHUTDOWN
 
+            # Device is reachable if tunnel is anything other than "unavailable"
+            # "connected" = active tunnel, "disconnected" = reachable but no tunnel yet
+            is_connected = tunnel_state != "unavailable"
+
             devices.append(DeviceInfo(
                 udid=identifier,
                 name=name,
@@ -127,6 +133,8 @@ class DevicectlBackend:
                 device_type=DeviceType.DEVICE,
                 os_version=f"iOS {os_version_str}" if os_version_str else "",
                 connection_type=connection_type,
+                device_family=device_type_str,  # Already "iPhone", "iPad", etc.
+                is_connected=is_connected,
             ))
 
         return devices

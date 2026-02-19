@@ -1,0 +1,30 @@
+[
+  {
+    "UniqueDeviceID": "5f9f02e25a8d7b3c1e4f6a9d2b8c0e1f3a5d7b9c",
+    "DeviceName": "iPhone 7",
+    "ProductVersion": "15.8.3",
+    "DeviceClass": "iPhone",
+    "ConnectionType": "USB"
+  },
+  {
+    "UniqueDeviceID": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "DeviceName": "iPhone 8",
+    "ProductVersion": "16.7.2",
+    "DeviceClass": "iPhone",
+    "ConnectionType": "USB"
+  },
+  {
+    "UniqueDeviceID": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
+    "DeviceName": "iPhone 14 Pro",
+    "ProductVersion": "17.2.1",
+    "DeviceClass": "iPhone",
+    "ConnectionType": "USB"
+  },
+  {
+    "UniqueDeviceID": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+    "DeviceName": "iPad Air",
+    "ProductVersion": "18.0",
+    "DeviceClass": "iPad",
+    "ConnectionType": "USB"
+  }
+]

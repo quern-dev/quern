@@ -10,6 +10,7 @@ from server.device.devicectl import DevicectlBackend
 from server.device.screenshots import process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.idb import IdbBackend
+from server.device.usbmux import UsbmuxBackend
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 logger = logging.getLogger("quern-debug-server.device")
@@ -22,6 +23,7 @@ class DeviceController(DeviceControllerUI):
         self.simctl = SimctlBackend()
         self.idb = IdbBackend()
         self.devicectl = DevicectlBackend()
+        self.usbmux = UsbmuxBackend()
         self._active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
         # UI tree cache: {udid: (elements, timestamp)}
@@ -42,6 +44,7 @@ class DeviceController(DeviceControllerUI):
             "simctl": await self.simctl.is_available(),
             "idb": await self.idb.is_available(),
             "devicectl": await self.devicectl.is_available(),
+            "pymobiledevice3": await self.usbmux.is_available(),
             "tunneld": await is_tunneld_running(),
         }
 
@@ -136,17 +139,20 @@ class DeviceController(DeviceControllerUI):
         }
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List all devices (simulators + physical)."""
+        """List all devices (simulators + physical + pre-iOS 17 USB)."""
         sim_devices = await self.simctl.list_devices()
         physical_devices = await self.devicectl.list_devices()
+        usbmux_devices = await self.usbmux.list_devices()
 
         # Populate device type cache
         for d in sim_devices:
             self._device_type_cache[d.udid] = DeviceType.SIMULATOR
         for d in physical_devices:
             self._device_type_cache[d.udid] = DeviceType.DEVICE
+        for d in usbmux_devices:
+            self._device_type_cache[d.udid] = DeviceType.DEVICE
 
-        return sim_devices + physical_devices
+        return sim_devices + physical_devices + usbmux_devices
 
     async def boot(self, udid: str | None = None, name: str | None = None) -> str:
         """Boot a simulator by udid or name. Returns the udid that was booted."""
