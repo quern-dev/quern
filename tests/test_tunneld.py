@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -139,6 +140,60 @@ class TestResolveTunnelUdid:
     async def test_not_found(self):
         with patch("server.device.tunneld.get_tunneld_devices", return_value={}):
             result = await resolve_tunnel_udid("UNKNOWN-UUID")
+            assert result is None
+
+    async def test_multiple_tunnels_maps_via_devicectl(self, tmp_path):
+        """With multiple tunneled devices, devicectl JSON maps CoreDevice UUIDs."""
+        devices = {
+            "00008130-AAAA1111": [{"tunnel-address": "fd35::1"}],
+            "00008130-BBBB2222": [{"tunnel-address": "fd35::2"}],
+        }
+        devicectl_output = {
+            "result": {
+                "devices": [
+                    {
+                        "identifier": "53DA57AA-1111",
+                        "hardwareProperties": {"udid": "00008130-AAAA1111"},
+                    },
+                    {
+                        "identifier": "53DA57AA-2222",
+                        "hardwareProperties": {"udid": "00008130-BBBB2222"},
+                    },
+                ]
+            }
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+
+        async def fake_subprocess(*args, **kwargs):
+            # Write devicectl JSON to the temp file (second-to-last arg)
+            json_path = args[-1]
+            Path(json_path).write_text(json.dumps(devicectl_output))
+            return mock_proc
+
+        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices), \
+             patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess):
+            result = await resolve_tunnel_udid("53DA57AA-1111")
+            assert result == "00008130-AAAA1111"
+            assert _tunnel_udid_cache["53DA57AA-1111"] == "00008130-AAAA1111"
+            assert _tunnel_udid_cache["53DA57AA-2222"] == "00008130-BBBB2222"
+
+    async def test_multiple_tunnels_devicectl_fails_gracefully(self):
+        """When devicectl fails with multiple tunnels, returns None."""
+        devices = {
+            "00008130-AAAA1111": [{"tunnel-address": "fd35::1"}],
+            "00008130-BBBB2222": [{"tunnel-address": "fd35::2"}],
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"error"))
+        mock_proc.returncode = 1
+
+        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices), \
+             patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await resolve_tunnel_udid("53DA57AA-1111")
             assert result is None
 
 

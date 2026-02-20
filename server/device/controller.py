@@ -7,6 +7,7 @@ import time
 
 from server.device.controller_ui import DeviceControllerUI
 from server.device.devicectl import DevicectlBackend
+from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.idb import IdbBackend
@@ -23,6 +24,7 @@ class DeviceController(DeviceControllerUI):
         self.simctl = SimctlBackend()
         self.idb = IdbBackend()
         self.devicectl = DevicectlBackend()
+        self.pmd3 = Pmd3Backend()
         self.usbmux = UsbmuxBackend()
         self._active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
@@ -44,7 +46,7 @@ class DeviceController(DeviceControllerUI):
             "simctl": await self.simctl.is_available(),
             "idb": await self.idb.is_available(),
             "devicectl": await self.devicectl.is_available(),
-            "pymobiledevice3": await self.usbmux.is_available(),
+            "pymobiledevice3": await self.pmd3.is_available(),
             "tunneld": await is_tunneld_running(),
         }
 
@@ -237,7 +239,7 @@ class DeviceController(DeviceControllerUI):
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
         resolved = await self.resolve_udid(udid)
         if self._is_physical(resolved):
-            raw_png = await self.devicectl.screenshot(resolved)
+            raw_png = await self.pmd3.screenshot(resolved)
         else:
             raw_png = await self.simctl.screenshot(resolved)
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)

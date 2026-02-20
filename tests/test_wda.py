@@ -68,11 +68,14 @@ def _simulator(
 
 
 def _mock_process(returncode=0, stdout=b"", stderr=b""):
-    """Create a mock asyncio.Process."""
-    proc = AsyncMock()
+    """Create a mock asyncio.Process.
+
+    Uses MagicMock for the process itself (Process is not async) and
+    AsyncMock only for the coroutine methods (communicate).
+    """
+    proc = MagicMock()
     proc.returncode = returncode
     proc.communicate = AsyncMock(return_value=(stdout, stderr))
-    proc.kill = MagicMock()
     return proc
 
 
@@ -202,14 +205,18 @@ class TestCloneWda:
         import asyncio
 
         repo = tmp_path / "WebDriverAgent"
-        proc = AsyncMock()
-        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
-        proc.kill = MagicMock()
+
+        async def _hang_forever():
+            await asyncio.sleep(999)
+            return (b"", b"")
+
+        proc = MagicMock()
+        proc.communicate = _hang_forever
         with (
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DIR", tmp_path),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
-            patch("server.device.wda.asyncio.wait_for", side_effect=asyncio.TimeoutError),
+            patch("server.device.wda.CLONE_TIMEOUT", 0.001),
         ):
             with pytest.raises(RuntimeError, match="git clone timed out"):
                 await clone_wda()
@@ -365,7 +372,6 @@ class TestBuildWda:
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
-            patch("server.device.wda.asyncio.wait_for", return_value=(b"", b"")),
         ):
             result = await build_wda("TEAM123")
 
@@ -388,7 +394,6 @@ class TestBuildWda:
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
-            patch("server.device.wda.asyncio.wait_for", return_value=(b"", b"")),
         ):
             result = await build_wda("NEW_TEAM")
 
@@ -404,7 +409,6 @@ class TestBuildWda:
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
-            patch("server.device.wda.asyncio.wait_for", return_value=(b"BUILD FAILED\n", b"signing error")),
         ):
             with pytest.raises(RuntimeError, match="xcodebuild failed"):
                 await build_wda("TEAM123")
@@ -566,7 +570,7 @@ class TestSetupWda:
             patch("server.device.wda.save_wda_state"),
             patch("server.device.wda.customize_wda", return_value=False),
             patch("server.device.wda.build_wda", return_value=False),
-            patch("server.device.wda.install_wda"),
+            patch("server.device.wda.install_wda", return_value=None),
         ):
             result = await setup_wda("DEV1", "iOS 17.4")
 
@@ -585,7 +589,7 @@ class TestSetupWda:
             patch("server.device.wda.save_wda_state"),
             patch("server.device.wda.customize_wda", return_value=True),
             patch("server.device.wda.build_wda", return_value=True),
-            patch("server.device.wda.install_wda"),
+            patch("server.device.wda.install_wda", return_value=None),
         ):
             result = await setup_wda("DEV1", "iOS 17.4", team_id="TEAM2")
 

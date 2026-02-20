@@ -48,7 +48,8 @@
             {"name": "arm64e", "subType": 2, "type": 16777228}
           ],
           "supportedDeviceFamilies": [1],
-          "tpiMeasuredValues": {}
+          "tpiMeasuredValues": {},
+          "udid": "00008130-AAAA1111"
         },
         "identifier": "53DA57AA-1234-5678-9ABC-DEF012345678",
         "visibilityClass": "default"

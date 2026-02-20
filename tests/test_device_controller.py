@@ -98,7 +98,7 @@ class TestCheckTools:
         ctrl.simctl.is_available = AsyncMock(return_value=True)
         ctrl.idb.is_available = AsyncMock(return_value=True)
         ctrl.devicectl.is_available = AsyncMock(return_value=True)
-        ctrl.usbmux.is_available = AsyncMock(return_value=True)
+        ctrl.pmd3.is_available = AsyncMock(return_value=True)
         with patch("server.device.tunneld.is_tunneld_running", return_value=True):
             tools = await ctrl.check_tools()
         assert tools == {"simctl": True, "idb": True, "devicectl": True, "pymobiledevice3": True, "tunneld": True}
@@ -108,7 +108,7 @@ class TestCheckTools:
         ctrl.simctl.is_available = AsyncMock(return_value=True)
         ctrl.idb.is_available = AsyncMock(return_value=False)
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
-        ctrl.usbmux.is_available = AsyncMock(return_value=False)
+        ctrl.pmd3.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools == {"simctl": True, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False}
@@ -118,7 +118,7 @@ class TestCheckTools:
         ctrl.simctl.is_available = AsyncMock(return_value=False)
         ctrl.idb.is_available = AsyncMock(return_value=False)
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
-        ctrl.usbmux.is_available = AsyncMock(return_value=False)
+        ctrl.pmd3.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools == {"simctl": False, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False}

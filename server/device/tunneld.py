@@ -13,10 +13,12 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -106,20 +108,21 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
 
     # Multiple tunnels — try to match via devicectl JSON which includes
     # both the CoreDevice UUID and the hardwareProperties.udid
+    tmp_path = None
     try:
-        import asyncio
-        import json
-        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
 
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "devicectl", "list", "devices",
-            "--json-output", "/dev/stdout",
+            "--json-output", tmp_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        await proc.communicate()
         if proc.returncode == 0:
-            data = json.loads(stdout.decode())
+            data = json.loads(Path(tmp_path).read_text())
             for dev in data.get("result", {}).get("devices", []):
                 cd_uuid = dev.get("identifier", "")
                 hw_udid = dev.get("hardwareProperties", {}).get("udid", "")
@@ -127,6 +130,9 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
                     _tunnel_udid_cache[cd_uuid] = hw_udid
     except Exception:
         logger.debug("Failed to map CoreDevice UUIDs via devicectl")
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
 
     return _tunnel_udid_cache.get(coredevice_uuid)
 
