@@ -1,3 +1,5 @@
+import { writeFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
@@ -346,7 +348,7 @@ NOTE: If you want to capture network traffic from this app:
 
   server.tool(
     "take_screenshot",
-    `Capture a screenshot from a simulator or physical device. Returns the image as base64-encoded data.`,
+    `Capture a screenshot from a simulator or physical device. Returns the image as base64-encoded data, or saves to disk when save_path is provided.`,
     {
       udid: z
         .string()
@@ -368,8 +370,14 @@ NOTE: If you want to capture network traffic from this app:
         .max(100)
         .default(85)
         .describe("JPEG quality (1-100, ignored for PNG)"),
+      save_path: z
+        .string()
+        .optional()
+        .describe(
+          "Save screenshot to this file path instead of returning base64. Parent directories are created automatically."
+        ),
     },
-    async ({ udid, format, scale, quality }) => {
+    async ({ udid, format, scale, quality, save_path }) => {
       try {
         const srv = discoverServer();
         const url = new URL("/api/v1/device/screenshot", srv.url);
@@ -388,6 +396,20 @@ NOTE: If you want to capture network traffic from this app:
         }
 
         const buffer = Buffer.from(await resp.arrayBuffer());
+
+        if (save_path) {
+          await mkdir(dirname(save_path), { recursive: true });
+          await writeFile(save_path, buffer);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Screenshot saved to ${save_path}`,
+              },
+            ],
+          };
+        }
+
         return {
           content: [
             {
