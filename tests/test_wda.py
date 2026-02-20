@@ -15,12 +15,14 @@ from httpx import ASGITransport, AsyncClient
 from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.device.wda import (
+    ICON_PATH,
     WDA_APP,
     WDA_REPO,
     WDA_STATE_FILE,
     _parse_ios_major_version,
     build_wda,
     clone_wda,
+    customize_wda,
     discover_signing_identities,
     install_wda,
     read_wda_state,
@@ -211,6 +213,127 @@ class TestCloneWda:
         ):
             with pytest.raises(RuntimeError, match="git clone timed out"):
                 await clone_wda()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: customize_wda
+# ---------------------------------------------------------------------------
+
+
+# Minimal project.pbxproj that matches the upstream WDA structure
+_MINIMAL_PBXPROJ = """\
+// !$*UTF8*$!
+{
+\tarchiveVersion = 1;
+\tobjects = {
+
+/* Begin PBXBuildFile section */
+\t\tEE9AB8001CAEE048008C271F /* UITestingUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = EE9AB7FD1CAEE048008C271F /* UITestingUITests.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+\t\tEE9AB7FC1CAEE048008C271F /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = WebDriverAgentRunner/Info.plist; sourceTree = SOURCE_ROOT; };
+\t\tEE9AB7FD1CAEE048008C271F /* UITestingUITests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = UITestingUITests.m; path = WebDriverAgentRunner/UITestingUITests.m; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXResourcesBuildPhase section */
+\t\tEEF988281C486603005CA669 /* Resources */ = {
+\t\t\tisa = PBXResourcesBuildPhase;
+\t\t\tbuildActionMask = 2147483647;
+\t\t\tfiles = (
+\t\t\t);
+\t\t\trunOnlyForDeploymentPostprocessing = 0;
+\t\t};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXGroup section */
+\t\tEEF988341C486655005CA669 /* WebDriverAgentRunner */ = {
+\t\t\tisa = PBXGroup;
+\t\t\tchildren = (
+\t\t\t\tEE9AB7FC1CAEE048008C271F /* Info.plist */,
+\t\t\t\tEE9AB7FD1CAEE048008C271F /* UITestingUITests.m */,
+\t\t\t);
+\t\t\tpath = WebDriverAgentRunner;
+\t\t\tsourceTree = "<group>";
+\t\t};
+/* End PBXGroup section */
+
+/* Begin XCBuildConfiguration section */
+\t\tEEF988321C486604005CA669 /* Debug */ = {
+\t\t\tisa = XCBuildConfiguration;
+\t\t\tbuildSettings = {
+\t\t\t\tINFOPLIST_FILE = WebDriverAgentRunner/Info.plist;
+\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.facebook.WebDriverAgentRunner;
+\t\t\t};
+\t\t\tname = Debug;
+\t\t};
+\t\tEEF988331C486604005CA669 /* Release */ = {
+\t\t\tisa = XCBuildConfiguration;
+\t\t\tbuildSettings = {
+\t\t\t\tINFOPLIST_FILE = WebDriverAgentRunner/Info.plist;
+\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.facebook.WebDriverAgentRunner;
+\t\t\t};
+\t\t\tname = Release;
+\t\t};
+/* End XCBuildConfiguration section */
+
+\t};
+}
+"""
+
+
+def _setup_wda_repo(tmp_path: Path) -> Path:
+    """Create a minimal WDA repo structure for testing customize_wda.
+
+    Includes upstream-like AppIcon assets in WebDriverAgentLib and PrivateHeaders,
+    mimicking the real appium/WebDriverAgent layout.
+    """
+    repo = tmp_path / "WebDriverAgent"
+    xcodeproj = repo / "WebDriverAgent.xcodeproj"
+    xcodeproj.mkdir(parents=True)
+    (xcodeproj / "project.pbxproj").write_text(_MINIMAL_PBXPROJ)
+
+    # Create upstream-like asset catalogs with placeholder icons
+    for subdir in ("WebDriverAgentLib", "PrivateHeaders"):
+        appiconset = repo / subdir / "Assets.xcassets" / "AppIcon.appiconset"
+        appiconset.mkdir(parents=True)
+        (appiconset / "AppIcon-1024.png").write_bytes(b"UPSTREAM_ICON_DATA")
+
+    return repo
+
+
+class TestCustomizeWda:
+    def test_replaces_upstream_icons(self, tmp_path):
+        repo = _setup_wda_repo(tmp_path)
+        result = customize_wda(repo)
+        assert result is True
+
+        # Both upstream icon files should now contain our icon (not the placeholder)
+        for subdir in ("WebDriverAgentLib", "PrivateHeaders"):
+            icon = repo / subdir / "Assets.xcassets" / "AppIcon.appiconset" / "AppIcon-1024.png"
+            assert icon.exists()
+            assert icon.read_bytes() != b"UPSTREAM_ICON_DATA"
+
+    def test_patches_build_settings(self, tmp_path):
+        repo = _setup_wda_repo(tmp_path)
+        customize_wda(repo)
+
+        content = (repo / "WebDriverAgent.xcodeproj" / "project.pbxproj").read_text()
+        assert content.count("PRODUCT_NAME = QuernDriver") == 2
+
+    def test_idempotent(self, tmp_path):
+        repo = _setup_wda_repo(tmp_path)
+
+        assert customize_wda(repo) is True
+        assert customize_wda(repo) is False
+
+        # PRODUCT_NAME should appear exactly twice (Debug + Release)
+        content = (repo / "WebDriverAgent.xcodeproj" / "project.pbxproj").read_text()
+        assert content.count("PRODUCT_NAME = QuernDriver") == 2
+
+    def test_icon_file_exists_in_resources(self):
+        """The wda-icon.png must be checked into the repo."""
+        assert ICON_PATH.exists(), f"Icon not found at {ICON_PATH}"
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +564,7 @@ class TestSetupWda:
             patch("server.device.wda.clone_wda", return_value=False),
             patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
             patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.customize_wda", return_value=False),
             patch("server.device.wda.build_wda", return_value=False),
             patch("server.device.wda.install_wda"),
         ):
@@ -459,6 +583,7 @@ class TestSetupWda:
             patch("server.device.wda.clone_wda", return_value=True),
             patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
             patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.customize_wda", return_value=True),
             patch("server.device.wda.build_wda", return_value=True),
             patch("server.device.wda.install_wda"),
         ):

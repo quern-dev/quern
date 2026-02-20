@@ -12,6 +12,7 @@ import json
 import logging
 import plistlib
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from typing import Any
 from server.config import CONFIG_DIR
 
 logger = logging.getLogger(__name__)
+
+ICON_PATH = Path(__file__).parent / "resources" / "wda-icon.png"
 
 WDA_DIR = CONFIG_DIR / "wda"
 WDA_REPO = WDA_DIR / "WebDriverAgent"
@@ -166,6 +169,73 @@ async def clone_wda() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Customize (inject app icon)
+# ---------------------------------------------------------------------------
+
+
+# Known UUIDs from the upstream WDA project.pbxproj — Debug and Release
+# build settings for WebDriverAgentRunner target.
+_DEBUG_CONFIG_UUID = "EEF988321C486604005CA669"
+_RELEASE_CONFIG_UUID = "EEF988331C486604005CA669"
+
+
+def customize_wda(repo: Path | None = None) -> bool:
+    """Inject a custom Quern app icon and display name into the WDA project.
+
+    Rather than adding a new asset catalog (which conflicts with the upstream's
+    existing one in WebDriverAgentLib), this replaces the upstream icon PNGs
+    directly and patches build settings for PRODUCT_NAME.
+
+    Idempotent — returns False if already customized.
+    Returns True if customization was applied.
+    """
+    repo = repo or WDA_REPO
+
+    if not ICON_PATH.exists():
+        raise RuntimeError(f"WDA icon not found at {ICON_PATH}")
+
+    # --- Step 1: Replace upstream AppIcon PNGs with our icon ---
+    replaced = 0
+    for appiconset in repo.rglob("AppIcon.appiconset"):
+        icon_dest = appiconset / "AppIcon-1024.png"
+        if icon_dest.exists():
+            shutil.copy2(ICON_PATH, icon_dest)
+            replaced += 1
+            logger.debug("Replaced icon at %s", icon_dest)
+
+    if replaced == 0:
+        logger.warning("No upstream AppIcon-1024.png found to replace")
+
+    # --- Step 2: Patch build settings for PRODUCT_NAME ---
+    pbxproj_path = repo / "WebDriverAgent.xcodeproj" / "project.pbxproj"
+    if not pbxproj_path.exists():
+        raise RuntimeError(f"project.pbxproj not found at {pbxproj_path}")
+
+    content = pbxproj_path.read_text()
+
+    # Idempotency: check if PRODUCT_NAME is already set
+    if "PRODUCT_NAME = QuernDriver" in content:
+        logger.info("WDA already customized — skipping")
+        return False
+
+    for config_uuid in (_DEBUG_CONFIG_UUID, _RELEASE_CONFIG_UUID):
+        config_pattern = re.compile(
+            rf"({config_uuid}\s*/\*[^*]*\*/\s*=\s*\{{[^}}]*?"
+            r"buildSettings\s*=\s*\{)\s*\n",
+            re.DOTALL,
+        )
+        content = config_pattern.sub(
+            r"\1\n"
+            r"\t\t\t\tPRODUCT_NAME = QuernDriver;\n",
+            content,
+        )
+
+    pbxproj_path.write_text(content)
+    logger.info("Customized WDA project: replaced icons and set PRODUCT_NAME")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 
@@ -236,6 +306,9 @@ async def build_wda(team_id: str) -> bool:
             f"stdout (last 20 lines): {stdout_tail}"
         )
 
+    # Post-process: inject icon and display name into the Runner app
+    await _post_process_runner_app(team_id)
+
     # Update state
     now = datetime.now(timezone.utc).isoformat()
     state = read_wda_state()
@@ -245,6 +318,107 @@ async def build_wda(team_id: str) -> bool:
     save_wda_state(state)
 
     return True
+
+
+async def _post_process_runner_app(team_id: str) -> None:
+    """Patch the auto-generated Runner .app with our icon and display name.
+
+    Xcode's build-for-testing generates WebDriverAgentRunner-Runner.app as a
+    wrapper around the .xctest bundle.  The icon and PRODUCT_NAME from our
+    build settings only land in the inner .xctest — the outer Runner app gets
+    Xcode defaults.  This function copies the icon assets, sets
+    CFBundleDisplayName, and re-signs the app.
+    """
+    runner_app = WDA_APP  # WebDriverAgentRunner-Runner.app
+    xctest_dir = runner_app / "PlugIns" / "WebDriverAgentRunner.xctest"
+
+    if not runner_app.exists():
+        logger.warning("Runner app not found at %s — skipping post-process", runner_app)
+        return
+
+    # Copy icon PNGs from xctest into the Runner app
+    for icon_file in xctest_dir.glob("AppIcon*.png"):
+        dest = runner_app / icon_file.name
+        shutil.copy2(icon_file, dest)
+        logger.debug("Copied %s to Runner app", icon_file.name)
+
+    # Copy compiled asset catalog if present
+    xctest_car = xctest_dir / "Assets.car"
+    runner_car = runner_app / "Assets.car"
+    if xctest_car.exists():
+        shutil.copy2(xctest_car, runner_car)
+
+    # Patch Info.plist to set display name and icon references
+    info_plist = runner_app / "Info.plist"
+    if info_plist.exists():
+        with open(info_plist, "rb") as f:
+            plist = plistlib.load(f)
+
+        plist["CFBundleDisplayName"] = "QuernDriver"
+
+        # Add CFBundleIcons so iOS uses our AppIcon PNGs
+        icon_files = sorted(p.name for p in runner_app.glob("AppIcon*.png"))
+        if icon_files:
+            plist["CFBundleIcons"] = {
+                "CFBundlePrimaryIcon": {
+                    "CFBundleIconFiles": [f.replace(".png", "").rstrip("~ipad") for f in icon_files],
+                    "UIPrerenderedIcon": False,
+                }
+            }
+
+        with open(info_plist, "wb") as f:
+            plistlib.dump(plist, f)
+
+    # Re-sign the app since we modified its contents.
+    # Find the signing identity that matches the team_id from the keychain.
+    logger.info("Re-signing Runner app after post-processing")
+    signing_identity = await _find_signing_identity(team_id)
+    if not signing_identity:
+        logger.warning("No signing identity found for team %s — skipping re-sign", team_id)
+        return
+
+    # Re-sign inner xctest first, then outer app
+    for bundle in [xctest_dir, runner_app]:
+        proc = await asyncio.create_subprocess_exec(
+            "codesign", "--force", "--sign", signing_identity,
+            "--preserve-metadata=identifier,entitlements",
+            str(bundle),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning("Re-signing %s failed: %s", bundle.name, stderr.decode())
+            return
+
+    logger.info("Post-processed Runner app: display name, icon, and signature updated")
+
+
+async def _find_signing_identity(team_id: str) -> str | None:
+    """Extract the signing identity from the existing xctest code signature.
+
+    This is more reliable than guessing from the keychain, since xcodebuild
+    already selected the correct identity during the build.
+    """
+    xctest = WDA_APP / "PlugIns" / "WebDriverAgentRunner.xctest"
+    if not xctest.exists():
+        return None
+
+    proc = await asyncio.create_subprocess_exec(
+        "codesign", "-d", "--verbose=2", str(xctest),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    # codesign -d outputs to stderr
+    output = stderr.decode()
+
+    # Look for: Authority=Apple Development: name (ID)
+    for line in output.splitlines():
+        if line.startswith("Authority=Apple Development:"):
+            return line.split("=", 1)[1]
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +495,9 @@ async def setup_wda(
     1. Discover signing identities
     2. If no team_id provided, auto-select (1 identity) or return list (multiple)
     3. Clone WDA repo (idempotent)
-    4. Build WDA (idempotent per device+team)
-    5. Install WDA on device
+    4. Customize WDA (inject app icon, idempotent)
+    5. Build WDA (idempotent per device+team)
+    6. Install WDA on device
 
     Returns a result dict with status and details.
     """
@@ -339,7 +514,14 @@ async def setup_wda(
 
     # Step 2: Resolve team_id
     if team_id is None:
-        if len(identities) == 1:
+        # Check if a team was previously selected
+        state = read_wda_state()
+        saved_team = state.get("build_team_id")
+        valid_teams = {i["team_id"] for i in identities}
+        if saved_team and saved_team in valid_teams:
+            team_id = saved_team
+            logger.info("Reusing previously selected team %s", team_id)
+        elif len(identities) == 1:
             team_id = identities[0]["team_id"]
         else:
             return {
@@ -366,10 +548,13 @@ async def setup_wda(
     state["cloned"] = True
     save_wda_state(state)
 
-    # Step 4: Build (device-independent, keyed by team_id only)
+    # Step 4: Customize (inject app icon)
+    customize_wda()
+
+    # Step 5: Build (device-independent, keyed by team_id only)
     built = await build_wda(team_id)
 
-    # Step 5: Install
+    # Step 6: Install
     await install_wda(udid, os_version)
 
     return {
