@@ -121,6 +121,21 @@ class TestDevicePoolAPI:
         for device in data["devices"]:
             assert device["claim_status"] == "claimed"
 
+    async def test_list_pool_with_device_type_filter(self, app, auth_headers, mock_device_pool):
+        """List pool with device_type filter works."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/devices/pool",
+                headers=auth_headers,
+                params={"device_type": "simulator"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        for device in data["devices"]:
+            assert device["device_type"] == "simulator"
+
     async def test_claim_and_release_flow(self, app, auth_headers, mock_device_pool):
         """Full claim and release flow works."""
         transport = ASGITransport(app=app)

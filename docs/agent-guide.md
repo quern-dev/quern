@@ -1,7 +1,7 @@
 # Quern Agent Guide
 
 **For**: AI agents using Quern MCP tools for mobile app debugging and testing
-**Last Updated**: February 17, 2026
+**Last Updated**: February 20, 2026
 
 ---
 
@@ -99,7 +99,7 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 **Key insight**: Start with summary, trigger action, drill down to specific flows.
 
 **Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
-1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database (works for both booted and shutdown simulators)
+1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database. Defaults to **booted simulators only**; pass `state="all"` or `device_type="device"` to check shutdown sims or physical devices
 2. Returns per-device `status`: `installed`, `not_installed`, `never_booted`, or `error`
 3. Returns `erased_devices` — UDIDs where a previously installed cert is now missing (probable device erase)
 4. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
@@ -267,6 +267,8 @@ Mock rules take priority over intercept rules. Clear them with `clear_mocks` whe
 ### Device Pool for Parallel Testing
 
 Use `ensure_devices` to boot and claim multiple simulators at once, then run different test scenarios on each in parallel. Each claimed device is isolated — no other session can use it until you call `release_device`. Always release devices when done to avoid resource exhaustion.
+
+**Default behavior**: `resolve_device` and `ensure_devices` default to `type="simulator"` to prevent accidentally targeting physical devices (which may not have your app installed). Pass `type="device"` explicitly to target physical devices.
 
 ---
 

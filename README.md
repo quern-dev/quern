@@ -233,7 +233,7 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | DELETE | `/api/v1/proxy/mocks` | Clear all mock rules |
 | GET | `/api/v1/proxy/cert` | Download CA certificate |
 | GET | `/api/v1/proxy/cert/status` | Check certificate installation status |
-| POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation on simulators (booted + shutdown) |
+| POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation (defaults to booted simulators) |
 | POST | `/api/v1/proxy/cert/install` | Install CA certificate |
 | GET | `/api/v1/proxy/setup-guide` | Device setup instructions |
 
@@ -289,7 +289,7 @@ server/
   device/              Simulator control (simctl, idb backends), device pool
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
-tests/                 760 tests
+tests/                 855+ tests
 ```
 
 ## Development

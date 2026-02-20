@@ -114,11 +114,24 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
 
     device_name_map = {d.udid: d.name for d in all_devices}
 
+    # Filter devices by state and device_type before determining UDIDs
+    filtered_devices = all_devices
+    if body.state:
+        from server.models import DeviceState as DS
+        filtered_devices = [d for d in filtered_devices if d.state.value == body.state]
+    if body.device_type:
+        from server.models import DeviceType as DT
+        try:
+            dt = DT(body.device_type)
+            filtered_devices = [d for d in filtered_devices if d.device_type == dt]
+        except ValueError:
+            pass
+
     # Determine which devices to verify
     if body.udid:
         udids = [body.udid]
     else:
-        udids = [d.udid for d in all_devices]
+        udids = [d.udid for d in filtered_devices]
 
     if not udids:
         raise HTTPException(status_code=400, detail="No simulators found")

@@ -214,6 +214,76 @@ class TestCriteriaMatching:
 
 
 # ----------------------------------------------------------------
+# TestDeviceTypeFiltering
+# ----------------------------------------------------------------
+
+
+class TestDeviceTypeFiltering:
+    """Test that device_type filtering excludes physical devices."""
+
+    @pytest.fixture
+    def mixed_controller(self):
+        """Mock controller returning simulators + physical devices."""
+        from server.device.controller import DeviceController
+
+        ctrl = DeviceController()
+        ctrl.simctl = AsyncMock()
+        ctrl.simctl.boot = AsyncMock()
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="SIM-1", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
+                    runtime="...", is_available=True, device_family="iPhone",
+                ),
+                DeviceInfo(
+                    udid="SIM-2", name="iPhone 15", state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR, os_version="iOS 17.5",
+                    runtime="...", is_available=True, device_family="iPhone",
+                ),
+                DeviceInfo(
+                    udid="DEV-1", name="John's iPhone", state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE, os_version="iOS 18.2",
+                    is_available=True, device_family="iPhone", connection_type="usb",
+                ),
+            ]
+        )
+        ctrl.list_devices = ctrl.simctl.list_devices
+        return ctrl
+
+    @pytest.fixture
+    def mixed_pool(self, tmp_path, mixed_controller):
+        p = DevicePool(mixed_controller)
+        p._pool_file = tmp_path / "device-pool.json"
+        return p
+
+    async def test_resolve_simulator_only(self, mixed_pool):
+        """resolve_device with device_type=SIMULATOR excludes physical devices."""
+        await mixed_pool.refresh_from_simctl()
+        udid = await mixed_pool.resolve_device(device_type=DeviceType.SIMULATOR)
+        assert udid in ("SIM-1", "SIM-2")
+
+    async def test_resolve_device_only(self, mixed_pool):
+        """resolve_device with device_type=DEVICE returns only physical device."""
+        await mixed_pool.refresh_from_simctl()
+        udid = await mixed_pool.resolve_device(device_type=DeviceType.DEVICE, device_family=None)
+        assert udid == "DEV-1"
+
+    async def test_ensure_simulator_only(self, mixed_pool):
+        """ensure_devices with device_type=SIMULATOR excludes physical devices."""
+        await mixed_pool.refresh_from_simctl()
+        udids = await mixed_pool.ensure_devices(count=2, device_type=DeviceType.SIMULATOR)
+        assert "DEV-1" not in udids
+        assert set(udids) == {"SIM-1", "SIM-2"}
+
+    async def test_ensure_device_type_none_returns_all(self, mixed_pool):
+        """ensure_devices with device_type=None returns simulators and physical devices."""
+        await mixed_pool.refresh_from_simctl()
+        udids = await mixed_pool.ensure_devices(count=3, device_type=None, device_family=None)
+        assert set(udids) == {"SIM-1", "SIM-2", "DEV-1"}
+
+
+# ----------------------------------------------------------------
 # TestRankCandidate
 # ----------------------------------------------------------------
 

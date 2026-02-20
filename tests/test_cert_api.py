@@ -150,7 +150,7 @@ class TestCertVerify:
 
     @pytest.mark.asyncio
     async def test_cert_verify_all_simulators(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
-        """Test POST /cert/verify with no UDID (all simulators, not just booted)."""
+        """Test POST /cert/verify with state=None to get all simulators (booted + shutdown)."""
         app.state.device_controller.list_devices = AsyncMock(return_value=[
             DeviceInfo(
                 udid="test-udid-1",
@@ -184,15 +184,99 @@ class TestCertVerify:
                     with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=None):
                         response = client.post(
                             "/api/v1/proxy/cert/verify",
-                            json={},
+                            json={"state": None, "device_type": "simulator"},
                             headers=auth_headers,
                         )
 
         assert response.status_code == 200
         data = response.json()
-        # Should verify ALL 3 simulators (booted + shutdown)
+        # Should verify ALL 3 simulators (booted + shutdown) when state=None
         assert len(data["devices"]) == 3
         assert {d["udid"] for d in data["devices"]} == {"test-udid-1", "test-udid-2", "test-udid-3"}
+
+    @pytest.mark.asyncio
+    async def test_cert_verify_booted_simulators_only(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
+        """Test POST /cert/verify with state='booted' and device_type='simulator' (defaults)."""
+        app.state.device_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="booted-sim",
+                name="iPhone 16 Pro",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR,
+            ),
+            DeviceInfo(
+                udid="shutdown-sim",
+                name="iPhone 15",
+                state=DeviceState.SHUTDOWN,
+                device_type=DeviceType.SIMULATOR,
+            ),
+            DeviceInfo(
+                udid="physical-dev",
+                name="John's iPhone",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE,
+            ),
+        ])
+
+        with patch("server.proxy.cert_manager.get_device_cert_state") as mock_get_state:
+            mock_get_state.return_value = DeviceCertState(
+                name="Test Device",
+                cert_installed=True,
+                fingerprint="abc123",
+                verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+            with patch("server.proxy.cert_manager.check_truststore_status", return_value="installed"):
+                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                    with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=None):
+                        response = client.post(
+                            "/api/v1/proxy/cert/verify",
+                            json={"state": "booted", "device_type": "simulator"},
+                            headers=auth_headers,
+                        )
+
+        assert response.status_code == 200
+        data = response.json()
+        # Should only verify booted simulator, not shutdown sim or physical device
+        assert len(data["devices"]) == 1
+        assert data["devices"][0]["udid"] == "booted-sim"
+
+    @pytest.mark.asyncio
+    async def test_cert_verify_all_states(self, client, auth_headers, mock_cert_path, mock_cert_state, app):
+        """Test POST /cert/verify with state=None returns all matching device_type."""
+        app.state.device_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="booted-sim",
+                name="iPhone 16 Pro",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR,
+            ),
+            DeviceInfo(
+                udid="shutdown-sim",
+                name="iPhone 15",
+                state=DeviceState.SHUTDOWN,
+                device_type=DeviceType.SIMULATOR,
+            ),
+        ])
+
+        with patch("server.proxy.cert_manager.get_device_cert_state") as mock_get_state:
+            mock_get_state.return_value = DeviceCertState(
+                name="Test Device",
+                cert_installed=True,
+                fingerprint="abc123",
+                verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+            with patch("server.proxy.cert_manager.check_truststore_status", return_value="installed"):
+                with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                    with patch("server.api.proxy_certs.read_cert_state_for_device", return_value=None):
+                        response = client.post(
+                            "/api/v1/proxy/cert/verify",
+                            json={"state": None, "device_type": "simulator"},
+                            headers=auth_headers,
+                        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["devices"]) == 2
 
     @pytest.mark.asyncio
     async def test_cert_verify_shutdown_device(self, client, auth_headers, mock_cert_path, mock_cert_state, app):

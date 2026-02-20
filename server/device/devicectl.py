@@ -141,12 +141,29 @@ class DevicectlBackend:
 
     async def launch_app(self, uuid: str, bundle_id: str) -> int:
         """Launch an app on a physical device. Returns the PID."""
-        stdout, _ = await self._run_devicectl(
-            "device", "process", "launch",
-            "--device", uuid,
-            bundle_id,
-            json_output=True,
-        )
+        try:
+            stdout, _ = await self._run_devicectl(
+                "device", "process", "launch",
+                "--device", uuid,
+                bundle_id,
+                json_output=True,
+            )
+        except DeviceError as e:
+            msg = str(e)
+            if "app not found" in msg.lower() or "no such" in msg.lower() or "unable to find" in msg.lower():
+                raise DeviceError(
+                    f"Failed to launch {bundle_id} on physical device {uuid[:8]}: app is not installed. "
+                    f"Install it first with install_app, or use device_type='simulator' in "
+                    f"resolve_device/ensure_devices to target simulators instead.",
+                    tool="devicectl",
+                )
+            raise DeviceError(
+                f"Failed to launch {bundle_id} on physical device {uuid[:8]}: {msg}. "
+                f"Physical devices require the app to be signed and installed. "
+                f"If you intended to use a simulator, pass device_type='simulator' to "
+                f"resolve_device or ensure_devices.",
+                tool="devicectl",
+            )
 
         try:
             data = json.loads(stdout)

@@ -5,7 +5,7 @@ import time
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from server.models import DeviceError, EnsureDevicesRequest, ResolveDeviceRequest
+from server.models import DeviceError, DeviceType, EnsureDevicesRequest, ResolveDeviceRequest
 
 router = APIRouter(prefix="/api/v1/devices", tags=["device-pool"])
 
@@ -39,6 +39,17 @@ class ClaimDeviceRequest(BaseModel):
     name: str | None = None
     os_version: str | None = None
     device_family: str | None = None
+    device_type: str | None = None
+
+
+def _parse_device_type(value: str | None) -> DeviceType | None:
+    """Convert a string device_type to DeviceType enum, or None."""
+    if value is None:
+        return None
+    try:
+        return DeviceType(value)
+    except ValueError:
+        return None
 
 
 class ReleaseDeviceRequest(BaseModel):
@@ -52,16 +63,22 @@ async def list_device_pool(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
     claimed: str | None = Query(default=None, pattern="^(claimed|available)$"),
+    device_type: str | None = Query(default=None, pattern="^(simulator|device)$"),
 ):
     """List all devices in the pool with optional filters.
 
     Query params:
     - state: Filter by boot state (booted, shutdown)
     - claimed: Filter by claim status (claimed, available)
+    - device_type: Filter by device type (simulator, device)
     """
     pool = _get_pool(request)
     try:
-        devices = await pool.list_devices(state_filter=state, claimed_filter=claimed)
+        devices = await pool.list_devices(
+            state_filter=state,
+            claimed_filter=claimed,
+            device_type=_parse_device_type(device_type),
+        )
         return {
             "devices": [d.model_dump() for d in devices],
             "total": len(devices),
@@ -85,6 +102,7 @@ async def claim_device(request: Request, body: ClaimDeviceRequest):
             udid=body.udid,
             name=body.name,
             device_family=body.device_family,
+            device_type=_parse_device_type(body.device_type),
         )
         return {
             "status": "claimed",
@@ -152,6 +170,7 @@ async def resolve_device(request: Request, body: ResolveDeviceRequest):
             udid=body.udid,
             name=body.name,
             os_version=body.os_version,
+            device_type=_parse_device_type(body.device_type),
             device_family=body.device_family,
             auto_boot=body.auto_boot,
             wait_if_busy=body.wait_if_busy,
@@ -188,6 +207,7 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
             count=body.count,
             name=body.name,
             os_version=body.os_version,
+            device_type=_parse_device_type(body.device_type),
             device_family=body.device_family,
             auto_boot=body.auto_boot,
             session_id=body.session_id,

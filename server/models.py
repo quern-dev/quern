@@ -712,6 +712,7 @@ class ResolveDeviceRequest(BaseModel):
     name: str | None = None
     os_version: str | None = None
     device_family: str | None = None
+    device_type: str | None = "simulator"
     auto_boot: bool = False
     wait_if_busy: bool = False
     wait_timeout: float = Field(default=30.0, ge=1.0, le=120.0)
@@ -725,6 +726,7 @@ class EnsureDevicesRequest(BaseModel):
     name: str | None = None
     os_version: str | None = None
     device_family: str | None = None
+    device_type: str | None = "simulator"
     auto_boot: bool = True
     session_id: str | None = None
 
@@ -757,6 +759,8 @@ class CertVerifyRequest(BaseModel):
     """Request body for POST /api/v1/proxy/cert/verify."""
 
     udid: str | None = None  # If None, verify all simulators (booted + shutdown)
+    state: str | None = "booted"  # "booted", "shutdown", or None for all
+    device_type: str | None = "simulator"  # "simulator", "device", or None for all
 
 
 class DeviceCertInstallStatus(BaseModel):

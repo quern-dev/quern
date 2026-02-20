@@ -45,6 +45,7 @@ class DevicePool:
         self,
         state_filter: str | None = None,  # "booted", "shutdown", None=all
         claimed_filter: str | None = None,  # "claimed", "available", None=all
+        device_type: DeviceType | None = None,  # "simulator", "device", None=all
     ) -> list[DevicePoolEntry]:
         """List all devices in the pool with optional filters."""
         await self.refresh_from_simctl()
@@ -61,6 +62,9 @@ class DevicePool:
         elif claimed_filter == "available":
             devices = [d for d in devices if d.claim_status == DeviceClaimStatus.AVAILABLE]
 
+        if device_type:
+            devices = [d for d in devices if d.device_type == device_type]
+
         return devices
 
     async def claim_device(
@@ -69,6 +73,7 @@ class DevicePool:
         udid: str | None = None,
         name: str | None = None,
         device_family: str | None = None,
+        device_type: DeviceType | None = None,
     ) -> DevicePoolEntry:
         """Claim a device for exclusive use by a session.
 
@@ -99,6 +104,7 @@ class DevicePool:
                 effective_family = self._infer_device_family(name, device_family)
                 all_matches = self._find_candidates(
                     all_devices, name=name, device_family=effective_family,
+                    device_type=device_type,
                 )
                 if not all_matches:
                     raise DeviceError(

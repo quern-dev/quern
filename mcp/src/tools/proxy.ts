@@ -163,13 +163,25 @@ IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s tot
         .string()
         .optional()
         .describe(
-          "Specific simulator UDID to verify. If omitted, verifies all simulators (booted + shutdown). Prefer omitting this for batch checks."
+          "Specific simulator UDID to verify. If omitted, verifies devices matching the state/type filters."
         ),
+      state: z
+        .enum(["booted", "shutdown"])
+        .optional()
+        .default("booted")
+        .describe("Filter by device state. Defaults to 'booted' to avoid checking all ~38 simulators."),
+      device_type: z
+        .enum(["simulator", "device"])
+        .optional()
+        .default("simulator")
+        .describe("Filter by device type. Defaults to 'simulator' since cert verification is primarily for simulators."),
     },
-    async ({ udid }) => {
+    async ({ udid, state, device_type }) => {
       try {
         const body: Record<string, unknown> = {};
         if (udid !== undefined) body.udid = udid;
+        if (state) body.state = state;
+        if (device_type) body.device_type = device_type;
 
         const data = await apiRequest(
           "POST",

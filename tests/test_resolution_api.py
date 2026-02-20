@@ -138,6 +138,19 @@ class TestResolveEndpoint:
         assert resp.status_code == 404
         assert "No device matching" in resp.json()["detail"]
 
+    async def test_resolve_with_device_type(self, app, auth_headers, mock_device_pool):
+        """Resolve with device_type='simulator' returns only simulators."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/devices/resolve",
+                headers=auth_headers,
+                json={"device_type": "simulator"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "udid" in data
+
     async def test_resolve_no_args(self, app, auth_headers, mock_device_pool):
         """Resolve with empty body returns any booted device."""
         transport = ASGITransport(app=app)
@@ -210,6 +223,19 @@ class TestEnsureEndpoint:
         assert resp.status_code == 500 or resp.status_code == 404
         # The error message should mention "Need 10"
         assert "Need 10" in resp.json()["detail"] or "10" in resp.json()["detail"]
+
+    async def test_ensure_with_device_type(self, app, auth_headers, mock_device_pool):
+        """Ensure with device_type='simulator' returns only simulators."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/devices/ensure",
+                headers=auth_headers,
+                json={"count": 2, "device_type": "simulator"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["devices"]) == 2
 
     async def test_ensure_with_session_claims(self, app, auth_headers, mock_device_pool):
         """Ensure with session_id claims all devices."""

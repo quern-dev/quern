@@ -86,6 +86,65 @@ class TestListDevices:
         assert available[0].claim_status == DeviceClaimStatus.AVAILABLE
 
 
+class TestListDevicesDeviceType:
+    """Test device type filtering on list_devices."""
+
+    @pytest.fixture
+    def mixed_pool(self, tmp_path):
+        """Pool with mixed simulators and physical devices."""
+        from server.device.controller import DeviceController
+
+        ctrl = DeviceController()
+        ctrl.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="SIM-1111",
+                    name="iPhone 16 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                    os_version="iOS 18.2",
+                    runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                ),
+                DeviceInfo(
+                    udid="DEV-2222",
+                    name="John's iPhone",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                    os_version="iOS 18.2",
+                    connection_type="usb",
+                ),
+            ]
+        )
+        pool = DevicePool(ctrl)
+        pool._pool_file = tmp_path / "device-pool.json"
+        return pool
+
+    async def test_filter_simulators(self, mixed_pool):
+        """list_devices with device_type=SIMULATOR returns only simulators."""
+        devices = await mixed_pool.list_devices(device_type=DeviceType.SIMULATOR)
+        assert len(devices) == 1
+        assert devices[0].device_type == DeviceType.SIMULATOR
+
+    async def test_filter_physical(self, mixed_pool):
+        """list_devices with device_type=DEVICE returns only physical devices."""
+        devices = await mixed_pool.list_devices(device_type=DeviceType.DEVICE)
+        assert len(devices) == 1
+        assert devices[0].device_type == DeviceType.DEVICE
+
+    async def test_no_filter_returns_all(self, mixed_pool):
+        """list_devices with no device_type returns all devices."""
+        devices = await mixed_pool.list_devices()
+        assert len(devices) == 2
+
+    async def test_claim_with_device_type(self, mixed_pool):
+        """claim_device with device_type filters correctly."""
+        device = await mixed_pool.claim_device(
+            session_id="test", device_type=DeviceType.SIMULATOR,
+        )
+        assert device.device_type == DeviceType.SIMULATOR
+        assert device.udid == "SIM-1111"
+
+
 class TestClaimDevice:
     """Test device claiming functionality."""
 

@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from server.models import (
     BootDeviceRequest,
     DeviceError,
+    DeviceType,
     GrantPermissionRequest,
     InstallAppRequest,
     LaunchAppRequest,
@@ -60,14 +61,49 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 
 
 @router.get("/list")
-async def list_devices(request: Request):
-    """List all devices (simulators + physical) and tool availability."""
+async def list_devices(
+    request: Request,
+    state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
+    device_type: str | None = Query(default=None, pattern="^(simulator|device)$"),
+    cert_installed: bool | None = Query(default=None),
+    include_disconnected: bool = Query(default=False),
+):
+    """List all devices (simulators + physical) and tool availability.
+
+    Query params:
+    - state: Filter by boot state (booted, shutdown)
+    - device_type: Filter by device type (simulator, device)
+    - cert_installed: Filter by cert installation status (true/false)
+    - include_disconnected: Include paired but unreachable physical devices
+    """
     controller = _get_controller(request)
     try:
         devices = await controller.list_devices()
         tools = await controller.check_tools()
+
+        # Apply server-side filters
+        if not include_disconnected:
+            devices = [d for d in devices if d.is_connected]
+        if state:
+            devices = [d for d in devices if d.state.value == state]
+        if device_type:
+            dt = DeviceType(device_type)
+            devices = [d for d in devices if d.device_type == dt]
+
+        device_dicts = [d.model_dump() for d in devices]
+
+        # Enrich with cert_installed status if requested or always for convenience
+        if cert_installed is not None:
+            from server.proxy.cert_state import read_cert_state
+            cert_states = read_cert_state()
+            for dd in device_dicts:
+                dd["cert_installed"] = cert_states.get(dd["udid"], {}).get("cert_installed", False)
+            device_dicts = [
+                dd for dd in device_dicts
+                if dd["cert_installed"] == cert_installed
+            ]
         return {
-            "devices": [d.model_dump() for d in devices],
+            "devices": device_dicts,
             "tools": tools,
             "active_udid": controller._active_udid,
         }

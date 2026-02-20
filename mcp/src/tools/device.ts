@@ -16,6 +16,10 @@ export function registerDeviceTools(server: McpServer): void {
         .enum(["simulator", "device"])
         .optional()
         .describe("Filter by device type"),
+      cert_installed: z
+        .boolean()
+        .optional()
+        .describe("Filter by mitmproxy CA certificate installation status (true = cert installed, false = not installed)"),
       include_disconnected: z
         .boolean()
         .optional()
@@ -24,34 +28,25 @@ export function registerDeviceTools(server: McpServer): void {
           "Include physical devices that are paired but not currently reachable. By default, only connected devices are shown."
         ),
     },
-    async ({ state, type, include_disconnected }) => {
+    async ({ state, type, cert_installed, include_disconnected }) => {
       try {
-        const data = (await apiRequest("GET", "/api/v1/device/list")) as {
+        const params: Record<string, string | number | boolean | undefined> = {};
+        if (state) params.state = state;
+        if (type) params.device_type = type;
+        if (cert_installed !== undefined) params.cert_installed = cert_installed;
+        if (include_disconnected) params.include_disconnected = true;
+
+        const data = (await apiRequest("GET", "/api/v1/device/list", params)) as {
           devices: Array<Record<string, unknown>>;
           tools: Record<string, boolean>;
           active_udid: string | null;
         };
 
-        let devices = data.devices;
-        if (!include_disconnected) {
-          devices = devices.filter((d) => d.is_connected !== false);
-        }
-        if (state) {
-          devices = devices.filter((d) => d.state === state);
-        }
-        if (type) {
-          devices = devices.filter((d) => d.device_type === type);
-        }
-
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify(
-                { devices, tools: data.tools, active_udid: data.active_udid },
-                null,
-                2
-              ),
+              text: JSON.stringify(data, null, 2),
             },
           ],
         };

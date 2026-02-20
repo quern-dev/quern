@@ -15,12 +15,17 @@ export function registerDevicePoolTools(server: McpServer): void {
         .enum(["claimed", "available"])
         .optional()
         .describe("Filter by claim status"),
+      type: z
+        .enum(["simulator", "device"])
+        .optional()
+        .describe("Filter by device type. Default: no filter (shows all)."),
     },
-    async ({ state, claimed }) => {
+    async ({ state, claimed, type }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/devices/pool", {
           state,
           claimed,
+          device_type: type,
         });
 
         return {
@@ -59,13 +64,18 @@ export function registerDevicePoolTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
+      type: z
+        .enum(["simulator", "device"])
+        .optional()
+        .describe("Filter by device type. Omit to allow either type."),
     },
-    async ({ session_id, udid, name, device_family }) => {
+    async ({ session_id, udid, name, device_family, type }) => {
       try {
         const body: Record<string, unknown> = { session_id };
         if (udid) body.udid = udid;
         if (name) body.name = name;
         if (device_family) body.device_family = device_family;
+        if (type) body.device_type = type;
 
         const data = await apiRequest(
           "POST",
@@ -152,6 +162,11 @@ automatically. Use this instead of manually listing the pool and claiming.`,
         .string()
         .optional()
         .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
+      type: z
+        .enum(["simulator", "device"])
+        .optional()
+        .default("simulator")
+        .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
       auto_boot: z
         .boolean()
         .optional()
@@ -174,12 +189,13 @@ automatically. Use this instead of manually listing the pool and claiming.`,
         .optional()
         .describe("Claim the device for this session. Devices already claimed by this session are reused without re-claiming."),
     },
-    async ({ name, os_version, device_family, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
+    async ({ name, os_version, device_family, type, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
       try {
         const body: Record<string, unknown> = {};
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
         if (device_family) body.device_family = device_family;
+        if (type) body.device_type = type;
         if (auto_boot !== undefined) body.auto_boot = auto_boot;
         if (wait_if_busy !== undefined) body.wait_if_busy = wait_if_busy;
         if (wait_timeout !== undefined) body.wait_timeout = wait_timeout;
@@ -234,6 +250,11 @@ and optionally claims them all for a session.`,
         .string()
         .optional()
         .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
+      type: z
+        .enum(["simulator", "device"])
+        .optional()
+        .default("simulator")
+        .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
       auto_boot: z
         .boolean()
         .optional()
@@ -244,12 +265,13 @@ and optionally claims them all for a session.`,
         .optional()
         .describe("Claim all devices for this session. Devices already claimed by this session are reused without re-claiming."),
     },
-    async ({ count, name, os_version, device_family, auto_boot, session_id }) => {
+    async ({ count, name, os_version, device_family, type, auto_boot, session_id }) => {
       try {
         const body: Record<string, unknown> = { count };
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
         if (device_family) body.device_family = device_family;
+        if (type) body.device_type = type;
         if (auto_boot !== undefined) body.auto_boot = auto_boot;
         if (session_id) body.session_id = session_id;
 
