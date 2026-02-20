@@ -803,3 +803,10 @@ class StopSimLogRequest(BaseModel):
     """Request body for POST /api/v1/device/logging/stop."""
 
     udid: str | None = None
+
+
+class SetupWdaRequest(BaseModel):
+    """Request body for POST /api/v1/device/wda/setup."""
+
+    udid: str
+    team_id: str | None = None

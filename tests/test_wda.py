@@ -1,0 +1,616 @@
+"""Tests for WebDriverAgent setup (server/device/wda.py and server/api/wda.py).
+
+All subprocess calls are mocked — no real git/xcodebuild/devicectl/ideviceinstaller.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from server.config import ServerConfig
+from server.device.controller import DeviceController
+from server.device.wda import (
+    WDA_APP,
+    WDA_REPO,
+    WDA_STATE_FILE,
+    _parse_ios_major_version,
+    build_wda,
+    clone_wda,
+    discover_signing_identities,
+    install_wda,
+    read_wda_state,
+    save_wda_state,
+    setup_wda,
+)
+from server.main import create_app
+from server.models import DeviceInfo, DeviceState, DeviceType
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _physical_device(
+    udid: str = "00008030-AABBCCDD",
+    name: str = "iPhone 15 Pro",
+    os_version: str = "iOS 17.4",
+) -> DeviceInfo:
+    return DeviceInfo(
+        udid=udid,
+        name=name,
+        state=DeviceState.BOOTED,
+        device_type=DeviceType.DEVICE,
+        os_version=os_version,
+        connection_type="usb",
+        is_connected=True,
+    )
+
+
+def _simulator(
+    udid: str = "AAAA-1111",
+    name: str = "iPhone 16 Pro",
+) -> DeviceInfo:
+    return DeviceInfo(
+        udid=udid,
+        name=name,
+        state=DeviceState.BOOTED,
+        device_type=DeviceType.SIMULATOR,
+        os_version="iOS 18.6",
+    )
+
+
+def _mock_process(returncode=0, stdout=b"", stderr=b""):
+    """Create a mock asyncio.Process."""
+    proc = AsyncMock()
+    proc.returncode = returncode
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.kill = MagicMock()
+    return proc
+
+
+XCODE_PREFS_SINGLE_TEAM = {
+    "IDEProvisioningTeamByIdentifier": {
+        "acct-uuid-1": [
+            {"teamID": "TEAM123", "teamName": "Acme Inc.", "teamType": "Company"},
+        ],
+    },
+}
+
+XCODE_PREFS_MULTI_TEAM = {
+    "IDEProvisioningTeamByIdentifier": {
+        "acct-uuid-1": [
+            {"teamID": "TEAM123", "teamName": "Acme Inc.", "teamType": "Company"},
+            {"teamID": "TEAMABC", "teamName": "John Doe (Personal Team)", "teamType": "Personal Team"},
+        ],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: discover_signing_identities
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverSigningIdentities:
+    def test_single_team(self, tmp_path):
+        import plistlib
+        plist_path = tmp_path / "com.apple.dt.Xcode.plist"
+        with open(plist_path, "wb") as f:
+            plistlib.dump(XCODE_PREFS_SINGLE_TEAM, f)
+
+        with patch("server.device.wda.Path.home", return_value=tmp_path / "fake_home"):
+            # We need to patch the actual plist path
+            fake_prefs = tmp_path / "com.apple.dt.Xcode.plist"
+            with patch("server.device.wda.Path.home") as mock_home:
+                # Build the path so home() / "Library" / ... resolves to our file
+                mock_home.return_value = tmp_path
+                # But our file is at tmp_path/com.apple.dt.Xcode.plist, not
+                # tmp_path/Library/Preferences/...  So just patch at the open level.
+                pass
+
+        # Simpler: just patch plistlib.load to return our test data
+        import plistlib as _plistlib
+        with (
+            patch("builtins.open", create=True),
+            patch("server.device.wda.Path.exists", return_value=True),
+            patch("server.device.wda.plistlib.load", return_value=XCODE_PREFS_SINGLE_TEAM),
+        ):
+            ids = discover_signing_identities()
+
+        assert len(ids) == 1
+        assert ids[0]["team_id"] == "TEAM123"
+        assert ids[0]["team_name"] == "Acme Inc."
+
+    def test_multiple_teams(self):
+        with (
+            patch("builtins.open", create=True),
+            patch("server.device.wda.Path.exists", return_value=True),
+            patch("server.device.wda.plistlib.load", return_value=XCODE_PREFS_MULTI_TEAM),
+        ):
+            ids = discover_signing_identities()
+
+        assert len(ids) == 2
+        assert ids[0]["team_id"] == "TEAM123"
+        assert ids[1]["team_id"] == "TEAMABC"
+
+    def test_no_xcode_prefs(self, tmp_path):
+        with patch("server.device.wda.Path.home", return_value=tmp_path):
+            ids = discover_signing_identities()
+
+        assert ids == []
+
+    def test_empty_prefs(self):
+        with (
+            patch("builtins.open", create=True),
+            patch("server.device.wda.Path.exists", return_value=True),
+            patch("server.device.wda.plistlib.load", return_value={}),
+        ):
+            ids = discover_signing_identities()
+
+        assert ids == []
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: clone_wda
+# ---------------------------------------------------------------------------
+
+
+class TestCloneWda:
+    async def test_skips_if_already_cloned(self, tmp_path):
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+
+        with patch("server.device.wda.WDA_REPO", repo):
+            result = await clone_wda()
+
+        assert result is False
+
+    async def test_clones_fresh(self, tmp_path):
+        repo = tmp_path / "WebDriverAgent"
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DIR", tmp_path),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+        ):
+            result = await clone_wda()
+
+        assert result is True
+        mock_exec.assert_called_once()
+
+    async def test_clone_failure(self, tmp_path):
+        repo = tmp_path / "WebDriverAgent"
+        proc = _mock_process(returncode=128, stderr=b"fatal: could not connect")
+        with (
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DIR", tmp_path),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            with pytest.raises(RuntimeError, match="git clone failed"):
+                await clone_wda()
+
+    async def test_clone_timeout(self, tmp_path):
+        import asyncio
+
+        repo = tmp_path / "WebDriverAgent"
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        proc.kill = MagicMock()
+        with (
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DIR", tmp_path),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda.asyncio.wait_for", side_effect=asyncio.TimeoutError),
+        ):
+            with pytest.raises(RuntimeError, match="git clone timed out"):
+                await clone_wda()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: build_wda
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWda:
+    async def test_skips_if_already_built(self, tmp_path):
+        state = {
+            "cloned": True,
+            "build_team_id": "TEAM123",
+            "built_at": "2026-01-01T00:00:00+00:00",
+        }
+        with patch("server.device.wda.read_wda_state", return_value=state):
+            result = await build_wda("TEAM123")
+
+        assert result is False
+
+    async def test_builds_fresh(self, tmp_path):
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+        (repo / "WebDriverAgent.xcodeproj").mkdir()
+
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.read_wda_state", return_value={"cloned": True}),
+            patch("server.device.wda.save_wda_state") as mock_save,
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda.asyncio.wait_for", return_value=(b"", b"")),
+        ):
+            result = await build_wda("TEAM123")
+
+        assert result is True
+        mock_save.assert_called_once()
+
+    async def test_rebuilds_if_different_team(self, tmp_path):
+        state = {
+            "cloned": True,
+            "build_team_id": "OLD_TEAM",
+            "built_at": "2026-01-01T00:00:00+00:00",
+        }
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda.asyncio.wait_for", return_value=(b"", b"")),
+        ):
+            result = await build_wda("NEW_TEAM")
+
+        assert result is True
+
+    async def test_build_failure(self, tmp_path):
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+
+        proc = _mock_process(returncode=65, stdout=b"BUILD FAILED\n", stderr=b"signing error")
+        with (
+            patch("server.device.wda.read_wda_state", return_value={"cloned": True}),
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda.asyncio.wait_for", return_value=(b"BUILD FAILED\n", b"signing error")),
+        ):
+            with pytest.raises(RuntimeError, match="xcodebuild failed"):
+                await build_wda("TEAM123")
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: install_wda
+# ---------------------------------------------------------------------------
+
+
+class TestInstallWda:
+    async def test_install_ios17_uses_devicectl(self, tmp_path):
+        app = tmp_path / "WDA.app"
+        app.mkdir()
+
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.WDA_APP", app),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch("server.device.wda.read_wda_state", return_value={}),
+            patch("server.device.wda.save_wda_state"),
+        ):
+            await install_wda("DEV1", "iOS 17.4")
+
+        # Should use devicectl
+        args = mock_exec.call_args[0]
+        assert "devicectl" in args
+
+    async def test_install_ios16_uses_ideviceinstaller(self, tmp_path):
+        app = tmp_path / "WDA.app"
+        app.mkdir()
+
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.WDA_APP", app),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch("server.device.wda.read_wda_state", return_value={}),
+            patch("server.device.wda.save_wda_state"),
+        ):
+            await install_wda("DEV1", "iOS 16.7")
+
+        args = mock_exec.call_args[0]
+        assert "ideviceinstaller" in args
+
+    async def test_install_ios15_uses_ideviceinstaller(self, tmp_path):
+        app = tmp_path / "WDA.app"
+        app.mkdir()
+
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.WDA_APP", app),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch("server.device.wda.read_wda_state", return_value={}),
+            patch("server.device.wda.save_wda_state"),
+        ):
+            await install_wda("DEV1", "iOS 15.8.6")
+
+        args = mock_exec.call_args[0]
+        assert "ideviceinstaller" in args
+
+    async def test_install_failure(self, tmp_path):
+        app = tmp_path / "WDA.app"
+        app.mkdir()
+
+        proc = _mock_process(returncode=1, stderr=b"install failed")
+        with (
+            patch("server.device.wda.WDA_APP", app),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            with pytest.raises(RuntimeError, match="install failed"):
+                await install_wda("DEV1", "iOS 17.0")
+
+    async def test_install_no_app_file(self):
+        fake_path = Path("/nonexistent/WDA.app")
+        with patch("server.device.wda.WDA_APP", fake_path):
+            with pytest.raises(RuntimeError, match="WDA app not found"):
+                await install_wda("DEV1", "iOS 17.0")
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _parse_ios_major_version
+# ---------------------------------------------------------------------------
+
+
+class TestParseIosMajorVersion:
+    def test_ios_17(self):
+        assert _parse_ios_major_version("iOS 17.4") == 17
+
+    def test_ios_15_patch(self):
+        assert _parse_ios_major_version("iOS 15.8.6") == 15
+
+    def test_ios_26(self):
+        assert _parse_ios_major_version("iOS 26.3") == 26
+
+    def test_invalid(self):
+        with pytest.raises(ValueError, match="Cannot parse"):
+            _parse_ios_major_version("unknown")
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: state persistence
+# ---------------------------------------------------------------------------
+
+
+class TestWdaState:
+    def test_read_empty(self, tmp_path):
+        state_file = tmp_path / "wda-state.json"
+        with patch("server.device.wda.WDA_STATE_FILE", state_file):
+            state = read_wda_state()
+        assert state == {"cloned": False, "builds": {}}
+
+    def test_roundtrip(self, tmp_path):
+        state_file = tmp_path / "wda-state.json"
+        with patch("server.device.wda.WDA_STATE_FILE", state_file), \
+             patch("server.device.wda.CONFIG_DIR", tmp_path):
+            save_wda_state({"cloned": True, "builds": {"DEV1": {"team_id": "T"}}})
+            state = read_wda_state()
+        assert state["cloned"] is True
+        assert state["builds"]["DEV1"]["team_id"] == "T"
+
+    def test_read_corrupt_json(self, tmp_path):
+        state_file = tmp_path / "wda-state.json"
+        state_file.write_text("not valid json{{{")
+        with patch("server.device.wda.WDA_STATE_FILE", state_file):
+            state = read_wda_state()
+        assert state == {"cloned": False, "builds": {}}
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: setup_wda orchestrator
+# ---------------------------------------------------------------------------
+
+
+class TestSetupWda:
+    async def test_no_identities(self):
+        with patch("server.device.wda.discover_signing_identities", return_value=[]):
+            result = await setup_wda("DEV1", "iOS 17.4")
+
+        assert result["status"] == "error"
+        assert "No provisioning teams" in result["error"]
+
+    async def test_multiple_identities_no_team_id(self):
+        identities = [
+            {"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"},
+            {"team_id": "TEAM2", "team_name": "Personal", "team_type": "Personal Team"},
+        ]
+        with patch("server.device.wda.discover_signing_identities", return_value=identities):
+            result = await setup_wda("DEV1", "iOS 17.4")
+
+        assert result["status"] == "needs_identity_selection"
+        assert len(result["identities"]) == 2
+
+    async def test_single_identity_auto_selects(self):
+        identities = [{"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"}]
+        with (
+            patch("server.device.wda.discover_signing_identities", return_value=identities),
+            patch("server.device.wda.clone_wda", return_value=False),
+            patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.build_wda", return_value=False),
+            patch("server.device.wda.install_wda"),
+        ):
+            result = await setup_wda("DEV1", "iOS 17.4")
+
+        assert result["status"] == "ok"
+        assert result["team_id"] == "TEAM1"
+
+    async def test_explicit_team_id(self):
+        identities = [
+            {"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"},
+            {"team_id": "TEAM2", "team_name": "Personal", "team_type": "Personal Team"},
+        ]
+        with (
+            patch("server.device.wda.discover_signing_identities", return_value=identities),
+            patch("server.device.wda.clone_wda", return_value=True),
+            patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.build_wda", return_value=True),
+            patch("server.device.wda.install_wda"),
+        ):
+            result = await setup_wda("DEV1", "iOS 17.4", team_id="TEAM2")
+
+        assert result["status"] == "ok"
+        assert result["team_id"] == "TEAM2"
+        assert result["cloned"] is True
+        assert result["built"] is True
+
+    async def test_invalid_team_id(self):
+        identities = [{"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"}]
+        with patch("server.device.wda.discover_signing_identities", return_value=identities):
+            result = await setup_wda("DEV1", "iOS 17.4", team_id="BOGUS")
+
+        assert result["status"] == "error"
+        assert "BOGUS" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# API integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def app():
+    config = ServerConfig(api_key="test-key-12345")
+    return create_app(config=config, enable_oslog=False, enable_crash=False, enable_proxy=False)
+
+
+@pytest.fixture
+def auth_headers():
+    return {"Authorization": "Bearer test-key-12345"}
+
+
+@pytest.fixture
+def mock_controller(app):
+    ctrl = DeviceController()
+    ctrl._active_udid = None
+    ctrl.list_devices = AsyncMock(return_value=[
+        _physical_device(),
+        _simulator(),
+    ])
+    ctrl.check_tools = AsyncMock(return_value={"simctl": True, "idb": False})
+    app.state.device_controller = ctrl
+    return ctrl
+
+
+class TestWdaApi:
+    async def test_setup_wda_success(self, app, auth_headers, mock_controller):
+        mock_result = {"status": "ok", "udid": "00008030-AABBCCDD", "team_id": "TEAM1"}
+        with patch("server.device.wda.setup_wda", return_value=mock_result):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/setup",
+                    json={"udid": "00008030-AABBCCDD"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+
+    async def test_setup_wda_simulator_rejected(self, app, auth_headers, mock_controller):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/v1/device/wda/setup",
+                json={"udid": "AAAA-1111"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 400
+        assert "simulator" in resp.json()["detail"].lower()
+
+    async def test_setup_wda_device_not_found(self, app, auth_headers, mock_controller):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/v1/device/wda/setup",
+                json={"udid": "nonexistent-udid"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 404
+
+    async def test_setup_wda_needs_identity_selection(self, app, auth_headers, mock_controller):
+        mock_result = {
+            "status": "needs_identity_selection",
+            "identities": [
+                {"hash": "A" * 40, "name": "Dev", "team_id": "TEAM1"},
+                {"hash": "B" * 40, "name": "Dist", "team_id": "TEAM2"},
+            ],
+            "message": "Multiple signing identities found.",
+        }
+        with patch("server.device.wda.setup_wda", return_value=mock_result):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/setup",
+                    json={"udid": "00008030-AABBCCDD"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "needs_identity_selection"
+        assert len(data["identities"]) == 2
+
+    async def test_setup_wda_with_team_id(self, app, auth_headers, mock_controller):
+        mock_result = {"status": "ok", "udid": "00008030-AABBCCDD", "team_id": "TEAM2"}
+        with patch("server.device.wda.setup_wda", return_value=mock_result):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/setup",
+                    json={"udid": "00008030-AABBCCDD", "team_id": "TEAM2"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["team_id"] == "TEAM2"
+
+    async def test_setup_wda_runtime_error(self, app, auth_headers, mock_controller):
+        with patch("server.device.wda.setup_wda", side_effect=RuntimeError("xcodebuild exploded")):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/setup",
+                    json={"udid": "00008030-AABBCCDD"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 500
+        assert "xcodebuild exploded" in resp.json()["detail"]
+
+    async def test_setup_wda_no_controller(self, app, auth_headers):
+        """Should return 503 when device controller isn't initialized."""
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/v1/device/wda/setup",
+                json={"udid": "00008030-AABBCCDD"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 503

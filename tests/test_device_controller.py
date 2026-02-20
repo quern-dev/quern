@@ -58,6 +58,7 @@ class TestResolveUdid:
             _device(udid="other-udid", state=DeviceState.SHUTDOWN),
         ])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         result = await ctrl.resolve_udid()
         assert result == "auto-udid"
         assert ctrl._active_udid == "auto-udid"
@@ -69,6 +70,7 @@ class TestResolveUdid:
             _device(udid="off1", state=DeviceState.SHUTDOWN),
         ])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         with pytest.raises(DeviceError, match="No booted device"):
             await ctrl.resolve_udid()
 
@@ -80,6 +82,7 @@ class TestResolveUdid:
             _device(udid="dev2", name="iPhone B", state=DeviceState.BOOTED),
         ])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         with pytest.raises(DeviceError, match="Multiple devices booted"):
             await ctrl.resolve_udid()
 

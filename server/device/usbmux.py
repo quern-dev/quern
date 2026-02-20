@@ -54,7 +54,14 @@ class UsbmuxBackend:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout_bytes, _ = await proc.communicate()
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.warning("pymobiledevice3 usbmux list timed out after 10s")
+                return []
 
             if proc.returncode != 0:
                 return []
