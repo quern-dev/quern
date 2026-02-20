@@ -113,9 +113,11 @@ class DevicectlBackend:
             tunnel_state = connection_props.get("tunnelState", "")
             device_type_str = dev.get("hardwareProperties", {}).get("deviceType", "")
 
-            # Map state: connected tunnel = booted, otherwise check bootState
+            # Map state: any active/reachable tunnel or explicit bootState = booted.
+            # tunnelState values: "connected" (active tunnel), "disconnected"
+            # (reachable but no tunnel yet — e.g. WiFi devices), "unavailable".
             boot_state = dev.get("deviceProperties", {}).get("bootState", "")
-            if tunnel_state == "connected":
+            if tunnel_state in ("connected", "disconnected"):
                 state = DeviceState.BOOTED
             elif boot_state == "booted":
                 state = DeviceState.BOOTED

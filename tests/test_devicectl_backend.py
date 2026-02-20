@@ -89,6 +89,23 @@ class TestListDevices:
         assert dev2.device_type == DeviceType.DEVICE
         assert dev2.is_connected is False
 
+    async def test_wifi_disconnected_tunnel_is_booted(self):
+        """WiFi devices with tunnelState=disconnected are reachable → booted."""
+        fixture_data = json.loads(_load_fixture("devicectl_list_output.json"))
+        # Modify the second device to look like a WiFi-reachable device
+        dev2 = fixture_data["result"]["devices"][1]
+        dev2["connectionProperties"]["tunnelState"] = "disconnected"
+        dev2["connectionProperties"]["transportType"] = "localNetwork"
+
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=(json.dumps(fixture_data), ""))
+
+        devices = await backend.list_devices()
+        assert len(devices) == 2
+        assert devices[1].state == DeviceState.BOOTED
+        assert devices[1].connection_type == "localNetwork"
+        assert devices[1].is_connected is True
+
     async def test_unpaired_devices_excluded(self):
         """Devices that aren't paired are skipped."""
         fixture_data = json.loads(_load_fixture("devicectl_list_output.json"))
