@@ -36,6 +36,7 @@ class LogSource(str, enum.Enum):
     PROXY = "proxy"
     APP_DRAIN = "app_drain"
     SIMULATOR = "simulator"
+    SERVER = "server"
 
 
 class LogEntry(BaseModel):
@@ -69,7 +70,7 @@ class LogQueryParams(BaseModel):
     process: str | None = None
     source: LogSource | None = None
     search: str | None = None
-    device_id: str = "default"
+    device_id: str | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
 
@@ -84,7 +85,7 @@ class LogStreamParams(BaseModel):
     source: LogSource | None = None
     match: str | None = None
     exclude: str | None = None
-    device_id: str = "default"
+    device_id: str | None = None
 
 
 class SourceStatus(BaseModel):

@@ -54,6 +54,7 @@ from server.sources.build import BuildAdapter
 from server.sources.crash import CrashAdapter, DIAGNOSTIC_REPORTS_DIR
 from server.sources.oslog import OslogAdapter
 from server.sources.proxy import ProxyAdapter
+from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
 from server.api.builds import router as builds_router
@@ -81,8 +82,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     dedup.start()
     app.state.deduplicator = dedup
 
+    # Server log adapter — bypass dedup (server logs are unique, not spammy repeats)
+    server_log = ServerLogAdapter(on_entry=buffer.append)
+    adapters: dict[str, BaseSourceAdapter] = {"server": server_log}
+    await server_log.start()
+
     # Start source adapters (all feed into the deduplicator)
-    adapters: dict[str, BaseSourceAdapter] = {}
 
     if app.state.enable_syslog:
         syslog = SyslogAdapter(

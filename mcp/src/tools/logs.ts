@@ -206,9 +206,9 @@ export function registerLogTools(server: McpServer): void {
         .describe("Minimum log level filter"),
       process: z.string().optional().describe("Filter by process name"),
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "server"])
         .optional()
-        .describe("Filter by log source"),
+        .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
     },
     async ({ count, level, process, source }) => {
       try {
@@ -262,9 +262,9 @@ export function registerLogTools(server: McpServer): void {
         .describe("Minimum log level"),
       process: z.string().optional().describe("Filter by process name"),
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "server"])
         .optional()
-        .describe("Filter by log source"),
+        .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
       search: z
         .string()
         .optional()

@@ -60,7 +60,7 @@ async def stream_logs(
     source: LogSource | None = None,
     match: str | None = None,
     exclude: str | None = None,
-    device_id: str = "default",
+    device_id: str | None = None,
 ) -> EventSourceResponse:
     """Stream log entries in real time via Server-Sent Events."""
     buffer = request.app.state.ring_buffer
@@ -140,7 +140,7 @@ async def query_logs(
     process: str | None = None,
     source: LogSource | None = None,
     search: str | None = None,
-    device_id: str = "default",
+    device_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> LogQueryResponse:
