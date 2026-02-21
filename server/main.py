@@ -82,8 +82,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     dedup.start()
     app.state.deduplicator = dedup
 
-    # Server log adapter — bypass dedup (server logs are unique, not spammy repeats)
-    server_log = ServerLogAdapter(on_entry=buffer.append)
+    # Server log adapter — dedicated buffer so device syslog can't evict server logs
+    server_buffer: RingBuffer = app.state.server_buffer
+    server_log = ServerLogAdapter(on_entry=server_buffer.append)
     adapters: dict[str, BaseSourceAdapter] = {"server": server_log}
     await server_log.start()
 
@@ -300,6 +301,7 @@ def create_app(
     # Store shared state
     app.state.config = config
     app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size)
+    app.state.server_buffer = RingBuffer(max_size=1_000)
     app.state.process_filter = process_filter
     app.state.enable_syslog = enable_syslog
     app.state.enable_oslog = enable_oslog

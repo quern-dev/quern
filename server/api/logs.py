@@ -26,7 +26,22 @@ from server.processing.summarizer import (
     parse_cursor,
 )
 
+from server.storage.ring_buffer import RingBuffer
+
 router = APIRouter(prefix="/api/v1/logs", tags=["logs"])
+
+
+def _get_buffers(request: Request, source: LogSource | None) -> list[RingBuffer]:
+    """Return the buffer(s) to query based on source filter.
+
+    Server logs live in a dedicated buffer so device syslog can't evict them.
+    """
+    if source == LogSource.SERVER:
+        return [request.app.state.server_buffer]
+    if source is not None:
+        return [request.app.state.ring_buffer]
+    # No source filter — merge both
+    return [request.app.state.ring_buffer, request.app.state.server_buffer]
 
 
 class LogQueryResponse(BaseModel):
@@ -63,7 +78,7 @@ async def stream_logs(
     device_id: str | None = None,
 ) -> EventSourceResponse:
     """Stream log entries in real time via Server-Sent Events."""
-    buffer = request.app.state.ring_buffer
+    buffers = _get_buffers(request, source)
     params = LogStreamParams(
         level=level,
         process=process,
@@ -99,29 +114,43 @@ async def stream_logs(
         return True
 
     async def event_generator():
-        queue = buffer.subscribe()
+        # Subscribe to all relevant buffers and merge into one queue
+        merged: asyncio.Queue[LogEntry] = asyncio.Queue(maxsize=1000)
+        subscriptions = [(buf, buf.subscribe()) for buf in buffers]
+
+        async def forward(queue: asyncio.Queue[LogEntry]) -> None:
+            while True:
+                entry = await queue.get()
+                try:
+                    merged.put_nowait(entry)
+                except asyncio.QueueFull:
+                    pass  # Drop if merged queue is full
+
+        tasks = [asyncio.create_task(forward(q)) for _, q in subscriptions]
         try:
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    entry = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    entry = await asyncio.wait_for(merged.get(), timeout=15.0)
                     if matches_filter(entry):
                         yield {
                             "event": "log",
                             "data": entry.model_dump_json(),
                         }
                 except asyncio.TimeoutError:
-                    # Send heartbeat to keep connection alive
                     yield {
                         "event": "heartbeat",
                         "data": json.dumps({
                             "time": datetime.now(timezone.utc).isoformat(),
-                            "buffer_size": buffer.size,
+                            "buffer_size": buffers[0].size,
                         }),
                     }
         finally:
-            buffer.unsubscribe(queue)
+            for task in tasks:
+                task.cancel()
+            for buf, queue in subscriptions:
+                buf.unsubscribe(queue)
 
     return EventSourceResponse(event_generator())
 
@@ -145,8 +174,6 @@ async def query_logs(
     offset: int = Query(default=0, ge=0),
 ) -> LogQueryResponse:
     """Query historical log entries with filters and pagination."""
-    buffer = request.app.state.ring_buffer
-
     params = LogQueryParams(
         since=since,
         until=until,
@@ -159,7 +186,19 @@ async def query_logs(
         offset=offset,
     )
 
-    entries, total = await buffer.query(params)
+    buffers = _get_buffers(request, source)
+    if len(buffers) == 1:
+        entries, total = await buffers[0].query(params)
+    else:
+        # Merge results from multiple buffers, sorted by timestamp
+        all_entries: list[LogEntry] = []
+        for buf in buffers:
+            buf_entries = await buf.filter_entries(params)
+            all_entries.extend(buf_entries)
+        all_entries.sort(key=lambda e: e.timestamp)
+        total = len(all_entries)
+        entries = all_entries[offset : offset + limit]
+
     return LogQueryResponse(
         entries=entries,
         total=total,
@@ -184,20 +223,25 @@ async def get_summary(
     The response includes a `cursor` field. Pass it back as `since_cursor`
     on the next call to get only new entries since the last summary.
     """
-    buffer = request.app.state.ring_buffer
+    # Summary always reads from both buffers (no source filter)
+    buffers = _get_buffers(request, None)
 
+    all_entries: list[LogEntry] = []
     if since_cursor:
         cursor_ts = parse_cursor(since_cursor)
-        if cursor_ts:
-            entries = await buffer.get_after(cursor_ts)
-        else:
-            entries = await buffer.get_recent(buffer.max_size)
+        for buf in buffers:
+            if cursor_ts:
+                all_entries.extend(await buf.get_after(cursor_ts))
+            else:
+                all_entries.extend(await buf.get_recent(buf.max_size))
     else:
         duration = WINDOW_DURATIONS[window]
         cutoff = datetime.now(timezone.utc) - duration
-        entries = await buffer.get_since(cutoff)
+        for buf in buffers:
+            all_entries.extend(await buf.get_since(cutoff))
 
-    return generate_summary(entries, window=window, process=process)
+    all_entries.sort(key=lambda e: e.timestamp)
+    return generate_summary(all_entries, window=window, process=process)
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +257,18 @@ async def get_errors(
     include_crashes: bool = True,
 ) -> LogErrorsResponse:
     """Get error-level entries and crash reports."""
-    buffer = request.app.state.ring_buffer
-
+    # Errors endpoint reads from both buffers (server errors are important!)
+    buffers = _get_buffers(request, None)
     error_levels = set(LogLevel.at_least(LogLevel.ERROR))
 
-    if since:
-        candidates = await buffer.get_since(since)
-    else:
-        candidates = await buffer.get_recent(buffer.max_size)
+    candidates: list[LogEntry] = []
+    for buf in buffers:
+        if since:
+            candidates.extend(await buf.get_since(since))
+        else:
+            candidates.extend(await buf.get_recent(buf.max_size))
 
+    candidates.sort(key=lambda e: e.timestamp)
     all_entries = [e for e in candidates if e.level in error_levels]
 
     if not include_crashes:

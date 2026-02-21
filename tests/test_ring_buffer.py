@@ -115,6 +115,37 @@ async def test_query_pagination():
 
 
 @pytest.mark.asyncio
+async def test_filter_entries_ignores_pagination():
+    """filter_entries returns ALL matching entries, ignoring limit/offset."""
+    buf = RingBuffer(max_size=100)
+
+    for i in range(20):
+        await buf.append(_make_entry(f"msg {i}", process="MyApp"))
+    await buf.append(_make_entry("other", process="OtherApp"))
+
+    # Even with limit=3 and offset=5, filter_entries should return all 20 MyApp entries
+    params = LogQueryParams(process="MyApp", limit=3, offset=5)
+    results = await buf.filter_entries(params)
+    assert len(results) == 20
+    assert all(e.process == "MyApp" for e in results)
+
+
+@pytest.mark.asyncio
+async def test_filter_entries_applies_filters():
+    """filter_entries applies source/level/search filters."""
+    buf = RingBuffer(max_size=100)
+
+    await buf.append(_make_entry("server start", source=LogSource.SERVER, level=LogLevel.INFO))
+    await buf.append(_make_entry("device log", source=LogSource.SYSLOG, level=LogLevel.INFO))
+    await buf.append(_make_entry("server error", source=LogSource.SERVER, level=LogLevel.ERROR))
+
+    params = LogQueryParams(source=LogSource.SERVER)
+    results = await buf.filter_entries(params)
+    assert len(results) == 2
+    assert all(e.source == LogSource.SERVER for e in results)
+
+
+@pytest.mark.asyncio
 async def test_subscribe_receives_new_entries():
     buf = RingBuffer(max_size=100)
     queue = buf.subscribe()

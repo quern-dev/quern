@@ -59,6 +59,14 @@ class RingBuffer:
             paginated = results[params.offset : params.offset + params.limit]
             return paginated, total
 
+    async def filter_entries(self, params: LogQueryParams) -> list[LogEntry]:
+        """Apply query filters and return ALL matching entries (no pagination).
+
+        Use when merging results across buffers — caller handles pagination.
+        """
+        async with self._lock:
+            return self._filter(params)
+
     async def get_since(self, since: datetime) -> list[LogEntry]:
         """Get all entries at or after a given timestamp."""
         async with self._lock:

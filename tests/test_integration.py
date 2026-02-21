@@ -567,3 +567,101 @@ async def test_proxy_setup_guide(app, auth_headers):
         phys = data["steps"][1]
         assert phys["target"] == "physical_device"
         assert "note" in phys
+
+
+# ---------------------------------------------------------------------------
+# Dual ring buffer (server_buffer) routing
+# ---------------------------------------------------------------------------
+
+
+def _make_server_entry(
+    message: str,
+    level: LogLevel = LogLevel.INFO,
+    timestamp: datetime | None = None,
+) -> LogEntry:
+    return LogEntry(
+        id="srv-test",
+        timestamp=timestamp or datetime.now(timezone.utc),
+        process="quern-debug-server",
+        level=level,
+        message=message,
+        source=LogSource.SERVER,
+        device_id="server",
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_source_server_uses_server_buffer(app, auth_headers):
+    """source=server queries only the server_buffer, not ring_buffer."""
+    now = datetime.now(timezone.utc)
+
+    # Put a device entry in ring_buffer
+    await app.state.ring_buffer.append(
+        _make_entry("device log", timestamp=now)
+    )
+    # Put a server entry in server_buffer
+    await app.state.server_buffer.append(
+        _make_server_entry("server startup", timestamp=now + timedelta(seconds=1))
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/logs/query",
+            headers=auth_headers,
+            params={"source": "server"},
+        )
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["entries"][0]["message"] == "server startup"
+
+
+@pytest.mark.asyncio
+async def test_query_no_source_merges_both_buffers(app, auth_headers):
+    """No source filter merges ring_buffer + server_buffer, sorted by timestamp."""
+    now = datetime.now(timezone.utc)
+
+    await app.state.ring_buffer.append(
+        _make_entry("device log 1", timestamp=now)
+    )
+    await app.state.server_buffer.append(
+        _make_server_entry("server log", timestamp=now + timedelta(seconds=1))
+    )
+    await app.state.ring_buffer.append(
+        _make_entry("device log 2", timestamp=now + timedelta(seconds=2))
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/logs/query",
+            headers=auth_headers,
+        )
+        data = resp.json()
+        assert data["total"] == 3
+        messages = [e["message"] for e in data["entries"]]
+        assert messages == ["device log 1", "server log", "device log 2"]
+
+
+@pytest.mark.asyncio
+async def test_query_source_syslog_skips_server_buffer(app, auth_headers):
+    """source=syslog queries only ring_buffer, not server_buffer."""
+    now = datetime.now(timezone.utc)
+
+    await app.state.ring_buffer.append(
+        _make_entry("device log", timestamp=now)
+    )
+    await app.state.server_buffer.append(
+        _make_server_entry("server log", timestamp=now + timedelta(seconds=1))
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/logs/query",
+            headers=auth_headers,
+            params={"source": "syslog"},
+        )
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["entries"][0]["message"] == "device log"
