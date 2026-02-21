@@ -273,6 +273,53 @@ class DeviceControllerUI:
             logger.debug(f"[FAST PATH] describe-point failed: {e}, falling back")
             return (False, None)
 
+    async def _wda_direct_query(
+        self,
+        udid: str,
+        label: str | None = None,
+        identifier: str | None = None,
+        element_type: str | None = None,
+    ) -> list[UIElement]:
+        """Query WDA directly for specific elements without fetching the full tree.
+
+        Translates label/identifier/type into WDA locator strategies:
+        - identifier only → 'accessibility id' (fastest, exact match)
+        - label only → 'predicate string' with label ==[c] (case-insensitive)
+        - combined filters → 'predicate string' with AND clauses
+
+        Returns parsed UIElement objects. Empty list on no match or error.
+        """
+        def _escape(val: str) -> str:
+            """Escape single quotes for NSPredicate string literals."""
+            return val.replace("'", "\\'")
+
+        xcui_type = f"XCUIElementType{element_type}" if element_type else None
+
+        # Choose the most efficient WDA locator strategy
+        if identifier and not label and not xcui_type:
+            # Fastest: direct accessibility id lookup
+            using = "accessibility id"
+            value = identifier
+        else:
+            # Build NSPredicate string
+            clauses: list[str] = []
+            if identifier:
+                clauses.append(f"name == '{_escape(identifier)}'")
+            if label:
+                clauses.append(f"label ==[c] '{_escape(label)}'")
+            if xcui_type:
+                clauses.append(f"type == '{xcui_type}'")
+
+            if not clauses:
+                return []
+
+            using = "predicate string"
+            value = " AND ".join(clauses)
+
+        logger.info("[WDA DIRECT] %s=%s on %s", using, value, udid[:8])
+        raw = await self.wda_client.find_elements_by_query(udid, using, value)
+        return parse_elements(raw)
+
     async def get_ui_elements(
         self,
         udid: str | None = None,
@@ -326,6 +373,11 @@ class DeviceControllerUI:
                     return filtered, resolved
 
                 return cached_elements, resolved
+
+        # WDA direct query: physical device + filters + cache miss → query directly
+        if has_filters and self._is_physical(resolved):
+            elements = await self._wda_direct_query(resolved, filter_label, filter_identifier, filter_type)
+            return elements, resolved
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
@@ -602,6 +654,7 @@ class DeviceControllerUI:
         max_elements: int = 20,
         udid: str | None = None,
         snapshot_depth: int | None = None,
+        strategy: str | None = None,
     ) -> tuple[dict, str]:
         """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
 
@@ -609,8 +662,14 @@ class DeviceControllerUI:
             max_elements: Maximum interactive elements to include (0 = unlimited)
             udid: Device UDID (auto-resolves if omitted)
             snapshot_depth: WDA accessibility tree depth (1-50, physical devices only)
+            strategy: 'skeleton' to skip /source timeout on complex screens (physical only)
         """
-        elements, resolved = await self.get_ui_elements(udid, snapshot_depth=snapshot_depth)
+        resolved = await self.resolve_udid(udid)
+        if strategy == "skeleton" and self._is_physical(resolved):
+            raw = await self.wda_client.build_screen_skeleton(resolved)
+            elements = parse_elements(raw)
+        else:
+            elements, resolved = await self.get_ui_elements(udid, snapshot_depth=snapshot_depth)
         return generate_screen_summary(elements, max_elements=max_elements), resolved
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:

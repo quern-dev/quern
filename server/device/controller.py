@@ -67,6 +67,17 @@ class DeviceController(DeviceControllerUI):
                 tool="simctl",
             )
 
+    async def _ensure_device_type_cached(self, udid: str) -> None:
+        """Populate device type cache if this UDID isn't known yet.
+
+        Called lazily when a UDID is used that hasn't been seen via
+        list_devices(). Without this, _is_physical() defaults to simulator
+        and physical devices get routed to idb instead of WDA.
+        """
+        if udid not in self._device_type_cache:
+            logger.debug("Device type unknown for %s, refreshing device list...", udid[:8])
+            await self.list_devices()
+
     async def resolve_udid(self, udid: str | None = None) -> str:
         """Resolve which device to target.
 
@@ -81,6 +92,7 @@ class DeviceController(DeviceControllerUI):
         4. Fallback: simple auto-detect (original logic, unchanged)
         """
         if udid:
+            await self._ensure_device_type_cached(udid)
             self._active_udid = udid
             return udid
 

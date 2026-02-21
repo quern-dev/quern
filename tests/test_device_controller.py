@@ -514,3 +514,197 @@ class TestScreenshotAnnotated:
         assert call_args[1]["scale"] == 0.5
         assert result_bytes == b"annotated-png"
         assert media_type == "image/png"
+
+
+# ---------------------------------------------------------------------------
+# WDA direct query (Phase 2 — direct WDA element queries)
+# ---------------------------------------------------------------------------
+
+
+class TestWdaDirectQuery:
+    """Test _wda_direct_query() strategy mapping."""
+
+    async def test_identifier_only_uses_accessibility_id(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
+
+        await ctrl._wda_direct_query("PHYS-0001", identifier="myButton")
+        ctrl.wda_client.find_elements_by_query.assert_called_once_with(
+            "PHYS-0001", "accessibility id", "myButton",
+        )
+
+    async def test_label_only_uses_predicate(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
+
+        await ctrl._wda_direct_query("PHYS-0001", label="Settings")
+        call = ctrl.wda_client.find_elements_by_query.call_args
+        assert call[0][1] == "predicate string"
+        assert "label ==[c] 'Settings'" in call[0][2]
+
+    async def test_identifier_with_type_uses_predicate(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
+
+        await ctrl._wda_direct_query("PHYS-0001", identifier="myBtn", element_type="Button")
+        call = ctrl.wda_client.find_elements_by_query.call_args
+        assert call[0][1] == "predicate string"
+        assert "name == 'myBtn'" in call[0][2]
+        assert "type == 'XCUIElementTypeButton'" in call[0][2]
+
+    async def test_label_with_single_quote_escaped(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
+
+        await ctrl._wda_direct_query("PHYS-0001", label="O'Brien's")
+        call = ctrl.wda_client.find_elements_by_query.call_args
+        assert call[0][1] == "predicate string"
+        assert "label ==[c] 'O\\'Brien\\'s'" in call[0][2]
+
+    async def test_returns_parsed_elements(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[
+            {
+                "type": "Button",
+                "AXLabel": "Done",
+                "AXUniqueId": "done_btn",
+                "frame": {"x": 10, "y": 20, "width": 80, "height": 40},
+                "enabled": True,
+            },
+        ])
+
+        elements = await ctrl._wda_direct_query("PHYS-0001", identifier="done_btn")
+        assert len(elements) == 1
+        assert elements[0].type == "Button"
+        assert elements[0].label == "Done"
+
+
+class TestGetUIElementsWdaDispatch:
+    """Test that get_ui_elements dispatches to WDA direct query for physical devices."""
+
+    async def test_physical_with_filters_uses_direct_query(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[
+            {
+                "type": "Button",
+                "AXLabel": "Done",
+                "AXUniqueId": "done_btn",
+                "frame": {"x": 10, "y": 20, "width": 80, "height": 40},
+                "enabled": True,
+            },
+        ])
+        ctrl.wda_client.describe_all = AsyncMock()
+
+        elements, udid = await ctrl.get_ui_elements(
+            "PHYS-0001", filter_identifier="done_btn",
+        )
+        assert len(elements) == 1
+        assert elements[0].label == "Done"
+        # Should NOT call describe_all
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_physical_no_filters_uses_describe_all(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        ctrl.wda_client.find_elements_by_query = AsyncMock()
+
+        elements, udid = await ctrl.get_ui_elements("PHYS-0001")
+        assert len(elements) == 4
+        # Should NOT call direct query
+        ctrl.wda_client.find_elements_by_query.assert_not_called()
+
+    async def test_simulator_with_filters_uses_describe_all(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        # Simulator (default) — no entry in _device_type_cache means SIMULATOR
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        ctrl.wda_client.find_elements_by_query = AsyncMock()
+
+        elements, udid = await ctrl.get_ui_elements(
+            "AAAA-1111", filter_label="Settings",
+        )
+        # Should use describe_all (idb), not WDA direct query
+        ctrl.idb.describe_all.assert_called_once()
+        ctrl.wda_client.find_elements_by_query.assert_not_called()
+
+    async def test_physical_with_filters_and_valid_cache_uses_cache(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+
+        # Pre-populate cache
+        from server.device.ui_elements import parse_elements
+        import time
+        cached_elements = parse_elements(_FAKE_IDB_OUTPUT)
+        ctrl._ui_cache["PHYS-0001"] = (cached_elements, time.time())
+
+        ctrl.wda_client.find_elements_by_query = AsyncMock()
+        ctrl.wda_client.describe_all = AsyncMock()
+
+        elements, udid = await ctrl.get_ui_elements(
+            "PHYS-0001", filter_label="Settings",
+        )
+        assert len(elements) == 1
+        assert elements[0].label == "Settings"
+        # Should use cache, NOT direct query or describe_all
+        ctrl.wda_client.find_elements_by_query.assert_not_called()
+        ctrl.wda_client.describe_all.assert_not_called()
+
+
+class TestGetScreenSummaryStrategy:
+    """Test strategy parameter on get_screen_summary."""
+
+    async def test_skeleton_strategy_physical_calls_build_skeleton(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.build_screen_skeleton = AsyncMock(return_value=[
+            {
+                "type": "TabBar",
+                "AXLabel": "Tab Bar",
+                "frame": {"x": 0, "y": 800, "width": 393, "height": 52},
+                "enabled": True,
+            },
+        ])
+        ctrl.wda_client.describe_all = AsyncMock()
+
+        summary, udid = await ctrl.get_screen_summary(strategy="skeleton")
+        assert udid == "PHYS-0001"
+        ctrl.wda_client.build_screen_skeleton.assert_called_once_with("PHYS-0001")
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_skeleton_strategy_simulator_falls_back(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        ctrl.wda_client.build_screen_skeleton = AsyncMock()
+
+        summary, udid = await ctrl.get_screen_summary(strategy="skeleton")
+        assert udid == "AAAA-1111"
+        # Simulator should NOT call build_screen_skeleton
+        ctrl.wda_client.build_screen_skeleton.assert_not_called()
+        ctrl.idb.describe_all.assert_called_once()
+
+    async def test_no_strategy_default_behavior(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        summary, udid = await ctrl.get_screen_summary()
+        assert udid == "AAAA-1111"
+        assert "summary" in summary
+        ctrl.idb.describe_all.assert_called_once()

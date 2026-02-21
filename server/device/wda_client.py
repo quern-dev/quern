@@ -30,21 +30,18 @@ FORWARD_START_PORT = 18100  # base port for usbmux forwards
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
 IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
 
-# Element types to query in the fallback path (when /source times out).
-# Ordered by importance. Excludes container types (ScrollView, Table) that
-# can trigger full-tree walks in WDA on complex screens like MapKit.
-_FALLBACK_ELEMENT_TYPES = [
-    "XCUIElementTypeButton",
-    "XCUIElementTypeTextField",
-    "XCUIElementTypeSecureTextField",
-    "XCUIElementTypeSearchField",
-    "XCUIElementTypeSwitch",
-    "XCUIElementTypeSlider",
-    "XCUIElementTypeLink",
-    "XCUIElementTypeNavigationBar",
-    "XCUIElementTypeTabBar",
+# Class chain queries for the skeleton fallback (when /source times out).
+# These use XCTest's native lazy query API and bypass WDA's snapshot mechanism,
+# making them safe on screens with 300+ map pins where /source hangs.
+_SKELETON_CONTAINER_TYPES = [
+    "**/XCUIElementTypeTabBar",
+    "**/XCUIElementTypeNavigationBar",
+    "**/XCUIElementTypeToolbar",
+    "**/XCUIElementTypeAlert",
+    "**/XCUIElementTypeSheet",
 ]
-ELEMENT_QUERY_TIMEOUT = 3.0  # seconds per element type query in fallback
+SKELETON_QUERY_TIMEOUT = 8.0  # seconds — busy map: container ~1.6s + children ~4.7s
+_ELEMENT_RESPONSE_ATTRIBUTES = "type,label,name,rect,enabled,value"
 
 
 @dataclass
@@ -71,6 +68,8 @@ class WdaBackend:
         self._idle_task: asyncio.Task | None = None
         # Track active snapshotMaxDepth per device to avoid redundant POSTs
         self._current_depth: dict[str, int] = {}
+        # Per-device lock for session creation (prevents parallel _ensure_session races)
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def close(self) -> None:
         """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
@@ -288,54 +287,73 @@ class WdaBackend:
 
     async def _ensure_session(self, udid: str) -> str:
         """Create or return a cached WDA session for this device."""
+        # Fast path: session already exists (no lock needed)
         conn = self._connections.get(udid)
         if conn and conn.session_id:
             return conn.session_id
 
-        base_url = await self._get_base_url(udid)
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{base_url}/session",
-                    json={"capabilities": {}},
-                    timeout=WDA_TIMEOUT,
+        # Serialize session creation per device to prevent parallel races
+        # (e.g. build_screen_skeleton fires 5 concurrent find_elements_by_query)
+        if udid not in self._session_locks:
+            self._session_locks[udid] = asyncio.Lock()
+        async with self._session_locks[udid]:
+            # Re-check after acquiring lock (another coroutine may have created it)
+            conn = self._connections.get(udid)
+            if conn and conn.session_id:
+                return conn.session_id
+
+            base_url = await self._get_base_url(udid)
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{base_url}/session",
+                        json={"capabilities": {}},
+                        timeout=WDA_TIMEOUT,
+                    )
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+                raise DeviceError(
+                    f"WDA session creation failed on {udid[:8]} ({type(exc).__name__})",
+                    tool="wda",
                 )
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
-            raise DeviceError(
-                f"WDA session creation failed on {udid[:8]} ({type(exc).__name__})",
-                tool="wda",
-            )
 
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA session creation failed (status {resp.status_code})",
-                tool="wda",
-            )
-
-        session_id = resp.json().get("sessionId", "")
-        if not session_id:
-            session_id = resp.json().get("value", {}).get("sessionId", "")
-
-        if conn:
-            conn.session_id = session_id
-        logger.info("WDA session created for %s: %s", udid[:8], session_id[:8])
-
-        # Configure WDA settings for better performance on complex screens.
-        # snapshotMaxDepth=10 prevents the accessibility tree walk from going
-        # 50 levels deep (the default), which deadlocks WDA on MapKit screens
-        # with hundreds of annotations.
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{base_url}/session/{session_id}/appium/settings",
-                    json={"settings": {"snapshotMaxDepth": SNAPSHOT_MAX_DEPTH}},
-                    timeout=WDA_TIMEOUT,
+            if resp.status_code != 200:
+                raise DeviceError(
+                    f"WDA session creation failed (status {resp.status_code})",
+                    tool="wda",
                 )
-            self._current_depth[udid] = SNAPSHOT_MAX_DEPTH
-        except Exception:
-            logger.debug("Failed to configure WDA settings for %s", udid[:8])
 
-        return session_id
+            session_id = resp.json().get("sessionId", "")
+            if not session_id:
+                session_id = resp.json().get("value", {}).get("sessionId", "")
+
+            conn = self._connections.get(udid)
+            if conn:
+                conn.session_id = session_id
+            logger.info("WDA session created for %s: %s", udid[:8], session_id[:8])
+
+            # Configure WDA settings for better performance on complex screens.
+            # snapshotMaxDepth=10 prevents the accessibility tree walk from going
+            # 50 levels deep (the default), which deadlocks WDA on MapKit screens
+            # with hundreds of annotations.
+            # shouldUseCompactResponses=False + elementResponseAttributes ensures
+            # element query responses include rect, name, value, enabled — not just
+            # type and label.
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        f"{base_url}/session/{session_id}/appium/settings",
+                        json={"settings": {
+                            "snapshotMaxDepth": SNAPSHOT_MAX_DEPTH,
+                            "shouldUseCompactResponses": False,
+                            "elementResponseAttributes": _ELEMENT_RESPONSE_ATTRIBUTES,
+                        }},
+                        timeout=WDA_TIMEOUT,
+                    )
+                self._current_depth[udid] = SNAPSHOT_MAX_DEPTH
+            except Exception:
+                logger.debug("Failed to configure WDA settings for %s", udid[:8])
+
+            return session_id
 
     async def _set_snapshot_depth(self, udid: str, depth: int) -> None:
         """Update WDA snapshotMaxDepth if it differs from the current value."""
@@ -343,7 +361,7 @@ class WdaBackend:
             return
 
         session_id = await self._ensure_session(udid)
-        base_url = await self._get_base_url(udid)
+        base_url = self._connections[udid].base_url
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(
@@ -418,11 +436,12 @@ class WdaBackend:
         If raise_on_timeout=True, re-raises httpx.TimeoutException directly
         instead of wrapping it in DeviceError (so callers can handle timeouts).
         """
-        base_url = await self._get_base_url(udid)
         if use_session:
             session_id = await self._ensure_session(udid)
+            base_url = self._connections[udid].base_url
             url = f"{base_url}/session/{session_id}{path}"
         else:
+            base_url = await self._get_base_url(udid)
             url = f"{base_url}{path}"
         try:
             async with httpx.AsyncClient() as client:
@@ -490,60 +509,136 @@ class WdaBackend:
                 "WDA restart on %s: driver started but not responsive", udid[:8],
             )
 
-    async def _describe_via_element_queries(self, udid: str) -> list[dict]:
-        """Fallback: query WDA for elements by class name instead of full /source.
+    async def find_elements_by_query(
+        self, udid: str, using: str, value: str,
+        *, scope_element_id: str | None = None, timeout: float | None = None,
+    ) -> list[dict]:
+        """Query WDA for elements using a locator strategy.
 
-        Issues one POST /session/{id}/elements per type in _FALLBACK_ELEMENT_TYPES.
-        Returns a flat list of idb-format dicts (same as describe_all).
+        Wraps POST /session/{id}/elements (or /element/{id}/elements for scoped).
+        Supports: 'class chain', 'class name', 'accessibility id', 'predicate string'.
 
-        Each query uses a short timeout (ELEMENT_QUERY_TIMEOUT) to avoid hanging
-        if WDA gets stuck on a particular element type. Consecutive timeouts
-        abort early to prevent wasting time on a hung WDA.
+        Returns idb-format dicts with _wda_element_id preserved for scoped child queries.
+        Timeout/non-200 returns [] — graceful degradation.
         """
         session_id = await self._ensure_session(udid)
-        base_url = await self._get_base_url(udid)
+        base_url = self._connections[udid].base_url
+
+        if scope_element_id:
+            url = f"{base_url}/session/{session_id}/element/{scope_element_id}/elements"
+        else:
+            url = f"{base_url}/session/{session_id}/elements"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    url,
+                    json={"using": using, "value": value},
+                    timeout=timeout or SKELETON_QUERY_TIMEOUT,
+                )
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+            logger.debug("Element query failed (%s=%s) on %s", using, value, udid[:8])
+            return []
+
+        if resp.status_code != 200:
+            logger.debug("Element query non-200 (%s=%s) on %s: %d", using, value, udid[:8], resp.status_code)
+            return []
+
+        elements = resp.json().get("value", [])
         results: list[dict] = []
-        consecutive_failures = 0
+        for el in elements:
+            # Determine type: prefer element's own 'type' field (available with compact responses off)
+            raw_type = el.get("type", "") or value
+            # Class chain values like "**/XCUIElementTypeTabBar" — extract just the type
+            el_type = raw_type.rsplit("/", 1)[-1] if "/" in raw_type else raw_type
+            mapped = _map_wda_element_from_query(el, el_type)
+            if mapped:
+                # Preserve WDA element UUID for scoped child queries
+                wda_id = (el.get("ELEMENT")
+                          or el.get("element-6066-11e4-a52e-4f735466cecf"))
+                if wda_id:
+                    mapped["_wda_element_id"] = wda_id
+                results.append(mapped)
 
-        async with httpx.AsyncClient() as client:
-            for class_name in _FALLBACK_ELEMENT_TYPES:
-                if consecutive_failures >= 3:
-                    logger.warning(
-                        "Aborting element queries on %s — %d consecutive failures",
-                        udid[:8], consecutive_failures,
-                    )
-                    break
-
-                try:
-                    resp = await client.post(
-                        f"{base_url}/session/{session_id}/elements",
-                        json={"using": "class name", "value": class_name},
-                        timeout=ELEMENT_QUERY_TIMEOUT,
-                    )
-                except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
-                    logger.debug("Element query failed for %s on %s", class_name, udid[:8])
-                    consecutive_failures += 1
-                    continue
-
-                if resp.status_code != 200:
-                    consecutive_failures += 1
-                    continue
-
-                consecutive_failures = 0  # Reset on success
-                elements = resp.json().get("value", [])
-                for el in elements:
-                    mapped = _map_wda_element_from_query(el, class_name)
-                    if mapped:
-                        results.append(mapped)
-
-        logger.info(
-            "[PERF] wda._describe_via_element_queries: %d elements via %d type queries (device %s)",
-            len(results), len(_FALLBACK_ELEMENT_TYPES), udid[:8],
-        )
         # Track interaction for idle timeout
         self._last_interaction[udid] = time.monotonic()
         self._ensure_idle_task()
         return results
+
+    async def build_screen_skeleton(self, udid: str) -> list[dict]:
+        """Build a lightweight screen description using class chain queries.
+
+        Two-phase parallel approach:
+        1. Query all container types (TabBar, NavBar, Toolbar, Alert, Sheet) in parallel
+        2. Query direct children (Button, Other) scoped to each container in parallel
+
+        Returns flat idb-format list. Gracefully handles missing containers
+        (Alert/Sheet usually absent). Strips _wda_element_id before returning.
+        """
+        start = time.perf_counter()
+
+        # Phase 1: find containers in parallel
+        container_tasks = [
+            self.find_elements_by_query(udid, "class chain", chain)
+            for chain in _SKELETON_CONTAINER_TYPES
+        ]
+        container_results = await asyncio.gather(*container_tasks, return_exceptions=True)
+
+        # Collect containers with their WDA element IDs
+        containers: list[dict] = []
+        for result in container_results:
+            if isinstance(result, Exception):
+                continue
+            for el in result:
+                if el.get("_wda_element_id"):
+                    containers.append(el)
+
+        # Phase 2: query direct children for each container using class name.
+        # class name finds immediate children only — reliable on all WDA versions.
+        _CHILD_TYPES = [
+            "XCUIElementTypeButton",
+            "XCUIElementTypeOther",
+        ]
+        child_tasks = [
+            self.find_elements_by_query(
+                udid, "class name", child_type,
+                scope_element_id=c["_wda_element_id"],
+            )
+            for c in containers
+            for child_type in _CHILD_TYPES
+        ]
+        child_results = await asyncio.gather(*child_tasks, return_exceptions=True) if child_tasks else []
+
+        # Dedupe children by WDA element ID (multiple type queries may return same element)
+        seen_ids: set[str] = set()
+        all_children: list[dict] = []
+        for result in child_results:
+            if isinstance(result, Exception):
+                continue
+            for child in result:
+                wda_id = child.get("_wda_element_id", "")
+                if wda_id and wda_id in seen_ids:
+                    continue
+                if wda_id:
+                    seen_ids.add(wda_id)
+                all_children.append(child)
+
+        # Build flat result list: containers + their children
+        flat: list[dict] = []
+        for container in containers:
+            c = {k: v for k, v in container.items() if k != "_wda_element_id"}
+            flat.append(c)
+
+        for child in all_children:
+            c = {k: v for k, v in child.items() if k != "_wda_element_id"}
+            flat.append(c)
+
+        elapsed = (time.perf_counter() - start) * 1000
+        logger.info(
+            "[PERF] wda.build_screen_skeleton: %d elements (%d containers) in %.1fms (device %s)",
+            len(flat), len(containers), elapsed, udid[:8],
+        )
+        return flat
 
     async def describe_all(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
@@ -579,7 +674,7 @@ class WdaBackend:
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
 
-            return await self._describe_via_element_queries(udid)
+            return await self.build_screen_skeleton(udid)
 
         if resp.status_code != 200:
             raise DeviceError(
@@ -629,7 +724,7 @@ class WdaBackend:
                 await self._restart_wda(udid)
 
             # Fallback returns flat list — no hierarchy, but better than an error
-            return await self._describe_via_element_queries(udid)
+            return await self.build_screen_skeleton(udid)
 
         if resp.status_code != 200:
             raise DeviceError(
@@ -861,9 +956,16 @@ def _map_wda_element_from_query(el: dict, class_name: str) -> dict | None:
             "height": rect["height"],
         }
 
+    # WDA echoes the class name (e.g. "XCUIElementTypeButton") in the name field
+    # when there's no accessibility identifier — filter those out
+    raw_name = el.get("name") or ""
+    identifier = raw_name if raw_name and not raw_name.startswith("XCUIElementType") else ""
+    if not identifier:
+        identifier = el.get("rawIdentifier") or ""
+
     return {
         "type": el_type,
-        "AXUniqueId": el.get("name") or el.get("rawIdentifier") or "",
+        "AXUniqueId": identifier,
         "AXLabel": el.get("label") or "",
         "AXValue": el.get("value"),
         "frame": frame,

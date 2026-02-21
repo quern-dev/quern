@@ -419,7 +419,19 @@ class TestScreenSummary:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.get_screen_summary.assert_called_once_with(max_elements=20, udid="BBBB-2222", snapshot_depth=None)
+        mock_controller.get_screen_summary.assert_called_once_with(max_elements=20, udid="BBBB-2222", snapshot_depth=None, strategy=None)
+
+    async def test_screen_summary_with_strategy(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/screen-summary?strategy=skeleton",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        mock_controller.get_screen_summary.assert_called_once_with(
+            max_elements=20, udid=None, snapshot_depth=None, strategy="skeleton",
+        )
 
 
 # ---------------------------------------------------------------------------

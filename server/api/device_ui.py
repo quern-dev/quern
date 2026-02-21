@@ -35,6 +35,7 @@ async def get_ui_elements(
     udid: str | None = Query(default=None),
     children_of: str | None = Query(default=None, description="Only return children of the element with this identifier or label"),
     snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
+    strategy: str | None = Query(default=None, description="Use 'skeleton' to skip /source timeout on complex screens. Physical devices only."),
 ):
     """Get all UI accessibility elements from the current screen.
 
@@ -45,7 +46,15 @@ async def get_ui_elements(
 
     controller = _get_controller(request)
     try:
-        if children_of:
+        if strategy == "skeleton":
+            resolved_udid = await controller.resolve_udid(udid)
+            if controller._is_physical(resolved_udid):
+                raw = await controller.wda_client.build_screen_skeleton(resolved_udid)
+                from server.device.ui_elements import parse_elements
+                elements = parse_elements(raw)
+            else:
+                elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth)
+        elif children_of:
             elements, resolved_udid = await controller.get_ui_elements_children_of(
                 children_of=children_of, udid=udid, snapshot_depth=snapshot_depth,
             )
@@ -164,6 +173,7 @@ async def get_screen_summary(
     max_elements: int = Query(default=20, ge=0, le=500),
     udid: str | None = Query(default=None),
     snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
+    strategy: str | None = Query(default=None, description="Use 'skeleton' to skip /source timeout on complex screens. Physical devices only."),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
@@ -171,6 +181,7 @@ async def get_screen_summary(
     - max_elements: Maximum interactive elements to include (0 = unlimited, default 20)
     - udid: Device UDID (auto-resolves if omitted)
     - snapshot_depth: WDA accessibility tree depth (1-50, default 10). Only affects physical devices.
+    - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
 
     Returns summary with truncated, total_interactive_elements fields.
     """
@@ -180,6 +191,7 @@ async def get_screen_summary(
             max_elements=max_elements,
             udid=udid,
             snapshot_depth=snapshot_depth,
+            strategy=strategy,
         )
         summary["udid"] = resolved_udid
         return summary
