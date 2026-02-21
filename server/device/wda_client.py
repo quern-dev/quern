@@ -568,9 +568,9 @@ class WdaBackend:
     async def build_screen_skeleton(self, udid: str) -> list[dict]:
         """Build a lightweight screen description using class chain queries.
 
-        Two-phase parallel approach:
+        Two-phase approach:
         1. Query all container types (TabBar, NavBar, Toolbar, Alert, Sheet) in parallel
-        2. Query direct children (Button, Other) scoped to each container in parallel
+        2. Query descendant buttons scoped to each container type sequentially
 
         Returns flat idb-format list. Gracefully handles missing containers
         (Alert/Sheet usually absent). Strips _wda_element_id before returning.
@@ -593,21 +593,29 @@ class WdaBackend:
                 if el.get("_wda_element_id"):
                     containers.append(el)
 
-        # Phase 2: query direct children for each container using class name.
-        # class name finds immediate children only — reliable on all WDA versions.
-        _CHILD_TYPES = [
-            "XCUIElementTypeButton",
-            "XCUIElementTypeOther",
-        ]
-        child_tasks = [
-            self.find_elements_by_query(
-                udid, "class name", child_type,
-                scope_element_id=c["_wda_element_id"],
-            )
-            for c in containers
-            for child_type in _CHILD_TYPES
-        ]
-        child_results = await asyncio.gather(*child_tasks, return_exceptions=True) if child_tasks else []
+        # Phase 2: find children using unscoped class chain queries.
+        # Must bump snapshotMaxDepth — at depth=10, TabBar buttons are invisible
+        # because some apps nest them inside Other wrappers.
+        # Run sequentially: WDA serializes queries internally, so parallel
+        # queries share the same timeout budget and the second one times out.
+        await self._set_snapshot_depth(udid, 50)
+        try:
+            container_types = list(dict.fromkeys(
+                c["type"].replace("XCUIElementType", "")
+                for c in containers if c.get("type")
+            ))
+            child_results: list[list[dict] | Exception] = []
+            for c_type in container_types:
+                try:
+                    result = await self.find_elements_by_query(
+                        udid, "class chain",
+                        f"**/XCUIElementType{c_type}/**/XCUIElementTypeButton",
+                    )
+                    child_results.append(result)
+                except Exception as exc:
+                    child_results.append(exc)
+        finally:
+            await self._set_snapshot_depth(udid, SNAPSHOT_MAX_DEPTH)
 
         # Dedupe children by WDA element ID (multiple type queries may return same element)
         seen_ids: set[str] = set()

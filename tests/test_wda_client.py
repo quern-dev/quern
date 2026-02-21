@@ -1355,49 +1355,49 @@ class TestFindElementsByQuery:
 
 class TestBuildScreenSkeleton:
     async def test_containers_and_children(self):
-        """Skeleton returns containers + direct children via class name queries."""
+        """Skeleton returns containers + descendant buttons via class chain queries."""
         backend = _make_session_backend()
+        depth_calls = []
+
+        async def mock_set_depth(udid, depth):
+            depth_calls.append(depth)
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
-            # Phase 1: container queries (class chain, no scope)
-            if using == "class chain" and scope_element_id is None:
-                if "TabBar" in value:
-                    return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
-                             "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                             "_wda_element_id": "tabbar-uuid"}]
-                if "NavigationBar" in value:
-                    return [{"type": "NavigationBar", "AXLabel": "Map", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
-                             "AXUniqueId": "Map", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                             "_wda_element_id": "navbar-uuid"}]
-                return []
-            # Phase 2: child queries (class name, scoped to container)
-            if using == "class name" and scope_element_id == "tabbar-uuid":
-                if "Button" in value:
-                    return [{"type": "Button", "AXLabel": "Home", "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
-                             "AXUniqueId": "Home", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                             "_wda_element_id": "btn-1"}]
-                if "Other" in value:
-                    return [{"type": "Other", "AXLabel": "Search", "frame": {"x": 100, "y": 808, "width": 96, "height": 44},
-                             "AXUniqueId": "Search", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                             "_wda_element_id": "other-1"}]
-            if using == "class name" and scope_element_id == "navbar-uuid":
-                if "Button" in value:
-                    return [{"type": "Button", "AXLabel": "Back", "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
-                             "AXUniqueId": "Back", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                             "_wda_element_id": "btn-2"}]
-                return []
+            # Phase 1: container queries
+            if value == "**/XCUIElementTypeTabBar":
+                return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                         "_wda_element_id": "tabbar-uuid"}]
+            if value == "**/XCUIElementTypeNavigationBar":
+                return [{"type": "NavigationBar", "AXLabel": "Map", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
+                         "AXUniqueId": "Map", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                         "_wda_element_id": "navbar-uuid"}]
+            # Phase 2: unscoped class chain child queries
+            if value == "**/XCUIElementTypeTabBar/**/XCUIElementTypeButton":
+                return [
+                    {"type": "Button", "AXLabel": "Home", "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
+                     "AXUniqueId": "Home", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                     "_wda_element_id": "btn-1"},
+                    {"type": "Button", "AXLabel": "Search", "frame": {"x": 100, "y": 808, "width": 96, "height": 44},
+                     "AXUniqueId": "Search", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                     "_wda_element_id": "btn-2"},
+                ]
+            if value == "**/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton":
+                return [{"type": "Button", "AXLabel": "Back", "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
+                         "AXUniqueId": "Back", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                         "_wda_element_id": "btn-3"}]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find):
+        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
+             patch.object(backend, "_set_snapshot_depth", side_effect=mock_set_depth):
             result = await backend.build_screen_skeleton("test-udid")
 
-        # 2 containers + 3 children (btn-1, other-1, btn-2) = 5
+        # 2 containers + 3 buttons = 5
         assert len(result) == 5
         types = [el["type"] for el in result]
         assert "TabBar" in types
         assert "NavigationBar" in types
-        assert types.count("Button") == 2  # btn-1 + btn-2
-        assert types.count("Other") == 1   # direct child, no remapping
+        assert types.count("Button") == 3
         labels = [el["AXLabel"] for el in result]
         assert "Home" in labels
         assert "Search" in labels
@@ -1405,51 +1405,56 @@ class TestBuildScreenSkeleton:
         # _wda_element_id should be stripped
         for el in result:
             assert "_wda_element_id" not in el
+        # Depth bumped to 50 before Phase 2, restored to SNAPSHOT_MAX_DEPTH after
+        assert depth_calls == [50, SNAPSHOT_MAX_DEPTH]
 
     async def test_dedup_by_wda_id(self):
         """Children with the same WDA element ID are deduped."""
         backend = _make_session_backend()
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
-            if using == "class chain" and scope_element_id is None and "TabBar" in value:
+            if value == "**/XCUIElementTypeTabBar":
                 return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
                          "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
                          "_wda_element_id": "tabbar-uuid"}]
-            if using == "class chain" and scope_element_id is None:
-                return []
-            # Both Button and Other queries return element with same WDA ID
-            if using == "class name" and scope_element_id == "tabbar-uuid":
+            if value == "**/XCUIElementTypeNavigationBar":
+                return [{"type": "NavigationBar", "AXLabel": "", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
+                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                         "_wda_element_id": "navbar-uuid"}]
+            # Both container child queries return same element (e.g. shared button)
+            if "/**/XCUIElementTypeButton" in value:
                 return [{"type": "Button", "AXLabel": "Home", "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
                          "AXUniqueId": "Home", "AXValue": None, "enabled": True, "role": "", "role_description": "",
                          "_wda_element_id": "btn-1"}]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find):
+        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
+             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
             result = await backend.build_screen_skeleton("test-udid")
 
-        # 1 container + 1 child (btn-1 deduped across Button and Other queries)
-        assert len(result) == 2
+        # 2 containers + 1 child (btn-1 deduped across TabBar and NavBar queries)
+        assert len(result) == 3
         assert result[0]["type"] == "TabBar"
-        assert result[1]["type"] == "Button"
+        assert result[1]["type"] == "NavigationBar"
+        assert result[2]["type"] == "Button"
 
     async def test_partial_failures(self):
         """Missing containers (e.g. no Alert) are gracefully skipped."""
         backend = _make_session_backend()
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
-            if using == "class chain" and scope_element_id is None and "TabBar" in value:
+            if value == "**/XCUIElementTypeTabBar":
                 return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
                          "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
                          "_wda_element_id": "tabbar-uuid"}]
-            if using == "class chain" and scope_element_id is None:
-                return []  # All other containers absent
-            if using == "class name" and scope_element_id and "Button" in value:
+            if "/**/XCUIElementTypeButton" in value:
                 return [{"type": "Button", "AXLabel": "Tab1", "frame": {"x": 0, "y": 808, "width": 96, "height": 44},
                          "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
                          "_wda_element_id": "btn-1"}]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find):
+        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
+             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
             result = await backend.build_screen_skeleton("test-udid")
 
         # 1 container + 1 button
@@ -1464,7 +1469,8 @@ class TestBuildScreenSkeleton:
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find):
+        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
+             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
             result = await backend.build_screen_skeleton("test-udid")
 
         assert result == []
@@ -1474,23 +1480,53 @@ class TestBuildScreenSkeleton:
         backend = _make_session_backend()
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
-            if using == "class chain" and "TabBar" in value:
+            if "TabBar" in value and "Button" not in value:
                 raise httpx.ReadTimeout("hung")
-            if using == "class chain" and "NavigationBar" in value:
+            if value == "**/XCUIElementTypeNavigationBar":
                 return [{"type": "NavigationBar", "AXLabel": "Map", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
                          "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
                          "_wda_element_id": "nav-uuid"}]
-            if using == "class chain" and scope_element_id is None:
-                return []
-            # Phase 2 child queries (scoped class name)
+            if value == "**/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton":
+                return [{"type": "Button", "AXLabel": "Back", "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
+                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                         "_wda_element_id": "btn-1"}]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find):
+        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
+             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
             result = await backend.build_screen_skeleton("test-udid")
 
-        # Should still have NavigationBar despite TabBar failure
-        assert len(result) == 1
+        # Should still have NavigationBar + its button despite TabBar failure
+        assert len(result) == 2
         assert result[0]["type"] == "NavigationBar"
+        assert result[1]["type"] == "Button"
+
+    async def test_depth_restored_on_child_query_failure(self):
+        """snapshotMaxDepth is restored even when all child queries fail."""
+        backend = _make_session_backend()
+        depth_calls = []
+
+        async def mock_set_depth(udid, depth):
+            depth_calls.append(depth)
+
+        async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
+            if value == "**/XCUIElementTypeTabBar":
+                return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
+                         "_wda_element_id": "tabbar-uuid"}]
+            if "/**/XCUIElementTypeButton" in value:
+                raise httpx.ReadTimeout("hung")
+            return []
+
+        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
+             patch.object(backend, "_set_snapshot_depth", side_effect=mock_set_depth):
+            result = await backend.build_screen_skeleton("test-udid")
+
+        # Container present, child query failed
+        assert len(result) == 1
+        assert result[0]["type"] == "TabBar"
+        # Depth still restored
+        assert depth_calls == [50, SNAPSHOT_MAX_DEPTH]
 
 
 # ---------------------------------------------------------------------------
