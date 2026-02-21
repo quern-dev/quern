@@ -147,8 +147,8 @@ def find_element(
 ) -> list[UIElement]:
     """Find elements matching label/identifier/type filters.
 
-    Combines filters with AND logic. At least one of label or identifier required.
-    Returns list of matching elements (may be empty).
+    Combines filters with AND logic. At least one of label, identifier, or
+    element_type is required. Returns list of matching elements (may be empty).
 
     Args:
         elements: List of UI elements to search
@@ -159,11 +159,14 @@ def find_element(
     Returns:
         List of matching elements (empty if no matches)
     """
-    # Start with label or identifier search
+    # Start with label or identifier search, then narrow by type
     if label:
         matches = find_by_label(elements, label)
     elif identifier:
         matches = find_by_identifier(elements, identifier)
+    elif element_type:
+        # Type-only query — return all elements matching the type
+        return find_by_type(elements, element_type)
     else:
         # No search criteria provided
         return []

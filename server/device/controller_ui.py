@@ -444,9 +444,9 @@ class DeviceControllerUI:
         Raises:
             DeviceError if no matches or validation fails.
         """
-        if not label and not identifier:
+        if not label and not identifier and not element_type:
             raise DeviceError(
-                "Either label or identifier is required",
+                "At least one of label, identifier, or element_type is required",
                 tool="idb",
             )
 
@@ -494,9 +494,9 @@ class DeviceControllerUI:
         Raises:
             DeviceError if validation fails or timeout > 60s.
         """
-        if not label and not identifier:
+        if not label and not identifier and not element_type:
             raise DeviceError(
-                "Either label or identifier is required",
+                "At least one of label, identifier, or element_type is required",
                 tool="idb",
             )
 
