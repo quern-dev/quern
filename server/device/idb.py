@@ -95,8 +95,12 @@ class IdbBackend:
             )
         return stdout.decode(), stderr.decode()
 
-    async def describe_all(self, udid: str) -> list[dict]:
+    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
+
+        Args:
+            snapshot_depth: Ignored for idb (no depth control). Accepted for
+                interface compatibility with WdaBackend.
 
         Runs: idb ui describe-all --udid <udid> --nested
         Uses --nested to get the full tree including children inside
@@ -183,12 +187,16 @@ class IdbBackend:
 
         return flat
 
-    async def describe_all_nested(self, udid: str) -> list[dict]:
+    async def describe_all_nested(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
         """Get all UI accessibility elements with hierarchy preserved.
 
         Same subprocess call as describe_all (--nested), but skips flattening
         and container probing. Returns raw nested dicts with `children` arrays
         intact.
+
+        Args:
+            snapshot_depth: Ignored for idb (no depth control). Accepted for
+                interface compatibility with WdaBackend.
         """
         stdout, _ = await self._run(
             "ui", "describe-all", "--udid", udid, "--nested",

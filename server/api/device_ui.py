@@ -34,6 +34,7 @@ async def get_ui_elements(
     request: Request,
     udid: str | None = Query(default=None),
     children_of: str | None = Query(default=None, description="Only return children of the element with this identifier or label"),
+    snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
 ):
     """Get all UI accessibility elements from the current screen.
 
@@ -46,10 +47,10 @@ async def get_ui_elements(
     try:
         if children_of:
             elements, resolved_udid = await controller.get_ui_elements_children_of(
-                children_of=children_of, udid=udid,
+                children_of=children_of, udid=udid, snapshot_depth=snapshot_depth,
             )
         else:
-            elements, resolved_udid = await controller.get_ui_elements(udid=udid)
+            elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth)
 
         end = time.perf_counter()
         logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
@@ -162,12 +163,14 @@ async def get_screen_summary(
     request: Request,
     max_elements: int = Query(default=20, ge=0, le=500),
     udid: str | None = Query(default=None),
+    snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
     Query params:
     - max_elements: Maximum interactive elements to include (0 = unlimited, default 20)
     - udid: Device UDID (auto-resolves if omitted)
+    - snapshot_depth: WDA accessibility tree depth (1-50, default 10). Only affects physical devices.
 
     Returns summary with truncated, total_interactive_elements fields.
     """
@@ -176,6 +179,7 @@ async def get_screen_summary(
         summary, resolved_udid = await controller.get_screen_summary(
             max_elements=max_elements,
             udid=udid,
+            snapshot_depth=snapshot_depth,
         )
         summary["udid"] = resolved_udid
         return summary

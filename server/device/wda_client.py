@@ -24,9 +24,27 @@ logger = logging.getLogger("quern-debug-server.wda-client")
 
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
+SOURCE_TIMEOUT = 3.0  # seconds — most screens return /source in <2s
+SNAPSHOT_MAX_DEPTH = 10  # WDA default is 50 — way too deep for MapKit etc.
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
 IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
+
+# Element types to query in the fallback path (when /source times out).
+# Ordered by importance. Excludes container types (ScrollView, Table) that
+# can trigger full-tree walks in WDA on complex screens like MapKit.
+_FALLBACK_ELEMENT_TYPES = [
+    "XCUIElementTypeButton",
+    "XCUIElementTypeTextField",
+    "XCUIElementTypeSecureTextField",
+    "XCUIElementTypeSearchField",
+    "XCUIElementTypeSwitch",
+    "XCUIElementTypeSlider",
+    "XCUIElementTypeLink",
+    "XCUIElementTypeNavigationBar",
+    "XCUIElementTypeTabBar",
+]
+ELEMENT_QUERY_TIMEOUT = 3.0  # seconds per element type query in fallback
 
 
 @dataclass
@@ -51,6 +69,8 @@ class WdaBackend:
         # Idle timeout tracking
         self._last_interaction: dict[str, float] = {}
         self._idle_task: asyncio.Task | None = None
+        # Track active snapshotMaxDepth per device to avoid redundant POSTs
+        self._current_depth: dict[str, int] = {}
 
     async def close(self) -> None:
         """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
@@ -81,6 +101,7 @@ class WdaBackend:
                     conn.forward_proc.kill()
         self._connections.clear()
         self._last_interaction.clear()
+        self._current_depth.clear()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -96,12 +117,28 @@ class WdaBackend:
         """
         if udid in self._connections:
             conn = self._connections[udid]
-            # Verify the connection is still alive
-            if conn.forward_proc is None or conn.forward_proc.returncode is None:
-                return conn.base_url
 
-            # Forward proc died — remove and reconnect
-            del self._connections[udid]
+            if conn.forward_proc is not None:
+                # usbmux forward — check if process is still alive
+                if conn.forward_proc.returncode is None:
+                    return conn.base_url
+                # Forward proc died — remove and reconnect
+                del self._connections[udid]
+            else:
+                # tunneld connection — verify WDA is still reachable
+                try:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.get(
+                            f"{conn.base_url}/status", timeout=2.0,
+                        )
+                        if resp.status_code == 200:
+                            return conn.base_url
+                except Exception:
+                    pass
+                logger.info(
+                    "Cached WDA tunnel stale for %s, reconnecting...", udid[:8],
+                )
+                del self._connections[udid]
 
         # Try tunneld first (iOS 17+)
         base_url = await self._try_tunneld_connection(udid)
@@ -282,7 +319,42 @@ class WdaBackend:
         if conn:
             conn.session_id = session_id
         logger.info("WDA session created for %s: %s", udid[:8], session_id[:8])
+
+        # Configure WDA settings for better performance on complex screens.
+        # snapshotMaxDepth=10 prevents the accessibility tree walk from going
+        # 50 levels deep (the default), which deadlocks WDA on MapKit screens
+        # with hundreds of annotations.
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{base_url}/session/{session_id}/appium/settings",
+                    json={"settings": {"snapshotMaxDepth": SNAPSHOT_MAX_DEPTH}},
+                    timeout=WDA_TIMEOUT,
+                )
+            self._current_depth[udid] = SNAPSHOT_MAX_DEPTH
+        except Exception:
+            logger.debug("Failed to configure WDA settings for %s", udid[:8])
+
         return session_id
+
+    async def _set_snapshot_depth(self, udid: str, depth: int) -> None:
+        """Update WDA snapshotMaxDepth if it differs from the current value."""
+        if self._current_depth.get(udid) == depth:
+            return
+
+        session_id = await self._ensure_session(udid)
+        base_url = await self._get_base_url(udid)
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{base_url}/session/{session_id}/appium/settings",
+                    json={"settings": {"snapshotMaxDepth": depth}},
+                    timeout=WDA_TIMEOUT,
+                )
+            self._current_depth[udid] = depth
+            logger.info("WDA snapshotMaxDepth set to %d for %s", depth, udid[:8])
+        except Exception:
+            logger.debug("Failed to set snapshotMaxDepth=%d for %s", depth, udid[:8])
 
     async def delete_session(self, udid: str) -> None:
         """Delete the active WDA session for a device. No-op if no session."""
@@ -301,6 +373,7 @@ class WdaBackend:
             logger.debug("Failed to delete WDA session %s on %s", session_id[:8], udid[:8])
 
         conn.session_id = None
+        self._current_depth.pop(udid, None)
         logger.info("WDA session deleted for %s", udid[:8])
 
     def _ensure_idle_task(self) -> None:
@@ -336,11 +409,14 @@ class WdaBackend:
 
     async def _request(
         self, method: str, udid: str, path: str,
-        use_session: bool = False, **kwargs,
+        use_session: bool = False, timeout: float | None = None,
+        raise_on_timeout: bool = False, **kwargs,
     ) -> httpx.Response:
         """Make an HTTP request to WDA, converting transport errors to DeviceError.
 
         If use_session=True, prepends /session/{sessionId} to the path.
+        If raise_on_timeout=True, re-raises httpx.TimeoutException directly
+        instead of wrapping it in DeviceError (so callers can handle timeouts).
         """
         base_url = await self._get_base_url(udid)
         if use_session:
@@ -351,9 +427,13 @@ class WdaBackend:
         try:
             async with httpx.AsyncClient() as client:
                 resp = await getattr(client, method)(
-                    url, timeout=WDA_TIMEOUT, **kwargs,
+                    url, timeout=timeout or WDA_TIMEOUT, **kwargs,
                 )
         except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+            if raise_on_timeout and isinstance(exc, httpx.TimeoutException):
+                # Caller wants to handle timeouts — don't invalidate connection
+                # (WDA may still be alive, just slow on this request)
+                raise
             # Connection lost — invalidate cached connection so next call reconnects
             self._connections.pop(udid, None)
             raise DeviceError(
@@ -368,14 +448,139 @@ class WdaBackend:
 
         return resp
 
-    async def describe_all(self, udid: str) -> list[dict]:
+    async def _is_wda_responsive(self, udid: str) -> bool:
+        """Quick /status ping to check if WDA is still alive (2s timeout)."""
+        conn = self._connections.get(udid)
+        if not conn:
+            # No cached connection — try to resolve base URL without full reconnect
+            try:
+                base_url = await self._get_base_url(udid)
+            except DeviceError:
+                return False
+        else:
+            base_url = conn.base_url
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{base_url}/status", timeout=2.0)
+                return resp.status_code == 200
+        except Exception:
+            return False
+
+    async def _restart_wda(self, udid: str) -> None:
+        """Stop and restart the WDA driver for a device, clearing cached connection."""
+        from server.device.wda import start_driver, stop_driver
+
+        # Clear cached connection
+        self._connections.pop(udid, None)
+
+        os_version = self._device_os_versions.get(udid)
+        if not os_version:
+            logger.warning("Cannot restart WDA on %s — os_version unknown", udid[:8])
+            return
+
+        try:
+            await stop_driver(udid)
+        except Exception:
+            logger.debug("stop_driver failed for %s (may already be dead)", udid[:8])
+
+        result = await start_driver(udid, os_version)
+        if not result.get("ready"):
+            logger.warning(
+                "WDA restart on %s: driver started but not responsive", udid[:8],
+            )
+
+    async def _describe_via_element_queries(self, udid: str) -> list[dict]:
+        """Fallback: query WDA for elements by class name instead of full /source.
+
+        Issues one POST /session/{id}/elements per type in _FALLBACK_ELEMENT_TYPES.
+        Returns a flat list of idb-format dicts (same as describe_all).
+
+        Each query uses a short timeout (ELEMENT_QUERY_TIMEOUT) to avoid hanging
+        if WDA gets stuck on a particular element type. Consecutive timeouts
+        abort early to prevent wasting time on a hung WDA.
+        """
+        session_id = await self._ensure_session(udid)
+        base_url = await self._get_base_url(udid)
+        results: list[dict] = []
+        consecutive_failures = 0
+
+        async with httpx.AsyncClient() as client:
+            for class_name in _FALLBACK_ELEMENT_TYPES:
+                if consecutive_failures >= 3:
+                    logger.warning(
+                        "Aborting element queries on %s — %d consecutive failures",
+                        udid[:8], consecutive_failures,
+                    )
+                    break
+
+                try:
+                    resp = await client.post(
+                        f"{base_url}/session/{session_id}/elements",
+                        json={"using": "class name", "value": class_name},
+                        timeout=ELEMENT_QUERY_TIMEOUT,
+                    )
+                except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+                    logger.debug("Element query failed for %s on %s", class_name, udid[:8])
+                    consecutive_failures += 1
+                    continue
+
+                if resp.status_code != 200:
+                    consecutive_failures += 1
+                    continue
+
+                consecutive_failures = 0  # Reset on success
+                elements = resp.json().get("value", [])
+                for el in elements:
+                    mapped = _map_wda_element_from_query(el, class_name)
+                    if mapped:
+                        results.append(mapped)
+
+        logger.info(
+            "[PERF] wda._describe_via_element_queries: %d elements via %d type queries (device %s)",
+            len(results), len(_FALLBACK_ELEMENT_TYPES), udid[:8],
+        )
+        # Track interaction for idle timeout
+        self._last_interaction[udid] = time.monotonic()
+        self._ensure_idle_task()
+        return results
+
+    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
 
         Fetches WDA's /source?format=json, flattens the nested tree,
         and converts field names to match idb's describe-all output.
+
+        If /source times out (common on complex screens like MapKit),
+        falls back to targeted element queries by class name.
+
+        Args:
+            snapshot_depth: WDA accessibility tree depth (1-50). If provided
+                and different from current, updates WDA settings before fetching.
         """
+        if snapshot_depth is not None:
+            await self._set_snapshot_depth(udid, snapshot_depth)
+
         start = time.perf_counter()
-        resp = await self._request("get", udid, "/source", params={"format": "json"})
+        try:
+            resp = await self._request(
+                "get", udid, "/source", params={"format": "json"},
+                timeout=SOURCE_TIMEOUT, raise_on_timeout=True,
+            )
+        except httpx.TimeoutException:
+            elapsed = (time.perf_counter() - start) * 1000
+            logger.warning(
+                "[PERF] wda /source timed out after %.0fms on %s — falling back to element queries",
+                elapsed, udid[:8],
+            )
+
+            # Check if WDA is hung (common with MapKit/large trees)
+            if not await self._is_wda_responsive(udid):
+                logger.warning("WDA hung on %s, restarting driver...", udid[:8])
+                await self._restart_wda(udid)
+
+            return await self._describe_via_element_queries(udid)
+
         if resp.status_code != 200:
             raise DeviceError(
                 f"WDA /source failed (status {resp.status_code}): {resp.text[:200]}",
@@ -394,9 +599,38 @@ class WdaBackend:
         )
         return flat
 
-    async def describe_all_nested(self, udid: str) -> list[dict]:
-        """Get UI elements with hierarchy preserved, in idb-compatible format."""
-        resp = await self._request("get", udid, "/source", params={"format": "json"})
+    async def describe_all_nested(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
+        """Get UI elements with hierarchy preserved, in idb-compatible format.
+
+        Falls back to flat element queries if /source times out.
+
+        Args:
+            snapshot_depth: WDA accessibility tree depth (1-50). If provided
+                and different from current, updates WDA settings before fetching.
+        """
+        if snapshot_depth is not None:
+            await self._set_snapshot_depth(udid, snapshot_depth)
+
+        start = time.perf_counter()
+        try:
+            resp = await self._request(
+                "get", udid, "/source", params={"format": "json"},
+                timeout=SOURCE_TIMEOUT, raise_on_timeout=True,
+            )
+        except httpx.TimeoutException:
+            elapsed = (time.perf_counter() - start) * 1000
+            logger.warning(
+                "[PERF] wda /source timed out after %.0fms on %s (nested) — falling back to element queries",
+                elapsed, udid[:8],
+            )
+
+            if not await self._is_wda_responsive(udid):
+                logger.warning("WDA hung on %s, restarting driver...", udid[:8])
+                await self._restart_wda(udid)
+
+            # Fallback returns flat list — no hierarchy, but better than an error
+            return await self._describe_via_element_queries(udid)
+
         if resp.status_code != 200:
             raise DeviceError(
                 f"WDA /source failed (status {resp.status_code})",
@@ -603,6 +837,40 @@ def convert_wda_tree_nested(node: dict) -> list[dict]:
             child_converted = convert_wda_tree_nested(child)
             converted["children"].extend(child_converted)
     return [converted]
+
+
+def _map_wda_element_from_query(el: dict, class_name: str) -> dict | None:
+    """Convert an element from POST /session/{id}/elements to idb-format dict.
+
+    The /elements endpoint returns less data than /source — typically just
+    the element reference and a few attributes. We extract what we can.
+    """
+    # Strip XCUIElementType prefix for the type field
+    el_type = class_name
+    if el_type.startswith("XCUIElementType"):
+        el_type = el_type[len("XCUIElementType"):]
+
+    # WDA /elements response has label, name, rect, isEnabled, etc. inline
+    rect = el.get("rect", {})
+    frame = None
+    if rect and all(k in rect for k in ("x", "y", "width", "height")):
+        frame = {
+            "x": rect["x"],
+            "y": rect["y"],
+            "width": rect["width"],
+            "height": rect["height"],
+        }
+
+    return {
+        "type": el_type,
+        "AXUniqueId": el.get("name") or el.get("rawIdentifier") or "",
+        "AXLabel": el.get("label") or "",
+        "AXValue": el.get("value"),
+        "frame": frame,
+        "enabled": el.get("isEnabled", True),
+        "role": "",
+        "role_description": "",
+    }
 
 
 def find_element_at_point(elements: list[dict], x: float, y: float) -> dict | None:

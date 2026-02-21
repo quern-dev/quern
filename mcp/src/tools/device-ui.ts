@@ -15,12 +15,19 @@ export function registerDeviceUITools(server: McpServer): void {
         .string()
         .optional()
         .describe("Only return children of the element with this identifier or label"),
+      snapshot_depth: z
+        .number()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects physical devices."),
     },
-    async ({ udid, children_of }) => {
+    async ({ udid, children_of, snapshot_depth }) => {
       try {
         const params: Record<string, string> = {};
         if (udid) params.udid = udid;
         if (children_of) params.children_of = children_of;
+        if (snapshot_depth !== undefined) params.snapshot_depth = String(snapshot_depth);
         const data = await apiRequest("GET", "/api/v1/device/ui", params);
 
         return {
@@ -198,12 +205,19 @@ This is the recommended first step before interacting with UI. Use this to disco
         .string()
         .optional()
         .describe("Target device UDID (auto-resolves if omitted)"),
+      snapshot_depth: z
+        .number()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects physical devices."),
     },
-    async ({ max_elements, udid }) => {
+    async ({ max_elements, udid, snapshot_depth }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/device/screen-summary", {
           max_elements,
           udid,
+          snapshot_depth,
         });
 
         return {

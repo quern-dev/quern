@@ -360,7 +360,7 @@ class TestGetUIElements:
         assert data["element_count"] == 3
         assert len(data["elements"]) == 3
         assert data["udid"] == "AAAA-1111"
-        mock_controller.get_ui_elements.assert_called_once_with(udid=None)
+        mock_controller.get_ui_elements.assert_called_once_with(udid=None, snapshot_depth=None)
 
     async def test_get_ui_elements_with_udid(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
@@ -370,7 +370,7 @@ class TestGetUIElements:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.get_ui_elements.assert_called_once_with(udid="BBBB-2222")
+        mock_controller.get_ui_elements.assert_called_once_with(udid="BBBB-2222", snapshot_depth=None)
 
     async def test_get_ui_elements_idb_not_found(self, app, auth_headers, mock_controller):
         mock_controller.get_ui_elements = AsyncMock(
@@ -419,7 +419,7 @@ class TestScreenSummary:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.get_screen_summary.assert_called_once_with(max_elements=20, udid="BBBB-2222")
+        mock_controller.get_screen_summary.assert_called_once_with(max_elements=20, udid="BBBB-2222", snapshot_depth=None)
 
 
 # ---------------------------------------------------------------------------

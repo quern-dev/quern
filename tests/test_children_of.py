@@ -194,7 +194,7 @@ class TestChildrenOfAPI:
         assert "Username" in labels
         assert "Password" in labels
         mock_controller_with_children.get_ui_elements_children_of.assert_called_once_with(
-            children_of="FormGroup", udid=None,
+            children_of="FormGroup", udid=None, snapshot_depth=None,
         )
 
     async def test_without_children_of_uses_normal_path(self, app, auth_headers, mock_controller_with_children):
@@ -206,5 +206,5 @@ class TestChildrenOfAPI:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller_with_children.get_ui_elements.assert_called_once_with(udid=None)
+        mock_controller_with_children.get_ui_elements.assert_called_once_with(udid=None, snapshot_depth=None)
         mock_controller_with_children.get_ui_elements_children_of.assert_not_called()

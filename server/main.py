@@ -228,6 +228,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if released:
         logger.info("Cleaned up %d stale device claims on startup", len(released))
 
+    # Warm device caches in the background (device type dispatch, WDA os_versions)
+    async def _warmup_devices():
+        try:
+            devices = await device_controller.list_devices()
+            logger.info("Device warmup: discovered %d device(s)", len(devices))
+        except Exception:
+            logger.debug("Device warmup failed (non-fatal)", exc_info=True)
+
+    warmup_task = asyncio.create_task(_warmup_devices())
+
     # Launch proxy watchdog if proxy is enabled
     watchdog_task = None
     if app.state.enable_proxy:

@@ -51,10 +51,11 @@ def _maybe_reexec_in_venv() -> None:
 def _ensure_mcp_built(quiet: bool = False) -> bool:
     """Build the MCP TypeScript server if needed.
 
-    Compares mcp/src/index.ts mtime vs mcp/dist/index.js mtime to detect
-    staleness.  Runs ``npm install`` when node_modules/ is missing or when
-    package.json is newer than node_modules/, and ``npm run build`` only
-    when the source is newer than the output (or the output is missing).
+    Compares the newest mtime across all mcp/src/**/*.ts files against
+    mcp/dist/index.js mtime to detect staleness.  Runs ``npm install``
+    when node_modules/ is missing or when package.json is newer than
+    node_modules/, and ``npm run build`` only when source is newer than
+    the output (or the output is missing).
 
     Args:
         quiet: When True, only print on actual build or failure.
@@ -71,20 +72,22 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         return False
 
     mcp_dir = project_root / "mcp"
-    src_file = mcp_dir / "src" / "index.ts"
+    src_dir = mcp_dir / "src"
     dist_file = mcp_dir / "dist" / "index.js"
 
-    if not src_file.exists():
+    if not src_dir.exists():
         if not quiet:
-            print("Warning: mcp/src/index.ts not found — skipping MCP build")
+            print("Warning: mcp/src/ not found — skipping MCP build")
         return False
 
-    # Determine if a build is needed
+    # Determine if a build is needed by checking ALL .ts source files
     needs_build = not dist_file.exists()
     if not needs_build:
-        src_mtime = src_file.stat().st_mtime
         dist_mtime = dist_file.stat().st_mtime
-        needs_build = src_mtime > dist_mtime
+        for ts_file in src_dir.rglob("*.ts"):
+            if ts_file.stat().st_mtime > dist_mtime:
+                needs_build = True
+                break
 
     if not needs_build:
         return True  # Already up to date

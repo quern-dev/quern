@@ -306,7 +306,7 @@ class TestGetUIElements:
         assert len(elements) == 4
         assert elements[0].type == "Application"
         assert elements[1].label == "Settings"
-        ctrl.idb.describe_all.assert_called_once_with("AAAA-1111")
+        ctrl.idb.describe_all.assert_called_once_with("AAAA-1111", snapshot_depth=None)
 
     async def test_with_explicit_udid(self):
         ctrl = DeviceController()
@@ -314,7 +314,7 @@ class TestGetUIElements:
 
         elements, udid = await ctrl.get_ui_elements(udid="BBBB-2222")
         assert udid == "BBBB-2222"
-        ctrl.idb.describe_all.assert_called_once_with("BBBB-2222")
+        ctrl.idb.describe_all.assert_called_once_with("BBBB-2222", snapshot_depth=None)
 
 
 class TestGetScreenSummary:

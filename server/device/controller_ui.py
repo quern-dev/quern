@@ -280,6 +280,7 @@ class DeviceControllerUI:
         filter_label: str | None = None,
         filter_identifier: str | None = None,
         filter_type: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -306,6 +307,10 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         now = time.time()
 
+        # Bypass cache when snapshot_depth is provided (different depth = different tree shape)
+        if snapshot_depth is not None:
+            use_cache = False
+
         # Check cache (unless explicitly bypassed)
         # Strategy: Use cached full tree, then filter in memory (fast)
         if use_cache and resolved in self._ui_cache:
@@ -325,7 +330,7 @@ class DeviceControllerUI:
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
 
-        raw = await self._ui_backend(resolved).describe_all(resolved)
+        raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth)
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -353,6 +358,7 @@ class DeviceControllerUI:
         self,
         children_of: str,
         udid: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[list[UIElement], str]:
         """Get UI elements scoped to children of a specific parent.
 
@@ -360,7 +366,7 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
-        nested = await self._ui_backend(resolved).describe_all_nested(resolved)
+        nested = await self._ui_backend(resolved).describe_all_nested(resolved, snapshot_depth=snapshot_depth)
         child_dicts = find_children_of(nested, parent_identifier=children_of, parent_label=children_of)
         elements = parse_elements(child_dicts)
         return elements, resolved
@@ -595,14 +601,16 @@ class DeviceControllerUI:
         self,
         max_elements: int = 20,
         udid: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[dict, str]:
         """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
 
         Args:
             max_elements: Maximum interactive elements to include (0 = unlimited)
             udid: Device UDID (auto-resolves if omitted)
+            snapshot_depth: WDA accessibility tree depth (1-50, physical devices only)
         """
-        elements, resolved = await self.get_ui_elements(udid)
+        elements, resolved = await self.get_ui_elements(udid, snapshot_depth=snapshot_depth)
         return generate_screen_summary(elements, max_elements=max_elements), resolved
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:

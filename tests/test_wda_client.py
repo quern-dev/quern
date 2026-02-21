@@ -8,10 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import httpx
+
 from server.device.wda_client import (
+    ELEMENT_QUERY_TIMEOUT,
     IDLE_TIMEOUT,
+    SOURCE_TIMEOUT,
     WdaBackend,
+    _FALLBACK_ELEMENT_TYPES,
     _map_wda_element,
+    _map_wda_element_from_query,
     convert_wda_tree_nested,
     find_element_at_point,
     flatten_wda_tree,
@@ -265,11 +271,17 @@ class TestFindElementAtPoint:
 
 
 def _make_session_backend() -> WdaBackend:
-    """Helper: create a WdaBackend with a pre-cached session for 'test-udid'."""
+    """Helper: create a WdaBackend with a pre-cached session for 'test-udid'.
+
+    Uses a mock forward_proc (returncode=None → alive) so the cache check
+    is a simple process-alive test, not a network /status ping.
+    """
     backend = WdaBackend()
+    mock_proc = MagicMock()
+    mock_proc.returncode = None  # Process still alive
     backend._connections["test-udid"] = MagicMock(
         base_url="http://localhost:8100",
-        forward_proc=None,
+        forward_proc=mock_proc,
         session_id="test-session",
     )
     return backend
@@ -443,15 +455,51 @@ class TestBackendDispatch:
 
 
 class TestWdaConnectionManagement:
-    async def test_cached_connection_reused(self):
+    async def test_cached_tunneld_connection_verified(self):
+        """Cached tunneld connection should ping /status before reuse."""
         backend = WdaBackend()
         backend._connections["test-udid"] = MagicMock(
-            base_url="http://localhost:18100",
+            base_url="http://[fd35::1]:8100",
             forward_proc=None,
         )
 
-        url = await backend._get_base_url("test-udid")
-        assert url == "http://localhost:18100"
+        mock_resp = MagicMock(status_code=200)
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.device.wda_client.httpx.AsyncClient", return_value=mock_client):
+            url = await backend._get_base_url("test-udid")
+            assert url == "http://[fd35::1]:8100"
+            mock_client.get.assert_called_once_with(
+                "http://[fd35::1]:8100/status", timeout=2.0,
+            )
+
+    async def test_stale_tunneld_connection_reconnects(self):
+        """Stale tunneld connection should be dropped and reconnected."""
+        backend = WdaBackend()
+        backend._connections["test-udid"] = MagicMock(
+            base_url="http://[fd35::1]:8100",
+            forward_proc=None,
+        )
+
+        # Ping fails — stale tunnel
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.device.wda_client.httpx.AsyncClient", return_value=mock_client):
+            with patch.object(
+                backend, "_try_tunneld_connection",
+                new_callable=AsyncMock,
+                return_value="http://[fd99::2]:8100",
+            ):
+                url = await backend._get_base_url("test-udid")
+                assert url == "http://[fd99::2]:8100"
+                # Old connection should be replaced
+                assert backend._connections["test-udid"].base_url == "http://[fd99::2]:8100"
 
     async def test_dead_forward_proc_reconnects(self):
         """If the forward process died, should attempt reconnection."""
@@ -688,3 +736,386 @@ class TestIdleTimeout:
         assert backend._idle_task is not None
         await backend.close()
         assert backend._idle_task is None
+
+
+# ---------------------------------------------------------------------------
+# /source timeout + fallback tests
+# ---------------------------------------------------------------------------
+
+
+class TestDescribeAllTimeoutFallback:
+    async def test_describe_all_fast_screen_uses_source(self):
+        """Normal screens: /source returns quickly, no fallback needed."""
+        backend = _make_session_backend()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"value": WDA_TREE, "sessionId": "abc"}
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await backend.describe_all("test-udid")
+
+            assert len(result) == 5
+            assert result[0]["type"] == "Application"
+            # /source was called with SOURCE_TIMEOUT
+            mock_client.get.assert_called_once()
+            call_kwargs = mock_client.get.call_args
+            assert call_kwargs.kwargs.get("timeout") == SOURCE_TIMEOUT or call_kwargs[1].get("timeout") == SOURCE_TIMEOUT
+
+    async def test_describe_all_timeout_falls_back_to_element_queries(self):
+        """When /source times out but WDA is responsive, use element queries."""
+        backend = _make_session_backend()
+
+        # Mock element query responses
+        mock_elements_response = MagicMock()
+        mock_elements_response.status_code = 200
+        mock_elements_response.json.return_value = {"value": [
+            {
+                "name": "loginButton",
+                "label": "Log In",
+                "value": None,
+                "rect": {"x": 100, "y": 200, "width": 120, "height": 44},
+                "isEnabled": True,
+            },
+        ]}
+
+        # Mock /status response (WDA is responsive)
+        mock_status_response = MagicMock()
+        mock_status_response.status_code = 200
+
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if "/source" in url:
+                raise httpx.ReadTimeout("timed out")
+            if "/status" in url:
+                return mock_status_response
+            return mock_status_response
+
+        async def mock_post(url, **kwargs):
+            if "/elements" in url:
+                return mock_elements_response
+            return mock_elements_response
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(side_effect=mock_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await backend.describe_all("test-udid")
+
+            # Should have results from element queries
+            assert len(result) > 0
+            # Each fallback type produces one element (our mock returns 1 per type)
+            assert result[0]["AXLabel"] == "Log In"
+
+    async def test_describe_all_timeout_restarts_hung_wda(self):
+        """When /source times out AND /status times out, restart WDA then fallback."""
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        mock_elements_response = MagicMock()
+        mock_elements_response.status_code = 200
+        mock_elements_response.json.return_value = {"value": []}
+
+        restarted = False
+
+        async def mock_get(url, **kwargs):
+            nonlocal restarted
+            if "/source" in url:
+                raise httpx.ReadTimeout("timed out")
+            if "/status" in url:
+                if not restarted:
+                    raise httpx.ReadTimeout("WDA hung")
+                return MagicMock(status_code=200)
+            return MagicMock(status_code=200)
+
+        async def mock_post(url, **kwargs):
+            if "/elements" in url:
+                return mock_elements_response
+            return MagicMock(status_code=200, json=MagicMock(return_value={"sessionId": "new-session", "value": {"sessionId": "new-session"}}))
+
+        async def fake_stop(udid):
+            pass
+
+        async def fake_start(udid, os_version):
+            nonlocal restarted
+            restarted = True
+            # Re-establish connection after restart (simulates WDA coming back)
+            mock_proc = MagicMock()
+            mock_proc.returncode = None
+            backend._connections[udid] = MagicMock(
+                base_url="http://localhost:8100",
+                forward_proc=mock_proc,
+                session_id="new-session",
+            )
+            return {"ready": True}
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(side_effect=mock_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch("server.device.wda.stop_driver", new_callable=AsyncMock, side_effect=fake_stop) as mock_stop:
+                with patch("server.device.wda.start_driver", new_callable=AsyncMock, side_effect=fake_start) as mock_start:
+                    result = await backend.describe_all("test-udid")
+
+                    # Driver was restarted
+                    mock_stop.assert_called_once_with("test-udid")
+                    mock_start.assert_called_once_with("test-udid", "iOS 17.4")
+
+            # Should return (possibly empty) results from fallback
+            assert isinstance(result, list)
+            assert restarted is True
+
+    async def test_describe_all_nested_timeout_falls_back(self):
+        """describe_all_nested also falls back on /source timeout."""
+        backend = _make_session_backend()
+
+        mock_elements_response = MagicMock()
+        mock_elements_response.status_code = 200
+        mock_elements_response.json.return_value = {"value": [
+            {
+                "name": "settingsSwitch",
+                "label": "Dark Mode",
+                "value": "1",
+                "rect": {"x": 250, "y": 300, "width": 51, "height": 31},
+                "isEnabled": True,
+            },
+        ]}
+
+        mock_status_response = MagicMock()
+        mock_status_response.status_code = 200
+
+        async def mock_get(url, **kwargs):
+            if "/source" in url:
+                raise httpx.ReadTimeout("timed out")
+            return mock_status_response
+
+        async def mock_post(url, **kwargs):
+            if "/elements" in url:
+                return mock_elements_response
+            return mock_elements_response
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(side_effect=mock_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await backend.describe_all_nested("test-udid")
+
+            # Falls back to flat list
+            assert isinstance(result, list)
+            assert len(result) > 0
+
+
+class TestMapWdaElementFromQuery:
+    def test_basic_mapping(self):
+        el = {
+            "name": "myButton",
+            "label": "Submit",
+            "value": None,
+            "rect": {"x": 10, "y": 20, "width": 100, "height": 44},
+            "isEnabled": True,
+        }
+        result = _map_wda_element_from_query(el, "XCUIElementTypeButton")
+        assert result["type"] == "Button"
+        assert result["AXLabel"] == "Submit"
+        assert result["AXUniqueId"] == "myButton"
+        assert result["frame"]["x"] == 10
+
+    def test_missing_rect(self):
+        el = {"name": "x", "label": "Y"}
+        result = _map_wda_element_from_query(el, "XCUIElementTypeSwitch")
+        assert result["type"] == "Switch"
+        assert result["frame"] is None
+
+    def test_empty_element(self):
+        result = _map_wda_element_from_query({}, "XCUIElementTypeTextField")
+        assert result["type"] == "TextField"
+        assert result["AXLabel"] == ""
+        assert result["AXUniqueId"] == ""
+
+
+class TestIsWdaResponsive:
+    async def test_responsive_returns_true(self):
+        backend = _make_session_backend()
+
+        mock_resp = MagicMock(status_code=200)
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.device.wda_client.httpx.AsyncClient", return_value=mock_client):
+            assert await backend._is_wda_responsive("test-udid") is True
+
+    async def test_timeout_returns_false(self):
+        backend = _make_session_backend()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ReadTimeout("hung"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.device.wda_client.httpx.AsyncClient", return_value=mock_client):
+            assert await backend._is_wda_responsive("test-udid") is False
+
+    async def test_no_connection_returns_false(self):
+        backend = WdaBackend()
+        # No connection, no os_version — _get_base_url will raise
+        with patch.object(backend, "_get_base_url", new_callable=AsyncMock, side_effect=DeviceError("nope", tool="wda")):
+            assert await backend._is_wda_responsive("test-udid") is False
+
+
+# ---------------------------------------------------------------------------
+# Snapshot depth tests
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotDepth:
+    async def test_set_snapshot_depth_posts_when_different(self):
+        """_set_snapshot_depth should POST to /appium/settings when depth changes."""
+        backend = _make_session_backend()
+        backend._current_depth["test-udid"] = 10
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend._set_snapshot_depth("test-udid", 25)
+
+            mock_client.post.assert_called_once_with(
+                "http://localhost:8100/session/test-session/appium/settings",
+                json={"settings": {"snapshotMaxDepth": 25}},
+                timeout=10.0,
+            )
+        assert backend._current_depth["test-udid"] == 25
+
+    async def test_set_snapshot_depth_skips_when_same(self):
+        """_set_snapshot_depth should NOT POST when depth is already current."""
+        backend = _make_session_backend()
+        backend._current_depth["test-udid"] = 10
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend._set_snapshot_depth("test-udid", 10)
+
+            mock_client.post.assert_not_called()
+
+    async def test_describe_all_with_snapshot_depth_updates_settings(self):
+        """describe_all(snapshot_depth=20) should update settings before /source."""
+        backend = _make_session_backend()
+        backend._current_depth["test-udid"] = 10
+
+        # Track call order
+        call_order = []
+
+        mock_settings_response = MagicMock()
+        mock_settings_response.status_code = 200
+
+        mock_source_response = MagicMock()
+        mock_source_response.status_code = 200
+        mock_source_response.json.return_value = {"value": SIMPLE_WDA_ELEMENT}
+
+        async def mock_post(url, **kwargs):
+            if "/appium/settings" in url:
+                call_order.append("settings")
+                return mock_settings_response
+            return mock_settings_response
+
+        async def mock_get(url, **kwargs):
+            call_order.append("source")
+            return mock_source_response
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=mock_post)
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await backend.describe_all("test-udid", snapshot_depth=20)
+
+            assert call_order == ["settings", "source"]
+            assert len(result) == 1
+
+    async def test_describe_all_without_snapshot_depth_no_settings_call(self):
+        """describe_all() without snapshot_depth should not call /appium/settings."""
+        backend = _make_session_backend()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"value": SIMPLE_WDA_ELEMENT}
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.post = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend.describe_all("test-udid")
+
+            # post should not have been called (no settings update, no session create needed)
+            mock_client.post.assert_not_called()
+
+    async def test_delete_session_clears_depth(self):
+        """delete_session should remove the depth entry."""
+        backend = WdaBackend()
+        backend._connections["test-udid"] = MagicMock(
+            base_url="http://localhost:8100",
+            forward_proc=None,
+            session_id="sess-123",
+        )
+        backend._current_depth["test-udid"] = 15
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.delete = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend.delete_session("test-udid")
+
+        assert "test-udid" not in backend._current_depth
+
+    async def test_close_clears_depth(self):
+        """close() should clear all depth entries."""
+        backend = WdaBackend()
+        backend._current_depth["dev1"] = 10
+        backend._current_depth["dev2"] = 20
+
+        await backend.close()
+
+        assert len(backend._current_depth) == 0
