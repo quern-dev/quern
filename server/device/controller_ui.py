@@ -377,7 +377,13 @@ class DeviceControllerUI:
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and self._is_physical(resolved):
             elements = await self._wda_direct_query(resolved, filter_label, filter_identifier, filter_type)
-            return elements, resolved
+            if elements:
+                return elements, resolved
+            # Direct query found nothing — fall through to /source snapshot.
+            # WDA 'accessibility id' doesn't always match identifiers that
+            # appear in the full /source tree on physical devices.
+            logger.info("[WDA DIRECT FALLBACK] No results for id=%s label=%s, trying /source",
+                        filter_identifier, filter_label)
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
