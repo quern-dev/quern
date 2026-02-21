@@ -1039,8 +1039,10 @@ class TestSnapshotDepth:
             assert len(result) == 1
 
     async def test_describe_all_without_snapshot_depth_no_settings_call(self):
-        """describe_all() without snapshot_depth should not call /appium/settings."""
+        """describe_all() without snapshot_depth skips settings POST when depth is already correct."""
         backend = _make_session_backend()
+        # Simulate depth already set (e.g. from session creation)
+        backend._current_depth["test-udid"] = SNAPSHOT_MAX_DEPTH
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1056,7 +1058,7 @@ class TestSnapshotDepth:
 
             await backend.describe_all("test-udid")
 
-            # post should not have been called (no settings update, no session create needed)
+            # post should not have been called (depth already matches SNAPSHOT_MAX_DEPTH)
             mock_client.post.assert_not_called()
 
     async def test_delete_session_clears_depth(self):

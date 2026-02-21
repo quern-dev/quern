@@ -25,7 +25,7 @@ logger = logging.getLogger("quern-debug-server.wda-client")
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 SOURCE_TIMEOUT = 3.0  # seconds — most screens return /source in <2s
-SNAPSHOT_MAX_DEPTH = 10  # WDA default is 50 — way too deep for MapKit etc.
+SNAPSHOT_MAX_DEPTH = 25  # WDA default is 50 — 25 resolves most screens; skeleton fallback handles dense maps
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
 IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
@@ -332,9 +332,9 @@ class WdaBackend:
             logger.info("WDA session created for %s: %s", udid[:8], session_id[:8])
 
             # Configure WDA settings for better performance on complex screens.
-            # snapshotMaxDepth=10 prevents the accessibility tree walk from going
-            # 50 levels deep (the default), which deadlocks WDA on MapKit screens
-            # with hundreds of annotations.
+            # snapshotMaxDepth prevents the accessibility tree walk from going
+            # 50 levels deep (the WDA default), which deadlocks WDA on MapKit
+            # screens with hundreds of annotations.
             # shouldUseCompactResponses=False + elementResponseAttributes ensures
             # element query responses include rect, name, value, enabled — not just
             # type and label.
@@ -553,6 +553,11 @@ class WdaBackend:
             el_type = raw_type.rsplit("/", 1)[-1] if "/" in raw_type else raw_type
             mapped = _map_wda_element_from_query(el, el_type)
             if mapped:
+                # If found via 'accessibility id', the identifier IS the query value.
+                # WDA often echoes the class name in 'name' instead of the real
+                # accessibilityIdentifier, causing the mapper to discard it.
+                if using == "accessibility id" and not mapped.get("AXUniqueId"):
+                    mapped["AXUniqueId"] = value
                 # Preserve WDA element UUID for scoped child queries
                 wda_id = (el.get("ELEMENT")
                           or el.get("element-6066-11e4-a52e-4f735466cecf"))
@@ -661,8 +666,10 @@ class WdaBackend:
             snapshot_depth: WDA accessibility tree depth (1-50). If provided
                 and different from current, updates WDA settings before fetching.
         """
-        if snapshot_depth is not None:
-            await self._set_snapshot_depth(udid, snapshot_depth)
+        # Always ensure depth is set — covers stale sessions where the
+        # settings POST in _ensure_session failed silently.
+        target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
+        await self._set_snapshot_depth(udid, target_depth)
 
         start = time.perf_counter()
         try:
@@ -711,8 +718,8 @@ class WdaBackend:
             snapshot_depth: WDA accessibility tree depth (1-50). If provided
                 and different from current, updates WDA settings before fetching.
         """
-        if snapshot_depth is not None:
-            await self._set_snapshot_depth(udid, snapshot_depth)
+        target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
+        await self._set_snapshot_depth(udid, target_depth)
 
         start = time.perf_counter()
         try:
