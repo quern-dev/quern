@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from server.device.wda_client import (
+    IDLE_TIMEOUT,
     WdaBackend,
     _map_wda_element,
     convert_wda_tree_nested,
     find_element_at_point,
     flatten_wda_tree,
 )
+from server.models import DeviceError
 
 
 # ---------------------------------------------------------------------------
@@ -480,8 +484,207 @@ class TestWdaConnectionManagement:
         backend._connections["test-udid"] = MagicMock(
             base_url="http://localhost:18100",
             forward_proc=mock_proc,
+            session_id=None,
         )
 
         await backend.close()
         mock_proc.terminate.assert_called_once()
         assert len(backend._connections) == 0
+
+
+# ---------------------------------------------------------------------------
+# delete_session tests
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSession:
+    async def test_delete_session_sends_delete(self):
+        backend = WdaBackend()
+        backend._connections["test-udid"] = MagicMock(
+            base_url="http://localhost:8100",
+            forward_proc=None,
+            session_id="sess-123",
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.delete = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend.delete_session("test-udid")
+
+            mock_client.delete.assert_called_once_with(
+                "http://localhost:8100/session/sess-123",
+                timeout=10.0,
+            )
+
+        assert backend._connections["test-udid"].session_id is None
+
+    async def test_delete_session_noop_without_session(self):
+        backend = WdaBackend()
+        backend._connections["test-udid"] = MagicMock(
+            base_url="http://localhost:8100",
+            forward_proc=None,
+            session_id=None,
+        )
+
+        # Should not raise
+        await backend.delete_session("test-udid")
+
+    async def test_delete_session_noop_no_connection(self):
+        backend = WdaBackend()
+        # No connection at all — should not raise
+        await backend.delete_session("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# Auto-start tests
+# ---------------------------------------------------------------------------
+
+
+class TestAutoStart:
+    async def test_auto_start_when_wda_unreachable(self):
+        backend = WdaBackend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        mock_result = {"status": "started", "pid": 42, "ready": True}
+
+        with (
+            patch.object(
+                backend, "_try_tunneld_connection",
+                new_callable=AsyncMock,
+                side_effect=[None, "http://[fd35::1]:8100"],
+            ),
+            patch.object(
+                backend, "_start_usbmux_forward",
+                new_callable=AsyncMock,
+                side_effect=DeviceError("not reachable", tool="wda"),
+            ),
+            patch("server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result),
+        ):
+            url = await backend._get_base_url("test-udid")
+            assert url == "http://[fd35::1]:8100"
+
+    async def test_auto_start_skipped_without_os_version(self):
+        backend = WdaBackend()
+        # No os_version set
+
+        with (
+            patch.object(
+                backend, "_try_tunneld_connection",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                backend, "_start_usbmux_forward",
+                new_callable=AsyncMock,
+                side_effect=DeviceError("not reachable", tool="wda"),
+            ),
+        ):
+            with pytest.raises(DeviceError, match="os_version unknown"):
+                await backend._get_base_url("test-udid")
+
+    async def test_auto_start_not_ready_raises(self):
+        backend = WdaBackend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        mock_result = {"status": "started", "pid": 42, "ready": False}
+
+        with (
+            patch.object(
+                backend, "_try_tunneld_connection",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                backend, "_start_usbmux_forward",
+                new_callable=AsyncMock,
+                side_effect=DeviceError("not reachable", tool="wda"),
+            ),
+            patch("server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result),
+        ):
+            with pytest.raises(DeviceError, match="did not become responsive"):
+                await backend._get_base_url("test-udid")
+
+
+# ---------------------------------------------------------------------------
+# Idle timeout tests
+# ---------------------------------------------------------------------------
+
+
+class TestIdleTimeout:
+    async def test_idle_checker_cleans_idle_sessions(self):
+        """Idle timeout deletes session and clears connection, but does NOT stop the driver."""
+        backend = WdaBackend()
+        backend._connections["test-udid"] = MagicMock(
+            base_url="http://localhost:8100",
+            forward_proc=None,
+            session_id="sess-123",
+        )
+        # Set last interaction to way in the past
+        backend._last_interaction["test-udid"] = time.monotonic() - (IDLE_TIMEOUT + 60)
+
+        with (
+            patch.object(backend, "delete_session", new_callable=AsyncMock) as mock_delete,
+            patch("server.device.wda_client.IDLE_CHECK_INTERVAL", 0.01),
+        ):
+            # Run the checker briefly
+            task = asyncio.create_task(backend._idle_checker())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+            mock_delete.assert_called_once_with("test-udid")
+
+        assert "test-udid" not in backend._connections
+        assert "test-udid" not in backend._last_interaction
+
+    async def test_idle_checker_skips_active_devices(self):
+        backend = WdaBackend()
+        backend._connections["test-udid"] = MagicMock(
+            base_url="http://localhost:8100",
+            forward_proc=None,
+            session_id="sess-123",
+        )
+        # Set last interaction to recent
+        backend._last_interaction["test-udid"] = time.monotonic()
+
+        with (
+            patch.object(backend, "delete_session", new_callable=AsyncMock) as mock_delete,
+            patch("server.device.wda_client.IDLE_CHECK_INTERVAL", 0.01),
+        ):
+            task = asyncio.create_task(backend._idle_checker())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+            mock_delete.assert_not_called()
+
+        assert "test-udid" in backend._connections
+
+    async def test_ensure_idle_task_creates_task(self):
+        backend = WdaBackend()
+        assert backend._idle_task is None
+        backend._ensure_idle_task()
+        assert backend._idle_task is not None
+        # Clean up
+        backend._idle_task.cancel()
+        try:
+            await backend._idle_task
+        except asyncio.CancelledError:
+            pass
+
+    async def test_close_cancels_idle_task(self):
+        backend = WdaBackend()
+        backend._ensure_idle_task()
+        assert backend._idle_task is not None
+        await backend.close()
+        assert backend._idle_task is None

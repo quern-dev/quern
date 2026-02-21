@@ -815,3 +815,15 @@ class SetupWdaRequest(BaseModel):
 
     udid: str
     team_id: str | None = None
+
+
+class StartDriverRequest(BaseModel):
+    """Request body for POST /api/v1/device/wda/start."""
+
+    udid: str
+
+
+class StopDriverRequest(BaseModel):
+    """Request body for POST /api/v1/device/wda/stop."""
+
+    udid: str

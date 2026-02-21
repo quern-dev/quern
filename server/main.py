@@ -252,6 +252,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except asyncio.CancelledError:
             pass
 
+    # Shutdown WDA client (cancels idle task, deletes sessions, kills port-forwards)
+    # Note: does NOT kill xcodebuild processes — they persist across restarts
+    if device_controller:
+        await device_controller.wda_client.close()
+
     for adapter in adapters.values():
         await adapter.stop()
     for sim_adapter in app.state.sim_log_adapters.values():

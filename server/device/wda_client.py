@@ -25,6 +25,8 @@ logger = logging.getLogger("quern-debug-server.wda-client")
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
+IDLE_TIMEOUT = 15 * 60  # 15 minutes
+IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
 
 
 @dataclass
@@ -44,9 +46,32 @@ class WdaBackend:
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
         self._next_port = FORWARD_START_PORT
+        # os_version cache for auto-start — populated by controller
+        self._device_os_versions: dict[str, str] = {}
+        # Idle timeout tracking
+        self._last_interaction: dict[str, float] = {}
+        self._idle_task: asyncio.Task | None = None
 
     async def close(self) -> None:
-        """Shutdown all port-forward subprocesses."""
+        """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
+        # Cancel idle timeout task
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+            try:
+                await self._idle_task
+            except asyncio.CancelledError:
+                pass
+            self._idle_task = None
+
+        # Delete active sessions
+        for udid, conn in list(self._connections.items()):
+            if conn.session_id:
+                try:
+                    await self.delete_session(udid)
+                except Exception:
+                    pass
+
+        # Kill port-forward subprocesses
         for conn in self._connections.values():
             if conn.forward_proc and conn.forward_proc.returncode is None:
                 conn.forward_proc.terminate()
@@ -55,6 +80,7 @@ class WdaBackend:
                 except asyncio.TimeoutError:
                     conn.forward_proc.kill()
         self._connections.clear()
+        self._last_interaction.clear()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -65,6 +91,8 @@ class WdaBackend:
 
         iOS 17+: tries the tunneld IPv6 address directly.
         iOS 16-: starts a usbmux port-forward subprocess.
+
+        If WDA is not reachable and os_version is known, auto-starts the driver.
         """
         if udid in self._connections:
             conn = self._connections[udid]
@@ -81,7 +109,43 @@ class WdaBackend:
             self._connections[udid] = _WdaConnection(base_url=base_url)
             return base_url
 
-        # Fall back to usbmux forward (iOS 16-)
+        # Try usbmux forward (iOS 16-)
+        try:
+            base_url, proc, port = await self._start_usbmux_forward(udid)
+            self._connections[udid] = _WdaConnection(
+                base_url=base_url, forward_proc=proc, local_port=port,
+            )
+            return base_url
+        except DeviceError:
+            pass
+
+        # WDA not reachable — try auto-start if we know the os_version
+        os_version = self._device_os_versions.get(udid)
+        if not os_version:
+            raise DeviceError(
+                f"WDA not reachable on {udid[:8]} and os_version unknown — "
+                "cannot auto-start. Ensure WDA is running on the device.",
+                tool="wda",
+            )
+
+        logger.info("WDA not reachable on %s, auto-starting driver...", udid[:8])
+        from server.device.wda import start_driver
+
+        result = await start_driver(udid, os_version)
+        if not result.get("ready"):
+            raise DeviceError(
+                f"Auto-started WDA driver on {udid[:8]} but it did not become responsive. "
+                f"Check log: ~/.quern/wda/runner-{udid[:8]}.log",
+                tool="wda",
+            )
+
+        # Retry connection after auto-start
+        base_url = await self._try_tunneld_connection(udid)
+        if base_url:
+            self._connections[udid] = _WdaConnection(base_url=base_url)
+            return base_url
+
+        # Try usbmux again
         base_url, proc, port = await self._start_usbmux_forward(udid)
         self._connections[udid] = _WdaConnection(
             base_url=base_url, forward_proc=proc, local_port=port,
@@ -220,6 +284,56 @@ class WdaBackend:
         logger.info("WDA session created for %s: %s", udid[:8], session_id[:8])
         return session_id
 
+    async def delete_session(self, udid: str) -> None:
+        """Delete the active WDA session for a device. No-op if no session."""
+        conn = self._connections.get(udid)
+        if not conn or not conn.session_id:
+            return
+
+        session_id = conn.session_id
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.delete(
+                    f"{conn.base_url}/session/{session_id}",
+                    timeout=WDA_TIMEOUT,
+                )
+        except Exception:
+            logger.debug("Failed to delete WDA session %s on %s", session_id[:8], udid[:8])
+
+        conn.session_id = None
+        logger.info("WDA session deleted for %s", udid[:8])
+
+    def _ensure_idle_task(self) -> None:
+        """Start the idle checker background task if not already running."""
+        if self._idle_task is None or self._idle_task.done():
+            self._idle_task = asyncio.create_task(self._idle_checker())
+
+    async def _idle_checker(self) -> None:
+        """Background task: clean up idle sessions.
+
+        Deletes the WDA session and clears cached connections, but leaves
+        the xcodebuild process running so the next interaction can reconnect
+        without a costly reinstall.
+        """
+        try:
+            while True:
+                await asyncio.sleep(IDLE_CHECK_INTERVAL)
+                now = time.monotonic()
+                idle_udids = [
+                    udid for udid, last in self._last_interaction.items()
+                    if now - last > IDLE_TIMEOUT
+                ]
+                for udid in idle_udids:
+                    logger.info("WDA idle timeout for %s — deleting session (driver stays running)", udid[:8])
+                    try:
+                        await self.delete_session(udid)
+                    except Exception:
+                        pass
+                    self._connections.pop(udid, None)
+                    self._last_interaction.pop(udid, None)
+        except asyncio.CancelledError:
+            return
+
     async def _request(
         self, method: str, udid: str, path: str,
         use_session: bool = False, **kwargs,
@@ -247,6 +361,11 @@ class WdaBackend:
                 "Ensure WDA is running on the device.",
                 tool="wda",
             )
+
+        # Track interaction for idle timeout
+        self._last_interaction[udid] = time.monotonic()
+        self._ensure_idle_task()
+
         return resp
 
     async def describe_all(self, udid: str) -> list[dict]:

@@ -17,9 +17,14 @@ from server.device.controller import DeviceController
 from server.device.wda import (
     ICON_PATH,
     WDA_APP,
+    WDA_DERIVED,
     WDA_REPO,
     WDA_STATE_FILE,
+    XCTESTRUN,
+    _find_xctestrun,
+    _is_process_alive,
     _parse_ios_major_version,
+    _rename_xctestrun,
     build_wda,
     clone_wda,
     customize_wda,
@@ -28,6 +33,8 @@ from server.device.wda import (
     read_wda_state,
     save_wda_state,
     setup_wda,
+    start_driver,
+    stop_driver,
 )
 from server.main import create_app
 from server.models import DeviceInfo, DeviceState, DeviceType
@@ -743,3 +750,252 @@ class TestWdaApi:
             )
 
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _rename_xctestrun / _find_xctestrun
+# ---------------------------------------------------------------------------
+
+
+class TestXctestrunRename:
+    def test_rename_xctestrun(self, tmp_path):
+        products = tmp_path / "Build" / "Products"
+        products.mkdir(parents=True)
+        original = products / "WebDriverAgentRunner_iphonesimulator17.4-arm64.xctestrun"
+        original.write_text("test")
+
+        with patch("server.device.wda.WDA_DERIVED", tmp_path):
+            _rename_xctestrun()
+
+        assert not original.exists()
+        assert (products / "quern-driver.xctestrun").exists()
+        assert (products / "quern-driver.xctestrun").read_text() == "test"
+
+    def test_rename_skips_if_already_named(self, tmp_path):
+        products = tmp_path / "Build" / "Products"
+        products.mkdir(parents=True)
+        stable = products / "quern-driver.xctestrun"
+        stable.write_text("test")
+
+        with patch("server.device.wda.WDA_DERIVED", tmp_path):
+            _rename_xctestrun()
+
+        assert stable.exists()
+
+    def test_rename_noop_if_no_products_dir(self, tmp_path):
+        with patch("server.device.wda.WDA_DERIVED", tmp_path):
+            _rename_xctestrun()  # Should not raise
+
+    def test_find_xctestrun_stable_name(self, tmp_path):
+        products = tmp_path / "Build" / "Products"
+        products.mkdir(parents=True)
+        stable = products / "quern-driver.xctestrun"
+        stable.write_text("test")
+
+        with patch("server.device.wda.XCTESTRUN", stable):
+            result = _find_xctestrun()
+        assert result == stable
+
+    def test_find_xctestrun_fallback_glob(self, tmp_path):
+        products = tmp_path / "Build" / "Products"
+        products.mkdir(parents=True)
+        other = products / "SomeOtherName.xctestrun"
+        other.write_text("test")
+        fake_stable = tmp_path / "nonexistent" / "quern-driver.xctestrun"
+
+        with (
+            patch("server.device.wda.XCTESTRUN", fake_stable),
+            patch("server.device.wda.WDA_DERIVED", tmp_path),
+        ):
+            result = _find_xctestrun()
+        assert result == other
+
+    def test_find_xctestrun_not_found(self, tmp_path):
+        fake_stable = tmp_path / "nonexistent" / "quern-driver.xctestrun"
+        with (
+            patch("server.device.wda.XCTESTRUN", fake_stable),
+            patch("server.device.wda.WDA_DERIVED", tmp_path),
+        ):
+            with pytest.raises(RuntimeError, match="No .xctestrun file found"):
+                _find_xctestrun()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: start_driver / stop_driver
+# ---------------------------------------------------------------------------
+
+
+class TestStartDriver:
+    async def test_start_driver_spawns_xcodebuild(self, tmp_path):
+        products = tmp_path / "Build" / "Products"
+        products.mkdir(parents=True)
+        xctestrun = products / "quern-driver.xctestrun"
+        xctestrun.write_text("test")
+
+        proc = MagicMock()
+        proc.pid = 42
+
+        with (
+            patch("server.device.wda.XCTESTRUN", xctestrun),
+            patch("server.device.wda.WDA_DERIVED", tmp_path),
+            patch("server.device.wda.WDA_LOG_DIR", tmp_path / "logs"),
+            patch("server.device.wda.read_wda_state", return_value={}),
+            patch("server.device.wda.save_wda_state") as mock_save,
+            patch("server.device.tunneld.resolve_tunnel_udid", new_callable=AsyncMock, return_value="hw-udid-123"),
+            patch("server.device.tunneld.get_tunneld_devices", new_callable=AsyncMock, return_value={
+                "hw-udid-123": [{"tunnel-address": "fd35::1"}]
+            }),
+            patch("server.device.wda.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc),
+            patch("server.device.wda._poll_wda_status", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await start_driver("DEV-UUID-123", "iOS 17.4")
+
+        assert result["status"] == "started"
+        assert result["pid"] == 42
+        assert result["ready"] is True
+        mock_save.assert_called()
+
+    async def test_start_driver_already_running(self):
+        state = {"runners": {"DEV1": {"pid": 999}}}
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda._is_process_alive", return_value=True),
+            patch("server.device.wda._find_xctestrun", return_value=Path("/fake")),
+        ):
+            result = await start_driver("DEV1", "iOS 17.4")
+
+        assert result["status"] == "already_running"
+        assert result["pid"] == 999
+
+    async def test_start_driver_cleans_stale_pid(self, tmp_path):
+        products = tmp_path / "Build" / "Products"
+        products.mkdir(parents=True)
+        xctestrun = products / "quern-driver.xctestrun"
+        xctestrun.write_text("test")
+
+        proc = MagicMock()
+        proc.pid = 100
+
+        state = {"runners": {"DEV1": {"pid": 999}}}
+        with (
+            patch("server.device.wda.XCTESTRUN", xctestrun),
+            patch("server.device.wda.WDA_DERIVED", tmp_path),
+            patch("server.device.wda.WDA_LOG_DIR", tmp_path / "logs"),
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda._is_process_alive", return_value=False),
+            patch("server.device.tunneld.resolve_tunnel_udid", new_callable=AsyncMock, return_value=None),
+            patch("server.device.tunneld.get_tunneld_devices", new_callable=AsyncMock, return_value={}),
+            patch("server.device.wda.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc),
+            patch("server.device.wda._poll_wda_status", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await start_driver("DEV1", "iOS 17.4")
+
+        assert result["status"] == "started"
+        assert result["pid"] == 100
+
+
+class TestStopDriver:
+    async def test_stop_driver_not_running(self):
+        with patch("server.device.wda.read_wda_state", return_value={}):
+            result = await stop_driver("DEV1")
+
+        assert result["status"] == "not_running"
+
+    async def test_stop_driver_sigterm(self):
+        state = {"runners": {"DEV1": {"pid": 42}}}
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda._is_process_alive", side_effect=[True, False]),
+            patch("server.device.wda.os.kill") as mock_kill,
+        ):
+            result = await stop_driver("DEV1")
+
+        assert result["status"] == "stopped"
+        mock_kill.assert_called_once_with(42, __import__("signal").SIGTERM)
+
+    async def test_stop_driver_dead_pid(self):
+        state = {"runners": {"DEV1": {"pid": 42}}}
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda._is_process_alive", return_value=False),
+        ):
+            result = await stop_driver("DEV1")
+
+        assert result["status"] == "not_running"
+
+
+# ---------------------------------------------------------------------------
+# API integration tests: /start and /stop
+# ---------------------------------------------------------------------------
+
+
+class TestWdaStartStopApi:
+    async def test_start_driver_api(self, app, auth_headers, mock_controller):
+        mock_result = {"status": "started", "udid": "00008030-AABBCCDD", "pid": 42, "ready": True}
+        with patch("server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/start",
+                    json={"udid": "00008030-AABBCCDD"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "started"
+
+    async def test_start_driver_simulator_rejected(self, app, auth_headers, mock_controller):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/v1/device/wda/start",
+                json={"udid": "AAAA-1111"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 400
+        assert "simulator" in resp.json()["detail"].lower()
+
+    async def test_start_driver_not_found(self, app, auth_headers, mock_controller):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/v1/device/wda/start",
+                json={"udid": "nonexistent"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 404
+
+    async def test_stop_driver_api(self, app, auth_headers, mock_controller):
+        mock_result = {"status": "stopped", "udid": "00008030-AABBCCDD"}
+        with patch("server.device.wda.stop_driver", new_callable=AsyncMock, return_value=mock_result):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/stop",
+                    json={"udid": "00008030-AABBCCDD"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "stopped"
+
+    async def test_stop_driver_simulator_rejected(self, app, auth_headers, mock_controller):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/v1/device/wda/stop",
+                json={"udid": "AAAA-1111"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 400

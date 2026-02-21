@@ -10,12 +10,16 @@ import asyncio
 import fcntl
 import json
 import logging
+import os
 import plistlib
 import re
+import signal
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from server.config import CONFIG_DIR
 
@@ -27,7 +31,12 @@ WDA_DIR = CONFIG_DIR / "wda"
 WDA_REPO = WDA_DIR / "WebDriverAgent"
 WDA_DERIVED = WDA_DIR / "build"
 WDA_APP = WDA_DERIVED / "Build" / "Products" / "Debug-iphoneos" / "WebDriverAgentRunner-Runner.app"
+XCTESTRUN = WDA_DERIVED / "Build" / "Products" / "quern-driver.xctestrun"
 WDA_STATE_FILE = CONFIG_DIR / "wda-state.json"
+WDA_LOG_DIR = CONFIG_DIR / "wda"
+
+DRIVER_START_TIMEOUT = 30
+DRIVER_STOP_TIMEOUT = 5
 
 CLONE_TIMEOUT = 60
 BUILD_TIMEOUT = 600
@@ -309,6 +318,9 @@ async def build_wda(team_id: str) -> bool:
     # Post-process: inject icon and display name into the Runner app
     await _post_process_runner_app(team_id)
 
+    # Rename the xctestrun file to a stable name
+    _rename_xctestrun()
+
     # Update state
     now = datetime.now(timezone.utc).isoformat()
     state = read_wda_state()
@@ -419,6 +431,213 @@ async def _find_signing_identity(team_id: str) -> str | None:
             return line.split("=", 1)[1]
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# xctestrun helpers
+# ---------------------------------------------------------------------------
+
+
+def _rename_xctestrun() -> None:
+    """Rename the generated *.xctestrun to quern-driver.xctestrun for stable reference."""
+    products_dir = WDA_DERIVED / "Build" / "Products"
+    if not products_dir.exists():
+        return
+
+    for f in products_dir.glob("*.xctestrun"):
+        if f.name == "quern-driver.xctestrun":
+            continue
+        dest = products_dir / "quern-driver.xctestrun"
+        f.rename(dest)
+        logger.info("Renamed %s → %s", f.name, dest.name)
+        return
+
+
+def _find_xctestrun() -> Path:
+    """Find the xctestrun file — prefer stable name, fall back to glob."""
+    if XCTESTRUN.exists():
+        return XCTESTRUN
+
+    products_dir = WDA_DERIVED / "Build" / "Products"
+    if products_dir.exists():
+        for f in products_dir.glob("*.xctestrun"):
+            return f
+
+    raise RuntimeError(
+        "No .xctestrun file found. Run setup_wda() first to build WDA."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Driver lifecycle (start / stop xcodebuild test-without-building)
+# ---------------------------------------------------------------------------
+
+
+async def _poll_wda_status(url: str, timeout: float = DRIVER_START_TIMEOUT) -> bool:
+    """Poll WDA /status until it responds 200, with timeout."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{url}/status", timeout=3.0)
+                if resp.status_code == 200:
+                    return True
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+    return False
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+async def start_driver(udid: str, os_version: str) -> dict:
+    """Start WDA on a physical device via xcodebuild test-without-building.
+
+    Spawns xcodebuild as a background process with output redirected to a log file.
+    Tracks PID in wda-state.json so the process persists across server restarts.
+
+    Returns dict with {status, udid, pid, ready}.
+    """
+    xctestrun_path = _find_xctestrun()
+
+    state = read_wda_state()
+    runners = state.get("runners", {})
+
+    # Check for existing runner
+    existing = runners.get(udid)
+    if existing:
+        pid = existing.get("pid")
+        if pid and _is_process_alive(pid):
+            logger.info("WDA driver already running for %s (pid %d)", udid[:8], pid)
+            return {"status": "already_running", "udid": udid, "pid": pid, "ready": True}
+        # Stale PID — clean up
+        logger.info("Cleaning stale WDA runner for %s (pid %s)", udid[:8], pid)
+        del runners[udid]
+        state["runners"] = runners
+        save_wda_state(state)
+
+    # Resolve hardware UDID for iOS 17+ tunneld devices
+    from server.device.tunneld import resolve_tunnel_udid
+
+    major = _parse_ios_major_version(os_version)
+    hw_udid = udid
+    if major >= 17:
+        resolved = await resolve_tunnel_udid(udid)
+        if resolved:
+            hw_udid = resolved
+
+    # Prepare log file
+    WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
+    log_file = open(log_path, "w")
+
+    logger.info("Starting WDA driver for %s (hw_udid=%s)", udid[:8], hw_udid)
+
+    proc = await asyncio.create_subprocess_exec(
+        "xcodebuild", "test-without-building",
+        "-xctestrun", str(xctestrun_path),
+        "-destination", f"id={hw_udid}",
+        stdout=log_file,
+        stderr=log_file,
+    )
+
+    # Save runner state immediately (before polling)
+    state = read_wda_state()
+    state.setdefault("runners", {})[udid] = {
+        "pid": proc.pid,
+        "hw_udid": hw_udid,
+        "log_path": str(log_path),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_wda_state(state)
+
+    # Poll for WDA to become responsive
+    # For tunneld devices, use the tunnel address; for usbmux, use localhost
+    from server.device.tunneld import get_tunneld_devices
+
+    wda_url = None
+    if major >= 17:
+        devices = await get_tunneld_devices()
+        tunnel_udid = await resolve_tunnel_udid(udid)
+        tunnels = devices.get(tunnel_udid or udid, [])
+        if tunnels:
+            addr = tunnels[0].get("tunnel-address")
+            if addr:
+                wda_url = f"http://[{addr}]:8100"
+
+    if not wda_url:
+        wda_url = "http://localhost:8100"
+
+    ready = await _poll_wda_status(wda_url, timeout=DRIVER_START_TIMEOUT)
+
+    if not ready:
+        logger.warning("WDA did not become responsive within %ds for %s", DRIVER_START_TIMEOUT, udid[:8])
+
+    return {
+        "status": "started",
+        "udid": udid,
+        "pid": proc.pid,
+        "ready": ready,
+    }
+
+
+async def stop_driver(udid: str) -> dict:
+    """Stop WDA driver for a device.
+
+    Sends SIGTERM, waits up to 5s, then SIGKILL if needed.
+    Removes runner entry from wda-state.json.
+    """
+    state = read_wda_state()
+    runners = state.get("runners", {})
+    existing = runners.get(udid)
+
+    if not existing:
+        return {"status": "not_running", "udid": udid}
+
+    pid = existing.get("pid")
+    if not pid or not _is_process_alive(pid):
+        # Already dead — clean up state
+        del runners[udid]
+        state["runners"] = runners
+        save_wda_state(state)
+        return {"status": "not_running", "udid": udid}
+
+    logger.info("Stopping WDA driver for %s (pid %d)", udid[:8], pid)
+
+    # SIGTERM
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    # Wait for exit
+    for _ in range(DRIVER_STOP_TIMEOUT * 10):
+        if not _is_process_alive(pid):
+            break
+        await asyncio.sleep(0.1)
+    else:
+        # Still alive — SIGKILL
+        logger.warning("WDA driver pid %d did not stop, sending SIGKILL", pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # Clean up state
+    state = read_wda_state()
+    runners = state.get("runners", {})
+    runners.pop(udid, None)
+    state["runners"] = runners
+    save_wda_state(state)
+
+    return {"status": "stopped", "udid": udid}
 
 
 # ---------------------------------------------------------------------------

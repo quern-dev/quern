@@ -45,4 +45,72 @@ export function registerWdaTools(server: McpServer): void {
       }
     }
   );
+
+  server.tool(
+    "start_driver",
+    `Start the WDA driver (xcodebuild test-without-building) on a physical iOS device. Auto-starts if not already running. Returns status, PID, and whether WDA is responsive. The driver persists across server restarts.`,
+    {
+      udid: z.string().describe("Physical device UDID"),
+    },
+    async ({ udid }) => {
+      try {
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/device/wda/start",
+          undefined,
+          { udid }
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "stop_driver",
+    `Stop the WDA driver on a physical iOS device. Deletes the active WDA session and kills the xcodebuild process. Use this to free device resources when done with UI automation.`,
+    {
+      udid: z.string().describe("Physical device UDID"),
+    },
+    async ({ udid }) => {
+      try {
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/device/wda/stop",
+          undefined,
+          { udid }
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
 }

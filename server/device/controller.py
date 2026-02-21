@@ -148,13 +148,17 @@ class DeviceController(DeviceControllerUI):
         physical_devices = await self.devicectl.list_devices()
         usbmux_devices = await self.usbmux.list_devices()
 
-        # Populate device type cache
+        # Populate device type cache and WDA os_version cache
         for d in sim_devices:
             self._device_type_cache[d.udid] = DeviceType.SIMULATOR
         for d in physical_devices:
             self._device_type_cache[d.udid] = DeviceType.DEVICE
+            if d.os_version:
+                self.wda_client._device_os_versions[d.udid] = d.os_version
         for d in usbmux_devices:
             self._device_type_cache[d.udid] = DeviceType.DEVICE
+            if d.os_version:
+                self.wda_client._device_os_versions[d.udid] = d.os_version
 
         return sim_devices + physical_devices + usbmux_devices
 
