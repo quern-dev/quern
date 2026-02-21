@@ -12,6 +12,7 @@ from server.device.screenshots import process_screenshot
 from server.device.simctl import SimctlBackend
 from server.device.idb import IdbBackend
 from server.device.usbmux import UsbmuxBackend
+from server.device.wda_client import WdaBackend
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 logger = logging.getLogger("quern-debug-server.device")
@@ -26,6 +27,7 @@ class DeviceController(DeviceControllerUI):
         self.devicectl = DevicectlBackend()
         self.pmd3 = Pmd3Backend()
         self.usbmux = UsbmuxBackend()
+        self.wda_client = WdaBackend()
         self._active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
         # UI tree cache: {udid: (elements, timestamp)}

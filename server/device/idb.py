@@ -368,7 +368,10 @@ class IdbBackend:
         """Press a hardware button. Runs: idb ui button <BUTTON> --udid <udid>"""
         await self._run("ui", "button", button, "--udid", udid)
 
-    async def select_all_and_delete(self, udid: str, x: float, y: float) -> None:
+    async def select_all_and_delete(
+        self, udid: str, x: float, y: float,
+        element_type: str | None = None,
+    ) -> None:
         """Select all text in focused field and delete it.
 
         Triple-taps at (x, y) to select all text, then presses Backspace.

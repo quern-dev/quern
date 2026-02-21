@@ -1,4 +1,4 @@
-"""DeviceControllerUI — mixin for UI inspection and interaction (idb-dependent)."""
+"""DeviceControllerUI — mixin for UI inspection and interaction."""
 
 from __future__ import annotations
 
@@ -25,14 +25,17 @@ class DeviceControllerUI:
 
     Expects the consuming class to provide:
     - self.idb: IdbBackend
+    - self.wda_client: WdaBackend
     - self.simctl: SimctlBackend
     - self._ui_cache: dict[str, tuple[list[UIElement], float]]
     - self._cache_ttl: float
     - self._cache_hits: int
     - self._cache_misses: int
     - self._device_info_cache: dict[str, DeviceInfo]
+    - self._device_type_cache: dict[str, DeviceType]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
+    - self._is_physical(udid) -> bool
     """
 
     # Bottom safe area inset for devices with home indicator (Face ID / Dynamic Island)
@@ -63,6 +66,15 @@ class DeviceControllerUI:
         "_Trackables button in tab bar": (280, 40, "bottom-left"),
         "_Settings button": (28, 78, "top-right"),  # 28px from right edge, 78px from top
     }
+
+    def _ui_backend(self, udid: str):
+        """Return the appropriate UI automation backend for a device.
+
+        Physical devices use WdaBackend; simulators use IdbBackend.
+        """
+        if self._is_physical(udid):
+            return self.wda_client
+        return self.idb
 
     async def _get_screen_dimensions(self, udid: str) -> dict | None:
         """Get screen dimensions for a device. Returns {"width": int, "height": int} or None."""
@@ -154,7 +166,7 @@ class DeviceControllerUI:
             # Swipe up (start lower, end higher)
             swipe_start_y = screen_height * 0.7
             swipe_end_y = swipe_start_y - scroll_amount
-            await self.idb.swipe(resolved, mid_x, swipe_start_y, mid_x, swipe_end_y, 0.3)
+            await self._ui_backend(resolved).swipe(resolved, mid_x, swipe_start_y, mid_x, swipe_end_y, 0.3)
             self._invalidate_ui_cache(resolved)
 
             # Re-fetch and check
@@ -243,7 +255,7 @@ class DeviceControllerUI:
 
         # Probe the point
         try:
-            element = await self.idb.describe_point(udid, x, y)
+            element = await self._ui_backend(udid).describe_point(udid, x, y)
             if not element:
                 logger.debug(f"[FAST PATH] No element at ({x}, {y})")
                 return (True, None)  # Fast path succeeded, but element not found
@@ -313,7 +325,7 @@ class DeviceControllerUI:
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
 
-        raw = await self.idb.describe_all(resolved)
+        raw = await self._ui_backend(resolved).describe_all(resolved)
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -348,7 +360,7 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
-        nested = await self.idb.describe_all_nested(resolved)
+        nested = await self._ui_backend(resolved).describe_all_nested(resolved)
         child_dicts = find_children_of(nested, parent_identifier=children_of, parent_label=children_of)
         elements = parse_elements(child_dicts)
         return elements, resolved
@@ -596,7 +608,7 @@ class DeviceControllerUI:
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
         """Tap at coordinates. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.idb.tap(resolved, x, y)
+        await self._ui_backend(resolved).tap(resolved, x, y)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
@@ -658,7 +670,7 @@ class DeviceControllerUI:
                     logger.info(f"[FAST PATH TAP] Tapping {identifier} at calculated coordinates ({x}, {y}) [anchor={anchor}]")
 
                     # Tap directly without fetching UI tree
-                    await self.idb.tap(resolved, x, y)
+                    await self._ui_backend(resolved).tap(resolved, x, y)
 
                     return {
                         "status": "ok",
@@ -771,7 +783,7 @@ class DeviceControllerUI:
                         if matches_final:
                             cx, cy = get_tap_point(matches_final[0])
 
-            await self.idb.tap(resolved, cx, cy)
+            await self._ui_backend(resolved).tap(resolved, cx, cy)
             self._invalidate_ui_cache(resolved)  # UI changed
 
             # Future enhancement: Post-tap verification
@@ -841,14 +853,14 @@ class DeviceControllerUI:
     ) -> str:
         """Swipe gesture. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.idb.swipe(resolved, start_x, start_y, end_x, end_y, duration)
+        await self._ui_backend(resolved).swipe(resolved, start_x, start_y, end_x, end_y, duration)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
     async def type_text(self, text: str, udid: str | None = None) -> str:
         """Type text into focused field. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.idb.type_text(resolved, text)
+        await self._ui_backend(resolved).type_text(resolved, text)
         self._invalidate_ui_cache(resolved)  # UI changed (text field value updated)
         return resolved
 
@@ -883,14 +895,16 @@ class DeviceControllerUI:
         cx = target.frame["x"] + target.frame["width"] / 2
         cy = target.frame["y"] + target.frame["height"] / 2
 
-        await self.idb.select_all_and_delete(resolved, x=cx, y=cy)
+        await self._ui_backend(resolved).select_all_and_delete(
+            resolved, x=cx, y=cy, element_type=target.type,
+        )
         self._invalidate_ui_cache(resolved)
         return resolved
 
     async def press_button(self, button: str, udid: str | None = None) -> str:
         """Press a hardware button. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        await self.idb.press_button(resolved, button)
+        await self._ui_backend(resolved).press_button(resolved, button)
         return resolved
 
     async def screenshot_annotated(
