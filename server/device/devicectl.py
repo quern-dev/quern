@@ -128,6 +128,10 @@ class DevicectlBackend:
             # "connected" = active tunnel, "disconnected" = reachable but no tunnel yet
             is_connected = tunnel_state != "unavailable"
 
+            # Skip unreachable devices — they can't be used for anything
+            if not is_connected:
+                continue
+
             devices.append(DeviceInfo(
                 udid=identifier,
                 name=name,

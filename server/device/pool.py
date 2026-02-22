@@ -274,6 +274,16 @@ class DevicePool:
                     )
                     state.devices[device_info.udid] = entry
 
+            # Remove devices that no longer exist in simctl
+            live_udids = {d.udid for d in simctl_devices}
+            stale_udids = [uid for uid in state.devices if uid not in live_udids]
+            for uid in stale_udids:
+                removed = state.devices.pop(uid)
+                logger.info(
+                    "Pruned deleted device from pool: %s (%s, %s)",
+                    uid[:8], removed.name, removed.os_version,
+                )
+
             state.updated_at = now
             self._write_state(state)
             self._last_refresh_at = now
