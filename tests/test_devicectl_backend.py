@@ -60,7 +60,7 @@ class TestIsAvailable:
 
 class TestListDevices:
     async def test_parses_paired_devices(self):
-        """All paired devices are returned with correct state and connectivity."""
+        """Only reachable paired devices are returned (unreachable ones are skipped)."""
         fixture = _load_fixture("devicectl_list_output.json")
         backend = DevicectlBackend()
 
@@ -68,10 +68,9 @@ class TestListDevices:
 
         devices = await backend.list_devices()
 
-        # Both paired devices should appear
-        assert len(devices) == 2
+        # Only the connected device should appear; the unavailable "Old iPad" is skipped
+        assert len(devices) == 1
 
-        # First device: connected tunnel + booted
         dev = devices[0]
         assert dev.udid == "53DA57AA-1234-5678-9ABC-DEF012345678"
         assert dev.name == "John's iPhone"
@@ -80,14 +79,6 @@ class TestListDevices:
         assert dev.os_version == "iOS 18.3.2"
         assert dev.connection_type == "usb"
         assert dev.is_connected is True
-
-        # Second device: disconnected, no bootState → shutdown, not connected
-        dev2 = devices[1]
-        assert dev2.udid == "BBBB2222-3333-4444-5555-666677778888"
-        assert dev2.name == "Old iPad"
-        assert dev2.state == DeviceState.SHUTDOWN
-        assert dev2.device_type == DeviceType.DEVICE
-        assert dev2.is_connected is False
 
     async def test_wifi_disconnected_tunnel_is_booted(self):
         """WiFi devices with tunnelState=disconnected are reachable → booted."""

@@ -287,7 +287,7 @@ def create_app(
     config: ServerConfig | None = None,
     process_filter: str | None = None,
     enable_syslog: bool = True,
-    enable_oslog: bool = True,
+    enable_oslog: bool = False,
     subsystem_filter: str | None = None,
     enable_crash: bool = True,
     crash_dir: Path | None = None,
@@ -390,8 +390,8 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     parser.add_argument(
-        "--oslog", action="store_true", default=None,
-        help="Enable OSLog adapter (default: enabled on macOS)",
+        "--oslog", action="store_true", default=False,
+        help="Enable OSLog adapter (default: off)",
     )
     parser.add_argument(
         "--no-oslog", action="store_true", default=False,
@@ -518,9 +518,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     )
 
     enable_syslog = not args.no_syslog
-    enable_oslog = not args.no_oslog and (
-        args.oslog is True or platform.system() == "Darwin"
-    )
+    enable_oslog = args.oslog is True and not args.no_oslog
     enable_crash = not args.no_crash
 
     # Write state file
