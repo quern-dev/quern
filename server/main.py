@@ -417,8 +417,8 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
         help="Run idevicecrashreport to pull crashes from device",
     )
     parser.add_argument(
-        "--simulator-crashes", action="store_true", default=False,
-        help="Also watch ~/Library/Logs/DiagnosticReports/ for simulator crash reports",
+        "--simulator-crashes", action=argparse.BooleanOptionalAction, default=True,
+        help="Watch ~/Library/Logs/DiagnosticReports/ for simulator crash reports (default: enabled)",
     )
     parser.add_argument(
         "--crash-process-filter", default=None, type=str,

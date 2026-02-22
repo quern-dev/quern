@@ -126,6 +126,8 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 **Key insight**: Crashes leave traces in multiple places. Cross-referencing sources is where you find root causes.
 
+**Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `./quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
+
 ---
 
 ### Reproducing Bug Reports

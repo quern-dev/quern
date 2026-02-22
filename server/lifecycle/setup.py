@@ -717,6 +717,57 @@ def check_tunneld() -> CheckResult:
     )
 
 
+def configure_crash_reporter_dialog() -> CheckResult:
+    """Check and optionally disable the macOS crash reporter dialog.
+
+    When set to 'none', crash reports are still written to
+    ~/Library/Logs/DiagnosticReports/ but no modal dialog appears.
+    This is especially useful on headless CI machines where hundreds
+    of dialogs can accumulate.
+    """
+    if platform.system() != "Darwin":
+        return CheckResult(
+            name="Crash dialog",
+            status=CheckStatus.SKIPPED,
+            message="macOS only",
+        )
+
+    rc, stdout, _ = _run(["defaults", "read", "com.apple.CrashReporter", "DialogType"])
+    current = stdout.strip() if rc == 0 else ""
+
+    if current == "none":
+        return CheckResult(
+            name="Crash dialog",
+            status=CheckStatus.OK,
+            message="Disabled (crash reports still saved to disk)",
+        )
+
+    desc = f"Currently: '{current}'" if current else "Currently: default (shows dialog)"
+    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})"):
+        rc, _, stderr = _run([
+            "defaults", "write", "com.apple.CrashReporter", "DialogType", "none",
+        ])
+        if rc == 0:
+            return CheckResult(
+                name="Crash dialog",
+                status=CheckStatus.OK,
+                message="Disabled (crash reports still saved to disk)",
+            )
+        return CheckResult(
+            name="Crash dialog",
+            status=CheckStatus.ERROR,
+            message="Failed to set defaults",
+            detail=stderr,
+        )
+
+    return CheckResult(
+        name="Crash dialog",
+        status=CheckStatus.WARNING,
+        message=desc,
+        detail="Disable manually: defaults write com.apple.CrashReporter DialogType none",
+    )
+
+
 def check_booted_simulators() -> list[dict[str, str]]:
     """Return a list of booted simulators [{name, udid}]."""
     rc, stdout, _ = _run(["xcrun", "simctl", "list", "devices", "--json"])
@@ -1131,6 +1182,10 @@ def run_setup() -> int:
 
     report.add(check_vpn())
     report.add(check_mitmproxy_cert())
+
+    # ── Crash reporter dialog ──
+
+    report.add(configure_crash_reporter_dialog())
 
     # ── Simulator cert setup ──
 

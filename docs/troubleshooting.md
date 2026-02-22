@@ -48,6 +48,8 @@ CoreData: error: Failed to call designated initializer
 
 ## Reading Crash Reports
 
+Simulator crash reports from `~/Library/Logs/DiagnosticReports/` are watched automatically. To suppress the macOS crash dialog (useful on CI), run `defaults write com.apple.CrashReporter DialogType none` or use `./quern setup`.
+
 ### Key Fields
 
 - **Exception Type**: The Mach exception (e.g., `EXC_BAD_ACCESS`, `EXC_CRASH`)
