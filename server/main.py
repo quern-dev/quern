@@ -119,6 +119,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             pull_from_device=app.state.pull_crashes,
             extra_watch_dirs=app.state.crash_extra_watch_dirs,
             process_filter=app.state.crash_process_filter,
+            on_crash_hook=app.state.on_crash_hook,
         )
         adapters["crash"] = crash
         app.state.crash_adapter = crash
@@ -301,6 +302,7 @@ def create_app(
     crash_process_filter: str | None = None,
     enable_proxy: bool = True,
     proxy_port: int = 9101,
+    on_crash_hook: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     if config is None:
@@ -328,6 +330,7 @@ def create_app(
     app.state.crash_process_filter = crash_process_filter
     app.state.enable_proxy = enable_proxy
     app.state.proxy_port = proxy_port
+    app.state.on_crash_hook = on_crash_hook
     app.state.source_adapters = {}
     app.state.crash_adapter = None
     app.state.build_adapter = None
@@ -431,6 +434,10 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-syslog", action="store_true", default=False,
         help="Disable idevicesyslog capture (default: already off)",
+    )
+    parser.add_argument(
+        "--on-crash", default=None, type=str,
+        help="Shell command to run on each crash (CrashReport JSON piped to stdin)",
     )
     parser.add_argument(
         "--no-proxy", action="store_true", default=False,
@@ -562,6 +569,8 @@ def _cmd_start(args: argparse.Namespace) -> None:
                 print(f"  Crash process filter: {args.crash_process_filter}")
         if enable_proxy:
             print(f"  Proxy: enabled (port: {proxy_port})")
+        if args.on_crash:
+            print(f"  On-crash hook: {args.on_crash}")
         print()
 
     crash_extra_watch_dirs = []
@@ -581,6 +590,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         crash_process_filter=args.crash_process_filter,
         enable_proxy=enable_proxy,
         proxy_port=proxy_port,
+        on_crash_hook=args.on_crash,
     )
 
     uv_config = uvicorn.Config(

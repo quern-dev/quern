@@ -305,6 +305,43 @@ async def test_process_filter_skips_non_matching_crash_text(tmp_crash_dir):
 
 
 # ------------------------------------------------------------------
+# on-crash hook
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_crash_hook_receives_json(tmp_crash_dir, tmp_path):
+    """The on-crash hook should receive valid CrashReport JSON on stdin."""
+    output_file = tmp_path / "hook_output.json"
+    hook_cmd = f"cat > {output_file}"
+
+    adapter = CrashAdapter(
+        watch_dir=tmp_crash_dir,
+        poll_interval=0.1,
+        on_crash_hook=hook_cmd,
+    )
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+
+    src = FIXTURES / "crash_sample.ips"
+    (tmp_crash_dir / "hook_test.ips").write_text(src.read_text())
+
+    # Wait for poll + hook to complete
+    await asyncio.sleep(1.0)
+    await adapter.stop()
+
+    assert len(entries) == 1
+    assert output_file.exists(), "Hook output file was not created"
+
+    data = json.loads(output_file.read_text())
+    assert data["process"] == "MyApp"
+    assert data["exception_type"] == "EXC_CRASH"
+    assert data["signal"] == "SIGABRT"
+    assert "crash_id" in data
+
+
+# ------------------------------------------------------------------
 # Status
 # ------------------------------------------------------------------
 

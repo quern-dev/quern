@@ -42,6 +42,7 @@ class CrashAdapter(BaseSourceAdapter):
         poll_interval: float = POLL_INTERVAL,
         extra_watch_dirs: list[Path] | None = None,
         process_filter: str | None = None,
+        on_crash_hook: str | None = None,
     ) -> None:
         super().__init__(
             adapter_id="crash",
@@ -54,6 +55,7 @@ class CrashAdapter(BaseSourceAdapter):
         self.poll_interval = poll_interval
         self.extra_watch_dirs = extra_watch_dirs or []
         self.process_filter = process_filter
+        self.on_crash_hook = on_crash_hook
         self._poll_task: asyncio.Task | None = None
         self._seen_files: set[str] = set()
         self.crash_reports: list[CrashReport] = []
@@ -182,6 +184,36 @@ class CrashAdapter(BaseSourceAdapter):
                     raw=content[:2000],
                 )
                 await self.emit(entry)
+                if self.on_crash_hook:
+                    asyncio.create_task(self._run_crash_hook(report))
+
+    async def _run_crash_hook(self, report: CrashReport) -> None:
+        """Run the on-crash hook command with CrashReport JSON on stdin."""
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                self.on_crash_hook,  # type: ignore[arg-type]
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=report.model_dump_json().encode()),
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("on-crash hook timed out after 60s, killing")
+                proc.kill()
+                await proc.wait()
+                return
+            if proc.returncode != 0:
+                logger.warning(
+                    "on-crash hook exited with code %d: %s",
+                    proc.returncode,
+                    stderr.decode(errors="replace")[:500],
+                )
+        except Exception:
+            logger.exception("on-crash hook failed")
 
     def _parse_crash_file(self, path: Path, content: str) -> CrashReport | None:
         """Parse a .ips (JSON) or .crash (text) file."""
