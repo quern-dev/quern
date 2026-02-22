@@ -223,21 +223,35 @@ class CrashAdapter(BaseSourceAdapter):
             return self._parse_crash_text(path, content)
         return None
 
+    # bug_type values that represent actual crash reports (not diagnostics)
+    CRASH_BUG_TYPES = {"309"}
+
     def _parse_ips(self, path: Path, content: str) -> CrashReport | None:
         """Parse iOS 15+ .ips JSON crash report."""
+        header: dict = {}
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
-            # Some .ips files have a header line before JSON
+            # .ips files typically have a JSON header line, then the report body
             lines = content.split("\n", 1)
             if len(lines) < 2:
                 logger.warning("Could not parse .ips file %s", path)
                 return None
             try:
+                header = json.loads(lines[0])
+            except json.JSONDecodeError:
+                pass
+            try:
                 data = json.loads(lines[1])
             except json.JSONDecodeError:
                 logger.warning("Could not parse .ips file %s", path)
                 return None
+
+        # Filter out non-crash diagnostic reports (Jetsam, SFA, analytics, etc.)
+        bug_type = header.get("bug_type") or data.get("bug_type")
+        if bug_type and str(bug_type) not in self.CRASH_BUG_TYPES:
+            logger.debug("Skipping non-crash .ips (bug_type=%s): %s", bug_type, path.name)
+            return None
 
         crash_id = uuid.uuid4().hex[:12]
         proc_name = data.get("procName", "") or data.get("name", "") or path.stem

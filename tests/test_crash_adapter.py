@@ -305,6 +305,44 @@ async def test_process_filter_skips_non_matching_crash_text(tmp_crash_dir):
 
 
 # ------------------------------------------------------------------
+# bug_type filtering
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_skips_non_crash_ips(tmp_crash_dir):
+    """Non-crash .ips files (Jetsam, SFA, analytics) should be ignored."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=0.1)
+    entries = _collect_entries(adapter)
+
+    await adapter.start()
+
+    # Jetsam event (bug_type 298)
+    jetsam = '{"bug_type":"298"}\n{"build":"iPhone OS 18.6","product":"iPhone12,1"}'
+    (tmp_crash_dir / "JetsamEvent.ips").write_text(jetsam)
+
+    # SFA diagnostic (bug_type 226)
+    sfa = '{"bug_type":"226"}\n{"postTime":123,"events":[]}'
+    (tmp_crash_dir / "SFA-networking.ips").write_text(sfa)
+
+    # Real crash (bug_type 309) — should be captured
+    crash = json.dumps({
+        "bug_type": "309",
+        "procName": "TestApp",
+        "exception": {"type": "EXC_CRASH", "signal": "SIGABRT"},
+        "faultingThread": 0,
+        "threads": [{"frames": [{"symbol": "abort"}]}],
+    })
+    (tmp_crash_dir / "TestApp-crash.ips").write_text(f'{{"bug_type":"309"}}\n{crash}')
+
+    await asyncio.sleep(0.5)
+    await adapter.stop()
+
+    assert len(entries) == 1
+    assert adapter.crash_reports[0].process == "TestApp"
+
+
+# ------------------------------------------------------------------
 # on-crash hook
 # ------------------------------------------------------------------
 
