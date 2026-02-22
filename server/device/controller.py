@@ -39,6 +39,8 @@ class DeviceController(DeviceControllerUI):
         self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        # CoreDevice UUID -> libimobiledevice UDID mapping (populated by list_devices)
+        self._usbmux_udid_map: dict[str, str] = {}
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
@@ -172,7 +174,53 @@ class DeviceController(DeviceControllerUI):
             if d.os_version:
                 self.wda_client._device_os_versions[d.udid] = d.os_version
 
+        # Build CoreDevice UUID -> libimobiledevice UDID mapping
+        # by correlating device names between devicectl and usbmux
+        usb_name_map = await self.usbmux.get_usb_udid_map()
+        for d in physical_devices:
+            if d.name in usb_name_map:
+                self._usbmux_udid_map[d.udid] = usb_name_map[d.name]
+
         return sim_devices + physical_devices + usbmux_devices
+
+    async def get_libimobiledevice_udid(self, coredevice_udid: str) -> str | None:
+        """Look up the libimobiledevice UDID for a CoreDevice UUID.
+
+        For pre-iOS 17 devices discovered via usbmux, the UDID is already in
+        libimobiledevice format (40-char hex) — return it directly.
+
+        Returns None if the device is not USB-connected (e.g. network-only).
+        Refreshes the mapping if the UDID isn't found on first lookup.
+        """
+        # Check the CoreDevice -> libimobiledevice mapping
+        udid = self._usbmux_udid_map.get(coredevice_udid)
+        if udid is not None:
+            return udid
+
+        # Pre-iOS 17 devices already use libimobiledevice UDIDs as their
+        # primary identifier (from usbmux). Check if this UDID belongs to
+        # a usbmux-discovered device and return it as-is.
+        device_type = self._device_type_cache.get(coredevice_udid)
+        if device_type == DeviceType.DEVICE:
+            # It's a known physical device — check if it's a usbmux UDID
+            # (40-char hex, not a CoreDevice UUID format)
+            if len(coredevice_udid) == 40 and all(c in "0123456789abcdef" for c in coredevice_udid):
+                return coredevice_udid
+
+        # Refresh and try again
+        await self.list_devices()
+
+        udid = self._usbmux_udid_map.get(coredevice_udid)
+        if udid is not None:
+            return udid
+
+        # Re-check after refresh for usbmux devices
+        device_type = self._device_type_cache.get(coredevice_udid)
+        if device_type == DeviceType.DEVICE:
+            if len(coredevice_udid) == 40 and all(c in "0123456789abcdef" for c in coredevice_udid):
+                return coredevice_udid
+
+        return None
 
     async def boot(self, udid: str | None = None, name: str | None = None) -> str:
         """Boot a simulator by udid or name. Returns the udid that was booted."""

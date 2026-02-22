@@ -155,3 +155,46 @@ class TestIsAvailable:
         backend = UsbmuxBackend()
         with patch.object(backend, "_find_binary", return_value=None):
             assert await backend.is_available() is False
+
+
+# ---------------------------------------------------------------------------
+# get_usb_udid_map
+# ---------------------------------------------------------------------------
+
+
+class TestGetUsbUdidMap:
+    async def test_returns_all_devices_unfiltered(self, backend):
+        """get_usb_udid_map returns ALL devices, including iOS 17+."""
+        fixture_json = (FIXTURES / "usbmux_list_output.json").read_bytes()
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(fixture_json, b""))
+        mock_proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await backend.get_usb_udid_map()
+
+        # Fixture has 4 devices — all should be included (no version filter)
+        assert len(result) == 4
+        assert result["iPhone 7"] == "5f9f02e25a8d7b3c1e4f6a9d2b8c0e1f3a5d7b9c"
+        assert result["iPhone 14 Pro"] == "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1"
+        assert result["iPad Air"] == "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2"
+
+    async def test_empty_on_failure(self, backend):
+        with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
+            result = await backend.get_usb_udid_map()
+        assert result == {}
+
+    async def test_skips_entries_without_name_or_udid(self, backend):
+        raw = json.dumps([
+            {"UniqueDeviceID": "aaa", "DeviceName": ""},
+            {"UniqueDeviceID": "", "DeviceName": "Test"},
+            {"UniqueDeviceID": "bbb", "DeviceName": "Good Device"},
+        ]).encode()
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(raw, b""))
+        mock_proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await backend.get_usb_udid_map()
+
+        assert result == {"Good Device": "bbb"}

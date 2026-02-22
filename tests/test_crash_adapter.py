@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -396,3 +397,94 @@ async def test_status_watching(tmp_crash_dir):
     await adapter.stop()
     status = adapter.status()
     assert status.status == "stopped"
+
+
+# ------------------------------------------------------------------
+# On-demand pull_from_device
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pull_from_device_with_udid(tmp_crash_dir):
+    """pull_from_device should call idevicecrashreport with -u <udid>."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+
+    mock_proc = AsyncMock()
+    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.returncode = 0
+
+    with patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        result = await adapter.pull_from_device("00008030-AABBCCDD")
+
+        # Verify the -u flag was passed
+        mock_exec.assert_called_once()
+        args = mock_exec.call_args[0]
+        assert "-u" in args
+        assert "00008030-AABBCCDD" in args
+        assert "-e" in args
+
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_pull_from_device_without_udid(tmp_crash_dir):
+    """pull_from_device without UDID should not pass -u flag."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+
+    mock_proc = AsyncMock()
+    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.returncode = 0
+
+    with patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await adapter.pull_from_device()
+
+        args = mock_exec.call_args[0]
+        assert "-u" not in args
+        assert "-e" in args
+
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_pull_from_device_returns_new_reports(tmp_crash_dir):
+    """pull_from_device should return only newly discovered crash reports."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+
+    src = FIXTURES / "crash_sample.ips"
+
+    async def fake_wait():
+        # Simulate idevicecrashreport writing a file
+        (tmp_crash_dir / "pulled_crash.ips").write_text(src.read_text())
+        return 0
+
+    mock_proc = AsyncMock()
+    mock_proc.wait = fake_wait
+    mock_proc.returncode = 0
+
+    with patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        new_reports = await adapter.pull_from_device("00008030-AABBCCDD")
+
+    assert len(new_reports) == 1
+    assert new_reports[0].process == "MyApp"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_pull_from_device_no_binary(tmp_crash_dir):
+    """pull_from_device should return empty list if idevicecrashreport is not installed."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+
+    with patch("shutil.which", return_value=None):
+        result = await adapter.pull_from_device("00008030-AABBCCDD")
+
+    assert result == []
+    await adapter.stop()

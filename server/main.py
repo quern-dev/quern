@@ -116,7 +116,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             device_id=config.default_device_id,
             on_entry=dedup.process,
             watch_dir=app.state.crash_dir,
-            pull_from_device=app.state.pull_crashes,
             extra_watch_dirs=app.state.crash_extra_watch_dirs,
             process_filter=app.state.crash_process_filter,
             on_crash_hook=app.state.on_crash_hook,
@@ -297,7 +296,6 @@ def create_app(
     subsystem_filter: str | None = None,
     enable_crash: bool = True,
     crash_dir: Path | None = None,
-    pull_crashes: bool = False,
     crash_extra_watch_dirs: list[Path] | None = None,
     crash_process_filter: str | None = None,
     enable_proxy: bool = True,
@@ -325,7 +323,6 @@ def create_app(
     app.state.subsystem_filter = subsystem_filter
     app.state.enable_crash = enable_crash
     app.state.crash_dir = crash_dir
-    app.state.pull_crashes = pull_crashes
     app.state.crash_extra_watch_dirs = crash_extra_watch_dirs or []
     app.state.crash_process_filter = crash_process_filter
     app.state.enable_proxy = enable_proxy
@@ -414,10 +411,6 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--crash-dir", default=None, type=Path,
         help="Directory to watch for crash reports (default: ~/.quern/crashes)",
-    )
-    parser.add_argument(
-        "--pull-crashes", action="store_true", default=False,
-        help="Run idevicecrashreport to pull crashes from device",
     )
     parser.add_argument(
         "--simulator-crashes", action=argparse.BooleanOptionalAction, default=True,
@@ -585,7 +578,6 @@ def _cmd_start(args: argparse.Namespace) -> None:
         subsystem_filter=args.subsystem,
         enable_crash=enable_crash,
         crash_dir=args.crash_dir,
-        pull_crashes=args.pull_crashes,
         crash_extra_watch_dirs=crash_extra_watch_dirs,
         crash_process_filter=args.crash_process_filter,
         enable_proxy=enable_proxy,

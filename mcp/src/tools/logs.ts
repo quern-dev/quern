@@ -450,12 +450,17 @@ export function registerLogTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Only crashes after this time (ISO 8601)"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Device UDID to pull fresh crashes from before returning results"),
     },
-    async ({ limit, since }) => {
+    async ({ limit, since, udid }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/crashes/latest", {
           limit,
           since,
+          udid,
         });
 
         return {

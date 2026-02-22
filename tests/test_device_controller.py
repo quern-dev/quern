@@ -708,3 +708,102 @@ class TestGetScreenSummaryStrategy:
         assert udid == "AAAA-1111"
         assert "summary" in summary
         ctrl.idb.describe_all.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# UDID mapping (CoreDevice UUID -> libimobiledevice UDID)
+# ---------------------------------------------------------------------------
+
+
+class TestUdidMapping:
+    async def test_list_devices_populates_mapping(self):
+        """list_devices() should correlate devicectl and usbmux names."""
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="B34C4EE9-CORE-DEVICE-UUID",
+                name="iPhone 11",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE,
+                os_version="iOS 18.4",
+            ),
+        ])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={
+            "iPhone 11": "00008030-AABBCCDDEEFF",
+        })
+
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map["B34C4EE9-CORE-DEVICE-UUID"] == "00008030-AABBCCDDEEFF"
+
+    async def test_get_libimobiledevice_udid_cached(self):
+        """get_libimobiledevice_udid returns cached value without refreshing."""
+        ctrl = DeviceController()
+        ctrl._usbmux_udid_map["CORE-UUID"] = "00008030-CACHED"
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+
+        result = await ctrl.get_libimobiledevice_udid("CORE-UUID")
+        assert result == "00008030-CACHED"
+        # Should not have called list_devices (no refresh needed)
+        ctrl.simctl.list_devices.assert_not_called()
+
+    async def test_get_libimobiledevice_udid_refreshes_on_miss(self):
+        """get_libimobiledevice_udid refreshes device list on cache miss."""
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="NEW-CORE-UUID",
+                name="iPhone 15 Pro",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE,
+                os_version="iOS 18.4",
+            ),
+        ])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={
+            "iPhone 15 Pro": "00008030-NEWDEVICE",
+        })
+
+        result = await ctrl.get_libimobiledevice_udid("NEW-CORE-UUID")
+        assert result == "00008030-NEWDEVICE"
+
+    async def test_get_libimobiledevice_udid_returns_none_for_network_only(self):
+        """Network-only devices have no usbmux UDID."""
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[
+            DeviceInfo(
+                udid="WIFI-ONLY-UUID",
+                name="iPhone via Wi-Fi",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE,
+                os_version="iOS 18.4",
+            ),
+        ])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+
+        result = await ctrl.get_libimobiledevice_udid("WIFI-ONLY-UUID")
+        assert result is None
+
+    async def test_get_libimobiledevice_udid_pre_ios17_passthrough(self):
+        """Pre-iOS 17 devices already use libimobiledevice UDIDs — return as-is."""
+        ctrl = DeviceController()
+        usbmux_udid = "4999b9b773908e7326d0405bedb5f57e277402f8"
+        # Simulate usbmux-discovered device (already in device type cache)
+        ctrl._device_type_cache[usbmux_udid] = DeviceType.DEVICE
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+
+        result = await ctrl.get_libimobiledevice_udid(usbmux_udid)
+        assert result == usbmux_udid
+        # Should not need to refresh
+        ctrl.simctl.list_devices.assert_not_called()

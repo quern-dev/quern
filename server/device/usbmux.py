@@ -38,15 +38,14 @@ class UsbmuxBackend:
             self._binary = str(path)
         return self._binary
 
-    async def list_devices(self) -> list[DeviceInfo]:
-        """List USB-connected devices with iOS < 17.
+    async def _run_usbmux_list(self) -> list[dict] | None:
+        """Run ``pymobiledevice3 --no-color usbmux list --usb`` and return parsed JSON.
 
-        Runs ``pymobiledevice3 --no-color usbmux list --usb`` and parses JSON stdout.
-        Returns an empty list on any error (graceful degradation).
+        Returns None on any error (graceful degradation).
         """
         binary = self._find_binary()
         if not binary:
-            return []
+            return None
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -61,21 +60,49 @@ class UsbmuxBackend:
             except asyncio.TimeoutError:
                 proc.kill()
                 logger.warning("pymobiledevice3 usbmux list timed out after 10s")
-                return []
+                return None
 
             if proc.returncode != 0:
-                return []
+                return None
         except Exception:
             logger.debug("Failed to run pymobiledevice3 usbmux list", exc_info=True)
-            return []
+            return None
 
         try:
-            raw = json.loads(stdout_bytes.decode())
+            return json.loads(stdout_bytes.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("Failed to parse usbmux list JSON output")
-            return []
+            return None
 
+    async def list_devices(self) -> list[DeviceInfo]:
+        """List USB-connected devices with iOS < 17.
+
+        Runs ``pymobiledevice3 --no-color usbmux list --usb`` and parses JSON stdout.
+        Returns an empty list on any error (graceful degradation).
+        """
+        raw = await self._run_usbmux_list()
+        if raw is None:
+            return []
         return self._parse_devices(raw)
+
+    async def get_usb_udid_map(self) -> dict[str, str]:
+        """Return {device_name: libimobiledevice_udid} for all USB-connected devices.
+
+        Unlike list_devices(), this does NOT filter by iOS version — it includes
+        all devices so we can map CoreDevice UUIDs to libimobiledevice UDIDs
+        by correlating device names.
+        """
+        raw = await self._run_usbmux_list()
+        if raw is None:
+            return {}
+
+        result: dict[str, str] = {}
+        for entry in raw:
+            udid = entry.get("UniqueDeviceID", "")
+            name = entry.get("DeviceName", "")
+            if udid and name:
+                result[name] = udid
+        return result
 
     @staticmethod
     def _parse_devices(raw: list[dict]) -> list[DeviceInfo]:

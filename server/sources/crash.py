@@ -38,7 +38,6 @@ class CrashAdapter(BaseSourceAdapter):
         device_id: str = "default",
         on_entry: EntryCallback | None = None,
         watch_dir: Path | None = None,
-        pull_from_device: bool = False,
         poll_interval: float = POLL_INTERVAL,
         extra_watch_dirs: list[Path] | None = None,
         process_filter: str | None = None,
@@ -51,7 +50,6 @@ class CrashAdapter(BaseSourceAdapter):
             on_entry=on_entry,
         )
         self.watch_dir = watch_dir or CRASH_DIR
-        self.pull_from_device = pull_from_device
         self.poll_interval = poll_interval
         self.extra_watch_dirs = extra_watch_dirs or []
         self.process_filter = process_filter
@@ -76,10 +74,9 @@ class CrashAdapter(BaseSourceAdapter):
         self.started_at = self._now()
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "Crash adapter started (watch_dir=%s, extra_dirs=%s, pull=%s, filter=%s)",
+            "Crash adapter started (watch_dir=%s, extra_dirs=%s, filter=%s)",
             self.watch_dir,
             self.extra_watch_dirs,
-            self.pull_from_device,
             self.process_filter,
         )
 
@@ -111,8 +108,6 @@ class CrashAdapter(BaseSourceAdapter):
         try:
             while self._running:
                 try:
-                    if self.pull_from_device:
-                        await self._pull_from_device()
                     await self._scan_for_new_files()
                 except asyncio.CancelledError:
                     raise
@@ -123,14 +118,30 @@ class CrashAdapter(BaseSourceAdapter):
         except asyncio.CancelledError:
             pass
 
-    async def _pull_from_device(self) -> None:
-        """Run idevicecrashreport to copy crashes from a connected device."""
+    async def pull_from_device(self, libimobiledevice_udid: str | None = None) -> list[CrashReport]:
+        """Pull crash reports from a connected device via idevicecrashreport.
+
+        Args:
+            libimobiledevice_udid: Target a specific device. If None, pulls from
+                any connected device.
+
+        Returns:
+            List of newly discovered CrashReport objects.
+        """
         if not shutil.which("idevicecrashreport"):
-            return
+            logger.debug("idevicecrashreport not found, skipping pull")
+            return []
+
+        self.watch_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = ["idevicecrashreport", "-e"]
+        if libimobiledevice_udid:
+            cmd.extend(["-u", libimobiledevice_udid])
+        cmd.append(str(self.watch_dir))
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "idevicecrashreport", "-e", str(self.watch_dir),
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -140,9 +151,15 @@ class CrashAdapter(BaseSourceAdapter):
             if proc.returncode is None:
                 proc.kill()
         except FileNotFoundError:
-            pass
+            return []
         except Exception:
             logger.exception("idevicecrashreport failed")
+            return []
+
+        # Scan for any new files that were pulled
+        before = set(r.crash_id for r in self.crash_reports)
+        await self._scan_for_new_files()
+        return [r for r in self.crash_reports if r.crash_id not in before]
 
     def _all_watch_dirs(self) -> list[Path]:
         """Return the primary watch dir plus any extra watch dirs."""
