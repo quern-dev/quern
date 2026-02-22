@@ -231,6 +231,10 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `release_device`     | POST        | `/api/v1/devices/release`              |
 | `resolve_device`     | POST        | `/api/v1/devices/resolve`              |
 | `ensure_devices`     | POST        | `/api/v1/devices/ensure`               |
+| `start_simulator_logging` | POST   | `/api/v1/device/logging/start`         |
+| `stop_simulator_logging`  | POST   | `/api/v1/device/logging/stop`          |
+| `start_device_logging`    | POST   | `/api/v1/device/logging/device/start`  |
+| `stop_device_logging`     | POST   | `/api/v1/device/logging/device/stop`   |
 
 ---
 
@@ -290,7 +294,7 @@ Use `ensure_devices` to boot and claim multiple simulators at once, then run dif
 
 **Confusing `tail_logs` and `query_logs`** — Use `tail_logs` for "show me recent stuff" (defaults to 50, newest first). Use `query_logs` for searching with filters and time ranges.
 
-**Ignoring log source names** — `syslog` = device system log, `oslog` = macOS unified log, `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic, `simulator` = simulator unified logging.
+**Ignoring log source names** — `device` = physical device logs (on-demand, via `start_device_logging`), `simulator` = simulator unified logging (on-demand, via `start_simulator_logging`), `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic. Legacy: `syslog` = idevicesyslog (disabled by default, opt-in with `--syslog`), `oslog` = macOS unified log (disabled by default, opt-in with `--oslog`).
 
 **Using mock when you need intercept (or vice versa)** — Mocks return instant synthetic responses for stable test fixtures. Intercept pauses real requests for ad-hoc inspection and modification. Mock rules take priority over intercept.
 

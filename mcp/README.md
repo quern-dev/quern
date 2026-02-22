@@ -67,7 +67,8 @@ src/
     ├── intercept.ts      Intercept, replay, and mock rules
     ├── device.ts         Simulator control + UI interaction
     ├── device-pool.ts    Device pool claim/release/resolve
-    └── simulator-log.ts  Simulator log capture
+    ├── simulator-log.ts  Simulator log capture
+    └── device-log.ts     Physical device log capture
 ```
 
 ## Tools
@@ -153,8 +154,15 @@ src/
 
 | Tool | Description |
 |---|---|
-| `start_simulator_logging` | Capture os_log/Logger/NSLog output |
-| `stop_simulator_logging` | Stop log capture |
+| `start_simulator_logging` | Capture os_log/Logger/NSLog from a simulator |
+| `stop_simulator_logging` | Stop simulator log capture |
+
+### Device Logging (2 tools)
+
+| Tool | Description |
+|---|---|
+| `start_device_logging` | Capture os_log/Logger/NSLog from a physical device |
+| `stop_device_logging` | Stop physical device log capture |
 
 ## Resources
 

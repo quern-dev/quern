@@ -196,6 +196,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Simulator log adapters — managed on-demand via API
     app.state.sim_log_adapters: dict[str, "SimulatorLogAdapter"] = {}
 
+    # Physical device log adapters — managed on-demand via API
+    app.state.device_log_adapters: dict[str, "PhysicalDeviceLogAdapter"] = {}
+
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
@@ -272,6 +275,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await adapter.stop()
     for sim_adapter in app.state.sim_log_adapters.values():
         await sim_adapter.stop()
+    for dev_adapter in app.state.device_log_adapters.values():
+        await dev_adapter.stop()
     await dedup.stop()
 
     # Restore system proxy if we configured it
@@ -286,7 +291,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app(
     config: ServerConfig | None = None,
     process_filter: str | None = None,
-    enable_syslog: bool = True,
+    enable_syslog: bool = False,
     enable_oslog: bool = False,
     subsystem_filter: str | None = None,
     enable_crash: bool = True,
@@ -331,6 +336,7 @@ def create_app(
     app.state.device_controller = None
     app.state.device_pool = None
     app.state.sim_log_adapters = {}
+    app.state.device_log_adapters = {}
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
@@ -419,8 +425,12 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
         help="Only capture crashes whose process name contains this string",
     )
     parser.add_argument(
+        "--syslog", action="store_true", default=False,
+        help="Enable idevicesyslog capture from USB-connected devices (default: off)",
+    )
+    parser.add_argument(
         "--no-syslog", action="store_true", default=False,
-        help="Disable idevicesyslog capture from USB-connected devices",
+        help="Disable idevicesyslog capture (default: already off)",
     )
     parser.add_argument(
         "--no-proxy", action="store_true", default=False,
@@ -517,7 +527,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         ring_buffer_size=args.buffer_size,
     )
 
-    enable_syslog = not args.no_syslog
+    enable_syslog = args.syslog is True and not args.no_syslog
     enable_oslog = args.oslog is True and not args.no_oslog
     enable_crash = not args.no_crash
 

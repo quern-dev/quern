@@ -16,7 +16,9 @@ from server.models import (
     LaunchAppRequest,
     SetLocationRequest,
     ShutdownDeviceRequest,
+    StartDeviceLogRequest,
     StartSimLogRequest,
+    StopDeviceLogRequest,
     StopSimLogRequest,
     TerminateAppRequest,
     UninstallAppRequest,
@@ -332,6 +334,89 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
 
     # Remove from both dicts
     del sim_adapters[udid]
+    request.app.state.source_adapters.pop(adapter.adapter_id, None)
+
+    return {"status": "stopped", "udid": udid}
+
+
+# ---------------------------------------------------------------------------
+# Physical device logging
+# ---------------------------------------------------------------------------
+
+
+@router.post("/logging/device/start")
+async def start_device_logging(request: Request, body: StartDeviceLogRequest):
+    """Start capturing logs from a physical device via pymobiledevice3 syslog.
+
+    Captures os_log, Logger, and NSLog output. Logs appear in tail_logs/query_logs
+    with source="device". Use process filter to limit noise.
+
+    NOTE: This does NOT capture print() output.
+    """
+    from server.sources.device_log import PhysicalDeviceLogAdapter
+
+    controller = _get_controller(request)
+
+    # Resolve UDID
+    try:
+        udid = await controller.resolve_udid(body.udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+    # Verify it's a physical device
+    if not controller._is_physical(udid):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Device {udid} is a simulator. Use start_simulator_logging instead.",
+        )
+
+    # Check if already running for this UDID
+    dev_adapters: dict = request.app.state.device_log_adapters
+    if udid in dev_adapters and dev_adapters[udid].is_running:
+        return {"status": "already_running", "udid": udid, "adapter_id": dev_adapters[udid].adapter_id}
+
+    # Get the deduplicator as the entry callback (same pipeline as other adapters)
+    dedup = request.app.state.deduplicator
+
+    adapter = PhysicalDeviceLogAdapter(
+        udid=udid,
+        on_entry=dedup.process,
+        process_filter=body.process,
+        match_filter=body.match,
+    )
+
+    await adapter.start()
+
+    if adapter._error:
+        raise HTTPException(status_code=500, detail=adapter._error)
+
+    # Register in both dicts so it appears in list_log_sources
+    dev_adapters[udid] = adapter
+    request.app.state.source_adapters[adapter.adapter_id] = adapter
+
+    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id}
+
+
+@router.post("/logging/device/stop")
+async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
+    """Stop capturing logs from a physical device."""
+    controller = _get_controller(request)
+
+    # Resolve UDID
+    try:
+        udid = await controller.resolve_udid(body.udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+    dev_adapters: dict = request.app.state.device_log_adapters
+    adapter = dev_adapters.get(udid)
+    if not adapter:
+        raise HTTPException(status_code=404, detail=f"No device logging active for UDID {udid}")
+
+    await adapter.stop()
+
+    # Remove from both dicts
+    del dev_adapters[udid]
     request.app.state.source_adapters.pop(adapter.adapter_id, None)
 
     return {"status": "stopped", "udid": udid}

@@ -36,6 +36,7 @@ class LogSource(str, enum.Enum):
     PROXY = "proxy"
     APP_DRAIN = "app_drain"
     SIMULATOR = "simulator"
+    DEVICE = "device"
     SERVER = "server"
 
 
@@ -806,6 +807,20 @@ class StartSimLogRequest(BaseModel):
 
 class StopSimLogRequest(BaseModel):
     """Request body for POST /api/v1/device/logging/stop."""
+
+    udid: str | None = None
+
+
+class StartDeviceLogRequest(BaseModel):
+    """Request body for POST /api/v1/device/logging/device/start."""
+
+    udid: str | None = None
+    process: str | None = None
+    match: str | None = None
+
+
+class StopDeviceLogRequest(BaseModel):
+    """Request body for POST /api/v1/device/logging/device/stop."""
 
     udid: str | None = None
 

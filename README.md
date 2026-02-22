@@ -17,7 +17,7 @@ No cloud. No telemetry. Just a daemon on your Mac that bridges the gap between "
 Simulator / Device
     │
 Quern (localhost:9100)
-    ├── Log capture (syslog, oslog, crash reports, build output)
+    ├── Log capture (device, simulator, crash reports, build output)
     ├── Network proxy (intercept, mock, replay HTTP traffic)
     ├── Device control (boot, screenshot, tap, swipe, type)
     │
@@ -52,7 +52,7 @@ Quern isn't a cloud testing platform. It's local infrastructure that makes the A
 - Python 3.11+
 - Node.js 18+ (for MCP server)
 - Optional: `idb` for UI automation (`brew install idb-companion`)
-- Optional: `libimobiledevice` for physical device logs (`brew install libimobiledevice`)
+- Optional: `pymobiledevice3` for physical device logs (`pipx install pymobiledevice3`)
 
 ### Install
 
@@ -118,12 +118,14 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 Captures from multiple sources simultaneously, deduplicates, and stores in a ring buffer (10,000 entries).
 
-| Source | Tool | What it captures |
-|--------|------|------------------|
-| Device syslog | `idevicesyslog` | System and app log messages |
-| macOS unified log | `log stream` | Structured OS log entries |
-| Crash reports | `idevicecrashreport` | Parsed crash reports with stack traces |
-| Build output | `xcodebuild` | Errors, warnings, test results |
+| Source | Tool | What it captures | Mode |
+|--------|------|-------------------|------|
+| Physical device logs | `pymobiledevice3 syslog` | os_log, Logger, NSLog from physical devices | On-demand (`start_device_logging`) |
+| Simulator logs | `simctl log stream` | os_log, Logger, NSLog from simulators | On-demand (`start_simulator_logging`) |
+| Crash reports | `idevicecrashreport` | Parsed crash reports with stack traces | Always on |
+| Build output | `xcodebuild` | Errors, warnings, test results | Always on |
+| Device syslog (legacy) | `idevicesyslog` | Unfiltered system + app log messages | Opt-in (`--syslog`) |
+| macOS unified log | `log stream` | Structured OS log entries | Opt-in (`--oslog`) |
 
 ### Network Proxy
 
@@ -175,12 +177,12 @@ quern mcp-install    # Register MCP server with Claude Code
 
 ## MCP Tools
 
-52 tools available via MCP:
+56 tools available via MCP:
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `get_latest_crash`, `set_log_filter`, `list_log_sources` |
+| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `get_latest_crash`, `set_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging` |
 | Network | `query_flows`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `clear_mocks` |
@@ -262,6 +264,10 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/ui/press` | Press hardware button |
 | POST | `/api/v1/device/location` | Set GPS location |
 | POST | `/api/v1/device/permission` | Grant app permission |
+| POST | `/api/v1/device/logging/start` | Start simulator log capture |
+| POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
+| POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
+| POST | `/api/v1/device/logging/device/stop` | Stop physical device log capture |
 
 ### Device Pool
 
@@ -282,7 +288,7 @@ server/
   main.py              Entry point, CLI, FastAPI app
   config.py            API key management
   lifecycle/           Daemon, state.json, port scanning, watchdog, setup, updater
-  sources/             Log source adapters (syslog, oslog, crash, build, proxy)
+  sources/             Log source adapters (device, simulator, syslog, oslog, crash, build, proxy)
   processing/          Deduplicator, classifier, summarizer
   storage/             Ring buffer
   proxy/               mitmproxy addon, flow store, system proxy, cert management

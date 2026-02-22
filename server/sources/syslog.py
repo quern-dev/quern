@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Device name is optional — some idevicesyslog versions omit it.
 SYSLOG_PATTERN = re.compile(
     r"^(\w+\s+\d+)\s+"          # date: "Feb  7"
-    r"(\d{2}:\d{2}:\d{2})\s+"   # time: "14:23:01"
+    r"(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+"  # time: "14:23:01" or "14:23:01.123456"
     r"(?:(\S+)\s+)?"             # device (optional): "iPhone"
     r"(\S+?)"                    # process: "MyApp"
     r"(?:\(([^)]+)\))?"          # subsystem (optional): "(CoreFoundation)"
@@ -179,8 +179,10 @@ class SyslogAdapter(BaseSourceAdapter):
         # Parse the timestamp (idevicesyslog doesn't include year)
         now = datetime.now(timezone.utc)
         try:
+            # Handle optional fractional seconds (e.g. "14:23:01.123456")
+            fmt = "%Y %b %d %H:%M:%S.%f" if "." in time_str else "%Y %b %d %H:%M:%S"
             ts = datetime.strptime(
-                f"{now.year} {date_str} {time_str}", "%Y %b %d %H:%M:%S"
+                f"{now.year} {date_str} {time_str}", fmt
             ).replace(tzinfo=timezone.utc)
         except ValueError:
             ts = now

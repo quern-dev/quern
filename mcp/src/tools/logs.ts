@@ -206,7 +206,7 @@ export function registerLogTools(server: McpServer): void {
         .describe("Minimum log level filter"),
       process: z.string().optional().describe("Filter by process name"),
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "server"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
     },
@@ -262,7 +262,7 @@ export function registerLogTools(server: McpServer): void {
         .describe("Minimum log level"),
       process: z.string().optional().describe("Filter by process name"),
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "server"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
       search: z
@@ -481,7 +481,7 @@ export function registerLogTools(server: McpServer): void {
     "set_log_filter",
     `Reconfigure log capture filters for a source adapter.`,
     {
-      source: z.string().describe("Source adapter to configure (e.g. 'syslog')"),
+      source: z.string().describe("Source adapter to configure (e.g. 'simulator')"),
       process: z
         .string()
         .optional()
