@@ -19,7 +19,7 @@ class BuildParseRequest(BaseModel):
 class BuildParseFileRequest(BaseModel):
     file_path: str
     include_raw_warnings: bool = False
-    fuzzy_groups: bool = False
+    fuzzy_groups: bool = True
 
 
 @router.get("/latest")

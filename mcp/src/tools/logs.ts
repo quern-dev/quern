@@ -446,7 +446,7 @@ export function registerLogTools(server: McpServer): void {
       fuzzy_groups: z
         .boolean()
         .optional()
-        .describe("Use fuzzy word-level template grouping to collapse similar warnings (e.g. conformance warnings differing only by type name). Default: false (exact match grouping)."),
+        .describe("Use fuzzy word-level template grouping to collapse similar warnings (e.g. conformance warnings differing only by type name). Default: true. Set to false for exact match grouping."),
     },
     async ({ file_path, fuzzy_groups }) => {
       try {

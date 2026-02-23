@@ -170,7 +170,7 @@ class BuildAdapter(BaseSourceAdapter):
             s.status = "ready"
         return s
 
-    async def parse_build_output(self, content: str, *, fuzzy: bool = False) -> BuildResult:
+    async def parse_build_output(self, content: str, *, fuzzy: bool = True) -> BuildResult:
         """Parse raw xcodebuild output and return a structured result.
 
         Args:
