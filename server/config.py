@@ -75,14 +75,14 @@ def get_local_capture_processes() -> list[str]:
     """Return the list of process names for local capture mode.
 
     Returns [] if not configured (disabled).
-    Handles legacy bool values: True -> ["MobileSafari"], False -> [].
+    Handles legacy bool values: True -> default process list, False -> [].
     """
     value = read_user_config().get("local_capture")
     if value is None or value is False:
         return []
     if value is True:
-        # Legacy bool: default to MobileSafari
-        return ["MobileSafari"]
+        # Legacy bool: default to Safari processes
+        return ["MobileSafari", "com.apple.WebKit.Networking"]
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []

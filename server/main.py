@@ -462,7 +462,7 @@ def _is_our_process(pid: int) -> bool:
 
 def _cmd_start(args: argparse.Namespace) -> None:
     """Start the server (daemon or foreground)."""
-    # Auto-rebuild MCP server if source is newer than dist
+    # Always rebuild MCP server to ensure dist/ is current
     from server.__main__ import _ensure_mcp_built
     if not _ensure_mcp_built(quiet=True):
         print("Warning: MCP server build failed — MCP tools may be stale")
@@ -715,7 +715,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
 def _cmd_enable_local_capture(process_names: list[str]) -> None:
     """Enable local capture mode for specific processes."""
-    processes = process_names if process_names else ["MobileSafari"]
+    processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
 
     current = get_local_capture_processes()
     if current == processes:
@@ -724,7 +724,8 @@ def _cmd_enable_local_capture(process_names: list[str]) -> None:
 
     print("Enabling local capture mode.")
     print("This uses a macOS System Extension (mitmproxy-macos) to transparently")
-    print("capture network traffic from specific processes without configuring a system proxy.")
+    print("capture HTTP traffic from iOS Simulator processes without configuring")
+    print("a system proxy.")
     print()
     print("On first use, macOS will prompt you to allow the Mitmproxy Redirector")
     print("system extension in System Settings > Privacy & Security.")

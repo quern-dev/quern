@@ -49,19 +49,17 @@ def _maybe_reexec_in_venv() -> None:
 
 
 def _ensure_mcp_built(quiet: bool = False) -> bool:
-    """Build the MCP TypeScript server if needed.
+    """Build the MCP TypeScript server.
 
-    Compares the newest mtime across all mcp/src/**/*.ts files against
-    mcp/dist/index.js mtime to detect staleness.  Runs ``npm install``
-    when node_modules/ is missing or when package.json is newer than
-    node_modules/, and ``npm run build`` only when source is newer than
-    the output (or the output is missing).
+    Always runs ``npm run build`` to ensure dist/ is up to date.
+    Runs ``npm install`` first when node_modules/ is missing or
+    package.json is newer than node_modules/.
 
     Args:
         quiet: When True, only print on actual build or failure.
 
     Returns:
-        True if the build succeeded or was skipped, False on failure.
+        True if the build succeeded, False on failure.
     """
     import subprocess
 
@@ -79,18 +77,6 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         if not quiet:
             print("Warning: mcp/src/ not found — skipping MCP build")
         return False
-
-    # Determine if a build is needed by checking ALL .ts source files
-    needs_build = not dist_file.exists()
-    if not needs_build:
-        dist_mtime = dist_file.stat().st_mtime
-        for ts_file in src_dir.rglob("*.ts"):
-            if ts_file.stat().st_mtime > dist_mtime:
-                needs_build = True
-                break
-
-    if not needs_build:
-        return True  # Already up to date
 
     # Install node_modules if missing or stale (package.json newer than node_modules/)
     node_modules = mcp_dir / "node_modules"
