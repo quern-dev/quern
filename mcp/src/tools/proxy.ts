@@ -345,13 +345,18 @@ configuration needed.`,
         .describe(
           "Cursor from a previous summary response — returns only new activity since then"
         ),
+      simulator_udid: z
+        .string()
+        .optional()
+        .describe("Filter to flows from a specific simulator UDID"),
     },
-    async ({ window, host, since_cursor }) => {
+    async ({ window, host, since_cursor, simulator_udid }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
           window,
           host,
           since_cursor,
+          simulator_udid,
         });
 
         return {

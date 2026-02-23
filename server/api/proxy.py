@@ -401,11 +401,12 @@ async def flow_summary(
     window: str = Query(default="5m", pattern=r"^(30s|1m|5m|15m|1h)$"),
     host: str | None = None,
     since_cursor: str | None = None,
+    simulator_udid: str | None = None,
 ) -> FlowSummaryResponse:
     """Get an LLM-optimized summary of recent HTTP traffic."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
-        return generate_flow_summary([], window=window, host=host)
+        return generate_flow_summary([], window=window, host=host, simulator_udid=simulator_udid)
 
     now = datetime.now(timezone.utc)
 
@@ -420,7 +421,7 @@ async def flow_summary(
         since_ts = now - duration
         flows = await flow_store.get_since(since_ts)
 
-    return generate_flow_summary(flows, window=window, host=host)
+    return generate_flow_summary(flows, window=window, host=host, simulator_udid=simulator_udid)
 
 
 @router.get("/flows/{flow_id}", response_model=FlowRecord)
