@@ -1,7 +1,7 @@
 # Quern Agent Guide
 
 **For**: AI agents using Quern MCP tools for mobile app debugging and testing
-**Last Updated**: February 20, 2026
+**Last Updated**: February 23, 2026
 
 ---
 
@@ -93,10 +93,17 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 1. Call `ensure_server`, then check `proxy_status` — start the proxy if it isn't running
 2. Get a baseline with `get_flow_summary` to see current traffic patterns
 3. Trigger the issue (tap a button, navigate to a screen)
-4. Query for relevant flows — filter by method, path, or status code
+4. Query for relevant flows — filter by method, path, status code, or `simulator_udid`
 5. Use `get_flow_detail` on the specific flow to inspect headers, request body, and response body
 
 **Key insight**: Start with summary, trigger action, drill down to specific flows.
+
+**Per-simulator flow filtering**: When local capture is enabled, each flow is tagged with the originating simulator's UDID. Use `simulator_udid` in `query_flows` and `get_flow_summary` to see only traffic from a specific simulator — essential when running parallel tests.
+
+**Proxy modes for simulators**:
+
+- **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. Use `set_local_capture` to change the process list on the fly.
+- **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
 
 **Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
 1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database. Defaults to **booted simulators only**; pass `state="all"` or `device_type="device"` to check shutdown sims or physical devices
@@ -136,6 +143,25 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 ---
 
+### Working with Physical Devices
+
+Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. The key difference from simulators is that UI automation uses WebDriverAgent (WDA) instead of idb.
+
+**First-time setup**: Call `setup_wda` with the device UDID. This builds and installs WDA on the device, which requires a valid Apple Developer signing identity. If multiple identities exist, the tool returns a list — call again with the chosen `team_id`. The app appears on the device as **Quern Driver**.
+
+**After setup**: WDA auto-starts when you first interact with the device (screenshot, UI tree, tap, etc.). No need to manually call `start_driver` — it happens transparently. The driver idles out after 15 minutes of inactivity.
+
+**What works the same**: `take_screenshot`, `get_screen_summary`, `get_ui_tree`, `tap_element`, `swipe`, `type_text`, `wait_for_element`, `install_app`, `launch_app`, `terminate_app`.
+
+**What's different**:
+- `boot_device` / `shutdown_device` — simulators only
+- `set_location` — simulators only
+- `grant_permission` — simulators only
+- `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators)
+- `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
+
+---
+
 ### Reproducing Bug Reports
 
 1. Use `get_screen_summary` to verify your starting state
@@ -162,11 +188,12 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - Text input: focus the element, then `type_text`
 
 **"I need to see network traffic"**
-- Overview: `get_flow_summary`
+- Overview: `get_flow_summary` (use `simulator_udid` to filter by simulator)
 - Specific requests: `query_flows` with filters
 - Full detail: `get_flow_detail`
 - Modify traffic: `set_intercept` + `release_flow` with modifications
 - Mock responses: `set_mock`
+- Check capture mode: `proxy_status` — look at `local_capture` field
 
 **"I need to see logs"**
 - Recent activity: `tail_logs`
@@ -179,8 +206,9 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - Install app: `install_app`
 - Launch app: `launch_app`
 - Screenshot: `take_screenshot`
-- Location: `set_location`
-- Permissions: `grant_permission`
+- Location: `set_location` (simulators only)
+- Permissions: `grant_permission` (simulators only)
+- Physical device setup: `setup_wda` (first time only)
 
 ---
 
@@ -206,6 +234,7 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `verify_proxy_setup` | POST        | `/api/v1/proxy/cert/verify`            |
 | `start_proxy`        | POST        | `/api/v1/proxy/start`                  |
 | `stop_proxy`         | POST        | `/api/v1/proxy/stop`                   |
+| `set_local_capture`  | POST        | `/api/v1/proxy/local-capture`          |
 | `set_intercept`      | POST        | `/api/v1/proxy/intercept`              |
 | `clear_intercept`    | DELETE      | `/api/v1/proxy/intercept`              |
 | `list_held_flows`    | GET         | `/api/v1/proxy/intercept/held`         |
@@ -220,6 +249,7 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `install_app`        | POST        | `/api/v1/device/app/install`           |
 | `launch_app`         | POST        | `/api/v1/device/app/launch`            |
 | `terminate_app`      | POST        | `/api/v1/device/app/terminate`         |
+| `uninstall_app`      | POST        | `/api/v1/device/app/uninstall`         |
 | `list_apps`          | GET         | `/api/v1/device/app/list`              |
 | `take_screenshot`    | GET         | `/api/v1/device/screenshot`            |
 | `get_ui_tree`        | GET         | `/api/v1/device/ui`                    |
@@ -243,6 +273,9 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `stop_simulator_logging`  | POST   | `/api/v1/device/logging/stop`          |
 | `start_device_logging`    | POST   | `/api/v1/device/logging/device/start`  |
 | `stop_device_logging`     | POST   | `/api/v1/device/logging/device/stop`   |
+| `setup_wda`          | POST        | `/api/v1/device/wda/setup`             |
+| `start_driver`       | POST        | `/api/v1/device/wda/start`             |
+| `stop_driver`        | POST        | `/api/v1/device/wda/stop`              |
 
 ---
 
@@ -306,7 +339,11 @@ Use `ensure_devices` to boot and claim multiple simulators at once, then run dif
 
 **Using mock when you need intercept (or vice versa)** — Mocks return instant synthetic responses for stable test fixtures. Intercept pauses real requests for ad-hoc inspection and modification. Mock rules take priority over intercept.
 
-**Not checking idb availability** — Device management and screenshots use `simctl` (always available with Xcode). UI inspection and interaction (`get_ui_tree`, `tap`, `swipe`, `type_text`, `clear_text`, `press_button`) require `idb`. Check `list_devices` response for tool availability.
+**Not checking idb availability** — Device management and screenshots use `simctl` (always available with Xcode). Simulator UI automation (`get_ui_tree`, `tap`, `swipe`, `type_text`, `clear_text`, `press_button`) requires `idb`. Physical device UI automation uses WDA (auto-started). Check `list_devices` response for tool availability.
+
+**Not using per-simulator flow filtering** — When local capture is enabled, flows are tagged with the originating simulator's UDID. Always pass `simulator_udid` when querying flows during parallel testing — otherwise you'll see traffic from all simulators mixed together.
+
+**Leaving system proxy configured** — If you use `configure_system_proxy`, always call `unconfigure_system_proxy` when done. Forgetting this breaks the user's browser. With local capture enabled, you typically don't need the system proxy for simulator traffic at all.
 
 **Holding flows too long** — Held flows auto-release after 30 seconds to prevent hanging clients. Use `list_held_flows` with `timeout` for long-polling instead of rapid polling.
 
@@ -330,7 +367,7 @@ Use `ensure_devices` to boot and claim multiple simulators at once, then run dif
 
 **"Proxy not running"** — Check with `proxy_status` and call `start_proxy` if needed.
 
-**"No flows captured"** — The proxy may not be running, the device may not be configured to route through it, or the app may use certificate pinning. Check `proxy_status`, then `proxy_setup_guide` for device configuration steps.
+**"No flows captured"** — Check `proxy_status`. If `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. If local capture is not enabled, the device may not be configured to route through the proxy. Check `proxy_setup_guide` for device configuration steps. Also check for certificate pinning in the app.
 
 **"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
 

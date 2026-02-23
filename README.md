@@ -11,7 +11,7 @@ No cloud. No telemetry. Just a daemon on your Mac that bridges the gap between "
      ![Agent session with Quern](docs/images/agent-session.png)
 -->
 
-> Currently supports iOS Simulators, with iOS device, Android emulator, and Android device support on the roadmap.
+> Supports iOS Simulators and physical iOS devices (via WebDriverAgent). Android emulator and device support is on the roadmap.
 
 ```
 Simulator / Device
@@ -52,7 +52,8 @@ Quern isn't a cloud testing platform. It's local infrastructure that makes the A
 - Python 3.11+
 - Node.js 18+ (for MCP server)
 - Optional: `idb` for UI automation (`brew install idb-companion`)
-- Optional: `pymobiledevice3` for physical device logs (`pipx install pymobiledevice3`)
+- Optional: `pymobiledevice3` for physical device support (`pipx install pymobiledevice3`)
+- Optional: [mitmproxy-macos](https://github.com/mitmproxy/mitmproxy-macos) for local capture mode (transparent simulator traffic capture without system proxy)
 
 ### Install
 
@@ -82,6 +83,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
 | `cert-state.json` | Per-device certificate installation state — persists across restarts |
 | `device-pool.json` | Device pool claim/release state — persists across restarts |
+| `config.json` | Local capture settings and other configuration |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
 
@@ -131,21 +133,31 @@ Captures from multiple sources simultaneously, deduplicates, and stores in a rin
 
 Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by default).
 
-- **Query flows** — filter by host, method, status code, path
+- **Query flows** — filter by host, method, status code, path, or simulator UDID
 - **Inspect details** — full headers and bodies for any captured request
 - **Intercept** — pause matching requests, inspect, modify, release
 - **Mock** — return synthetic responses without hitting the real server
 - **Replay** — re-send a previously captured request
-- **System proxy** — auto-configures macOS network settings to route traffic through the proxy
+- **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
+- **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
 - **Certificate management** — check, install, and verify mitmproxy CA certificates
 - **LLM summaries** — traffic digests grouped by host with error highlights
 
+**Proxy setup for simulators:**
+
+| Mode | Setup | Pros | Cons |
+|------|-------|------|------|
+| Local capture (recommended) | `quern enable-local-capture` + approve macOS System Extension | Zero config per-simulator, per-simulator flow tagging, no system proxy needed | Requires [mitmproxy-macos](https://github.com/mitmproxy/mitmproxy-macos) and one-time macOS permission approval |
+| System proxy | `configure_system_proxy` / `unconfigure_system_proxy` | No extra software | Affects all Mac traffic, must remember to unconfigure when done |
+
+Local capture requires approving the **Mitmproxy Redirector** system extension in **System Settings > Privacy & Security** on first use.
+
 ### Device Control
 
-Manage iOS simulators and interact with running apps.
+Manage iOS simulators and physical devices, and interact with running apps.
 
-- **Device management** — list, boot, shutdown simulators
-- **App management** — install, launch, terminate, list apps
+- **Device management** — list, boot, shutdown simulators; discover physical devices
+- **App management** — install, launch, terminate, uninstall, list apps
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
@@ -155,41 +167,46 @@ Manage iOS simulators and interact with running apps.
 - **Configuration** — set GPS location, grant permissions
 - **Device pool** — claim/release devices for parallel test execution
 
-Device management and screenshots use `xcrun simctl` (always available with Xcode). UI automation requires [idb](https://fbidb.io/).
+**Simulator UI automation** uses [idb](https://fbidb.io/) (`brew install idb-companion`). Device management and screenshots use `xcrun simctl` (always available with Xcode).
+
+**Physical device UI automation** uses [WebDriverAgent](https://github.com/appium/WebDriverAgent) (WDA), which Quern builds and deploys automatically via `setup_wda`. WDA requires a valid Apple Developer signing identity. Once set up, the WDA driver auto-starts on first interaction and idles out after 15 minutes of inactivity. The app appears on the device as **Quern Driver**.
 
 ### Process Lifecycle
 
 Startup is idempotent — running `start` when a server is already running is a no-op. Port conflicts are handled automatically by scanning upward. The MCP server is auto-rebuilt on start when the TypeScript source is newer than the compiled output.
 
 ```bash
-quern setup          # Check environment, install deps
-quern start          # Daemonize
-quern start -f       # Foreground
-quern stop           # Graceful shutdown
-quern restart        # Stop + start
-quern status         # Show PID, URL, uptime
-quern update         # Pull latest changes, reinstall deps, rebuild MCP
-quern regenerate-key # New API key
-quern mcp-install    # Register MCP server with Claude Code
+quern setup                  # Check environment, install deps
+quern start                  # Daemonize
+quern start -f               # Foreground
+quern stop                   # Graceful shutdown
+quern restart                # Stop + start
+quern status                 # Show PID, URL, uptime
+quern update                 # Pull latest changes, reinstall deps, rebuild MCP
+quern regenerate-key         # New API key
+quern mcp-install            # Register MCP server with Claude Code
+quern enable-local-capture   # Enable transparent simulator traffic capture
+quern disable-local-capture  # Disable local capture
 ```
 
 `~/.quern/state.json` is the single source of truth for discovering a running instance.
 
 ## MCP Tools
 
-56 tools available via MCP:
+61 tools available via MCP:
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
 | Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `get_latest_crash`, `set_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging` |
-| Network | `query_flows`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup` |
+| Network | `query_flows`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `set_local_capture` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `clear_mocks` |
-| Device | `list_devices`, `boot_device`, `shutdown_device`, `install_app`, `launch_app`, `terminate_app`, `list_apps` |
+| Device | `list_devices`, `boot_device`, `shutdown_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps` |
 | UI | `take_screenshot`, `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `type_text`, `clear_text`, `press_button` |
 | Config | `set_location`, `grant_permission` |
 | Device Pool | `list_device_pool`, `claim_device`, `release_device`, `resolve_device`, `ensure_devices` |
+| Physical Device | `setup_wda`, `start_driver`, `stop_driver` |
 
 ## API Endpoints
 
@@ -238,6 +255,7 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation (defaults to booted simulators) |
 | POST | `/api/v1/proxy/cert/install` | Install CA certificate |
 | GET | `/api/v1/proxy/setup-guide` | Device setup instructions |
+| POST | `/api/v1/proxy/local-capture` | Set local capture process list |
 
 ### Device Control
 
@@ -249,6 +267,7 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/app/install` | Install app |
 | POST | `/api/v1/device/app/launch` | Launch app |
 | POST | `/api/v1/device/app/terminate` | Terminate app |
+| POST | `/api/v1/device/app/uninstall` | Uninstall app |
 | GET | `/api/v1/device/app/list` | List installed apps |
 | GET | `/api/v1/device/screenshot` | Capture screenshot |
 | GET | `/api/v1/device/screenshot/annotated` | Screenshot with accessibility overlays |
@@ -268,6 +287,9 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
 | POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
 | POST | `/api/v1/device/logging/device/stop` | Stop physical device log capture |
+| POST | `/api/v1/device/wda/setup` | Build and install WDA on physical device |
+| POST | `/api/v1/device/wda/start` | Start WDA driver |
+| POST | `/api/v1/device/wda/stop` | Stop WDA driver |
 
 ### Device Pool
 
@@ -292,7 +314,7 @@ server/
   processing/          Deduplicator, classifier, summarizer
   storage/             Ring buffer
   proxy/               mitmproxy addon, flow store, system proxy, cert management
-  device/              Simulator control (simctl, idb backends), device pool
+  device/              Simulator control (simctl, idb) + physical device control (WDA, pymobiledevice3), device pool
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
 tests/                 855+ tests
