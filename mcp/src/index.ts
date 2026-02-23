@@ -25,10 +25,43 @@ import { registerWdaTools } from "./tools/wda.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const server = new McpServer({
-  name: "quern-debug-server",
-  version: "0.1.0",
-});
+const instructions = [
+  "Quern is a debug server for AI-assisted iOS development — it captures logs, intercepts network traffic, and controls simulators/devices via MCP tools.",
+  "",
+  "SESSION START: ensure_server → resolve_device → get_screen_summary → proxy_status",
+  "",
+  "CORE PRINCIPLES:",
+  "- Structured data over screenshots: use get_screen_summary and get_ui_tree for decisions, screenshots for visual verification",
+  "- Accessibility over coordinates: use tap_element with label/element_type instead of tap with x,y",
+  "- Summarize first, drill down second: start with get_log_summary, get_flow_summary, get_screen_summary — then filter",
+  "- Verify state before acting: check proxy_status before capturing, check screen before tapping",
+  "- Server-side waiting: use wait_for_element instead of polling get_ui_tree; use list_held_flows with timeout instead of polling",
+  "- Filter aggressively: always filter logs by level/process/search, flows by host/method/status, UI by max_elements/children_of",
+  "",
+  "TOOL QUICK REFERENCE:",
+  "- See screen: get_screen_summary (quick) | get_ui_tree (full) | take_screenshot (visual)",
+  "- Interact: tap_element (preferred) | tap (coordinates, rare) | swipe | type_text (clear_text first if field has content)",
+  "- Network: get_flow_summary → query_flows → get_flow_detail | set_mock (synthetic responses) | set_intercept + release_flow (modify live traffic)",
+  "- Logs: get_log_summary → query_logs | tail_logs (recent) | get_errors | get_latest_crash",
+  "- Devices: resolve_device (find/boot/claim) | install_app | launch_app | grant_permission (sim only)",
+  "",
+  "NETWORK CAPTURE:",
+  "- Local capture (recommended for simulators): transparent, per-simulator flow tagging via simulator_udid. Check proxy_status local_capture field.",
+  "- System proxy: configure_system_proxy to start, unconfigure_system_proxy when done. Always unconfigure when finished.",
+  "- If no flows captured: verify certs with verify_proxy_setup",
+  "",
+  "PHYSICAL DEVICES: Call setup_wda once for first-time setup. After that, WDA auto-starts on first interaction. Use start_device_logging / stop_device_logging for logs. get_latest_crash with udid for crash reports.",
+  "",
+  "For the full agent guide with workflows, advanced patterns, and troubleshooting: read the quern://guide resource.",
+].join("\n");
+
+const server = new McpServer(
+  {
+    name: "quern-debug-server",
+    version: "0.1.0",
+  },
+  { instructions },
+);
 
 // ---------------------------------------------------------------------------
 // Tools
