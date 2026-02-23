@@ -203,17 +203,31 @@ def customize_wda(repo: Path | None = None) -> bool:
     if not ICON_PATH.exists():
         raise RuntimeError(f"WDA icon not found at {ICON_PATH}")
 
-    # --- Step 1: Replace upstream AppIcon PNGs with our icon ---
-    replaced = 0
-    for appiconset in repo.rglob("AppIcon.appiconset"):
-        icon_dest = appiconset / "AppIcon-1024.png"
-        if icon_dest.exists():
-            shutil.copy2(ICON_PATH, icon_dest)
-            replaced += 1
-            logger.debug("Replaced icon at %s", icon_dest)
+    # --- Step 1: Ensure AppIcon asset catalog exists with our icon ---
+    # The upstream WDA repo doesn't ship an asset catalog, so we create one
+    # in WebDriverAgentLib (which the pbxproj already references via
+    # ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon).
+    xcassets_dir = repo / "WebDriverAgentLib" / "Assets.xcassets"
+    appiconset_dir = xcassets_dir / "AppIcon.appiconset"
+    appiconset_dir.mkdir(parents=True, exist_ok=True)
 
-    if replaced == 0:
-        logger.warning("No upstream AppIcon-1024.png found to replace")
+    # Write Contents.json for the asset catalog
+    contents_json = {
+        "images": [
+            {
+                "filename": "AppIcon-1024.png",
+                "idiom": "universal",
+                "platform": "ios",
+                "size": "1024x1024",
+            }
+        ],
+        "info": {"author": "xcode", "version": 1},
+    }
+    (appiconset_dir / "Contents.json").write_text(json.dumps(contents_json, indent=2) + "\n")
+
+    # Copy our icon
+    shutil.copy2(ICON_PATH, appiconset_dir / "AppIcon-1024.png")
+    logger.debug("Created AppIcon asset catalog at %s", appiconset_dir)
 
     # --- Step 2: Patch build settings for PRODUCT_NAME ---
     pbxproj_path = repo / "WebDriverAgent.xcodeproj" / "project.pbxproj"
@@ -348,13 +362,30 @@ async def _post_process_runner_app(team_id: str) -> None:
         logger.warning("Runner app not found at %s — skipping post-process", runner_app)
         return
 
-    # Copy icon PNGs from xctest into the Runner app
-    for icon_file in xctest_dir.glob("AppIcon*.png"):
-        dest = runner_app / icon_file.name
-        shutil.copy2(icon_file, dest)
-        logger.debug("Copied %s to Runner app", icon_file.name)
+    # Generate icon PNGs at the sizes iOS expects and copy into the Runner app.
+    # We do this directly from our source icon rather than relying on the build
+    # producing them — the upstream WDA repo doesn't ship an asset catalog.
+    try:
+        from PIL import Image
+        src_icon = Image.open(ICON_PATH)
+        icon_sizes = [
+            ("AppIcon60x60@2x.png", 120),
+            ("AppIcon60x60@3x.png", 180),
+            ("AppIcon76x76@2x.png", 152),
+            ("AppIcon83.5x83.5@2x.png", 167),
+            ("AppIcon-1024.png", 1024),
+        ]
+        icon_names = []
+        for name, size in icon_sizes:
+            resized = src_icon.resize((size, size), Image.LANCZOS)
+            resized.save(runner_app / name)
+            icon_names.append(name)
+            logger.debug("Generated %s (%dx%d)", name, size, size)
+    except Exception as e:
+        logger.warning("Could not generate icon PNGs: %s", e)
+        icon_names = []
 
-    # Copy compiled asset catalog if present
+    # Also copy compiled asset catalog from xctest if present (bonus)
     xctest_car = xctest_dir / "Assets.car"
     runner_car = runner_app / "Assets.car"
     if xctest_car.exists():
@@ -369,11 +400,12 @@ async def _post_process_runner_app(team_id: str) -> None:
         plist["CFBundleDisplayName"] = "QuernDriver"
 
         # Add CFBundleIcons so iOS uses our AppIcon PNGs
-        icon_files = sorted(p.name for p in runner_app.glob("AppIcon*.png"))
-        if icon_files:
+        if icon_names:
             plist["CFBundleIcons"] = {
                 "CFBundlePrimaryIcon": {
-                    "CFBundleIconFiles": [f.replace(".png", "").rstrip("~ipad") for f in icon_files],
+                    "CFBundleIconFiles": [
+                        f.replace(".png", "").rstrip("~ipad") for f in icon_names
+                    ],
                     "UIPrerenderedIcon": False,
                 }
             }
@@ -658,7 +690,7 @@ async def install_wda(udid: str, os_version: str) -> None:
 
     Routes by iOS version:
     - iOS 17+: xcrun devicectl device install app
-    - iOS 15-16: ideviceinstaller -u <udid> -i <app>
+    - iOS 15-16: ideviceinstaller, or pymobiledevice3 as fallback
     """
     if not WDA_APP.exists():
         raise RuntimeError(
@@ -675,18 +707,33 @@ async def install_wda(udid: str, os_version: str) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-    else:
+        tool = "devicectl"
+    elif shutil.which("ideviceinstaller"):
         logger.info("Installing WDA via ideviceinstaller on device %s", udid)
         proc = await asyncio.create_subprocess_exec(
-            "ideviceinstaller", "-u", udid, "-i", str(WDA_APP),
+            "ideviceinstaller", "-u", udid, "install", str(WDA_APP),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        tool = "ideviceinstaller"
+    else:
+        pmd3 = shutil.which("pymobiledevice3")
+        if not pmd3:
+            raise RuntimeError(
+                "Neither ideviceinstaller nor pymobiledevice3 found. "
+                "Install with: brew install ideviceinstaller"
+            )
+        logger.info("Installing WDA via pymobiledevice3 on device %s", udid)
+        proc = await asyncio.create_subprocess_exec(
+            pmd3, "apps", "install", "--udid", udid, str(WDA_APP),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        tool = "pymobiledevice3"
 
     stdout, stderr = await proc.communicate()
 
     if proc.returncode != 0:
-        tool = "devicectl" if major >= 17 else "ideviceinstaller"
         raise RuntimeError(
             f"{tool} install failed (rc={proc.returncode}): {stderr.decode()}"
         )

@@ -472,6 +472,25 @@ def check_libimobiledevice() -> CheckResult:
     )
 
 
+def check_ideviceinstaller() -> CheckResult:
+    """Check for ideviceinstaller (needed to install apps on pre-iOS 17 devices)."""
+    tool = _which("ideviceinstaller")
+    if tool:
+        version = _get_version(["ideviceinstaller", "--version"])
+        msg = version or "installed"
+        return CheckResult(
+            name="ideviceinstaller",
+            status=CheckStatus.OK,
+            message=msg,
+        )
+    return CheckResult(
+        name="ideviceinstaller",
+        status=CheckStatus.MISSING,
+        message="Not installed (needed to install apps on pre-iOS 17 devices)",
+        fixable=True,
+    )
+
+
 def check_xcode_cli_tools() -> CheckResult:
     """Check for Xcode command line tools (provides xcrun, simctl)."""
     xcrun = _which("xcrun")
@@ -1033,6 +1052,20 @@ def run_setup() -> int:
                     detail="Try manually: brew install libimobiledevice",
                 )
     report.add(libimobile_result)
+
+    ideviceinstaller_result = check_ideviceinstaller()
+    if ideviceinstaller_result.status == CheckStatus.MISSING:
+        if _prompt_yn("    ideviceinstaller not found. Install via Homebrew?"):
+            if _brew_install("ideviceinstaller"):
+                ideviceinstaller_result = check_ideviceinstaller()  # re-check
+            else:
+                ideviceinstaller_result = CheckResult(
+                    name="ideviceinstaller",
+                    status=CheckStatus.ERROR,
+                    message="Homebrew install failed",
+                    detail="Try manually: brew install ideviceinstaller",
+                )
+    report.add(ideviceinstaller_result)
 
     report.add(check_xcode_cli_tools())
     report.add(check_mitmdump())

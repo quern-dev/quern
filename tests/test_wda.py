@@ -299,34 +299,35 @@ _MINIMAL_PBXPROJ = """\
 def _setup_wda_repo(tmp_path: Path) -> Path:
     """Create a minimal WDA repo structure for testing customize_wda.
 
-    Includes upstream-like AppIcon assets in WebDriverAgentLib and PrivateHeaders,
-    mimicking the real appium/WebDriverAgent layout.
+    Mimics the real appium/WebDriverAgent layout (no asset catalog — the
+    upstream repo doesn't ship one).
     """
     repo = tmp_path / "WebDriverAgent"
     xcodeproj = repo / "WebDriverAgent.xcodeproj"
     xcodeproj.mkdir(parents=True)
     (xcodeproj / "project.pbxproj").write_text(_MINIMAL_PBXPROJ)
 
-    # Create upstream-like asset catalogs with placeholder icons
-    for subdir in ("WebDriverAgentLib", "PrivateHeaders"):
-        appiconset = repo / subdir / "Assets.xcassets" / "AppIcon.appiconset"
-        appiconset.mkdir(parents=True)
-        (appiconset / "AppIcon-1024.png").write_bytes(b"UPSTREAM_ICON_DATA")
+    # Create WebDriverAgentLib dir (exists upstream, but no xcassets)
+    (repo / "WebDriverAgentLib").mkdir(parents=True)
 
     return repo
 
 
 class TestCustomizeWda:
-    def test_replaces_upstream_icons(self, tmp_path):
+    def test_creates_asset_catalog(self, tmp_path):
         repo = _setup_wda_repo(tmp_path)
         result = customize_wda(repo)
         assert result is True
 
-        # Both upstream icon files should now contain our icon (not the placeholder)
-        for subdir in ("WebDriverAgentLib", "PrivateHeaders"):
-            icon = repo / subdir / "Assets.xcassets" / "AppIcon.appiconset" / "AppIcon-1024.png"
-            assert icon.exists()
-            assert icon.read_bytes() != b"UPSTREAM_ICON_DATA"
+        # Should have created the asset catalog with our icon
+        appiconset = repo / "WebDriverAgentLib" / "Assets.xcassets" / "AppIcon.appiconset"
+        assert appiconset.exists()
+        assert (appiconset / "AppIcon-1024.png").exists()
+        assert (appiconset / "Contents.json").exists()
+
+        # Contents.json should reference the icon
+        contents = json.loads((appiconset / "Contents.json").read_text())
+        assert contents["images"][0]["filename"] == "AppIcon-1024.png"
 
     def test_patches_build_settings(self, tmp_path):
         repo = _setup_wda_repo(tmp_path)
