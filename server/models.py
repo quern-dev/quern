@@ -291,6 +291,30 @@ class FlowQueryResponse(BaseModel):
     has_more: bool
 
 
+class WaitForFlowRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/flows/wait."""
+
+    host: str | None = None
+    path_contains: str | None = None
+    method: str | None = None
+    status_min: int | None = None
+    status_max: int | None = None
+    has_error: bool | None = None
+    simulator_udid: str | None = None
+    timeout: float = Field(default=10, ge=0.1, le=60)
+    interval: float = Field(default=0.5, ge=0.1, le=5)
+    since: datetime | None = None  # defaults to now - 5s if omitted
+
+
+class WaitForFlowResponse(BaseModel):
+    """Response from POST /api/v1/proxy/flows/wait."""
+
+    matched: bool
+    flow: FlowRecord | None = None
+    elapsed_seconds: float
+    polls: int
+
+
 # ---------------------------------------------------------------------------
 # Proxy status & flow summary models (Phase 2b)
 # ---------------------------------------------------------------------------

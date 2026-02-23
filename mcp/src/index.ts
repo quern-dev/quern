@@ -41,7 +41,7 @@ const instructions = [
   "TOOL QUICK REFERENCE:",
   "- See screen: get_screen_summary (quick) | get_ui_tree (full) | take_screenshot (visual)",
   "- Interact: tap_element (preferred) | tap (coordinates, rare) | swipe | type_text (clear_text first if field has content)",
-  "- Network: get_flow_summary → query_flows → get_flow_detail | set_mock (synthetic responses) | set_intercept + release_flow (modify live traffic)",
+  "- Network: get_flow_summary → query_flows → get_flow_detail | wait_for_flow (block until match) | set_mock (synthetic responses) | set_intercept + release_flow (modify live traffic)",
   "- Logs: get_log_summary → query_logs | tail_logs (recent) | get_errors | get_latest_crash",
   "- Devices: resolve_device (find/boot/claim) | install_app | launch_app | grant_permission (sim only)",
   "",

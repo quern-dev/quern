@@ -4,7 +4,8 @@ export async function apiRequest(
   method: "GET" | "POST" | "DELETE",
   path: string,
   params?: Record<string, string | number | boolean | undefined>,
-  body?: unknown
+  body?: unknown,
+  timeoutMs?: number
 ): Promise<unknown> {
   const server = discoverServer();
   const url = new URL(path, server.url);
@@ -22,6 +23,10 @@ export async function apiRequest(
   };
 
   const init: RequestInit = { method, headers };
+
+  if (timeoutMs) {
+    init.signal = AbortSignal.timeout(timeoutMs);
+  }
 
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";

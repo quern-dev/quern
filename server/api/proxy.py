@@ -21,6 +21,8 @@ from server.models import (
     ProxyStatusResponse,
     SystemProxyInfo,
     SystemProxyRestoreInfo,
+    WaitForFlowRequest,
+    WaitForFlowResponse,
 )
 from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
 from server.proxy.summary import generate_flow_summary
@@ -422,6 +424,55 @@ async def flow_summary(
         flows = await flow_store.get_since(since_ts)
 
     return generate_flow_summary(flows, window=window, host=host, simulator_udid=simulator_udid)
+
+
+@router.post("/flows/wait", response_model=WaitForFlowResponse)
+async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFlowResponse:
+    """Block until a flow matching the filters appears, or timeout."""
+    import asyncio
+    import time
+
+    flow_store = request.app.state.flow_store
+
+    # Default since to now - 5s to catch flows that completed just before the call
+    effective_since = body.since or (datetime.now(timezone.utc) - timedelta(seconds=5))
+
+    start = time.monotonic()
+    polls = 0
+
+    while True:
+        polls += 1
+
+        if flow_store is not None:
+            params = FlowQueryParams(
+                host=body.host,
+                path_contains=body.path_contains,
+                method=body.method,
+                status_min=body.status_min,
+                status_max=body.status_max,
+                has_error=body.has_error,
+                simulator_udid=body.simulator_udid,
+                since=effective_since,
+                limit=1,
+            )
+            flows, _ = await flow_store.query(params)
+            if flows:
+                return WaitForFlowResponse(
+                    matched=True,
+                    flow=flows[0],
+                    elapsed_seconds=round(time.monotonic() - start, 3),
+                    polls=polls,
+                )
+
+        elapsed = time.monotonic() - start
+        if elapsed >= body.timeout:
+            return WaitForFlowResponse(
+                matched=False,
+                elapsed_seconds=round(elapsed, 3),
+                polls=polls,
+            )
+
+        await asyncio.sleep(body.interval)
 
 
 @router.get("/flows/{flow_id}", response_model=FlowRecord)

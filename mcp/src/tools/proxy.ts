@@ -82,6 +82,103 @@ export function registerProxyTools(server: McpServer): void {
   );
 
   server.tool(
+    "wait_for_flow",
+    `Wait for an HTTP flow matching filters to appear. Blocks server-side until a match is found or timeout expires. Always returns with matched:true/false — timeouts are not errors.
+
+Use this after triggering a UI action to observe the resulting network request without polling. Auto-sets 'since' to 5 seconds before the call to catch flows that completed between the action and the wait call.`,
+    {
+      host: z.string().optional().describe("Filter by hostname"),
+      path_contains: z
+        .string()
+        .optional()
+        .describe("Filter by path substring"),
+      method: z
+        .string()
+        .optional()
+        .describe("Filter by HTTP method (GET, POST, etc.)"),
+      status_min: z
+        .number()
+        .optional()
+        .describe("Minimum status code (e.g. 400 for errors)"),
+      status_max: z.number().optional().describe("Maximum status code"),
+      has_error: z
+        .boolean()
+        .optional()
+        .describe("Filter to flows with connection errors"),
+      simulator_udid: z
+        .string()
+        .optional()
+        .describe(
+          "Filter by simulator UDID (only flows from this simulator)"
+        ),
+      timeout: z
+        .number()
+        .min(0.1)
+        .max(60)
+        .default(10)
+        .describe("Max wait time in seconds (default 10, max 60)"),
+      interval: z
+        .number()
+        .min(0.1)
+        .max(5)
+        .default(0.5)
+        .describe("Poll interval in seconds (default 0.5)"),
+    },
+    async ({
+      host,
+      path_contains,
+      method,
+      status_min,
+      status_max,
+      has_error,
+      simulator_udid,
+      timeout,
+      interval,
+    }) => {
+      try {
+        const body: Record<string, unknown> = {};
+        if (host !== undefined) body.host = host;
+        if (path_contains !== undefined) body.path_contains = path_contains;
+        if (method !== undefined) body.method = method;
+        if (status_min !== undefined) body.status_min = status_min;
+        if (status_max !== undefined) body.status_max = status_max;
+        if (has_error !== undefined) body.has_error = has_error;
+        if (simulator_udid !== undefined)
+          body.simulator_udid = simulator_udid;
+        body.timeout = timeout;
+        body.interval = interval;
+
+        // Extended HTTP timeout so the MCP client doesn't time out before the server
+        const httpTimeoutMs = timeout * 1000 + 5000;
+
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/proxy/flows/wait",
+          undefined,
+          body,
+          httpTimeoutMs
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "get_flow_detail",
     `Get full request/response detail for a single captured HTTP flow, including headers and bodies.`,
     {
