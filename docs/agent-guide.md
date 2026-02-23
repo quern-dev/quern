@@ -70,7 +70,7 @@ Don't assume the proxy is running — check with `proxy_status` first. Don't ass
 
 Use `wait_for_element` instead of calling `get_ui_tree` in a loop. It polls server-side at sub-second intervals, returns immediately on match, handles timeouts, and uses fewer API round-trips.
 
-Similarly, `list_held_flows` supports a `timeout` parameter for long-polling — use it instead of repeatedly checking for intercepted flows.
+Use `wait_for_flow` after triggering a UI action to observe the resulting network request — it blocks until a matching flow appears or times out. Auto-sets `since` to 5 seconds before the call to catch flows that completed between the action and the wait. Use `list_held_flows` with a `timeout` when you need to intercept and *modify* flows.
 
 ---
 
@@ -229,6 +229,7 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `list_log_sources`   | GET         | `/api/v1/logs/sources`                 |
 | `query_flows`        | GET         | `/api/v1/proxy/flows`                  |
 | `get_flow_detail`    | GET         | `/api/v1/proxy/flows/{id}`             |
+| `wait_for_flow`      | POST        | `/api/v1/proxy/flows/wait`             |
 | `get_flow_summary`   | GET         | `/api/v1/proxy/flows/summary`          |
 | `proxy_status`       | GET         | `/api/v1/proxy/status`                 |
 | `verify_proxy_setup` | POST        | `/api/v1/proxy/cert/verify`            |
@@ -329,7 +330,7 @@ Use `ensure_devices` to boot and claim multiple simulators at once, then run dif
 
 **Hardcoding device UDIDs** — Use `resolve_device` with a name and let Quern find the right device. UDIDs differ across machines.
 
-**Client-side polling instead of server-side waiting** — Use `wait_for_element` instead of looping on `get_ui_tree`. Use `list_held_flows` with a timeout instead of polling for intercepted flows.
+**Client-side polling instead of server-side waiting** — Use `wait_for_element` instead of looping on `get_ui_tree`. Use `wait_for_flow` instead of polling `query_flows` after triggering a UI action. Use `list_held_flows` with a timeout instead of polling for intercepted flows.
 
 **Not clearing text before typing** — Use `clear_text` before `type_text` when a field has pre-existing content. Otherwise you'll append to whatever's already there.
 

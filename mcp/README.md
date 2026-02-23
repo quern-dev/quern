@@ -87,11 +87,12 @@ src/
 | `set_log_filter` | Reconfigure capture filters |
 | `list_log_sources` | List active log source adapters |
 
-### Proxy (10 tools)
+### Proxy (11 tools)
 
 | Tool | Description |
 |---|---|
 | `query_flows` | Query captured HTTP flows with filters |
+| `wait_for_flow` | Block until a matching HTTP flow appears |
 | `get_flow_detail` | Full request/response detail for a flow |
 | `proxy_status` | Check proxy state and configuration |
 | `verify_proxy_setup` | Verify mitmproxy CA cert on simulators |

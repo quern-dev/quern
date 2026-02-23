@@ -193,13 +193,13 @@ quern disable-local-capture  # Disable local capture
 
 ## MCP Tools
 
-61 tools available via MCP:
+62 tools available via MCP:
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
 | Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `get_latest_crash`, `set_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging` |
-| Network | `query_flows`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `set_local_capture` |
+| Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `set_local_capture` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `clear_mocks` |
 | Device | `list_devices`, `boot_device`, `shutdown_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps` |
