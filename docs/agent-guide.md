@@ -21,12 +21,11 @@ The tools should feel natural — you don't think about mechanics, you just look
 
 Every Quern session should start with:
 
-1. `ensure_server` — start or verify Quern is running
-2. `resolve_device` — get a device to work with
-3. `get_screen_summary` — see what's on screen
-4. `proxy_status` — check if network capture is active
+1. `resolve_device` — get a device to work with
+2. `get_screen_summary` — see what's on screen
+3. `proxy_status` — check if network capture is active
 
-From there, use the right tool for your task.
+From there, use the right tool for your task. If any tool fails with a connection error, call `ensure_server` to verify the server is running and auto-start it if needed.
 
 ---
 
@@ -37,6 +36,8 @@ From there, use the right tool for your task.
 Use `get_screen_summary` for a curated text description or `get_ui_tree` for the full accessibility hierarchy. These are cheaper, faster, and easier to reason about programmatically than screenshots.
 
 Screenshots are still useful — for verifying visual layout, catching rendering bugs, documenting state for humans, or when you need to see something the accessibility tree doesn't capture. Use both, but reach for structured data first when you need to make decisions or find elements to interact with.
+
+Both `take_screenshot` and `take_annotated_screenshot` support a `save_path` parameter to write the image to disk instead of returning base64 — useful when handing off files to other tools (e.g., opening in Preview) or attaching to reports.
 
 ---
 
@@ -90,11 +91,12 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 ### Debugging Network Issues
 
-1. Call `ensure_server`, then check `proxy_status` — start the proxy if it isn't running
+1. Check `proxy_status` — start the proxy if it isn't running
 2. Get a baseline with `get_flow_summary` to see current traffic patterns
 3. Trigger the issue (tap a button, navigate to a screen)
 4. Query for relevant flows — filter by method, path, status code, or `simulator_udid`
 5. Use `get_flow_detail` on the specific flow to inspect headers, request body, and response body
+6. To re-send a captured request (e.g., after fixing a backend issue), use `replay_flow` with the flow ID
 
 **Key insight**: Start with summary, trigger action, drill down to specific flows.
 
@@ -180,6 +182,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - Quick overview: `get_screen_summary`
 - Full detail: `get_ui_tree`
 - Visual for humans: `take_screenshot`
+- Accessibility overlay: `take_annotated_screenshot` — draws bounding boxes on interactive elements, useful for debugging why `tap_element` can't find an element
 
 **"I need to tap/interact with UI"**
 - Known element: `tap_element` with label and element_type
@@ -193,6 +196,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - Full detail: `get_flow_detail`
 - Modify traffic: `set_intercept` + `release_flow` with modifications
 - Mock responses: `set_mock`
+- Replay a request: `replay_flow`
 - Check capture mode: `proxy_status` — look at `local_capture` field
 
 **"I need to see logs"**
@@ -205,6 +209,9 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - Boot: `boot_device` or `resolve_device` with auto_boot
 - Install app: `install_app`
 - Launch app: `launch_app`
+- Terminate app: `terminate_app`
+- Uninstall app: `uninstall_app`
+- List installed apps: `list_apps`
 - Screenshot: `take_screenshot`
 - Location: `set_location` (simulators only)
 - Permissions: `grant_permission` (simulators only)
@@ -321,11 +328,13 @@ Use `ensure_devices` to boot and claim multiple simulators at once, then run dif
 
 ## Common Mistakes
 
-**Not calling `ensure_server` first** — Tools fail with connection errors. Always start with `ensure_server`.
+**Not calling `ensure_server` when tools fail** — If tools fail with connection errors, call `ensure_server` — it checks server health and auto-starts if needed.
 
 **Using only screenshots to understand UI state** — Screenshots work, but `get_screen_summary` and `get_ui_tree` are faster, cheaper, and return structured data you can act on directly. Use screenshots to complement structured data, not replace it.
 
 **Forgetting element_type when label is ambiguous** — `tap_element(label="Cancel")` might match a StaticText instead of the Button. Specify `element_type="Button"` when the label might not be unique.
+
+**Using `get_ui_tree` to debug missing elements** — When `tap_element` can't find an element, use `take_annotated_screenshot` to visually see what the accessibility tree detects overlaid on the actual screen. It's faster than reading through the full UI tree and immediately shows mismatches between visual layout and accessibility labels.
 
 **Not filtering logs/flows** — Unfiltered queries return overwhelming amounts of data. Always filter by level, process, host, status code, or search text.
 
