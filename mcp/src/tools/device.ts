@@ -435,6 +435,88 @@ NOTE: If you want to capture network traffic from this app:
   );
 
   server.tool(
+    "take_annotated_screenshot",
+    `Capture a screenshot with accessibility annotations overlaid. Draws red bounding boxes and labels (element type + accessibility label) on interactive UI elements (buttons, text fields, switches, etc.). Useful for debugging UI automation issues — visually confirms what the accessibility tree sees vs. what's on screen. Always returns PNG.`,
+    {
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (auto-resolves if omitted)"),
+      scale: z
+        .number()
+        .min(0.1)
+        .max(1.0)
+        .default(0.5)
+        .describe("Scale factor (0.1-1.0, default 0.5)"),
+      quality: z
+        .number()
+        .min(1)
+        .max(100)
+        .default(85)
+        .describe("JPEG quality (1-100, used for base screenshot before annotation)"),
+      save_path: z
+        .string()
+        .optional()
+        .describe(
+          "Save screenshot to this file path instead of returning base64. Parent directories are created automatically."
+        ),
+    },
+    async ({ udid, scale, quality, save_path }) => {
+      try {
+        const srv = discoverServer();
+        const url = new URL("/api/v1/device/screenshot/annotated", srv.url);
+        if (udid) url.searchParams.set("udid", udid);
+        url.searchParams.set("scale", String(scale));
+        url.searchParams.set("quality", String(quality));
+
+        const resp = await fetch(url.toString(), {
+          headers: { Authorization: `Bearer ${srv.apiKey}` },
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`HTTP ${resp.status}: ${text}`);
+        }
+
+        const buffer = Buffer.from(await resp.arrayBuffer());
+
+        if (save_path) {
+          await mkdir(dirname(save_path), { recursive: true });
+          await writeFile(save_path, buffer);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Annotated screenshot saved to ${save_path}`,
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "image" as const,
+              data: buffer.toString("base64"),
+              mimeType: "image/png",
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "set_location",
     `Set the simulated GPS location on a simulator.`,
     {

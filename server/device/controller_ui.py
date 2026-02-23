@@ -991,6 +991,9 @@ class DeviceControllerUI:
         Returns (image_bytes, media_type).
         """
         resolved = await self.resolve_udid(udid)
-        raw_png = await self.simctl.screenshot(resolved)
+        if self._is_physical(resolved):
+            raw_png = await self.pmd3.screenshot(resolved)
+        else:
+            raw_png = await self.simctl.screenshot(resolved)
         elements, _ = await self.get_ui_elements(resolved)
         return annotate_screenshot(raw_png, elements, scale=scale, quality=quality)

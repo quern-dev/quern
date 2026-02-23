@@ -55,9 +55,9 @@ Can't clear caches, UserDefaults, or databases between test runs. Important for 
 - `reset_app_data(bundle_id, udid)` that removes the app's data container
 - At minimum, `uninstall_app` + `install_app` works but is slow
 
-### 6. No annotated screenshot MCP tool
+### ~~6. No annotated screenshot MCP tool~~ ✅ Done
 
-`GET /api/v1/device/screenshot/annotated` overlays accessibility information on screenshots. Exists in HTTP API but not exposed via MCP. Very useful for visual debugging of "element not appearing" issues.
+~~`GET /api/v1/device/screenshot/annotated` overlays accessibility information on screenshots. Exists in HTTP API but not exposed via MCP.~~ Added `take_annotated_screenshot` MCP tool wrapping the existing endpoint.
 
 ### 7. `set_log_filter` is a stub
 
@@ -74,7 +74,7 @@ To change a mock response, agents must `clear_mocks(rule_id=...)` then `set_mock
 | ~~`POST /builds/parse`~~ | ~~Submit xcodebuild output for parsing~~ ✅ (via `parse_build_output` / `POST /builds/parse-file`) |
 | ~~`POST /proxy/cert/install`~~ | ~~Install CA cert on simulator(s)~~ ✅ |
 | `GET /proxy/cert/status` | Cert installation status (cached) |
-| `GET /device/screenshot/annotated` | Screenshot with accessibility overlays |
+| ~~`GET /device/screenshot/annotated`~~ | ~~Screenshot with accessibility overlays~~ ✅ |
 | `POST /devices/cleanup` | Clean up stale device claims |
 | `POST /devices/refresh` | Refresh pool from simctl |
 
@@ -105,7 +105,7 @@ No way to measure "how long did this screen take to load" or "time between tap a
 |---|---|---|
 | App crashes on launch | Good (after crash) | No build tool, no wait-for-crash |
 | API returns wrong data | Good | ~~No wait-for-flow~~ ✅ |
-| UI element not appearing | Good | Annotated screenshot not in MCP |
+| UI element not appearing | Good | ~~Annotated screenshot not in MCP~~ ✅ |
 | Different API responses | Good | No app data reset |
 | Fix bug and verify | Partial | **No build tool** |
 | Performance issue | Partial | No metrics, no timing |
@@ -118,5 +118,5 @@ No way to measure "how long did this screen take to load" or "time between tap a
 2. ~~**`install_proxy_cert` MCP tool** — low effort, wraps existing endpoint~~ ✅
 3. ~~**`wait_for_flow` tool** — completes the network debugging loop~~ ✅
 4. **WDA activate for physical devices** — spec already written
-5. **Annotated screenshot MCP tool** — low effort, wraps existing endpoint
+5. ~~**Annotated screenshot MCP tool** — low effort, wraps existing endpoint~~ ✅
 6. **Fix or remove `set_log_filter` stub** — avoid confusing agents
