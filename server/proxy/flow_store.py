@@ -91,6 +91,8 @@ class FlowStore:
                 continue
             if params.has_error is False and flow.error is not None:
                 continue
+            if params.simulator_udid and flow.simulator_udid != params.simulator_udid:
+                continue
             if params.since and flow.timestamp < params.since:
                 continue
             if params.until and flow.timestamp > params.until:

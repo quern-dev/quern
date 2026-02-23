@@ -14,7 +14,12 @@ Usage:
 from __future__ import annotations
 
 import base64
+import ctypes
+import ctypes.util
 import json
+import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +29,169 @@ from typing import Any
 from mitmproxy import http
 from mitmproxy import ctx
 from mitmproxy import flowfilter
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: capture PID/process_name from mitmproxy_rs local redirector
+# ---------------------------------------------------------------------------
+
+# client_conn_id -> {pid, process_name}
+_client_process_info: dict[str, dict] = {}
+
+try:
+    from mitmproxy.proxy.server import LiveConnectionHandler
+
+    _orig_init = LiveConnectionHandler.__init__
+
+    def _patched_init(self, reader, writer, options, mode):
+        _orig_init(self, reader, writer, options, mode)
+        pid = writer.get_extra_info("pid")
+        process_name = writer.get_extra_info("process_name")
+        if pid is not None:
+            _client_process_info[self.client.id] = {
+                "pid": pid,
+                "process_name": process_name,
+            }
+
+    LiveConnectionHandler.__init__ = _patched_init
+except Exception:
+    pass  # Not available — non-local mode or import failure
+
+
+# ---------------------------------------------------------------------------
+# PID → Simulator UDID resolution
+# ---------------------------------------------------------------------------
+
+# launchd_sim PID -> UDID
+_launchd_sim_cache: dict[int, str] = {}
+# source PID -> resolved UDID (stable while simulator is booted)
+_pid_to_udid_cache: dict[int, str | None] = {}
+_cache_lock = threading.Lock()
+
+# UDID pattern in launchd_sim command line
+_UDID_RE = re.compile(r"[0-9A-F]{8}-(?:[0-9A-F]{4}-){3}[0-9A-F]{12}", re.IGNORECASE)
+
+
+def _refresh_launchd_sim_cache() -> None:
+    """Rebuild the launchd_sim PID→UDID cache from ps output."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,command"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return
+
+        new_cache: dict[int, str] = {}
+        for line in result.stdout.splitlines():
+            if "launchd_sim" not in line:
+                continue
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            m = _UDID_RE.search(parts[1])
+            if m:
+                new_cache[pid] = m.group(0)
+
+        with _cache_lock:
+            _launchd_sim_cache.clear()
+            _launchd_sim_cache.update(new_cache)
+    except Exception:
+        pass
+
+
+def _get_ppid(pid: int) -> int | None:
+    """Get parent PID using libproc (no subprocess overhead)."""
+    try:
+        libproc_path = ctypes.util.find_library("libproc")
+        if libproc_path is None:
+            # Direct path fallback on macOS
+            libproc_path = "/usr/lib/libproc.dylib"
+        libproc = ctypes.CDLL(libproc_path, use_errno=True)
+
+        # struct proc_bsdinfo
+        class ProcBsdInfo(ctypes.Structure):
+            _fields_ = [
+                ("pbi_flags", ctypes.c_uint32),
+                ("pbi_status", ctypes.c_uint32),
+                ("pbi_xstatus", ctypes.c_uint32),
+                ("pbi_pid", ctypes.c_uint32),
+                ("pbi_ppid", ctypes.c_uint32),
+                # ... more fields but we only need ppid
+            ]
+
+        buf = ProcBsdInfo()
+        # PROC_PIDTBSDINFO = 3
+        ret = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(buf), ctypes.sizeof(buf))
+        if ret > 0:
+            return buf.pbi_ppid
+    except Exception:
+        pass
+
+    # Fallback to ps
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "ppid="],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_simulator_udid(pid: int) -> str | None:
+    """Walk parent chain to find a launchd_sim ancestor → simulator UDID."""
+    with _cache_lock:
+        if pid in _pid_to_udid_cache:
+            return _pid_to_udid_cache[pid]
+
+    # Walk up to 10 levels of parent chain
+    current = pid
+    visited: set[int] = set()
+    for _ in range(10):
+        if current is None or current <= 1 or current in visited:
+            break
+        visited.add(current)
+
+        with _cache_lock:
+            udid = _launchd_sim_cache.get(current)
+        if udid:
+            with _cache_lock:
+                _pid_to_udid_cache[pid] = udid
+            return udid
+
+        current = _get_ppid(current)
+
+    # Cache miss after full walk — try refreshing launchd_sim cache once
+    _refresh_launchd_sim_cache()
+
+    # Retry the walk after refresh
+    current = pid
+    visited.clear()
+    for _ in range(10):
+        if current is None or current <= 1 or current in visited:
+            break
+        visited.add(current)
+
+        with _cache_lock:
+            udid = _launchd_sim_cache.get(current)
+        if udid:
+            with _cache_lock:
+                _pid_to_udid_cache[pid] = udid
+            return udid
+
+        current = _get_ppid(current)
+
+    # Not from a simulator
+    with _cache_lock:
+        _pid_to_udid_cache[pid] = None
+    return None
 
 # Maximum body size to include inline (100KB)
 MAX_BODY_SIZE = 100 * 1024
@@ -188,6 +356,8 @@ class IOSDebugAddon:
         self._stdin_thread.start()
         self._timeout_thread = threading.Thread(target=self._run_timeout_loop, daemon=True)
         self._timeout_thread.start()
+        # Pre-populate launchd_sim → UDID cache for simulator flow tagging
+        threading.Thread(target=_refresh_launchd_sim_cache, daemon=True).start()
         _write_json({"type": "status", "event": "started", "timestamp": time.time()})
 
     def done(self) -> None:
@@ -273,6 +443,10 @@ class IOSDebugAddon:
 
         _write_json(self._serialize_flow(flow))
 
+    def client_disconnected(self, client) -> None:
+        """Clean up process info when a client disconnects."""
+        _client_process_info.pop(client.id, None)
+
     def _serialize_flow(self, flow: http.HTTPFlow) -> dict[str, Any]:
         """Convert an mitmproxy flow to our JSON format."""
         flow_id = f"f_{uuid.uuid4().hex[:12]}"
@@ -292,6 +466,16 @@ class IOSDebugAddon:
         result["timing"] = _compute_timing(flow)
         result["tls"] = _get_tls_info(flow)
         result["error"] = str(flow.error) if flow.error else None
+
+        # Source process tagging (from monkey-patched connection handler)
+        client_id = flow.client_conn.id if flow.client_conn else None
+        if client_id and client_id in _client_process_info:
+            info = _client_process_info[client_id]
+            pid = info.get("pid")
+            result["source_process"] = info.get("process_name")
+            result["source_pid"] = pid
+            if pid is not None:
+                result["simulator_udid"] = _resolve_simulator_udid(pid)
 
         return result
 

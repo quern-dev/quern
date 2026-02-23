@@ -69,3 +69,31 @@ def read_user_config() -> dict:
 def get_default_device_family() -> str:
     """Return the configured default device family, defaulting to 'iPhone'."""
     return read_user_config().get("default_device_family", "iPhone")
+
+
+def get_local_capture_processes() -> list[str]:
+    """Return the list of process names for local capture mode.
+
+    Returns [] if not configured (disabled).
+    Handles legacy bool values: True -> ["MobileSafari"], False -> [].
+    """
+    value = read_user_config().get("local_capture")
+    if value is None or value is False:
+        return []
+    if value is True:
+        # Legacy bool: default to MobileSafari
+        return ["MobileSafari"]
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return []
+
+
+def set_local_capture_processes(processes: list[str]) -> None:
+    """Set the local_capture process list in ~/.quern/config.json.
+
+    An empty list disables local capture.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = read_user_config()
+    config["local_capture"] = processes
+    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")

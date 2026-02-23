@@ -26,6 +26,10 @@ export function registerProxyTools(server: McpServer): void {
         .boolean()
         .optional()
         .describe("Filter to flows with connection errors"),
+      simulator_udid: z
+        .string()
+        .optional()
+        .describe("Filter by simulator UDID (only flows from this simulator)"),
       limit: z
         .number()
         .min(1)
@@ -41,6 +45,7 @@ export function registerProxyTools(server: McpServer): void {
       status_min,
       status_max,
       has_error,
+      simulator_udid,
       limit,
       offset,
     }) => {
@@ -52,6 +57,7 @@ export function registerProxyTools(server: McpServer): void {
           status_min,
           status_max,
           has_error,
+          simulator_udid,
           limit,
           offset,
         });
@@ -124,11 +130,17 @@ export function registerProxyTools(server: McpServer): void {
   server.tool(
     "proxy_status",
     `Check proxy state and configuration. Returns status (running/stopped/error),
-port, flows captured, intercept state, mock rules count, and system proxy state.
+port, flows captured, intercept state, mock rules count, system proxy state, and
+local_capture mode.
 
 The system_proxy field shows whether the macOS system proxy is currently
 configured. If null/false, the user's browser works normally and traffic
-is NOT being captured.`,
+is NOT being captured.
+
+The local_capture field is a list of process names being captured via mitmproxy
+local mode. When non-empty, traffic from those processes (e.g. ["MobileSafari"])
+is transparently captured without needing a system proxy. Empty list means disabled.
+Use set_local_capture to change the process list on the fly.`,
     {},
     async () => {
       try {
@@ -217,13 +229,28 @@ IMPORTANT: By default, this does NOT configure the system proxy.
 The proxy will listen on the specified port but traffic won't be
 routed through it until you call configure_system_proxy.
 
-WORKFLOW:
+For SIMULATORS: The proxy automatically configures per-simulator proxy
+settings on all booted simulators that have the mitmproxy CA cert installed.
+Simulator traffic is captured without affecting the host's browser or network.
+Check the simulator_proxy field in proxy_status to see which simulators are configured.
+
+For PHYSICAL DEVICES: You still need to call configure_system_proxy to route
+traffic through mitmproxy (or configure the device's Wi-Fi proxy settings manually).
+
+WORKFLOW (simulators — zero setup):
+1. Call start_proxy → simulators are auto-configured
+2. Run your tests → traffic appears in flow capture
+3. Call stop_proxy when done
+
+WORKFLOW (physical devices):
 1. Call start_proxy (proxy listens, system proxy stays OFF)
 2. When ready to capture: call configure_system_proxy
 3. Run your tests/capture traffic
 4. When done: call unconfigure_system_proxy (restore user's browser)
 
-This keeps the user's browser working normally when not actively capturing.`,
+NOTE: If local_capture is enabled (check proxy_status), all local traffic
+including simulator traffic is captured transparently without any proxy
+configuration needed.`,
     {
       port: z
         .number()
@@ -442,6 +469,52 @@ the background and can be re-enabled with configure_system_proxy.`,
             {
               type: "text" as const,
               text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "set_local_capture",
+    `Set the list of process names for local capture mode. Uses mitmproxy's
+macOS System Extension to transparently capture traffic from specific processes
+without configuring a system proxy.
+
+Restarts the proxy automatically to apply the new configuration — no server
+restart needed. Pass an empty list to disable local capture.
+
+On first use, macOS will prompt to allow the Mitmproxy Redirector system
+extension in System Settings > Privacy & Security.`,
+    {
+      processes: z
+        .array(z.string())
+        .describe(
+          'List of process names to capture (e.g. ["MobileSafari", "Metatext"]). Empty list disables local capture.'
+        ),
+    },
+    async ({ processes }) => {
+      try {
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/proxy/local-capture",
+          undefined,
+          { processes }
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
             },
           ],
           isError: true,

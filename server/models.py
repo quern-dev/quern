@@ -261,6 +261,9 @@ class FlowRecord(BaseModel):
     tls: dict[str, str] | None = None
     error: str | None = None
     tags: list[str] = Field(default_factory=list)
+    source_process: str | None = Field(default=None, description="Process that originated the request (e.g. nsurlsessiond)")
+    source_pid: int | None = Field(default=None, description="PID of the originating process")
+    simulator_udid: str | None = Field(default=None, description="Simulator UDID if traffic came from a simulator")
 
 
 class FlowQueryParams(BaseModel):
@@ -275,6 +278,7 @@ class FlowQueryParams(BaseModel):
     since: datetime | None = None
     until: datetime | None = None
     device_id: str = "default"
+    simulator_udid: str | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
 
@@ -305,6 +309,7 @@ class ProxyStatusResponse(BaseModel):
     held_flows_count: int = 0
     mock_rules_count: int = 0
     error: str | None = None
+    local_capture: list[str] = Field(default_factory=list)
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
 

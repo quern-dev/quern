@@ -32,7 +32,7 @@ from fastapi import FastAPI
 
 from server.auth import APIKeyMiddleware
 from server.device.controller import DeviceController
-from server.config import ServerConfig
+from server.config import ServerConfig, get_local_capture_processes, set_local_capture_processes
 from server.lifecycle.daemon import LOG_FILE, daemonize, _print_status
 from server.lifecycle.ports import (
     DEFAULT_PROXY_PORT,
@@ -142,6 +142,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         on_entry=dedup.process,
         flow_store=flow_store,
         listen_port=app.state.proxy_port,
+        local_capture_processes=app.state.local_capture_processes,
     )
     adapters["proxy"] = proxy
     app.state.proxy_adapter = proxy
@@ -301,6 +302,7 @@ def create_app(
     enable_proxy: bool = True,
     proxy_port: int = 9101,
     on_crash_hook: str | None = None,
+    local_capture_processes: list[str] | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     if config is None:
@@ -328,6 +330,7 @@ def create_app(
     app.state.enable_proxy = enable_proxy
     app.state.proxy_port = proxy_port
     app.state.on_crash_hook = on_crash_hook
+    app.state.local_capture_processes = local_capture_processes or []
     app.state.source_adapters = {}
     app.state.crash_adapter = None
     app.state.build_adapter = None
@@ -530,6 +533,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     enable_syslog = args.syslog is True and not args.no_syslog
     enable_oslog = args.oslog is True and not args.no_oslog
     enable_crash = not args.no_crash
+    local_capture_processes = get_local_capture_processes() if enable_proxy else []
 
     # Write state file
     write_state({
@@ -538,6 +542,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "proxy_port": proxy_port,
         "proxy_enabled": enable_proxy,
         "proxy_status": "starting" if enable_proxy else "disabled",
+        "local_capture": local_capture_processes,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "api_key": config.api_key,
         "active_devices": [],
@@ -562,6 +567,12 @@ def _cmd_start(args: argparse.Namespace) -> None:
                 print(f"  Crash process filter: {args.crash_process_filter}")
         if enable_proxy:
             print(f"  Proxy: enabled (port: {proxy_port})")
+            if local_capture_processes:
+                print(f"  Local capture: {', '.join(local_capture_processes)}")
+            else:
+                print(f"  Local capture: disabled")
+                print(f"    Capture simulator traffic without a system proxy:")
+                print(f"    Run: quern enable-local-capture [process ...]")
         if args.on_crash:
             print(f"  On-crash hook: {args.on_crash}")
         print()
@@ -583,6 +594,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         enable_proxy=enable_proxy,
         proxy_port=proxy_port,
         on_crash_hook=args.on_crash,
+        local_capture_processes=local_capture_processes,
     )
 
     uv_config = uvicorn.Config(
@@ -701,6 +713,67 @@ def _cmd_status(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _cmd_enable_local_capture(process_names: list[str]) -> None:
+    """Enable local capture mode for specific processes."""
+    processes = process_names if process_names else ["MobileSafari"]
+
+    current = get_local_capture_processes()
+    if current == processes:
+        print(f"Local capture is already enabled for: {', '.join(processes)}")
+        return
+
+    print("Enabling local capture mode.")
+    print("This uses a macOS System Extension (mitmproxy-macos) to transparently")
+    print("capture network traffic from specific processes without configuring a system proxy.")
+    print()
+    print("On first use, macOS will prompt you to allow the Mitmproxy Redirector")
+    print("system extension in System Settings > Privacy & Security.")
+
+    set_local_capture_processes(processes)
+    print()
+    print(f"Local capture enabled for: {', '.join(processes)}")
+
+    # Restart server if running
+    state = read_state()
+    if state and is_server_healthy(state.get("server_port", 9100)):
+        print("Restarting server to apply changes...")
+        pid = state.get("pid")
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(50):
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            print("Server stopped. Start it again with: quern start")
+
+
+def _cmd_disable_local_capture() -> None:
+    """Disable local capture mode."""
+    if not get_local_capture_processes():
+        print("Local capture is already disabled.")
+        return
+
+    set_local_capture_processes([])
+    print("Local capture disabled in ~/.quern/config.json")
+
+    # Restart server if running
+    state = read_state()
+    if state and is_server_healthy(state.get("server_port", 9100)):
+        print("Restarting server to apply changes...")
+        pid = state.get("pid")
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(50):
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+            print("Server stopped. Start it again with: quern start")
+
+
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -738,6 +811,17 @@ def cli() -> None:
     # regenerate-key (preserved)
     subparsers.add_parser("regenerate-key", help="Generate a new API key")
 
+    # enable-local-capture / disable-local-capture
+    enable_lc = subparsers.add_parser(
+        "enable-local-capture",
+        help="Enable local traffic capture via macOS System Extension",
+    )
+    enable_lc.add_argument(
+        "processes", nargs="*", default=[],
+        help="Process names to capture (default: MobileSafari)",
+    )
+    subparsers.add_parser("disable-local-capture", help="Disable local traffic capture")
+
     args, remaining = parser.parse_known_args()
 
     # Backward compat: no subcommand → start --foreground
@@ -765,6 +849,10 @@ def cli() -> None:
     elif args.command == "regenerate-key":
         key = ServerConfig.regenerate_api_key()
         print(f"New API key: {key}")
+    elif args.command == "enable-local-capture":
+        _cmd_enable_local_capture(args.processes)
+    elif args.command == "disable-local-capture":
+        _cmd_disable_local_capture()
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())

@@ -76,9 +76,12 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     except Exception as e:
         _proxy_logger.debug(f"Failed to load state: {e}")
 
+    local_capture = getattr(request.app.state, "local_capture_processes", [])
+
     if adapter is None:
         return ProxyStatusResponse(
             status="stopped",
+            local_capture=local_capture,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
         )
@@ -93,6 +96,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
+            local_capture=local_capture,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
         )
@@ -107,6 +111,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
+            local_capture=local_capture,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
         )
@@ -116,6 +121,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
         port=adapter.listen_port,
         listen_host=adapter.listen_host,
         flows_captured=flow_store.size if flow_store else 0,
+        local_capture=local_capture,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,
     )
@@ -357,6 +363,7 @@ async def query_flows(
     since: datetime | None = None,
     until: datetime | None = None,
     device_id: str = "default",
+    simulator_udid: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> FlowQueryResponse:
@@ -375,6 +382,7 @@ async def query_flows(
         since=since,
         until=until,
         device_id=device_id,
+        simulator_udid=simulator_udid,
         limit=limit,
         offset=offset,
     )
@@ -447,3 +455,51 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
     else:
         await proxy_adapter.send_command({"action": "clear_filter"})
         return {"status": "accepted", "filter": "none"}
+
+
+# ---------------------------------------------------------------------------
+# Local capture
+# ---------------------------------------------------------------------------
+
+
+@router.post("/local-capture", response_model=ProxyStatusResponse)
+async def set_local_capture(request: Request, body: dict) -> ProxyStatusResponse:
+    """Set the local capture process list. Restarts the proxy to apply.
+
+    Body: {"processes": ["Metatext", "MobileSafari"]}
+    Empty list disables local capture.
+    """
+    processes = body.get("processes")
+    if processes is None:
+        raise HTTPException(status_code=400, detail="Missing 'processes' field")
+    if not isinstance(processes, list):
+        raise HTTPException(status_code=400, detail="'processes' must be a list of strings")
+    processes = [str(p) for p in processes if p]
+
+    adapter = request.app.state.proxy_adapter
+    if adapter is None:
+        raise HTTPException(status_code=503, detail="Proxy adapter not configured")
+
+    # Update app state
+    request.app.state.local_capture_processes = processes
+
+    # Persist to config
+    from server.config import set_local_capture_processes
+    set_local_capture_processes(processes)
+
+    # Restart proxy if running to apply new mode
+    was_running = adapter.is_running
+    if was_running:
+        await adapter.stop()
+        adapter.reconfigure(local_capture_processes=processes)
+        await adapter.start()
+    else:
+        adapter.reconfigure(local_capture_processes=processes)
+
+    # Update state file
+    try:
+        update_state(local_capture=processes)
+    except Exception:
+        _proxy_logger.debug("Could not update state file", exc_info=True)
+
+    return _get_proxy_status(request)

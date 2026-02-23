@@ -130,6 +130,12 @@ def _print_status(state: dict) -> None:
     if proxy_enabled:
         proxy_status = state.get("proxy_status", "unknown")
         print(f"  Proxy:      port {proxy_port} ({proxy_status})")
+        local_capture = state.get("local_capture", [])
+        if local_capture:
+            names = ", ".join(local_capture) if isinstance(local_capture, list) else "enabled"
+            print(f"  Local capture: {names}")
+        else:
+            print(f"  Local capture: disabled (run: quern enable-local-capture)")
     else:
         print(f"  Proxy:      disabled")
     print(f"  API key:    {key_display}")

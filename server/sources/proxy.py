@@ -110,6 +110,7 @@ class ProxyAdapter(BaseSourceAdapter):
         flow_store: FlowStore | None = None,
         listen_host: str = "0.0.0.0",
         listen_port: int = 9101,
+        local_capture_processes: list[str] | None = None,
     ) -> None:
         super().__init__(
             adapter_id="proxy",
@@ -120,8 +121,10 @@ class ProxyAdapter(BaseSourceAdapter):
         self.flow_store = flow_store or FlowStore()
         self.listen_host = listen_host
         self.listen_port = listen_port
+        self.local_capture_processes: list[str] = local_capture_processes or []
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
 
         # Intercept state (server-side mirror of addon state)
         self._intercept_pattern: str | None = None
@@ -131,7 +134,17 @@ class ProxyAdapter(BaseSourceAdapter):
         # Mock state (server-side mirror)
         self._mock_rules: list[dict] = []  # [{rule_id, pattern}]
 
-    def reconfigure(self, listen_port: int | None = None, listen_host: str | None = None) -> None:
+    @property
+    def local_capture(self) -> bool:
+        """Whether local capture is enabled (any processes configured)."""
+        return bool(self.local_capture_processes)
+
+    def reconfigure(
+        self,
+        listen_port: int | None = None,
+        listen_host: str | None = None,
+        local_capture_processes: list[str] | None = None,
+    ) -> None:
         """Update listen config. Only allowed when stopped."""
         if self._running:
             raise RuntimeError("Cannot reconfigure while running")
@@ -139,6 +152,8 @@ class ProxyAdapter(BaseSourceAdapter):
             self.listen_port = listen_port
         if listen_host is not None:
             self.listen_host = listen_host
+        if local_capture_processes is not None:
+            self.local_capture_processes = local_capture_processes
 
     @staticmethod
     def _find_mitmdump() -> str:
@@ -156,6 +171,8 @@ class ProxyAdapter(BaseSourceAdapter):
     @staticmethod
     def _kill_stale_mitmdump(port: int) -> None:
         """Find and kill any stale mitmdump holding our listen port."""
+        import socket
+
         # Find PIDs listening on the port
         try:
             result = subprocess.run(
@@ -167,6 +184,7 @@ class ProxyAdapter(BaseSourceAdapter):
         except Exception:
             return
 
+        killed_any = False
         for pid_str in result.stdout.strip().splitlines():
             try:
                 pid = int(pid_str.strip())
@@ -203,8 +221,22 @@ class ProxyAdapter(BaseSourceAdapter):
                         break
                 else:
                     os.kill(pid, signal_mod.SIGKILL)
+                killed_any = True
             except ProcessLookupError:
-                pass
+                killed_any = True
+
+        if not killed_any:
+            return
+
+        # Wait for the port to actually be free (OS may hold it briefly)
+        for _ in range(20):  # up to 2 seconds
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                    return  # Port is free
+                except OSError:
+                    time.sleep(0.1)
+        logger.warning("Port %d still busy after killing stale mitmdump", port)
 
     async def start(self) -> None:
         """Spawn mitmdump with our addon and begin reading output."""
@@ -224,9 +256,20 @@ class ProxyAdapter(BaseSourceAdapter):
             mitmdump,
             "-s", str(ADDON_PATH),
             "--listen-host", self.listen_host,
-            "--listen-port", str(self.listen_port),
             "--quiet",
         ]
+
+        if self.local_capture_processes:
+            # --mode regular@PORT handles the listen port; --mode local:Process1,Process2
+            # adds transparent capture for specific processes via macOS System Extension.
+            # Don't also pass --listen-port or mitmdump will try to bind the same address twice.
+            process_list = ",".join(self.local_capture_processes)
+            cmd.extend([
+                "--mode", f"regular@{self.listen_port}",
+                "--mode", f"local:{process_list}",
+            ])
+        else:
+            cmd.extend(["--listen-port", str(self.listen_port)])
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -244,6 +287,7 @@ class ProxyAdapter(BaseSourceAdapter):
         self._running = True
         self.started_at = self._now()
         self._read_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
             "Proxy adapter started (mitmdump on %s:%d)",
             self.listen_host,
@@ -261,15 +305,17 @@ class ProxyAdapter(BaseSourceAdapter):
             except asyncio.TimeoutError:
                 self._process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._read_task, getattr(self, "_stderr_task", None)):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         self._process = None
         self._read_task = None
+        self._stderr_task = None
 
         # Clear intercept/mock state
         self._intercept_pattern = None
@@ -419,6 +465,20 @@ class ProxyAdapter(BaseSourceAdapter):
                 logger.exception("Proxy read loop failed")
         finally:
             self._running = False
+
+    async def _drain_stderr(self) -> None:
+        """Read and log stderr from mitmdump so errors aren't lost."""
+        assert self._process is not None
+        assert self._process.stderr is not None
+        try:
+            async for raw_line in self._process.stderr:
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    logger.warning("mitmdump stderr: %s", line)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
     async def _handle_flow(self, data: dict) -> None:
         """Process a flow event from the addon."""
@@ -574,6 +634,9 @@ class ProxyAdapter(BaseSourceAdapter):
                 tls=data.get("tls"),
                 error=data.get("error"),
                 tags=[],
+                source_process=data.get("source_process"),
+                source_pid=data.get("source_pid"),
+                simulator_udid=data.get("simulator_udid"),
             )
         except Exception as e:
             logger.warning("Failed to parse flow data: %s", e)
