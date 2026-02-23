@@ -73,7 +73,7 @@ src/
 
 ## Tools
 
-### Logs (9 tools)
+### Logs (10 tools)
 
 | Tool | Description |
 |---|---|
@@ -83,6 +83,7 @@ src/
 | `get_log_summary` | AI-optimized summary with cursor-based delta polling |
 | `get_errors` | Error-level entries and crash reports |
 | `get_build_result` | Most recent parsed xcodebuild result |
+| `parse_build_output` | Parse an xcodebuild log file into structured results |
 | `get_latest_crash` | Recent crash reports with parsed details |
 | `set_log_filter` | Reconfigure capture filters |
 | `list_log_sources` | List active log source adapters |

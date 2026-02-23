@@ -224,6 +224,7 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `get_log_summary`    | GET         | `/api/v1/logs/summary`                 |
 | `get_errors`         | GET         | `/api/v1/logs/errors`                  |
 | `get_build_result`   | GET         | `/api/v1/builds/latest`                |
+| `parse_build_output` | POST        | `/api/v1/builds/parse-file`            |
 | `get_latest_crash`   | GET         | `/api/v1/crashes/latest`               |
 | `set_log_filter`     | POST        | `/api/v1/logs/filter`                  |
 | `list_log_sources`   | GET         | `/api/v1/logs/sources`                 |

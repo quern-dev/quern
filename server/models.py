@@ -197,12 +197,22 @@ class TestSummary(BaseModel):
     failures: list[TestFailure] = Field(default_factory=list)
 
 
+class WarningGroup(BaseModel):
+    """Warnings grouped by message pattern."""
+
+    message: str
+    count: int
+    files: list[str] = Field(default_factory=list)
+
+
 class BuildResult(BaseModel):
     """Parsed result from an xcodebuild invocation."""
 
     succeeded: bool = False
     errors: list[BuildDiagnostic] = Field(default_factory=list)
     warnings: list[BuildDiagnostic] = Field(default_factory=list)
+    warning_groups: list[WarningGroup] = Field(default_factory=list)
+    warning_count: int = 0
     tests: TestSummary | None = None
     raw_line_count: int = 0
 

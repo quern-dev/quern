@@ -437,6 +437,50 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.tool(
+    "parse_build_output",
+    `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing.`,
+    {
+      file_path: z
+        .string()
+        .describe("Absolute path to the xcodebuild log file (e.g. /tmp/build.log)"),
+      fuzzy_groups: z
+        .boolean()
+        .optional()
+        .describe("Use fuzzy word-level template grouping to collapse similar warnings (e.g. conformance warnings differing only by type name). Default: false (exact match grouping)."),
+    },
+    async ({ file_path, fuzzy_groups }) => {
+      try {
+        const body: Record<string, unknown> = { file_path };
+        if (fuzzy_groups !== undefined) {
+          body.fuzzy_groups = fuzzy_groups;
+        }
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/builds/parse-file",
+          undefined,
+          body
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "get_latest_crash",
     `Get recent crash reports with parsed exception types, signals, and stack frames.`,
     {

@@ -44,6 +44,7 @@ const instructions = [
   "- Network: get_flow_summary → query_flows → get_flow_detail | wait_for_flow (block until match) | set_mock (synthetic responses) | set_intercept + release_flow (modify live traffic)",
   "- Logs: get_log_summary → query_logs | tail_logs (recent) | get_errors | get_latest_crash",
   "- Devices: resolve_device (find/boot/claim) | install_app | launch_app | grant_permission (sim only)",
+  "- Device selection: use list_devices or resolve_device to discover devices. Prefer already-booted simulators or connected physical devices unless the user specifies otherwise.",
   "",
   "NETWORK CAPTURE:",
   "- Local capture (recommended for simulators): transparent, per-simulator flow tagging via simulator_udid. Check proxy_status local_capture field.",

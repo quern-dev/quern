@@ -9,8 +9,11 @@ emitted as ``LogEntry`` items through the normal pipeline.
 from __future__ import annotations
 
 import logging
+import pathlib
 import re
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from server.models import (
@@ -21,6 +24,7 @@ from server.models import (
     LogSource,
     TestFailure,
     TestSummary,
+    WarningGroup,
 )
 from server.sources import BaseSourceAdapter, EntryCallback
 
@@ -43,6 +47,92 @@ BUILD_STATUS_RE = re.compile(r"\*\*\s+BUILD\s+(SUCCEEDED|FAILED)\s+\*\*")
 TEST_SUITE_SUMMARY_RE = re.compile(
     r"Executed (\d+) tests?, with (\d+) failures?"
 )
+
+
+_QUOTED_TOKEN_RE = re.compile(r"'[^']*'|\S+")
+
+WILDCARD = "*"
+MAX_WILDCARD_RATIO = 0.30
+
+
+def _tokenize(message: str) -> list[str]:
+    """Split on whitespace but keep single-quoted tokens intact."""
+    return _QUOTED_TOKEN_RE.findall(message)
+
+
+@dataclass
+class _FuzzyTemplate:
+    """A word-level template that accumulates warnings matching its pattern."""
+
+    tokens: list[str]
+    first_message: str
+    files: list[str] = field(default_factory=list)
+    count: int = 0
+
+
+def _group_warnings_fuzzy(warnings: list[BuildDiagnostic]) -> list[WarningGroup]:
+    """Group warnings by fuzzy word-level template matching.
+
+    Two messages can merge if they have the same word count and differ in
+    at most ~30% of positions.  Differing positions become wildcards.
+    """
+    templates: list[_FuzzyTemplate] = []
+
+    for w in warnings:
+        tokens = _tokenize(w.message)
+        token_count = len(tokens)
+        basename = pathlib.PurePosixPath(w.file).name if w.file else ""
+
+        best_template: _FuzzyTemplate | None = None
+        best_new_wildcards = token_count + 1  # worse than any real match
+
+        for tpl in templates:
+            if len(tpl.tokens) != token_count:
+                continue
+
+            new_wildcards = 0
+            total_wildcards = 0
+            for t_tok, m_tok in zip(tpl.tokens, tokens):
+                if t_tok == WILDCARD:
+                    total_wildcards += 1
+                elif t_tok != m_tok:
+                    new_wildcards += 1
+                    total_wildcards += 1
+
+            if token_count > 0 and total_wildcards / token_count > MAX_WILDCARD_RATIO:
+                continue
+            if new_wildcards < best_new_wildcards:
+                best_new_wildcards = new_wildcards
+                best_template = tpl
+
+        if best_template is not None:
+            # Merge: replace differing positions with wildcard
+            for i, (t_tok, m_tok) in enumerate(
+                zip(best_template.tokens, tokens)
+            ):
+                if t_tok != WILDCARD and t_tok != m_tok:
+                    best_template.tokens[i] = WILDCARD
+            best_template.count += 1
+            if basename and basename not in best_template.files:
+                best_template.files.append(basename)
+        else:
+            # Seed new template
+            tpl = _FuzzyTemplate(
+                tokens=list(tokens),
+                first_message=w.message,
+                count=1,
+                files=[basename] if basename else [],
+            )
+            templates.append(tpl)
+
+    return [
+        WarningGroup(
+            message=tpl.first_message,
+            count=tpl.count,
+            files=tpl.files[:5],
+        )
+        for tpl in templates
+    ]
 
 
 class BuildAdapter(BaseSourceAdapter):
@@ -80,13 +170,17 @@ class BuildAdapter(BaseSourceAdapter):
             s.status = "ready"
         return s
 
-    async def parse_build_output(self, content: str) -> BuildResult:
+    async def parse_build_output(self, content: str, *, fuzzy: bool = False) -> BuildResult:
         """Parse raw xcodebuild output and return a structured result.
+
+        Args:
+            content: Raw xcodebuild output text.
+            fuzzy: Use fuzzy word-level template grouping instead of exact-match.
 
         Also emits LogEntry items for each error/warning through the pipeline.
         """
         errors: list[BuildDiagnostic] = []
-        warnings: list[BuildDiagnostic] = []
+        raw_warnings: list[BuildDiagnostic] = []
         test_cases: list[tuple[str, str, str, float]] = []
 
         # Parse diagnostics (errors and warnings)
@@ -101,7 +195,39 @@ class BuildAdapter(BaseSourceAdapter):
             if diag.severity == "error":
                 errors.append(diag)
             else:
-                warnings.append(diag)
+                raw_warnings.append(diag)
+
+        # Dedup warnings on (file, line, column, message)
+        seen_warnings: set[tuple[str, int | None, int | None, str]] = set()
+        warnings: list[BuildDiagnostic] = []
+        for w in raw_warnings:
+            key = (w.file, w.line, w.column, w.message)
+            if key not in seen_warnings:
+                seen_warnings.add(key)
+                warnings.append(w)
+
+        # Group deduped warnings
+        if fuzzy:
+            warning_groups = _group_warnings_fuzzy(warnings)
+        else:
+            # Exact-match grouping by message text
+            group_files: OrderedDict[str, list[str]] = OrderedDict()
+            group_counts: dict[str, int] = {}
+            for w in warnings:
+                basename = pathlib.PurePosixPath(w.file).name if w.file else ""
+                group_counts[w.message] = group_counts.get(w.message, 0) + 1
+                files = group_files.setdefault(w.message, [])
+                if basename and basename not in files:
+                    files.append(basename)
+
+            warning_groups = [
+                WarningGroup(
+                    message=msg,
+                    count=group_counts[msg],
+                    files=files[:5],
+                )
+                for msg, files in group_files.items()
+            ]
 
         # Parse test results
         for m in TEST_CASE_RE.finditer(content):
@@ -139,6 +265,8 @@ class BuildAdapter(BaseSourceAdapter):
             succeeded=succeeded,
             errors=errors,
             warnings=warnings,
+            warning_groups=warning_groups,
+            warning_count=len(warnings),
             tests=tests,
             raw_line_count=content.count("\n") + 1,
         )

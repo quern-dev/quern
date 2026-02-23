@@ -17,19 +17,18 @@ Audit of the Quern MCP tool surface and HTTP API, evaluated against typical agen
 
 ## Critical Gaps
 
-### 1. No build tool
+### 1. No build tool (partially addressed)
 
-The single biggest hole. Every debug cycle requires a rebuild, but there's no MCP tool to trigger `xcodebuild` or submit build output for parsing.
+Every debug cycle requires a rebuild, but there's no MCP tool to trigger `xcodebuild` directly.
 
-The infrastructure is partially there:
+The parser is now exposed:
 - `get_build_result` reads the most recent parsed build
-- `POST /api/v1/builds/parse` accepts raw xcodebuild output (HTTP only, no MCP tool)
-- Build source adapter watches for xcodebuild output
+- `parse_build_output` MCP tool accepts a build log file path and returns structured errors/warnings/test results
+- Agents run `xcodebuild ... 2>&1 > /tmp/build.log` via Bash, then call `parse_build_output(file_path="/tmp/build.log")`
 
-**What's needed:**
-- `build_app` tool: runs `xcodebuild build` with scheme/workspace, pipes output through the parser, returns structured errors/warnings
-- `parse_build_output` tool: wraps the existing `/builds/parse` endpoint for agents that run xcodebuild themselves
-- `run_tests` tool: runs `xcodebuild test`, returns structured test results
+**Still needed (intentionally deferred):**
+- `build_app` tool: runs `xcodebuild build` with scheme/workspace — deferred because xcodebuild's flag surface area is massive and agents can already run it via Bash
+- `run_tests` tool: runs `xcodebuild test` — same rationale
 
 ### ~~2. No `install_proxy_cert` MCP tool~~ ✅ Done
 
@@ -72,7 +71,7 @@ To change a mock response, agents must `clear_mocks(rule_id=...)` then `set_mock
 
 | HTTP Endpoint | Purpose |
 |---|---|
-| `POST /builds/parse` | Submit xcodebuild output for parsing |
+| ~~`POST /builds/parse`~~ | ~~Submit xcodebuild output for parsing~~ ✅ (via `parse_build_output` / `POST /builds/parse-file`) |
 | ~~`POST /proxy/cert/install`~~ | ~~Install CA cert on simulator(s)~~ ✅ |
 | `GET /proxy/cert/status` | Cert installation status (cached) |
 | `GET /device/screenshot/annotated` | Screenshot with accessibility overlays |
