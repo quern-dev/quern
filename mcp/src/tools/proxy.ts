@@ -222,6 +222,57 @@ IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s tot
   );
 
   server.tool(
+    "install_proxy_cert",
+    `Install the mitmproxy CA certificate on simulator(s). Required for HTTPS traffic capture. Idempotent by default — skips simulators that already have the cert installed. Use force to reinstall.
+
+IMPORTANT: Prefer omitting udid to install on all booted simulators in a single call. Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips.`,
+    {
+      udid: z
+        .string()
+        .optional()
+        .describe(
+          "Specific simulator UDID. If omitted, installs on all booted simulators."
+        ),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "Force reinstall even if cert is already present (default: false)"
+        ),
+    },
+    async ({ udid, force }) => {
+      try {
+        const body: Record<string, unknown> = {};
+        if (udid !== undefined) body.udid = udid;
+        if (force !== undefined) body.force = force;
+
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/proxy/cert/install",
+          undefined,
+          Object.keys(body).length > 0 ? body : undefined
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "start_proxy",
     `Start the mitmproxy network capture.
 

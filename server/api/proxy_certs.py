@@ -347,7 +347,9 @@ async def setup_guide(request: Request) -> dict:
         "3. Install the CA certificate into the simulator keychain: "
         "xcrun simctl keychain booted add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem",
         "4. Reboot the simulator — it reads the host's proxy settings at boot time, "
-        "so the proxy must be set BEFORE the simulator starts.",
+        "so the proxy must be set BEFORE the simulator starts. "
+        "(Note: this reboot requirement only applies to the system proxy approach. "
+        "With local capture mode, certs take effect immediately — no reboot needed.)",
         f"5. When done, disable the proxy: {clear_proxy_cmd}",
     ])
 

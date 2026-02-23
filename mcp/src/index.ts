@@ -48,7 +48,7 @@ const instructions = [
   "NETWORK CAPTURE:",
   "- Local capture (recommended for simulators): transparent, per-simulator flow tagging via simulator_udid. Check proxy_status local_capture field.",
   "- System proxy: configure_system_proxy to start, unconfigure_system_proxy when done. Always unconfigure when finished.",
-  "- If no flows captured: verify certs with verify_proxy_setup",
+  "- If no flows captured: verify certs with verify_proxy_setup, fix with install_proxy_cert",
   "",
   "PHYSICAL DEVICES: Call setup_wda once for first-time setup. After that, WDA auto-starts on first interaction. Use start_device_logging / stop_device_logging for logs. get_latest_crash with udid for crash reports.",
   "",
