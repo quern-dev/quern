@@ -15,6 +15,7 @@ from server.models import (
     InstallAppRequest,
     LaunchAppRequest,
     PreviewStartRequest,
+    PreviewStopRequest,
     SetLocationRequest,
     ShutdownDeviceRequest,
     StartDeviceLogRequest,
@@ -441,15 +442,14 @@ async def preview_start(request: Request, body: PreviewStartRequest):
     """Start a live preview window for USB-connected physical iOS devices.
 
     Opens a macOS window showing the device screen in real time via CoreMediaIO.
-    Compiles the preview binary on first use (~5s). Device discovery takes ~3s.
+    Compiles the preview binary on first use (~5s). Device discovery takes ~3s
+    on first launch (cached thereafter).
 
-    Only works for physical devices connected via USB — simulators are not
-    supported (they don't appear as CoreMediaIO screen capture sources).
+    If a UDID is provided, adds that single device. If omitted, adds all
+    available USB devices. Multiple devices can be previewed independently.
     """
     controller = _get_controller(request)
     pm = _get_preview_manager(request)
-
-    device_name: str | None = None
 
     if body.udid:
         # Resolve UDID and validate it's a physical device
@@ -465,7 +465,8 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                        f"physical devices connected via USB.",
             )
 
-        # Get device name for the CoreMediaIO filter
+        # Get device name for the CoreMediaIO match
+        device_name: str | None = None
         try:
             devices = await controller.list_devices()
             for d in devices:
@@ -473,25 +474,88 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                     device_name = d.name
                     break
         except DeviceError:
-            pass  # Fall through — preview will show all devices
+            pass
 
-    try:
-        result = await pm.start(device_name=device_name)
-        return result
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        if not device_name:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Could not resolve device name for UDID {udid}",
+            )
+
+        try:
+            preview = await pm.add(device_name)
+            return {
+                "status": "added",
+                "name": preview.name,
+                "position": preview.position,
+            }
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    else:
+        # No UDID — add all available devices
+        try:
+            await pm._ensure_process()
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        added = []
+        errors = []
+        for dev in pm._available:
+            if dev.name in pm._active:
+                added.append({"name": dev.name, "status": "already_active"})
+                continue
+            try:
+                preview = await pm.add(dev.name)
+                added.append({"name": preview.name, "position": preview.position, "status": "added"})
+            except RuntimeError as e:
+                errors.append({"name": dev.name, "error": str(e)})
+
+        return {"devices": added, "errors": errors}
 
 
 @router.post("/preview/stop")
-async def preview_stop(request: Request):
-    """Stop the live preview window."""
+async def preview_stop(request: Request, body: PreviewStopRequest):
+    """Stop live preview.
+
+    If a UDID is provided, stops only that device's preview.
+    If omitted, stops all previews and kills the process.
+    """
     pm = _get_preview_manager(request)
+
+    if body.udid:
+        controller = _get_controller(request)
+        try:
+            udid = await controller.resolve_udid(body.udid)
+        except DeviceError as e:
+            raise _handle_device_error(e)
+
+        # Resolve UDID → name
+        device_name: str | None = None
+        try:
+            devices = await controller.list_devices()
+            for d in devices:
+                if d.udid == udid:
+                    device_name = d.name
+                    break
+        except DeviceError:
+            pass
+
+        if not device_name:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Could not resolve device name for UDID {udid}",
+            )
+
+        await pm.remove(device_name)
+        return {"status": "removed", "name": device_name}
+
     return await pm.stop()
 
 
 @router.get("/preview/status")
 async def preview_status(request: Request):
-    """Get the current preview state (running/stopped, PID, device filter)."""
+    """Get the current preview state including per-device breakdown."""
     pm = _get_preview_manager(request)
     return pm.status()
 
@@ -500,8 +564,9 @@ async def preview_status(request: Request):
 async def preview_devices(request: Request):
     """List devices available for live preview via CoreMediaIO.
 
-    Only physical USB-connected iOS devices appear. Takes ~3s due to
-    CoreMediaIO discovery delay.
+    Only physical USB-connected iOS devices appear. If the preview process
+    is running, returns the cached device list instantly. Otherwise takes
+    ~3s due to CoreMediaIO discovery.
     """
     pm = _get_preview_manager(request)
     try:

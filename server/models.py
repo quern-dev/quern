@@ -879,6 +879,12 @@ class PreviewStartRequest(BaseModel):
     udid: str | None = None
 
 
+class PreviewStopRequest(BaseModel):
+    """Request body for POST /api/v1/device/preview/stop."""
+
+    udid: str | None = None
+
+
 class SetupWdaRequest(BaseModel):
     """Request body for POST /api/v1/device/wda/setup."""
 

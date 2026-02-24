@@ -606,7 +606,7 @@ NOTE: If you want to capture network traffic from this app:
 
   server.tool(
     "preview_device",
-    `Open a live macOS preview window showing a physical iOS device's screen in real time over USB. Uses CoreMediaIO screen capture — only works for physical devices connected via USB (not simulators). Compiles the preview binary on first use (~5s). Device discovery takes ~3s. If no UDID is provided, opens preview windows for all connected USB devices.`,
+    `Open a live macOS preview window showing a physical iOS device's screen in real time over USB. Uses CoreMediaIO screen capture — only works for physical devices connected via USB (not simulators). Compiles the preview binary on first use (~5s). Device discovery takes ~3s on first launch (cached thereafter). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB devices.`,
     {
       udid: z
         .string()
@@ -648,15 +648,25 @@ NOTE: If you want to capture network traffic from this app:
 
   server.tool(
     "stop_preview",
-    `Stop the live device preview window. Terminates the preview process.`,
-    {},
-    async () => {
+    `Stop a live device preview. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
+    {
+      udid: z
+        .string()
+        .optional()
+        .describe(
+          "UDID of a specific device to stop previewing. If omitted, stops all previews."
+        ),
+    },
+    async ({ udid }) => {
       try {
+        const body: Record<string, unknown> = {};
+        if (udid) body.udid = udid;
+
         const data = await apiRequest(
           "POST",
           "/api/v1/device/preview/stop",
           undefined,
-          {}
+          body
         );
 
         return {
@@ -680,7 +690,7 @@ NOTE: If you want to capture network traffic from this app:
 
   server.tool(
     "preview_status",
-    `Check the status of the live device preview (running/stopped, PID, device filter).`,
+    `Check the status of live device previews. Shows which devices are actively previewing, available devices, and process state.`,
     {},
     async () => {
       try {

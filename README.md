@@ -177,7 +177,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **Device management** — list, boot, shutdown simulators; discover physical devices
 - **App management** — install, launch, terminate, uninstall, list apps
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays
-- **Live preview** — open a real-time macOS video window of a physical device's screen via CoreMediaIO (USB-connected devices only)
+- **Live preview** — open real-time macOS video windows of physical device screens via CoreMediaIO (USB-connected devices only). Each device is independently controlled — add device A, add device B, remove A, add C — with no restart penalty after the initial 3s discovery
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
@@ -310,9 +310,9 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/wda/setup` | Build and install WDA on physical device |
 | POST | `/api/v1/device/wda/start` | Start WDA driver |
 | POST | `/api/v1/device/wda/stop` | Stop WDA driver |
-| POST | `/api/v1/device/preview/start` | Start live device preview window |
-| POST | `/api/v1/device/preview/stop` | Stop live device preview |
-| GET | `/api/v1/device/preview/status` | Preview status |
+| POST | `/api/v1/device/preview/start` | Add a device preview (or all devices if no UDID) |
+| POST | `/api/v1/device/preview/stop` | Remove a device preview (or stop all if no UDID) |
+| GET | `/api/v1/device/preview/status` | Per-device preview state and available devices |
 | GET | `/api/v1/device/preview/devices` | List CoreMediaIO preview devices |
 
 ### Device Pool

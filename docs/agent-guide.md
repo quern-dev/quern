@@ -161,7 +161,23 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - `grant_permission` — simulators only
 - `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators)
 - `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
-- `preview_device` — opens a live macOS video preview window of the device screen via CoreMediaIO (USB-connected physical devices only, not simulators). Use `stop_preview` to close, `preview_status` to check state
+- `preview_device` — opens a live macOS video preview window of the device screen via CoreMediaIO (USB-connected physical devices only, not simulators). Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and available devices
+
+---
+
+### Live Preview of Physical Devices
+
+Open real-time video windows to see what's happening on USB-connected physical devices. Each device is independently managed — no restart penalty after the initial 3-second CoreMediaIO discovery.
+
+1. `preview_device` with a device UDID — adds that device's preview window
+2. `preview_device` with another UDID — adds a second device (1s stagger, no rediscovery)
+3. `preview_status` — see which devices are active vs. available
+4. `stop_preview` with a UDID — remove one device's preview, others stay running
+5. `stop_preview` without a UDID — stop all previews and kill the process
+
+**Key insight**: The preview process stays alive even if all windows are closed (by user or via `stop_preview` with UDID). Re-adding a device is instant — no 3s discovery delay. Only `stop_preview` without a UDID kills the process.
+
+**Limitations**: USB-connected physical devices only. Simulators are not CoreMediaIO screen capture sources.
 
 ---
 
