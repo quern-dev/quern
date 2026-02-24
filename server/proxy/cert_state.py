@@ -90,14 +90,19 @@ def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
         fd.close()
 
 
-def record_device_proxy_config(udid: str, host: str, port: int) -> None:
+def record_device_proxy_config(
+    udid: str, host: str, port: int, client_ip: str | None = None
+) -> None:
     """Record the Wi-Fi proxy address configured on a physical device."""
     existing = read_cert_state_for_device(udid) or {}
-    existing.update({
+    updates: dict[str, Any] = {
         "wifi_proxy_host": host,
         "wifi_proxy_port": port,
         "wifi_proxy_set_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if client_ip is not None:
+        updates["client_ip"] = client_ip
+    existing.update(updates)
     update_cert_state(udid, existing)
 
 

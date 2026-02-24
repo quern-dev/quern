@@ -293,6 +293,7 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
 
 class RecordDeviceProxyRequest(BaseModel):
     udid: str
+    client_ip: str | None = None  # Device's LAN IP (from Wi-Fi settings or first captured flow)
 
 
 @router.post("/device-proxy-config")
@@ -316,8 +317,13 @@ async def record_device_proxy_config_endpoint(
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
-    record_device_proxy_config(body.udid, local_ip, port)
-    return {"udid": body.udid, "wifi_proxy_host": local_ip, "wifi_proxy_port": port}
+    record_device_proxy_config(body.udid, local_ip, port, client_ip=body.client_ip)
+    return {
+        "udid": body.udid,
+        "wifi_proxy_host": local_ip,
+        "wifi_proxy_port": port,
+        "client_ip": body.client_ip,
+    }
 
 
 # ---------------------------------------------------------------------------

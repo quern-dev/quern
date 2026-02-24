@@ -793,6 +793,7 @@ class DeviceCertState(BaseModel):
     wifi_proxy_port: int | None = None   # Port last set on device (typically 9101)
     wifi_proxy_set_at: str | None = None  # ISO 8601 timestamp
     wifi_proxy_stale: bool = False        # Computed: True if wifi_proxy_host != current local_ip
+    client_ip: str | None = None          # Device's LAN IP as seen by the proxy (for flow filtering)
 
 
 class CertStatusResponse(BaseModel):

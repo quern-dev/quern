@@ -664,17 +664,28 @@ the background and can be re-enabled with configure_system_proxy.`,
     `Record that the Wi-Fi proxy has been configured on a physical device with the current machine IP. ` +
     `Call this after successfully completing the Wi-Fi proxy setup in device Settings. ` +
     `Quern stores the address so it can detect if the machine IP changes and the proxy config becomes stale. ` +
-    `The host and port are derived from the running server — you only need to provide the device UDID.`,
+    `The host and port are derived from the running server — you only need to provide the device UDID. ` +
+    `Optionally pass client_ip (the device's LAN IP from its Wi-Fi settings) to enable per-device flow filtering ` +
+    `via the client_ip parameter on query_flows and get_flow_summary.`,
     {
       udid: z.string().describe("Device UDID"),
+      client_ip: z
+        .string()
+        .optional()
+        .describe(
+          "Device's LAN IP address (visible in Settings > Wi-Fi > (network) > IP Address). " +
+          "Used to filter captured flows to this device only."
+        ),
     },
-    async ({ udid }) => {
+    async ({ udid, client_ip }) => {
       try {
+        const body: Record<string, unknown> = { udid };
+        if (client_ip !== undefined) body.client_ip = client_ip;
         const data = await apiRequest(
           "POST",
           "/api/v1/proxy/device-proxy-config",
           undefined,
-          { udid }
+          body
         );
 
         return {
