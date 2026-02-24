@@ -6,7 +6,9 @@ import { apiRequest } from "../http.js";
 export function registerProxyTools(server: McpServer): void {
   server.tool(
     "query_flows",
-    `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.`,
+    `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
+
+For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP.`,
     {
       host: z.string().optional().describe("Filter by hostname"),
       path_contains: z.string().optional().describe("Filter by path substring"),
@@ -261,7 +263,26 @@ Each entry in cert_setup (keyed by device UDID) now includes:
 - wifi_proxy_stale: true if wifi_proxy_host differs from the current local_ip,
   meaning the device's proxy config is pointing to a stale address and needs
   reconfiguring with the current local_ip. Call record_device_proxy_config after
-  completing Wi-Fi proxy setup to update these values.`,
+  completing Wi-Fi proxy setup to update these values.
+- client_ip: the device's LAN IP as seen by the proxy — use this as the client_ip
+  filter on query_flows and get_flow_summary to isolate that device's traffic.
+
+TROUBLESHOOTING — no traffic from a physical device:
+1. wifi_proxy_stale: true → the machine's IP changed since the device was configured.
+   Re-run the WDA Wi-Fi proxy setup automation to update the device's Settings
+   (Settings > Wi-Fi > network > Configure Proxy > Manual, set new IP), then call
+   record_device_proxy_config to resync.
+2. wifi_proxy_host: null → the device has never been configured. Run the full
+   physical device setup: install cert → trust cert → configure Wi-Fi proxy →
+   record_device_proxy_config.
+3. wifi_proxy_stale: false and host is set, but still no flows → check:
+   - The proxy is running (status: "running")
+   - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
+   - The device's current LAN IP matches client_ip in cert_setup. If the device got
+     a new DHCP lease its IP will have changed — query_flows filtered by the old
+     client_ip will return nothing. Check the current IP in Settings > Wi-Fi >
+     (network) > IP Address, and if it differs, call record_device_proxy_config
+     again with the updated client_ip.`,
     {},
     async () => {
       try {
@@ -501,7 +522,9 @@ configuration needed.`,
 
   server.tool(
     "get_flow_summary",
-    `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.`,
+    `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
+
+For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP.`,
     {
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
