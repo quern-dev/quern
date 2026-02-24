@@ -117,6 +117,7 @@ def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
 def _print_status(state: dict) -> None:
     """Print formatted server status."""
     pid = state.get("pid", "?")
+    local_ip = state.get("local_ip") or state.get("server_host", "0.0.0.0")
     port = state.get("server_port", "?")
     api_key = state.get("api_key", "")
     proxy_port = state.get("proxy_port", "?")
@@ -126,7 +127,7 @@ def _print_status(state: dict) -> None:
 
     print(f"Quern Debug Server running")
     print(f"  PID:        {pid}")
-    print(f"  Server:     http://127.0.0.1:{port}")
+    print(f"  Server:     http://{local_ip}:{port}")
     if proxy_enabled:
         proxy_status = state.get("proxy_status", "unknown")
         print(f"  Proxy:      port {proxy_port} ({proxy_status})")

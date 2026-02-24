@@ -41,6 +41,7 @@ from server.lifecycle.ports import (
     reclaim_port,
 )
 from server.lifecycle.state import (
+    detect_local_ip,
     is_server_healthy,
     read_state,
     remove_state,
@@ -391,7 +392,7 @@ def create_app(
 
 def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     """Add shared server flags to a subcommand parser."""
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None, help="Bind port (default: 9100)")
     parser.add_argument("--process", "-p", default=None, help="Filter logs to this process name")
     parser.add_argument(
@@ -538,6 +539,8 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # Write state file
     write_state({
         "pid": os.getpid(),
+        "server_host": args.host,
+        "local_ip": detect_local_ip(),
         "server_port": server_port,
         "proxy_port": proxy_port,
         "proxy_enabled": enable_proxy,

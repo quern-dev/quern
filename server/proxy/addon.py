@@ -477,6 +477,12 @@ class IOSDebugAddon:
             if pid is not None:
                 result["simulator_udid"] = _resolve_simulator_udid(pid)
 
+        # Client IP tagging (for physical device identification)
+        if flow.client_conn:
+            peername = getattr(flow.client_conn, "peername", None)
+            if peername and isinstance(peername, (tuple, list)) and len(peername) >= 1:
+                result["client_ip"] = peername[0]
+
         return result
 
     # -------------------------------------------------------------------

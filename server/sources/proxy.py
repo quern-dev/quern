@@ -256,6 +256,7 @@ class ProxyAdapter(BaseSourceAdapter):
             mitmdump,
             "-s", str(ADDON_PATH),
             "--listen-host", self.listen_host,
+            "--ssl-insecure",
             "--quiet",
         ]
 
@@ -637,6 +638,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 source_process=data.get("source_process"),
                 source_pid=data.get("source_pid"),
                 simulator_udid=data.get("simulator_udid"),
+                client_ip=data.get("client_ip"),
             )
         except Exception as e:
             logger.warning("Failed to parse flow data: %s", e)

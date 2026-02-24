@@ -20,7 +20,7 @@ USER_CONFIG_FILE = CONFIG_DIR / "config.json"
 class ServerConfig:
     """Configuration for the Quern debug log server."""
 
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 9100
     ring_buffer_size: int = 10_000
     default_device_id: str = "default"

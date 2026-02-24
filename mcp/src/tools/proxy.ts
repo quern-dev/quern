@@ -30,6 +30,10 @@ export function registerProxyTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Filter by simulator UDID (only flows from this simulator)"),
+      client_ip: z
+        .string()
+        .optional()
+        .describe("Filter by client IP address (physical device identification)"),
       limit: z
         .number()
         .min(1)
@@ -46,6 +50,7 @@ export function registerProxyTools(server: McpServer): void {
       status_max,
       has_error,
       simulator_udid,
+      client_ip,
       limit,
       offset,
     }) => {
@@ -58,6 +63,7 @@ export function registerProxyTools(server: McpServer): void {
           status_max,
           has_error,
           simulator_udid,
+          client_ip,
           limit,
           offset,
         });
@@ -111,6 +117,10 @@ Use this after triggering a UI action to observe the resulting network request w
         .describe(
           "Filter by simulator UDID (only flows from this simulator)"
         ),
+      client_ip: z
+        .string()
+        .optional()
+        .describe("Filter by client IP address (physical device identification)"),
       timeout: z
         .number()
         .min(0.1)
@@ -132,6 +142,7 @@ Use this after triggering a UI action to observe the resulting network request w
       status_max,
       has_error,
       simulator_udid,
+      client_ip,
       timeout,
       interval,
     }) => {
@@ -145,6 +156,7 @@ Use this after triggering a UI action to observe the resulting network request w
         if (has_error !== undefined) body.has_error = has_error;
         if (simulator_udid !== undefined)
           body.simulator_udid = simulator_udid;
+        if (client_ip !== undefined) body.client_ip = client_ip;
         body.timeout = timeout;
         body.interval = interval;
 
@@ -227,8 +239,8 @@ Use this after triggering a UI action to observe the resulting network request w
   server.tool(
     "proxy_status",
     `Check proxy state and configuration. Returns status (running/stopped/error),
-port, flows captured, intercept state, mock rules count, system proxy state, and
-local_capture mode.
+port, flows captured, intercept state, mock rules count, system proxy state,
+local_capture mode, and local_ip.
 
 The system_proxy field shows whether the macOS system proxy is currently
 configured. If null/false, the user's browser works normally and traffic
@@ -237,7 +249,19 @@ is NOT being captured.
 The local_capture field is a list of process names being captured via mitmproxy
 local mode. When non-empty, traffic from those processes (e.g. ["MobileSafari"])
 is transparently captured without needing a system proxy. Empty list means disabled.
-Use set_local_capture to change the process list on the fly.`,
+Use set_local_capture to change the process list on the fly.
+
+The local_ip field is the Mac's outward-facing IP address — use this as the
+proxy server address when configuring a physical device's Wi-Fi proxy settings.
+
+Each entry in cert_setup (keyed by device UDID) now includes:
+- wifi_proxy_host: IP address last configured on the device's Wi-Fi proxy settings
+- wifi_proxy_port: Port last configured (typically 9101)
+- wifi_proxy_set_at: ISO 8601 timestamp of when the proxy was last set
+- wifi_proxy_stale: true if wifi_proxy_host differs from the current local_ip,
+  meaning the device's proxy config is pointing to a stale address and needs
+  reconfiguring with the current local_ip. Call record_device_proxy_config after
+  completing Wi-Fi proxy setup to update these values.`,
     {},
     async () => {
       try {
@@ -497,14 +521,19 @@ configuration needed.`,
         .string()
         .optional()
         .describe("Filter to flows from a specific simulator UDID"),
+      client_ip: z
+        .string()
+        .optional()
+        .describe("Filter by client IP address (physical device identification)"),
     },
-    async ({ window, host, since_cursor, simulator_udid }) => {
+    async ({ window, host, since_cursor, simulator_udid, client_ip }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
           window,
           host,
           since_cursor,
           simulator_udid,
+          client_ip,
         });
 
         return {
@@ -622,6 +651,43 @@ the background and can be re-enabled with configure_system_proxy.`,
             {
               type: "text" as const,
               text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "record_device_proxy_config",
+    `Record that the Wi-Fi proxy has been configured on a physical device with the current machine IP. ` +
+    `Call this after successfully completing the Wi-Fi proxy setup in device Settings. ` +
+    `Quern stores the address so it can detect if the machine IP changes and the proxy config becomes stale. ` +
+    `The host and port are derived from the running server — you only need to provide the device UDID.`,
+    {
+      udid: z.string().describe("Device UDID"),
+    },
+    async ({ udid }) => {
+      try {
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/proxy/device-proxy-config",
+          undefined,
+          { udid }
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
             },
           ],
           isError: true,

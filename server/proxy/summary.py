@@ -28,6 +28,7 @@ def generate_flow_summary(
     window: str = "5m",
     host: str | None = None,
     simulator_udid: str | None = None,
+    client_ip: str | None = None,
 ) -> FlowSummaryResponse:
     """Generate a structured summary from a list of flow records.
 
@@ -36,12 +37,17 @@ def generate_flow_summary(
         window: The window label (e.g., "5m") for the response.
         host: If set, only summarize flows to/from this host.
         simulator_udid: If set, only summarize flows from this simulator.
+        client_ip: If set, only summarize flows from this client IP (physical device).
     """
     now = datetime.now(timezone.utc)
 
     # Filter by simulator_udid if requested
     if simulator_udid:
         flows = [f for f in flows if f.simulator_udid == simulator_udid]
+
+    # Filter by client_ip if requested
+    if client_ip:
+        flows = [f for f in flows if f.client_ip == client_ip]
 
     # Filter by host if requested
     if host:

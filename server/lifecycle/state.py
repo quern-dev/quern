@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import socket
 import urllib.request
 from pathlib import Path
 from typing import Any, TypedDict
@@ -25,6 +26,8 @@ class ServerState(TypedDict, total=False):
     """Schema for state.json."""
 
     pid: int
+    server_host: str
+    local_ip: str | None
     server_port: int
     proxy_port: int
     proxy_enabled: bool
@@ -108,6 +111,18 @@ def update_state(**updates: Any) -> None:
             fd.close()
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to update state file: %s", e)
+
+
+def detect_local_ip() -> str | None:
+    """Detect the machine's outward-facing LAN IP address."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
 
 
 def is_server_healthy(port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:

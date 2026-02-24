@@ -11,6 +11,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
+from pydantic import BaseModel
+
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,
@@ -37,19 +39,32 @@ router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
 
 @router.get("/cert")
-async def download_cert() -> FileResponse:
-    """Download the mitmproxy CA certificate for device installation."""
+async def download_cert(format: str = "cer") -> FileResponse:
+    """Download the mitmproxy CA certificate for device installation.
+
+    Args:
+        format: "cer" (default) — triggers iOS/Android Install Profile dialog.
+                "pem" — raw PEM for scripts, adb, curl, etc.
+    """
     cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
     if not cert_path.is_file():
         raise HTTPException(
             status_code=404,
             detail="CA certificate not found. Run mitmproxy once to generate it.",
         )
-    return FileResponse(
-        path=str(cert_path),
-        media_type="application/x-pem-file",
-        filename="mitmproxy-ca-cert.pem",
-    )
+
+    if format == "pem":
+        return FileResponse(
+            path=str(cert_path),
+            media_type="application/x-pem-file",
+            filename="mitmproxy-ca-cert.pem",
+        )
+    else:  # "cer" — default, works for iOS and Android
+        return FileResponse(
+            path=str(cert_path),
+            media_type="application/x-x509-ca-cert",
+            filename="mitmproxy-ca-cert.cer",
+        )
 
 
 @router.get("/cert/status", response_model=CertStatusResponse)
@@ -269,6 +284,40 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
         "failed": len(results) - success_count,
         "devices": results,
     }
+
+
+# ---------------------------------------------------------------------------
+# Device proxy config tracking
+# ---------------------------------------------------------------------------
+
+
+class RecordDeviceProxyRequest(BaseModel):
+    udid: str
+
+
+@router.post("/device-proxy-config")
+async def record_device_proxy_config_endpoint(
+    body: RecordDeviceProxyRequest,
+    request: Request,
+) -> dict:
+    """Record the Wi-Fi proxy address that was configured on a physical device.
+
+    Derives host/port from the running server — the automation script does not
+    need to supply them. Call this after successfully completing Wi-Fi proxy
+    setup in device Settings so Quern can detect if the machine IP changes.
+    """
+    from server.lifecycle.state import detect_local_ip
+    from server.proxy.cert_state import record_device_proxy_config
+
+    local_ip = detect_local_ip()
+    if not local_ip:
+        raise HTTPException(status_code=503, detail="Cannot detect local IP address.")
+
+    adapter = getattr(request.app.state, "proxy_adapter", None)
+    port = adapter.listen_port if adapter else 9101
+
+    record_device_proxy_config(body.udid, local_ip, port)
+    return {"udid": body.udid, "wifi_proxy_host": local_ip, "wifi_proxy_port": port}
 
 
 # ---------------------------------------------------------------------------

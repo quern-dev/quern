@@ -21,8 +21,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        # Health check and API docs are always public
-        if request.url.path in ("/health", "/api/v1/health", "/docs", "/redoc", "/openapi.json"):
+        # Health check, API docs, and cert download are always public
+        if request.url.path in ("/health", "/api/v1/health", "/docs", "/redoc", "/openapi.json", "/api/v1/proxy/cert"):
             return await call_next(request)
 
         # Check Authorization: Bearer <key>

@@ -274,6 +274,7 @@ class FlowRecord(BaseModel):
     source_process: str | None = Field(default=None, description="Process that originated the request (e.g. nsurlsessiond)")
     source_pid: int | None = Field(default=None, description="PID of the originating process")
     simulator_udid: str | None = Field(default=None, description="Simulator UDID if traffic came from a simulator")
+    client_ip: str | None = Field(default=None, description="Client IP address (for physical device identification)")
 
 
 class FlowQueryParams(BaseModel):
@@ -289,6 +290,7 @@ class FlowQueryParams(BaseModel):
     until: datetime | None = None
     device_id: str = "default"
     simulator_udid: str | None = None
+    client_ip: str | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
 
@@ -311,6 +313,7 @@ class WaitForFlowRequest(BaseModel):
     status_max: int | None = None
     has_error: bool | None = None
     simulator_udid: str | None = None
+    client_ip: str | None = None
     timeout: float = Field(default=10, ge=0.1, le=60)
     interval: float = Field(default=0.5, ge=0.1, le=5)
     since: datetime | None = None  # defaults to now - 5s if omitted
@@ -344,6 +347,7 @@ class ProxyStatusResponse(BaseModel):
     mock_rules_count: int = 0
     error: str | None = None
     local_capture: list[str] = Field(default_factory=list)
+    local_ip: str | None = None
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
 
@@ -785,6 +789,10 @@ class DeviceCertState(BaseModel):
     fingerprint: str | None = None
     installed_at: str | None = None  # ISO 8601 timestamp
     verified_at: str | None = None  # Last SQLite check timestamp
+    wifi_proxy_host: str | None = None   # IP address last set on device
+    wifi_proxy_port: int | None = None   # Port last set on device (typically 9101)
+    wifi_proxy_set_at: str | None = None  # ISO 8601 timestamp
+    wifi_proxy_stale: bool = False        # Computed: True if wifi_proxy_host != current local_ip
 
 
 class CertStatusResponse(BaseModel):

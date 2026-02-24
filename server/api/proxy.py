@@ -45,6 +45,9 @@ router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 # ---------------------------------------------------------------------------
 
 
+from server.lifecycle.state import detect_local_ip as _detect_local_ip  # noqa: E402
+
+
 def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     """Build a ProxyStatusResponse from current app state."""
     from server.lifecycle.state import read_state
@@ -55,12 +58,19 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     # Read cert setup from persistent cert-state.json and system proxy from state.json
     cert_setup = None
     system_proxy_info: SystemProxyInfo | None = None
+    local_ip = _detect_local_ip()
     try:
         from server.proxy.cert_state import read_cert_state
         device_certs = read_cert_state()
         if device_certs:
             cert_setup = {
-                udid: DeviceCertState(**cert_data)
+                udid: DeviceCertState(
+                    **cert_data,
+                    wifi_proxy_stale=(
+                        cert_data.get("wifi_proxy_host") is not None
+                        and cert_data.get("wifi_proxy_host") != local_ip
+                    ),
+                )
                 for udid, cert_data in device_certs.items()
             }
     except Exception as e:
@@ -84,6 +94,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
         return ProxyStatusResponse(
             status="stopped",
             local_capture=local_capture,
+            local_ip=local_ip,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
         )
@@ -99,6 +110,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
             local_capture=local_capture,
+            local_ip=local_ip,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
         )
@@ -114,6 +126,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             held_flows_count=len(adapter._held_flows),
             mock_rules_count=len(adapter._mock_rules),
             local_capture=local_capture,
+            local_ip=local_ip,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
         )
@@ -124,6 +137,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
         listen_host=adapter.listen_host,
         flows_captured=flow_store.size if flow_store else 0,
         local_capture=local_capture,
+        local_ip=local_ip,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,
     )
@@ -366,6 +380,7 @@ async def query_flows(
     until: datetime | None = None,
     device_id: str = "default",
     simulator_udid: str | None = None,
+    client_ip: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> FlowQueryResponse:
@@ -385,6 +400,7 @@ async def query_flows(
         until=until,
         device_id=device_id,
         simulator_udid=simulator_udid,
+        client_ip=client_ip,
         limit=limit,
         offset=offset,
     )
@@ -404,11 +420,12 @@ async def flow_summary(
     host: str | None = None,
     since_cursor: str | None = None,
     simulator_udid: str | None = None,
+    client_ip: str | None = None,
 ) -> FlowSummaryResponse:
     """Get an LLM-optimized summary of recent HTTP traffic."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
-        return generate_flow_summary([], window=window, host=host, simulator_udid=simulator_udid)
+        return generate_flow_summary([], window=window, host=host, simulator_udid=simulator_udid, client_ip=client_ip)
 
     now = datetime.now(timezone.utc)
 
@@ -423,7 +440,7 @@ async def flow_summary(
         since_ts = now - duration
         flows = await flow_store.get_since(since_ts)
 
-    return generate_flow_summary(flows, window=window, host=host, simulator_udid=simulator_udid)
+    return generate_flow_summary(flows, window=window, host=host, simulator_udid=simulator_udid, client_ip=client_ip)
 
 
 @router.post("/flows/wait", response_model=WaitForFlowResponse)
@@ -452,6 +469,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 status_max=body.status_max,
                 has_error=body.has_error,
                 simulator_udid=body.simulator_udid,
+                client_ip=body.client_ip,
                 since=effective_since,
                 limit=1,
             )

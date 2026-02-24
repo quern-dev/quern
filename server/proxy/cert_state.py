@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,17 @@ def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+def record_device_proxy_config(udid: str, host: str, port: int) -> None:
+    """Record the Wi-Fi proxy address configured on a physical device."""
+    existing = read_cert_state_for_device(udid) or {}
+    existing.update({
+        "wifi_proxy_host": host,
+        "wifi_proxy_port": port,
+        "wifi_proxy_set_at": datetime.now(timezone.utc).isoformat(),
+    })
+    update_cert_state(udid, existing)
 
 
 def _create_and_open():
