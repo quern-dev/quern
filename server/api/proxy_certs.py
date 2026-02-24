@@ -20,6 +20,7 @@ from server.models import (
     CertVerifyResponse,
     DeviceCertInstallStatus,
     DeviceCertState,
+    DeviceType,
 )
 from server.proxy import cert_manager
 from server.proxy.cert_state import read_cert_state, read_cert_state_for_device
@@ -104,15 +105,17 @@ async def cert_status(request: Request) -> CertStatusResponse:
 
 @router.post("/cert/verify", response_model=CertVerifyResponse)
 async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyResponse:
-    """Verify certificate installation via SQLite TrustStore query.
+    """Verify certificate installation on simulators and physical devices.
 
-    Always performs ground-truth verification by querying the simulator's
-    TrustStore database. Updates persistent cert-state.json with results.
+    For simulators: queries the SQLite TrustStore database (ground truth).
+    For physical devices: checks for successful HTTPS flows through the proxy
+    from the device's recorded client IP. If mitmproxy successfully intercepted
+    HTTPS traffic, the cert must be installed and trusted.
 
-    Works for both booted and shutdown simulators (TrustStore is readable on disk).
+    Updates persistent cert-state.json with results.
 
     Args:
-        body.udid: Specific device UDID. If None, verifies all simulators.
+        body.udid: Specific device UDID. If None, verifies all matching devices.
 
     Returns:
         Detailed installation status per device with timestamps.
@@ -127,7 +130,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
 
-    device_name_map = {d.udid: d.name for d in all_devices}
+    device_map = {d.udid: d for d in all_devices}
 
     # Filter devices by state and device_type before determining UDIDs
     filtered_devices = all_devices
@@ -149,7 +152,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
         udids = [d.udid for d in filtered_devices]
 
     if not udids:
-        raise HTTPException(status_code=400, detail="No simulators found")
+        raise HTTPException(status_code=400, detail="No devices found")
 
     # Get cert fingerprint for truststore status checks
     cert_path = cert_manager.get_cert_path()
@@ -160,47 +163,39 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
         except Exception:
             pass
 
+    # Get flow store for physical device verification
+    flow_store = getattr(request.app.state, "flow_store", None)
+
     # Verify each device
     device_statuses = []
     erased_devices = []
     for udid in udids:
         try:
-            # Check previous state for erase detection
-            prev_state = read_cert_state_for_device(udid)
-            was_installed = prev_state.get("cert_installed", False) if prev_state else False
-
-            name = device_name_map.get(udid, "Unknown Device")
-            cert_state = await cert_manager.get_device_cert_state(
-                controller, udid, verify=True, device_name=name,
+            device_info = device_map.get(udid)
+            is_physical = (
+                device_info and device_info.device_type == DeviceType.DEVICE
             )
+            name = device_info.name if device_info else "Unknown Device"
 
-            # Determine detailed status
-            if fingerprint:
-                status = cert_manager.check_truststore_status(udid, fingerprint)
-            else:
-                status = "not_installed"
-
-            # Detect erase
-            if was_installed and not cert_state.cert_installed:
-                erased_devices.append(udid)
-
-            device_statuses.append(
-                DeviceCertInstallStatus(
-                    udid=udid,
-                    name=cert_state.name,
-                    cert_installed=cert_state.cert_installed,
-                    fingerprint=cert_state.fingerprint,
-                    verified_at=cert_state.verified_at or datetime.now(timezone.utc).isoformat(),
-                    status=status,
+            if is_physical:
+                # Physical device: verify via proxy flow store
+                status_entry = await _verify_physical_device(
+                    udid, name, fingerprint, flow_store,
                 )
-            )
+            else:
+                # Simulator: existing TrustStore SQLite check
+                status_entry = await _verify_simulator(
+                    controller, udid, name, fingerprint, erased_devices,
+                )
+
+            device_statuses.append(status_entry)
         except Exception as e:
             _logger.warning(f"Failed to verify cert for {udid}: {e}")
-            # Continue with other devices rather than failing completely
+            dev = device_map.get(udid)
             device_statuses.append(
                 DeviceCertInstallStatus(
                     udid=udid,
-                    name=device_name_map.get(udid, "Unknown Device"),
+                    name=dev.name if dev else "Unknown Device",
                     cert_installed=False,
                     fingerprint=None,
                     verified_at=datetime.now(timezone.utc).isoformat(),
@@ -215,6 +210,132 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
         verified=all_verified,
         devices=device_statuses,
         erased_devices=erased_devices,
+    )
+
+
+async def _verify_simulator(
+    controller,
+    udid: str,
+    name: str,
+    fingerprint: str | None,
+    erased_devices: list[str],
+) -> DeviceCertInstallStatus:
+    """Verify cert on a simulator via TrustStore SQLite query."""
+    prev_state = read_cert_state_for_device(udid)
+    was_installed = prev_state.get("cert_installed", False) if prev_state else False
+
+    cert_state = await cert_manager.get_device_cert_state(
+        controller, udid, verify=True, device_name=name,
+    )
+
+    if fingerprint:
+        status = cert_manager.check_truststore_status(udid, fingerprint)
+    else:
+        status = "not_installed"
+
+    if was_installed and not cert_state.cert_installed:
+        erased_devices.append(udid)
+
+    return DeviceCertInstallStatus(
+        udid=udid,
+        name=cert_state.name,
+        cert_installed=cert_state.cert_installed,
+        fingerprint=cert_state.fingerprint,
+        verified_at=cert_state.verified_at or datetime.now(timezone.utc).isoformat(),
+        status=status,
+    )
+
+
+async def _verify_physical_device(
+    udid: str,
+    name: str,
+    fingerprint: str | None,
+    flow_store,
+) -> DeviceCertInstallStatus:
+    """Verify cert on a physical device by checking for successful HTTPS flows.
+
+    If the device has a recorded client_ip in cert-state.json, queries the
+    flow store for successful HTTPS flows from that IP. A successful TLS
+    interception proves the cert is installed and trusted.
+    """
+    from server.models import FlowQueryParams
+    from server.proxy.cert_state import update_cert_state
+
+    now = datetime.now(timezone.utc).isoformat()
+    cert_state = read_cert_state_for_device(udid) or {}
+    device_client_ip = cert_state.get("client_ip")
+    has_proxy_config = cert_state.get("wifi_proxy_host") is not None
+
+    # No proxy configured at all
+    if not has_proxy_config:
+        return DeviceCertInstallStatus(
+            udid=udid,
+            name=name,
+            cert_installed=False,
+            fingerprint=None,
+            verified_at=now,
+            status="proxy_not_configured",
+        )
+
+    # Proxy configured but no client IP recorded
+    if not device_client_ip:
+        return DeviceCertInstallStatus(
+            udid=udid,
+            name=name,
+            cert_installed=cert_state.get("cert_installed", False),
+            fingerprint=cert_state.get("fingerprint"),
+            verified_at=now,
+            status="unverified_no_client_ip",
+        )
+
+    # No flow store available (proxy not running)
+    if flow_store is None:
+        return DeviceCertInstallStatus(
+            udid=udid,
+            name=name,
+            cert_installed=cert_state.get("cert_installed", False),
+            fingerprint=cert_state.get("fingerprint"),
+            verified_at=now,
+            status="unverified_proxy_not_running",
+        )
+
+    # Query flow store for successful flows from this device's IP
+    params = FlowQueryParams(
+        client_ip=device_client_ip,
+        has_error=False,
+        limit=20,
+    )
+    flows, _total = await flow_store.query(params)
+
+    # Check for any successful HTTPS flow (TLS interception worked)
+    has_https_flow = any(f.tls is not None for f in flows)
+
+    if has_https_flow:
+        # Cert verified — update persistent state
+        cert_state.update({
+            "cert_installed": True,
+            "fingerprint": fingerprint,
+            "verified_at": now,
+        })
+        update_cert_state(udid, cert_state)
+
+        return DeviceCertInstallStatus(
+            udid=udid,
+            name=name,
+            cert_installed=True,
+            fingerprint=fingerprint,
+            verified_at=now,
+            status="verified_via_traffic",
+        )
+
+    # Proxy configured, client IP known, but no HTTPS flows yet
+    return DeviceCertInstallStatus(
+        udid=udid,
+        name=name,
+        cert_installed=cert_state.get("cert_installed", False),
+        fingerprint=cert_state.get("fingerprint"),
+        verified_at=now,
+        status="unverified_no_traffic",
     )
 
 
