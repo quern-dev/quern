@@ -177,7 +177,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **Device management** — list, boot, shutdown simulators; discover physical devices
 - **App management** — install, launch, terminate, uninstall, list apps
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays
-- **Live preview** — open real-time macOS video windows of physical device screens via CoreMediaIO (USB-connected devices only). Each device is independently controlled — add device A, add device B, remove A, add C — with no restart penalty after the initial 3s discovery
+- **Live preview** — real-time video windows for USB-connected physical devices, independently per-device
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
