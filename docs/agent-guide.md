@@ -161,6 +161,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - `grant_permission` — simulators only
 - `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators)
 - `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
+- `preview_device` — opens a live macOS video preview window of the device screen via CoreMediaIO (USB-connected physical devices only, not simulators). Use `stop_preview` to close, `preview_status` to check state
 
 ---
 
@@ -282,6 +283,9 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `stop_simulator_logging`  | POST   | `/api/v1/device/logging/stop`          |
 | `start_device_logging`    | POST   | `/api/v1/device/logging/device/start`  |
 | `stop_device_logging`     | POST   | `/api/v1/device/logging/device/stop`   |
+| `preview_device`     | POST        | `/api/v1/device/preview/start`         |
+| `stop_preview`       | POST        | `/api/v1/device/preview/stop`          |
+| `preview_status`     | GET         | `/api/v1/device/preview/status`        |
 | `setup_wda`          | POST        | `/api/v1/device/wda/setup`             |
 | `start_driver`       | POST        | `/api/v1/device/wda/start`             |
 | `stop_driver`        | POST        | `/api/v1/device/wda/stop`              |

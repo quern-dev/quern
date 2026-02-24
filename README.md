@@ -59,6 +59,7 @@ Other things you can ask:
 - *"Find the last crash report and figure out what caused it"*
 - *"Set up the proxy on my physical iPhone and capture traffic while I browse"*
 - *"Show me what analytics events get sent when I open the settings screen"*
+- *"Open a live preview of my iPhone's screen so I can see what's happening"*
 - *"Run the app on 3 simulators in parallel and compare the network traffic"*
 
 ## Quick Start
@@ -176,6 +177,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **Device management** — list, boot, shutdown simulators; discover physical devices
 - **App management** — install, launch, terminate, uninstall, list apps
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays
+- **Live preview** — open a real-time macOS video window of a physical device's screen via CoreMediaIO (USB-connected devices only)
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
@@ -210,7 +212,7 @@ quern disable-local-capture  # Disable local capture
 
 ## MCP Tools
 
-63 tools available via MCP:
+66 tools available via MCP:
 
 | Category | Tools |
 |----------|-------|
@@ -223,6 +225,7 @@ quern disable-local-capture  # Disable local capture
 | UI | `take_screenshot`, `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `type_text`, `clear_text`, `press_button` |
 | Config | `set_location`, `grant_permission` |
 | Device Pool | `list_device_pool`, `claim_device`, `release_device`, `resolve_device`, `ensure_devices` |
+| Preview | `preview_device`, `stop_preview`, `preview_status` |
 | Physical Device | `setup_wda`, `start_driver`, `stop_driver` |
 
 ## API Endpoints
@@ -307,6 +310,10 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/wda/setup` | Build and install WDA on physical device |
 | POST | `/api/v1/device/wda/start` | Start WDA driver |
 | POST | `/api/v1/device/wda/stop` | Stop WDA driver |
+| POST | `/api/v1/device/preview/start` | Start live device preview window |
+| POST | `/api/v1/device/preview/stop` | Stop live device preview |
+| GET | `/api/v1/device/preview/status` | Preview status |
+| GET | `/api/v1/device/preview/devices` | List CoreMediaIO preview devices |
 
 ### Device Pool
 
