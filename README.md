@@ -44,6 +44,23 @@ Quern isn't a cloud testing platform. It's local infrastructure that makes the A
      ![Quern in action](docs/images/demo.gif)
 -->
 
+## How to Use Quern
+
+Once the server is installed and the MCP is registered, open your mobile project with your AI coding assistant (Claude Code, Cursor, etc.) and just ask it to do things:
+
+> *"Boot an iPhone 16 simulator, make sure the proxy is capturing traffic, then build and install my app. Log in with testuser / password123 and give me a summary of all the API calls you see during login."*
+
+The agent will use Quern's MCP tools to boot the simulator, configure the proxy, install your app, drive the UI to log in, and then query the captured network traffic — all without you touching the simulator or pasting logs into chat.
+
+Other things you can ask:
+
+- *"Take a screenshot and tell me what's on screen"*
+- *"Mock the /api/users endpoint to return a 500 error and see how the app handles it"*
+- *"Find the last crash report and figure out what caused it"*
+- *"Set up the proxy on my physical iPhone and capture traffic while I browse"*
+- *"Show me what analytics events get sent when I open the settings screen"*
+- *"Run the app on 3 simulators in parallel and compare the network traffic"*
+
 ## Quick Start
 
 ### Prerequisites
