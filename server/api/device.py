@@ -14,6 +14,7 @@ from server.models import (
     GrantPermissionRequest,
     InstallAppRequest,
     LaunchAppRequest,
+    PreviewStartRequest,
     SetLocationRequest,
     ShutdownDeviceRequest,
     StartDeviceLogRequest,
@@ -420,6 +421,93 @@ async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     request.app.state.source_adapters.pop(adapter.adapter_id, None)
 
     return {"status": "stopped", "udid": udid}
+
+
+# ---------------------------------------------------------------------------
+# Live preview
+# ---------------------------------------------------------------------------
+
+
+def _get_preview_manager(request: Request):
+    """Get the PreviewManager from app state."""
+    pm = getattr(request.app.state, "preview_manager", None)
+    if pm is None:
+        raise HTTPException(status_code=503, detail="Preview manager not initialized")
+    return pm
+
+
+@router.post("/preview/start")
+async def preview_start(request: Request, body: PreviewStartRequest):
+    """Start a live preview window for USB-connected physical iOS devices.
+
+    Opens a macOS window showing the device screen in real time via CoreMediaIO.
+    Compiles the preview binary on first use (~5s). Device discovery takes ~3s.
+
+    Only works for physical devices connected via USB — simulators are not
+    supported (they don't appear as CoreMediaIO screen capture sources).
+    """
+    controller = _get_controller(request)
+    pm = _get_preview_manager(request)
+
+    device_name: str | None = None
+
+    if body.udid:
+        # Resolve UDID and validate it's a physical device
+        try:
+            udid = await controller.resolve_udid(body.udid)
+        except DeviceError as e:
+            raise _handle_device_error(e)
+
+        if not controller._is_physical(udid):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Device {udid} is a simulator. Live preview only works with "
+                       f"physical devices connected via USB.",
+            )
+
+        # Get device name for the CoreMediaIO filter
+        try:
+            devices = await controller.list_devices()
+            for d in devices:
+                if d.udid == udid:
+                    device_name = d.name
+                    break
+        except DeviceError:
+            pass  # Fall through — preview will show all devices
+
+    try:
+        result = await pm.start(device_name=device_name)
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preview/stop")
+async def preview_stop(request: Request):
+    """Stop the live preview window."""
+    pm = _get_preview_manager(request)
+    return await pm.stop()
+
+
+@router.get("/preview/status")
+async def preview_status(request: Request):
+    """Get the current preview state (running/stopped, PID, device filter)."""
+    pm = _get_preview_manager(request)
+    return pm.status()
+
+
+@router.get("/preview/devices")
+async def preview_devices(request: Request):
+    """List devices available for live preview via CoreMediaIO.
+
+    Only physical USB-connected iOS devices appear. Takes ~3s due to
+    CoreMediaIO discovery delay.
+    """
+    pm = _get_preview_manager(request)
+    try:
+        return await pm.list_devices()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/screenshot/annotated")

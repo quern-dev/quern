@@ -873,6 +873,12 @@ class StopDeviceLogRequest(BaseModel):
     udid: str | None = None
 
 
+class PreviewStartRequest(BaseModel):
+    """Request body for POST /api/v1/device/preview/start."""
+
+    udid: str | None = None
+
+
 class SetupWdaRequest(BaseModel):
     """Request body for POST /api/v1/device/wda/setup."""
 

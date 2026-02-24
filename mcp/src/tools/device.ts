@@ -603,4 +603,105 @@ NOTE: If you want to capture network traffic from this app:
       }
     }
   );
+
+  server.tool(
+    "preview_device",
+    `Open a live macOS preview window showing a physical iOS device's screen in real time over USB. Uses CoreMediaIO screen capture — only works for physical devices connected via USB (not simulators). Compiles the preview binary on first use (~5s). Device discovery takes ~3s. If no UDID is provided, opens preview windows for all connected USB devices.`,
+    {
+      udid: z
+        .string()
+        .optional()
+        .describe(
+          "UDID of a physical device to preview. If omitted, previews all USB-connected devices."
+        ),
+    },
+    async ({ udid }) => {
+      try {
+        const body: Record<string, unknown> = {};
+        if (udid) body.udid = udid;
+
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/device/preview/start",
+          undefined,
+          body
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "stop_preview",
+    `Stop the live device preview window. Terminates the preview process.`,
+    {},
+    async () => {
+      try {
+        const data = await apiRequest(
+          "POST",
+          "/api/v1/device/preview/stop",
+          undefined,
+          {}
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "preview_status",
+    `Check the status of the live device preview (running/stopped, PID, device filter).`,
+    {},
+    async () => {
+      try {
+        const data = await apiRequest("GET", "/api/v1/device/preview/status");
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
 }

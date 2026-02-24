@@ -219,6 +219,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Install with: pip install fb-idb && brew install idb-companion"
         )
 
+    # Preview manager (live device screen preview)
+    from server.device.preview import PreviewManager
+    preview_manager = PreviewManager()
+    app.state.preview_manager = preview_manager
+
     # Device pool (Phase 4b-alpha)
     from server.device.pool import DevicePool
     device_pool = DevicePool(device_controller)
@@ -267,6 +272,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await watchdog_task
         except asyncio.CancelledError:
             pass
+
+    # Stop live preview if running
+    if preview_manager:
+        await preview_manager.stop()
 
     # Shutdown WDA client (cancels idle task, deletes sessions, kills port-forwards)
     # Note: does NOT kill xcodebuild processes — they persist across restarts
@@ -339,6 +348,7 @@ def create_app(
     app.state.flow_store = None
     app.state.device_controller = None
     app.state.device_pool = None
+    app.state.preview_manager = None
     app.state.sim_log_adapters = {}
     app.state.device_log_adapters = {}
 
