@@ -411,12 +411,15 @@ async def setup_guide(request: Request) -> dict:
         ])
         simulator_steps.insert(0, f"Certificate Status:\n{cert_status_text}")
 
+    api_port = request.app.state.config.port
+    cert_url = f"http://{local_ip}:{api_port}/api/v1/proxy/cert"
+
     return {
         "proxy_host": local_ip,
         "proxy_port": port,
         "active_interface": active_interface,
         "warnings": warnings,
-        "cert_install_url": "http://mitm.it",
+        "cert_install_url": cert_url,
         "cert_status": cert_status_by_device,
         "steps": [
             {
@@ -427,14 +430,15 @@ async def setup_guide(request: Request) -> dict:
             },
             {
                 "target": "physical_device",
-                "note": "Physical devices are configured directly in iOS Settings.",
+                "note": "Physical devices are configured directly in iOS Settings. "
+                        "Install and trust the certificate BEFORE configuring the proxy.",
                 "instructions": [
-                    "1. Go to Settings > Wi-Fi > (your network) > Configure Proxy > Manual",
-                    f"2. Set Server: {local_ip}, Port: {port}",
-                    "3. Open Safari and go to http://mitm.it to download the CA certificate",
-                    "4. Install the profile in Settings > General > VPN & Device Management",
-                    "5. Trust the certificate in Settings > General > About > "
+                    f"1. Open Safari on the device and go to {cert_url}",
+                    "2. Install the profile — Settings > General > VPN & Device Management",
+                    "3. Trust the certificate — Settings > General > About > "
                     "Certificate Trust Settings",
+                    "4. Go to Settings > Wi-Fi > (your network) > Configure Proxy > Manual",
+                    f"5. Set Server: {local_ip}, Port: {port}",
                 ],
             },
         ],

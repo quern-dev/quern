@@ -557,7 +557,7 @@ configuration needed.`,
 
   server.tool(
     "proxy_setup_guide",
-    `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup.`,
+    `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy.`,
     {},
     async () => {
       try {
