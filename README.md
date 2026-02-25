@@ -24,7 +24,7 @@ Quern (localhost:9100)
 
 ## Why
 
-AI agents are good at writing code. They're bad at knowing whether it worked. A build error gets caught; a silent API failure, a wrong screen, or a crash on launch usually doesn't — unless you paste logs back into the chat yourself.
+AI agents are good at writing code. They're bad at knowing whether it worked -- especially on mobile devices. A build error gets caught; a silent API failure, a wrong screen, or a crash on launch usually doesn't — unless you paste logs back into the chat yourself.
 
 Quern closes that loop. It gives agents direct, token-efficient access to everything they need to diagnose and fix problems autonomously: structured logs, network request/response pairs, parsed crash reports, screenshots, and the ability to interact with the running app.
 
