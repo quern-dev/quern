@@ -170,6 +170,8 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 
 Local capture requires approving the **Mitmproxy Redirector** system extension in **System Settings > Privacy & Security** on first use.
 
+**Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` if the stored config no longer matches the current network.
+
 ### Device Control
 
 Manage iOS simulators and physical devices, and interact with running apps.

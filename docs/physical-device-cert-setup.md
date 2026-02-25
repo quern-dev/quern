@@ -27,8 +27,10 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 ## Automated Script Outline
 
 ```python
-local_ip   = proxy_status()["local_ip"]   # e.g. "192.168.1.147"
+local_ip   = proxy_status()["local_ip"]   # fallback default-route IP
 cert_url   = f"http://{local_ip}:9100/api/v1/proxy/cert"
+# NOTE: The actual proxy host used in Wi-Fi settings is derived by subnet
+# matching in record_device_proxy_config — you don't need to compute it manually.
 ```
 
 ### Phase 1 — Download cert via Safari
@@ -92,12 +94,20 @@ tap_element(label="Continue", element_type="Button")
 
 ### Phase 4 — Configure Wi-Fi proxy
 
+Before starting, read the current SSID and device IP from Settings > Wi-Fi (or from the network detail screen you're about to open). You'll need both for Phase 5.
+
 ```python
 launch_app("com.apple.Preferences")
 tap_element(identifier="com.apple.settings.wifi")   # "Wi-Fi, <network>"
 
+# Read the connected SSID from the top of the screen (StaticText near the checkmark)
+# and note the device IP — visible on the next screen.
+
 # Tap ⓘ info button next to the connected network
 tap_element(label="More Info", element_type="Button")
+
+# Read IP Address field (e.g. "192.168.31.139") — needed for record_device_proxy_config
+# Use get_screen_summary to extract it.
 
 # Scroll to "Configure Proxy" using left-edge swipe
 while "Configure Proxy" not on screen:
@@ -107,6 +117,9 @@ while "Configure Proxy" not on screen:
 tap_element(label="Configure Proxy", element_type="StaticText")
 tap_element(label="Manual", element_type="StaticText")   # same quirk
 
+# The proxy host is the Mac IP on the same subnet as the device.
+# record_device_proxy_config derives it automatically — use local_ip as a
+# placeholder here, then call record_device_proxy_config to get the real value.
 tap_element(label="Server", element_type="TextField")
 type_text(local_ip)
 
@@ -117,6 +130,25 @@ tap_element(label="Save", element_type="Button")
 
 # Back at network detail — "Configure Proxy: Manual" ✓
 ```
+
+### Phase 5 — Record the proxy config
+
+Call this after Phase 4 completes. It derives the correct Mac interface IP by
+subnet-matching the device's `client_ip`, stores the config per SSID, and
+enables per-device flow filtering.
+
+```python
+ssid      = "<network name>"   # e.g. "Lilypad" — from Settings > Wi-Fi
+client_ip = "<device IP>"      # e.g. "192.168.31.139" — from network detail screen
+
+result = record_device_proxy_config(udid=udid, ssid=ssid, client_ip=client_ip)
+# result["wifi_proxy_host"] is the Mac IP that was actually recorded.
+# If it differs from what you typed in Phase 4, go back and correct it in Settings.
+```
+
+If the Mac is on multiple interfaces (e.g. Wi-Fi + Ethernet), `record_device_proxy_config`
+will pick the interface on the same /24 subnet as the device — always the right one,
+regardless of routing tables or interface names.
 
 ---
 

@@ -113,6 +113,13 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 3. Returns `erased_devices` — UDIDs where a previously installed cert is now missing (probable device erase)
 4. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
 
+**Physical device proxy capture**: Physical devices need their Wi-Fi proxy configured manually in Settings. The full setup flow is: install cert → trust cert → configure Wi-Fi proxy → call `record_device_proxy_config`. After that, filter flows by the device's `client_ip`.
+
+- `record_device_proxy_config(udid, ssid, client_ip)` — records the config per Wi-Fi network (SSID). Automatically derives the correct Mac interface IP by finding the interface on the same /24 subnet as the device's `client_ip`. This handles multi-interface Macs correctly (e.g. Wi-Fi + Ethernet active simultaneously).
+- Call it again whenever you move to a different network — each SSID is tracked independently, so configs for home and work don't overwrite each other.
+- `proxy_status` shows `wifi_proxy_configs` (keyed by SSID), `wifi_proxy_stale` (true if no stored network's proxy_host matches the current Mac IP), and `active_wifi_network` (the currently matching SSID). If `wifi_proxy_stale: true`, reconfigure the device's Wi-Fi proxy and call `record_device_proxy_config` again.
+- See `docs/physical-device-cert-setup.md` for the full WDA automation script.
+
 ---
 
 ### Debugging UI Issues

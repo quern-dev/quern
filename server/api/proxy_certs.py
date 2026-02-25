@@ -263,8 +263,18 @@ async def _verify_physical_device(
 
     now = datetime.now(timezone.utc).isoformat()
     cert_state = read_cert_state_for_device(udid) or {}
+
+    # Support both new per-network structure and legacy flat fields
+    wifi_configs: dict = cert_state.get("wifi_proxy_configs") or {}
+    has_proxy_config = bool(wifi_configs) or cert_state.get("wifi_proxy_host") is not None
+
+    # Resolve client_ip: prefer new per-network structure, fall back to legacy flat field
     device_client_ip = cert_state.get("client_ip")
-    has_proxy_config = cert_state.get("wifi_proxy_host") is not None
+    if not device_client_ip and wifi_configs:
+        for cfg in wifi_configs.values():
+            if cfg.get("client_ip"):
+                device_client_ip = cfg["client_ip"]
+                break
 
     # No proxy configured at all
     if not has_proxy_config:
@@ -414,7 +424,8 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
 
 class RecordDeviceProxyRequest(BaseModel):
     udid: str
-    client_ip: str | None = None  # Device's LAN IP (from Wi-Fi settings or first captured flow)
+    ssid: str  # Wi-Fi network name (visible at top of Settings > Wi-Fi)
+    client_ip: str | None = None  # Device's LAN IP (Settings > Wi-Fi > network > IP Address)
 
 
 @router.post("/device-proxy-config")
@@ -424,24 +435,29 @@ async def record_device_proxy_config_endpoint(
 ) -> dict:
     """Record the Wi-Fi proxy address that was configured on a physical device.
 
-    Derives host/port from the running server — the automation script does not
-    need to supply them. Call this after successfully completing Wi-Fi proxy
-    setup in device Settings so Quern can detect if the machine IP changes.
+    Derives proxy_host by finding the Mac interface on the same /24 subnet as
+    the device's client_ip. Falls back to detect_local_ip if client_ip is not
+    provided. Call this after completing Wi-Fi proxy setup in device Settings.
     """
-    from server.lifecycle.state import detect_local_ip
+    from server.lifecycle.state import detect_local_ip, detect_host_ip_for_subnet
     from server.proxy.cert_state import record_device_proxy_config
 
-    local_ip = detect_local_ip()
-    if not local_ip:
+    proxy_host = None
+    if body.client_ip:
+        proxy_host = detect_host_ip_for_subnet(body.client_ip)
+    if not proxy_host:
+        proxy_host = detect_local_ip()
+    if not proxy_host:
         raise HTTPException(status_code=503, detail="Cannot detect local IP address.")
 
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
-    record_device_proxy_config(body.udid, local_ip, port, client_ip=body.client_ip)
+    record_device_proxy_config(body.udid, body.ssid, proxy_host, port, client_ip=body.client_ip)
     return {
         "udid": body.udid,
-        "wifi_proxy_host": local_ip,
+        "ssid": body.ssid,
+        "wifi_proxy_host": proxy_host,
         "wifi_proxy_port": port,
         "client_ip": body.client_ip,
     }

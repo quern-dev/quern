@@ -8,12 +8,13 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server.lifecycle.state import update_state
+from server.lifecycle.state import update_state, detect_current_ssid, detect_host_ip_for_subnet
 
 _proxy_logger = logging.getLogger(__name__)
 
 from server.models import (
     DeviceCertState,
+    WifiProxyNetworkConfig,
     FlowQueryParams,
     FlowQueryResponse,
     FlowRecord,
@@ -63,16 +64,40 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
         from server.proxy.cert_state import read_cert_state
         device_certs = read_cert_state()
         if device_certs:
-            cert_setup = {
-                udid: DeviceCertState(
-                    **cert_data,
-                    wifi_proxy_stale=(
-                        cert_data.get("wifi_proxy_host") is not None
-                        and cert_data.get("wifi_proxy_host") != local_ip
-                    ),
+            current_ssid = detect_current_ssid()
+            cert_setup = {}
+            for udid, cert_data in device_certs.items():
+                configs: dict = cert_data.get("wifi_proxy_configs") or {}
+
+                wifi_proxy_stale = True
+                active_network = None
+                for ssid, cfg in configs.items():
+                    device_client_ip = cfg.get("client_ip")
+                    stored_host = cfg.get("proxy_host")
+                    if device_client_ip:
+                        mac_ip = detect_host_ip_for_subnet(device_client_ip)
+                        if mac_ip and mac_ip == stored_host:
+                            wifi_proxy_stale = False
+                            active_network = ssid
+                            break
+                    elif ssid == current_ssid and stored_host == local_ip:
+                        wifi_proxy_stale = False
+                        active_network = ssid
+                        break
+
+                # No configs at all means device hasn't been configured — not stale
+                if not configs:
+                    wifi_proxy_stale = False
+
+                cert_setup[udid] = DeviceCertState(
+                    **{k: v for k, v in cert_data.items() if k not in ("wifi_proxy_configs",)},
+                    wifi_proxy_configs={
+                        ssid: WifiProxyNetworkConfig(**cfg)
+                        for ssid, cfg in configs.items()
+                    } if configs else None,
+                    wifi_proxy_stale=wifi_proxy_stale,
+                    active_wifi_network=active_network,
                 )
-                for udid, cert_data in device_certs.items()
-            }
     except Exception as e:
         _proxy_logger.debug(f"Failed to load cert state: {e}")
 

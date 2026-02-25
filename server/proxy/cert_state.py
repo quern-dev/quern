@@ -91,18 +91,18 @@ def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
 
 
 def record_device_proxy_config(
-    udid: str, host: str, port: int, client_ip: str | None = None
+    udid: str, ssid: str, proxy_host: str, port: int, client_ip: str | None = None
 ) -> None:
-    """Record the Wi-Fi proxy address configured on a physical device."""
+    """Record the Wi-Fi proxy config for a specific network on a physical device."""
     existing = read_cert_state_for_device(udid) or {}
-    updates: dict[str, Any] = {
-        "wifi_proxy_host": host,
-        "wifi_proxy_port": port,
-        "wifi_proxy_set_at": datetime.now(timezone.utc).isoformat(),
+    configs: dict[str, Any] = existing.get("wifi_proxy_configs") or {}
+    configs[ssid] = {
+        "proxy_host": proxy_host,
+        "proxy_port": port,
+        "client_ip": client_ip,
+        "set_at": datetime.now(timezone.utc).isoformat(),
     }
-    if client_ip is not None:
-        updates["client_ip"] = client_ip
-    existing.update(updates)
+    existing["wifi_proxy_configs"] = configs
     update_cert_state(udid, existing)
 
 

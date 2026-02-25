@@ -781,6 +781,15 @@ class EnsureDevicesRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class WifiProxyNetworkConfig(BaseModel):
+    """Proxy config recorded for a single Wi-Fi network (keyed by SSID)."""
+
+    proxy_host: str
+    proxy_port: int
+    client_ip: str | None = None
+    set_at: str | None = None
+
+
 class DeviceCertState(BaseModel):
     """State of mitmproxy CA certificate installation for a device."""
 
@@ -789,11 +798,16 @@ class DeviceCertState(BaseModel):
     fingerprint: str | None = None
     installed_at: str | None = None  # ISO 8601 timestamp
     verified_at: str | None = None  # Last SQLite check timestamp
-    wifi_proxy_host: str | None = None   # IP address last set on device
-    wifi_proxy_port: int | None = None   # Port last set on device (typically 9101)
-    wifi_proxy_set_at: str | None = None  # ISO 8601 timestamp
-    wifi_proxy_stale: bool = False        # Computed: True if wifi_proxy_host != current local_ip
-    client_ip: str | None = None          # Device's LAN IP as seen by the proxy (for flow filtering)
+    # Per-network proxy config (keyed by SSID)
+    wifi_proxy_configs: dict[str, WifiProxyNetworkConfig] | None = None
+    # Computed at read time
+    wifi_proxy_stale: bool = False
+    active_wifi_network: str | None = None  # SSID whose config is currently active
+    # Legacy flat fields (kept for backward compat, ignored by new staleness logic)
+    wifi_proxy_host: str | None = None
+    wifi_proxy_port: int | None = None
+    wifi_proxy_set_at: str | None = None
+    client_ip: str | None = None          # Device's LAN IP (legacy flat field)
 
 
 class CertStatusResponse(BaseModel):

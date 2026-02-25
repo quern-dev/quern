@@ -125,6 +125,57 @@ def detect_local_ip() -> str | None:
         return None
 
 
+def _get_all_interface_ips() -> list[str]:
+    """Return all IPv4 addresses currently assigned to local interfaces."""
+    import subprocess
+    try:
+        result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+        ips = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet ") and not line.startswith("inet6"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[1]
+                    if not ip.startswith("127."):
+                        ips.append(ip)
+        return ips
+    except Exception:
+        return []
+
+
+def detect_host_ip_for_subnet(device_ip: str) -> str | None:
+    """Find the Mac interface IP on the same /24 subnet as device_ip."""
+    import ipaddress
+    try:
+        device_net = ipaddress.ip_network(f"{device_ip}/24", strict=False)
+    except ValueError:
+        return None
+    for ip in _get_all_interface_ips():
+        try:
+            if ipaddress.ip_network(f"{ip}/24", strict=False) == device_net:
+                return ip
+        except ValueError:
+            continue
+    return None
+
+
+def detect_current_ssid() -> str | None:
+    """Return the current Wi-Fi SSID, or None if not connected / not detectable."""
+    import subprocess
+    for iface in ("en0", "en1", "en2"):
+        try:
+            result = subprocess.run(
+                ["networksetup", "-getairportnetwork", iface],
+                capture_output=True, text=True, timeout=3,
+            )
+            if "Current Wi-Fi Network:" in result.stdout:
+                return result.stdout.split("Current Wi-Fi Network:", 1)[1].strip()
+        except Exception:
+            continue
+    return None
+
+
 def is_server_healthy(port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:
     """Check if a server is responding on the given port.
 

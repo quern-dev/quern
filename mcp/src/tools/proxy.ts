@@ -253,36 +253,35 @@ local mode. When non-empty, traffic from those processes (e.g. ["MobileSafari"])
 is transparently captured without needing a system proxy. Empty list means disabled.
 Use set_local_capture to change the process list on the fly.
 
-The local_ip field is the Mac's outward-facing IP address — use this as the
-proxy server address when configuring a physical device's Wi-Fi proxy settings.
+The local_ip field is the Mac's outward-facing IP address — use this as a
+fallback proxy address when configuring a physical device's Wi-Fi proxy settings,
+but prefer client_ip-based subnet detection (handled automatically by record_device_proxy_config).
 
-Each entry in cert_setup (keyed by device UDID) now includes:
-- wifi_proxy_host: IP address last configured on the device's Wi-Fi proxy settings
-- wifi_proxy_port: Port last configured (typically 9101)
-- wifi_proxy_set_at: ISO 8601 timestamp of when the proxy was last set
-- wifi_proxy_stale: true if wifi_proxy_host differs from the current local_ip,
-  meaning the device's proxy config is pointing to a stale address and needs
-  reconfiguring with the current local_ip. Call record_device_proxy_config after
-  completing Wi-Fi proxy setup to update these values.
-- client_ip: the device's LAN IP as seen by the proxy — use this as the client_ip
-  filter on query_flows and get_flow_summary to isolate that device's traffic.
+Each entry in cert_setup (keyed by device UDID) includes:
+- wifi_proxy_configs: dict keyed by SSID (Wi-Fi network name), each entry has:
+    proxy_host: Mac IP configured on the device for this network
+    proxy_port: Port configured (typically 9101)
+    client_ip: Device's LAN IP on that network (for flow filtering)
+    set_at: ISO 8601 timestamp of when the config was recorded
+- wifi_proxy_stale: true if no stored network's proxy_host matches the current Mac IP
+  for that subnet. This handles multi-network (home/work) and multi-interface scenarios.
+  If stale, reconfigure the device's Wi-Fi proxy and call record_device_proxy_config.
+- active_wifi_network: SSID whose config is currently active (proxy_host matches current
+  Mac IP for that subnet). Null if no network is active/matching.
 
 TROUBLESHOOTING — no traffic from a physical device:
-1. wifi_proxy_stale: true → the machine's IP changed since the device was configured.
-   Re-run the WDA Wi-Fi proxy setup automation to update the device's Settings
-   (Settings > Wi-Fi > network > Configure Proxy > Manual, set new IP), then call
-   record_device_proxy_config to resync.
-2. wifi_proxy_host: null → the device has never been configured. Run the full
+1. wifi_proxy_stale: true → the Mac's IP on this subnet changed (different network or
+   DHCP lease). Update the device's Settings (Wi-Fi > network > Configure Proxy > Manual)
+   with the new IP, then call record_device_proxy_config with the current ssid and client_ip.
+2. wifi_proxy_configs: null → the device has never been configured. Run the full
    physical device setup: install cert → trust cert → configure Wi-Fi proxy →
    record_device_proxy_config.
-3. wifi_proxy_stale: false and host is set, but still no flows → check:
+3. wifi_proxy_stale: false and active_wifi_network is set, but still no flows → check:
    - The proxy is running (status: "running")
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
-   - The device's current LAN IP matches client_ip in cert_setup. If the device got
-     a new DHCP lease its IP will have changed — query_flows filtered by the old
-     client_ip will return nothing. Check the current IP in Settings > Wi-Fi >
-     (network) > IP Address, and if it differs, call record_device_proxy_config
-     again with the updated client_ip.`,
+   - Use the client_ip from the active network config as the filter on query_flows.
+     If the device got a new DHCP lease, call record_device_proxy_config again with the
+     updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).`,
     {},
     async () => {
       try {
@@ -684,25 +683,30 @@ the background and can be re-enabled with configure_system_proxy.`,
 
   server.tool(
     "record_device_proxy_config",
-    `Record that the Wi-Fi proxy has been configured on a physical device with the current machine IP. ` +
+    `Record that the Wi-Fi proxy has been configured on a physical device. ` +
     `Call this after successfully completing the Wi-Fi proxy setup in device Settings. ` +
-    `Quern stores the address so it can detect if the machine IP changes and the proxy config becomes stale. ` +
-    `The host and port are derived from the running server — you only need to provide the device UDID. ` +
-    `Optionally pass client_ip (the device's LAN IP from its Wi-Fi settings) to enable per-device flow filtering ` +
-    `via the client_ip parameter on query_flows and get_flow_summary.`,
+    `Quern stores the config per Wi-Fi network (SSID) so multiple networks are tracked independently. ` +
+    `The proxy host is auto-derived from the Mac interface on the same subnet as the device's client_ip — ` +
+    `this is always the correct host regardless of interface names or routing tables. ` +
+    `The port is derived from the running server. ` +
+    `Passing client_ip also enables per-device flow filtering via the client_ip parameter on query_flows/get_flow_summary.`,
     {
       udid: z.string().describe("Device UDID"),
+      ssid: z.string().describe(
+        "Wi-Fi network name the device is connected to " +
+        "(visible at the top of Settings > Wi-Fi)."
+      ),
       client_ip: z
         .string()
         .optional()
         .describe(
-          "Device's LAN IP address (visible in Settings > Wi-Fi > (network) > IP Address). " +
-          "Used to filter captured flows to this device only."
+          "Device's LAN IP address (Settings > Wi-Fi > (network) > IP Address). " +
+          "Used to find the correct Mac interface IP automatically and to filter captured flows."
         ),
     },
-    async ({ udid, client_ip }) => {
+    async ({ udid, ssid, client_ip }) => {
       try {
-        const body: Record<string, unknown> = { udid };
+        const body: Record<string, unknown> = { udid, ssid };
         if (client_ip !== undefined) body.client_ip = client_ip;
         const data = await apiRequest(
           "POST",
