@@ -89,7 +89,7 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         if not quiet:
             print("Installing MCP server dependencies...")
         result = subprocess.run(
-            ["npm", "install"], cwd=str(mcp_dir), timeout=120,
+            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
             capture_output=quiet,
         )
         if result.returncode != 0:
