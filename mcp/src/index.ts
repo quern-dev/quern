@@ -22,6 +22,7 @@ import { registerDevicePoolTools } from "./tools/device-pool.js";
 import { registerSimulatorLogTools } from "./tools/simulator-log.js";
 import { registerDeviceLogTools } from "./tools/device-log.js";
 import { registerWdaTools } from "./tools/wda.js";
+import { registerBuildTools } from "./tools/build.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -79,6 +80,7 @@ registerDevicePoolTools(server);
 registerSimulatorLogTools(server);
 registerDeviceLogTools(server);
 registerWdaTools(server);
+registerBuildTools(server);
 
 // ---------------------------------------------------------------------------
 // Resources

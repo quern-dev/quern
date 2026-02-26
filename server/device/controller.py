@@ -249,11 +249,55 @@ class DeviceController(DeviceControllerUI):
         if self._active_udid == udid:
             self._active_udid = None
 
+    def _is_pre_ios17_udid(self, udid: str) -> bool:
+        """Return True if this UDID is a pre-iOS 17 libimobiledevice UDID.
+
+        Pre-iOS 17 devices are discovered via usbmux and have 40-character
+        lowercase hex UDIDs.  iOS 17+ devices use CoreDevice UUIDs (RFC 4122
+        format with dashes and uppercase hex).
+        """
+        return len(udid) == 40 and all(c in "0123456789abcdef" for c in udid)
+
+    async def _install_app_legacy(self, udid: str, app_path: str) -> None:
+        """Install an app on a pre-iOS 17 device via ideviceinstaller / pymobiledevice3."""
+        import asyncio
+        import shutil
+
+        if shutil.which("ideviceinstaller"):
+            tool = "ideviceinstaller"
+            cmd = ["ideviceinstaller", "-u", udid, "install", app_path]
+        else:
+            pmd3 = shutil.which("pymobiledevice3")
+            if not pmd3:
+                raise DeviceError(
+                    "Neither ideviceinstaller nor pymobiledevice3 found. "
+                    "Install with: brew install ideviceinstaller",
+                    tool="install",
+                )
+            tool = "pymobiledevice3"
+            cmd = [pmd3, "apps", "install", "--udid", udid, app_path]
+
+        logger.info("Installing via %s on pre-iOS17 device %s", tool, udid[:8])
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise DeviceError(
+                f"{tool} install failed (rc={proc.returncode}): {stderr.decode().strip()}",
+                tool=tool,
+            )
+
     async def install_app(self, app_path: str, udid: str | None = None) -> str:
         """Install an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         if self._is_physical(resolved):
-            await self.devicectl.install_app(resolved, app_path)
+            if self._is_pre_ios17_udid(resolved):
+                await self._install_app_legacy(resolved, app_path)
+            else:
+                await self.devicectl.install_app(resolved, app_path)
         else:
             await self.simctl.install_app(resolved, app_path)
         return resolved
