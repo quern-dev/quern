@@ -67,7 +67,7 @@ Other things you can ask:
 - Node.js 18+ (for MCP server)
 - Optional: `idb` for UI automation (`brew install idb-companion`)
 - Optional: `pymobiledevice3` for physical device support (`pipx install pymobiledevice3`)
-- Optional: [mitmproxy-macos](https://github.com/mitmproxy/mitmproxy-macos) for local capture mode (transparent simulator traffic capture without system proxy)
+- Optional: [mitmproxy](https://github.com/mitmproxy/mitmproxy) for local capture mode (transparent simulator traffic capture without system proxy)
 
 ### Install
 
