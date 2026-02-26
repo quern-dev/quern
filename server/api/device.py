@@ -118,12 +118,23 @@ async def list_devices(
 @router.post("/boot")
 async def boot_device(request: Request, body: BootDeviceRequest):
     """Boot a simulator by udid or name."""
+    from server.proxy import cert_manager as _cert_manager
+
     controller = _get_controller(request)
     try:
         udid = await controller.boot(udid=body.udid, name=body.name)
-        return {"status": "booted", "udid": udid}
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # Auto-install proxy cert if the cert file exists
+    cert_auto_installed: bool | None = None
+    if _cert_manager.get_cert_path().exists():
+        try:
+            cert_auto_installed = await _cert_manager.install_cert(controller, udid)
+        except Exception as exc:
+            logger.warning("Auto cert install failed for %s: %s", udid, exc)
+
+    return {"status": "booted", "udid": udid, "cert_auto_installed": cert_auto_installed}
 
 
 @router.post("/shutdown")
