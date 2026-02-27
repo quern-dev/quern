@@ -371,3 +371,14 @@ class DeviceController(DeviceControllerUI):
         self._require_simulator(resolved, "Grant permission")
         await self.simctl.grant_permission(resolved, bundle_id, permission)
         return resolved
+
+    async def clear_app_data(self, bundle_id: str, udid: str | None = None) -> str:
+        """Clear all app data for a simulator app. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        self._require_simulator(resolved, "Clear app data")
+        try:
+            await self.simctl.terminate_app(resolved, bundle_id)
+        except DeviceError:
+            pass  # app wasn't running, proceed anyway
+        await self.simctl.clear_app_data(resolved, bundle_id)
+        return resolved

@@ -330,6 +330,44 @@ class TestGrantPermission:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# clear_app_data
+# ---------------------------------------------------------------------------
+
+
+class TestClearAppData:
+    async def test_clear_app_data_success(self, tmp_path):
+        backend = SimctlBackend()
+        # Create fake container with some files/dirs
+        container = tmp_path / "container"
+        container.mkdir()
+        (container / "Documents").mkdir()
+        (container / "Library").mkdir()
+        (container / "prefs.plist").write_text("data")
+
+        async def mock_run_simctl(*args):
+            return str(container) + "\n", ""
+
+        with patch.object(backend, "_run_simctl", side_effect=mock_run_simctl):
+            await backend.clear_app_data("AAAA-1111", "com.example.App")
+
+        # Container dir itself must still exist
+        assert container.exists()
+        # All contents must be gone
+        assert list(container.iterdir()) == []
+
+    async def test_clear_app_data_missing_container(self, tmp_path):
+        backend = SimctlBackend()
+        nonexistent = tmp_path / "no-such-container"
+
+        async def mock_run_simctl(*args):
+            return str(nonexistent) + "\n", ""
+
+        with patch.object(backend, "_run_simctl", side_effect=mock_run_simctl):
+            with pytest.raises(DeviceError, match="App data container not found"):
+                await backend.clear_app_data("AAAA-1111", "com.example.App")
+
+
 class TestScreenshot:
     async def test_screenshot_reads_temp_file(self, tmp_path):
         backend = SimctlBackend()

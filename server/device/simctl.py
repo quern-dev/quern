@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -195,6 +196,18 @@ class SimctlBackend:
         Runs: xcrun simctl privacy <udid> grant <permission> <bundle_id>
         """
         await self._run_simctl("privacy", udid, "grant", permission, bundle_id)
+
+    async def clear_app_data(self, udid: str, bundle_id: str) -> None:
+        """Delete all contents of the app's data container (Documents, Library, tmp, etc.)."""
+        stdout, _ = await self._run_simctl("get_app_container", udid, bundle_id, "data")
+        container = Path(stdout.strip())
+        if not container.exists():
+            raise DeviceError(f"App data container not found for {bundle_id}", tool="simctl")
+        for child in container.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
 
     async def screenshot(self, udid: str) -> bytes:
         """Capture a screenshot from a simulator.

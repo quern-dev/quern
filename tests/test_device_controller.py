@@ -475,6 +475,31 @@ class TestSetLocation:
         ctrl.simctl.set_location.assert_called_once_with("AAAA-1111", 37.7749, -122.4194)
 
 
+class TestClearAppData:
+    async def test_clear_app_data_terminates_then_clears(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.terminate_app = AsyncMock()
+        ctrl.simctl.clear_app_data = AsyncMock()
+
+        udid = await ctrl.clear_app_data("com.example.App")
+        assert udid == "AAAA-1111"
+        ctrl.simctl.terminate_app.assert_called_once_with("AAAA-1111", "com.example.App")
+        ctrl.simctl.clear_app_data.assert_called_once_with("AAAA-1111", "com.example.App")
+
+    async def test_clear_app_data_proceeds_if_not_running(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.terminate_app = AsyncMock(
+            side_effect=DeviceError("app not running", tool="simctl")
+        )
+        ctrl.simctl.clear_app_data = AsyncMock()
+
+        udid = await ctrl.clear_app_data("com.example.App")
+        assert udid == "AAAA-1111"
+        ctrl.simctl.clear_app_data.assert_called_once_with("AAAA-1111", "com.example.App")
+
+
 class TestGrantPermission:
     async def test_grant_permission_delegates_to_simctl(self):
         ctrl = DeviceController()

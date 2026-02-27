@@ -95,6 +95,7 @@ def mock_controller(app):
     ctrl.press_button = AsyncMock(return_value="AAAA-1111")
     ctrl.set_location = AsyncMock(return_value="AAAA-1111")
     ctrl.grant_permission = AsyncMock(return_value="AAAA-1111")
+
     ctrl.screenshot_annotated = AsyncMock(return_value=(b"\x89PNGannotated", "image/png"))
     app.state.device_controller = ctrl
     return ctrl
@@ -270,6 +271,7 @@ class TestAppEndpoints:
             )
         assert resp.status_code == 200
         mock_controller.list_apps.assert_called_once_with(udid="BBBB-2222")
+
 
 
 # ---------------------------------------------------------------------------

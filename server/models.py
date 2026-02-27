@@ -597,6 +597,7 @@ class UninstallAppRequest(BaseModel):
     udid: str | None = None
 
 
+
 # ---------------------------------------------------------------------------
 # UI inspection models (Phase 3b)
 # ---------------------------------------------------------------------------
@@ -916,3 +917,56 @@ class StopDriverRequest(BaseModel):
     """Request body for POST /api/v1/device/wda/stop."""
 
     udid: str
+
+
+# ---------------------------------------------------------------------------
+# App state checkpoint + plist models
+# ---------------------------------------------------------------------------
+
+
+class SaveAppStateRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/save."""
+
+    bundle_id: str
+    label: str
+    description: str | None = None
+    udid: str | None = None
+
+
+class RestoreAppStateRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/restore."""
+
+    bundle_id: str
+    label: str
+    udid: str | None = None
+
+
+class ReadAppPlistRequest(BaseModel):
+    """Request body for GET /api/v1/device/app/state/plist (query params only)."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    key: str | None = None
+    udid: str | None = None
+
+
+class SetAppPlistValueRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    key: str
+    value: object
+    udid: str | None = None
+
+
+class DeleteAppPlistKeyRequest(BaseModel):
+    """Request body for DELETE /api/v1/device/app/state/plist/key."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    key: str
+    udid: str | None = None

@@ -69,6 +69,7 @@ from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.wda import router as wda_router
 from server.api.build_app import router as build_app_router
+from server.api.app_state import router as app_state_router
 
 logger = logging.getLogger("quern-debug-server")
 
@@ -368,6 +369,7 @@ def create_app(
     app.include_router(device_pool_router)
     app.include_router(wda_router)
     app.include_router(build_app_router)
+    app.include_router(app_state_router)
 
     @app.get("/health")
     async def health() -> dict:

@@ -197,6 +197,7 @@ async def uninstall_app(request: Request, body: UninstallAppRequest):
         raise _handle_device_error(e)
 
 
+
 @router.get("/app/list")
 async def list_apps(request: Request, udid: str | None = Query(default=None)):
     """List installed apps on a simulator."""
