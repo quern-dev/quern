@@ -78,13 +78,15 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
             print("Warning: mcp/src/ not found — skipping MCP build")
         return False
 
-    # Install node_modules if missing or stale (package.json newer than node_modules/)
+    # Install node_modules if missing or stale (package.json newer than sentinel file)
     node_modules = mcp_dir / "node_modules"
-    needs_install = not node_modules.exists()
-    if not needs_install:
-        pkg_json = mcp_dir / "package.json"
-        if pkg_json.exists() and pkg_json.stat().st_mtime > node_modules.stat().st_mtime:
-            needs_install = True
+    stamp = node_modules / ".install-stamp"
+    pkg_json = mcp_dir / "package.json"
+    needs_install = (
+        not node_modules.exists()
+        or not stamp.exists()
+        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
+    )
     if needs_install:
         if not quiet:
             print("Installing MCP server dependencies...")
@@ -95,52 +97,54 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         if result.returncode != 0:
             print("Error: npm install failed for MCP server")
             return False
+        stamp.touch()
 
-    # Build
-    if not quiet:
-        print("Building MCP server...")
-    result = subprocess.run(
-        ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
-        capture_output=quiet,
-    )
-    if result.returncode != 0:
-        print("Error: npm run build failed for MCP server")
-        return False
+    # Build only if dist is missing or any source file is newer than dist/index.js
+    needs_build = not dist_file.exists()
+    if not needs_build:
+        dist_mtime = dist_file.stat().st_mtime
+        for src_file in src_dir.rglob("*"):
+            if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
+                needs_build = True
+                break
 
-    if not quiet:
-        print("MCP server built successfully")
+    if needs_build:
+        if not quiet:
+            print("Building MCP server...")
+        result = subprocess.run(
+            ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
+            capture_output=quiet,
+        )
+        if result.returncode != 0:
+            print("Error: npm run build failed for MCP server")
+            return False
+        if not quiet:
+            print("MCP server built successfully")
+    elif not quiet:
+        print("MCP server up to date")
+
     return True
 
 
-def _cmd_mcp_install() -> int:
-    """Add quern-debug MCP server to ~/.claude.json."""
+def _install_json_mcpservers(config_path: Path, mcp_index: Path) -> tuple[bool, str]:
+    """Install quern-debug into a config file that uses the mcpServers JSON format.
+
+    Used by claude-code, claude-desktop, and cursor.
+    Deep-merges — all other keys in the config are preserved.
+    Creates the file (and parent dirs) if missing.
+    """
     import json
 
-    project_root = _find_project_root()
-    if project_root is None:
-        print("Error: could not find project root")
-        return 1
+    config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    mcp_dir = project_root / "mcp"
-    mcp_index = mcp_dir / "dist" / "index.js"
-
-    # Build the MCP server if needed
-    if not _ensure_mcp_built(quiet=False):
-        return 1
-
-    claude_config = Path.home() / ".claude.json"
-
-    # Read existing config or start fresh
-    if claude_config.exists():
+    if config_path.exists():
         try:
-            config = json.loads(claude_config.read_text())
+            config = json.loads(config_path.read_text())
         except (json.JSONDecodeError, ValueError):
-            print(f"Error: {claude_config} contains invalid JSON")
-            return 1
+            return False, f"Error: {config_path} contains invalid JSON"
     else:
         config = {}
 
-    # Add/update the MCP server entry
     if "mcpServers" not in config:
         config["mcpServers"] = {}
 
@@ -150,15 +154,168 @@ def _cmd_mcp_install() -> int:
         "args": [str(mcp_index)],
     }
 
-    claude_config.write_text(json.dumps(config, indent=2) + "\n")
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
 
-    if existing:
-        print(f"Updated quern-debug MCP server in {claude_config}")
+    verb = "Updated" if existing else "Added"
+    return True, f"{verb} quern-debug in {config_path}"
+
+
+def _install_opencode(mcp_index: Path) -> tuple[bool, str]:
+    """Install quern into ~/.config/opencode/opencode.json."""
+    import json
+
+    config_path = Path.home() / ".config" / "opencode" / "opencode.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            return False, f"Error: {config_path} contains invalid JSON"
     else:
-        print(f"Added quern-debug MCP server to {claude_config}")
-    print(f"  command: node")
-    print(f"  args: [{mcp_index}]")
-    return 0
+        config = {}
+
+    if "mcp" not in config:
+        config["mcp"] = {}
+
+    existing = config["mcp"].get("quern")
+    config["mcp"]["quern"] = {
+        "type": "local",
+        "command": ["node", str(mcp_index)],
+    }
+
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    verb = "Updated" if existing else "Added"
+    return True, f"{verb} quern in {config_path}"
+
+
+def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
+    """Insert or replace a TOML section using text manipulation.
+
+    If the section header exists, replaces content from that line until
+    the next section header (or EOF). If not found, appends at end.
+    """
+    header = f"[{section}]"
+    lines = text.splitlines(keepends=True)
+
+    # Build replacement block
+    field_lines = [f"{k} = {v}\n" for k, v in fields.items()]
+    block = [header + "\n"] + field_lines
+
+    # Find the section
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            break
+
+    if start is None:
+        # Append — ensure there's a blank line separator
+        if lines and not lines[-1].endswith("\n"):
+            lines.append("\n")
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.extend(block)
+        return "".join(lines)
+
+    # Find end of existing section (next header or EOF)
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        stripped = lines[i].strip()
+        if stripped.startswith("[") and not stripped.startswith("[["):
+            end = i
+            break
+
+    lines[start:end] = block + ["\n"]
+    return "".join(lines)
+
+
+def _install_codex(mcp_index: Path) -> tuple[bool, str]:
+    """Install quern into ~/.codex/config.toml."""
+    config_path = Path.home() / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_text = config_path.read_text() if config_path.exists() else ""
+    existing = "[mcp_servers.quern]" in existing_text
+
+    fields = {
+        "command": f'"{str(mcp_index)}"',
+        "args": "[]",
+        "enabled": "true",
+    }
+    new_text = _toml_upsert_section(existing_text, "mcp_servers.quern", fields)
+    config_path.write_text(new_text)
+
+    verb = "Updated" if existing else "Added"
+    return True, f"{verb} quern in {config_path}"
+
+
+def _cmd_mcp_install() -> int:
+    """Add quern-debug MCP server to one or more AI tool configs."""
+    import argparse
+
+    ALL_TARGETS = ["claude-code", "claude-desktop", "opencode", "codex", "cursor"]
+
+    parser = argparse.ArgumentParser(
+        prog="quern mcp-install",
+        description="Install the Quern MCP server into AI coding tools.",
+    )
+    parser.add_argument(
+        "targets",
+        nargs="*",
+        default=["claude-code"],
+        metavar="TARGET",
+        help=f"Targets to install into: {', '.join(ALL_TARGETS)}, all (default: claude-code)",
+    )
+    args = parser.parse_args(sys.argv[2:])
+
+    # Expand "all"
+    targets: list[str] = []
+    for t in args.targets:
+        if t == "all":
+            targets.extend(ALL_TARGETS)
+        elif t in ALL_TARGETS:
+            targets.append(t)
+        else:
+            print(f"Error: unknown target {t!r}. Valid targets: {', '.join(ALL_TARGETS)}, all")
+            return 1
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    targets = [t for t in targets if not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
+
+    project_root = _find_project_root()
+    if project_root is None:
+        print("Error: could not find project root")
+        return 1
+
+    mcp_index = project_root / "mcp" / "dist" / "index.js"
+
+    # Build the MCP server
+    if not _ensure_mcp_built(quiet=False):
+        return 1
+
+    CLAUDE_DESKTOP_CONFIG = (
+        Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    )
+
+    dispatch = {
+        "claude-code":    lambda: _install_json_mcpservers(Path.home() / ".claude.json", mcp_index),
+        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_index),
+        "cursor":         lambda: _install_json_mcpservers(Path.home() / ".cursor" / "mcp.json", mcp_index),
+        "opencode":       lambda: _install_opencode(mcp_index),
+        "codex":          lambda: _install_codex(mcp_index),
+    }
+
+    all_ok = True
+    for target in targets:
+        ok, message = dispatch[target]()
+        status = "✓" if ok else "✗"
+        print(f"  {status} {target}: {message}")
+        if not ok:
+            all_ok = False
+
+    return 0 if all_ok else 1
 
 
 def main() -> None:
