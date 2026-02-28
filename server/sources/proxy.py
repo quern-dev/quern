@@ -385,6 +385,27 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return rule_id
 
+    async def update_mock(self, rule_id: str, pattern: str | None = None, response: dict | None = None) -> dict:
+        """Update an existing mock rule. Returns the updated rule. Raises ValueError if not found or pattern invalid."""
+        rule = next((r for r in self._mock_rules if r["rule_id"] == rule_id), None)
+        if rule is None:
+            raise ValueError(f"Mock rule not found: {rule_id}")
+        new_pattern = pattern if pattern is not None else rule["pattern"]
+        new_response = response if response is not None else rule["response"]
+        if pattern is not None:
+            validate_filter_pattern(new_pattern)
+        self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
+        await self.send_command({"action": "clear_mock", "rule_id": rule_id})
+        updated = {"rule_id": rule_id, "pattern": new_pattern, "response": new_response}
+        self._mock_rules.append(updated)
+        await self.send_command({
+            "action": "set_mock",
+            "rule_id": rule_id,
+            "pattern": new_pattern,
+            "response": new_response,
+        })
+        return updated
+
     async def clear_mock(self, rule_id: str | None = None) -> None:
         """Remove a specific mock rule or all mock rules."""
         if rule_id:
@@ -576,9 +597,9 @@ class ProxyAdapter(BaseSourceAdapter):
             pass
         elif event == "mocks_cleared":
             rule_id = data.get("rule_id")
-            if rule_id:
-                self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
-            else:
+            if not rule_id:
+                # Full clear — sync the mirror. Per-rule clears are already
+                # handled by clear_mock() / update_mock() before the echo arrives.
                 self._mock_rules.clear()
         else:
             logger.info("Proxy addon status: %s", event)

@@ -418,12 +418,38 @@ async def test_handle_status_event_mocks_cleared(adapter):
 
 
 @pytest.mark.asyncio
-async def test_handle_status_event_mock_cleared_specific(adapter):
-    """mocks_cleared with rule_id should remove only that rule."""
+async def test_handle_status_event_mock_cleared_specific_is_noop(adapter):
+    """mocks_cleared with rule_id should be a no-op (caller already handled it)."""
     adapter._mock_rules = [{"rule_id": "a"}, {"rule_id": "b"}]
     adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "a"})
+    # Per-rule echo is ignored — both rules still present
+    assert len(adapter._mock_rules) == 2
+
+
+@pytest.mark.asyncio
+async def test_update_mock_preserves_rule(adapter):
+    """update_mock should correctly update the rule in _mock_rules."""
+    from unittest.mock import AsyncMock
+    adapter.send_command = AsyncMock()
+
+    # Seed a rule
+    adapter._mock_rules = [
+        {"rule_id": "r1", "pattern": "~d api.example.com", "response": {"status_code": 200, "body": "ok"}},
+    ]
+
+    updated = await adapter.update_mock("r1", response={"status_code": 404, "body": "not found"})
+
+    assert updated["rule_id"] == "r1"
+    assert updated["pattern"] == "~d api.example.com"  # unchanged
+    assert updated["response"]["status_code"] == 404
+
+    # _mock_rules should have exactly one rule with the updated response
     assert len(adapter._mock_rules) == 1
-    assert adapter._mock_rules[0]["rule_id"] == "b"
+    assert adapter._mock_rules[0]["response"]["status_code"] == 404
+
+    # Simulate the echo arriving — should NOT wipe the rule
+    adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "r1"})
+    assert len(adapter._mock_rules) == 1
 
 
 # ---------------------------------------------------------------------------

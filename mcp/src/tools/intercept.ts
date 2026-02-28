@@ -284,6 +284,74 @@ export function registerInterceptTools(server: McpServer): void {
   );
 
   server.tool(
+    "update_mock",
+    `Update an existing mock rule's pattern and/or response fields. Only provided fields are changed.`,
+    {
+      rule_id: z.string().describe("The mock rule ID to update"),
+      pattern: z
+        .string()
+        .optional()
+        .describe(
+          'New mitmproxy filter pattern (e.g. "~d api.example.com")'
+        ),
+      status_code: z
+        .number()
+        .optional()
+        .describe("New HTTP status code for the mock response"),
+      headers: z
+        .record(z.string())
+        .optional()
+        .describe("New response headers (replaces all headers)"),
+      body: z
+        .string()
+        .optional()
+        .describe("New response body string"),
+    },
+    async ({ rule_id, pattern, status_code, headers, body }) => {
+      try {
+        const payload: Record<string, unknown> = {};
+        if (pattern !== undefined) {
+          payload.pattern = pattern;
+        }
+        if (
+          status_code !== undefined ||
+          headers !== undefined ||
+          body !== undefined
+        ) {
+          const response: Record<string, unknown> = {};
+          if (status_code !== undefined) response.status_code = status_code;
+          if (headers !== undefined) response.headers = headers;
+          if (body !== undefined) response.body = body;
+          payload.response = response;
+        }
+
+        const data = await apiRequest(
+          "PATCH",
+          `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`,
+          undefined,
+          payload
+        );
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "clear_mocks",
     `Clear mock response rules. If rule_id is provided, removes only that rule. Otherwise removes all mock rules.`,
     {

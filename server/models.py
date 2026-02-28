@@ -487,6 +487,13 @@ class SetMockRequest(BaseModel):
     response: MockResponseSpec
 
 
+class UpdateMockRequest(BaseModel):
+    """Request body for PATCH /api/v1/proxy/mocks/{rule_id}."""
+
+    pattern: str | None = None
+    response: MockResponseSpec | None = None
+
+
 class MockRuleInfo(BaseModel):
     """Info about an active mock rule."""
 

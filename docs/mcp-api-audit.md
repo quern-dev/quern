@@ -52,9 +52,9 @@ See: `docs/wda-activate-app-spec.md`
 
 The MCP tool exists but the HTTP handler returns "Filter reconfiguration not yet implemented." Confusing for agents that try to use it. Should either be implemented or removed.
 
-### 8. No mock update
+### ~~8. No mock update~~ ✅ Done
 
-To change a mock response, agents must `clear_mocks(rule_id=...)` then `set_mock` again. An `update_mock(rule_id, ...)` would reduce friction for Workflow 4 (testing different API responses).
+~~To change a mock response, agents must `clear_mocks(rule_id=...)` then `set_mock` again.~~ Added `update_mock` MCP tool — takes `rule_id` plus optional `pattern`, `status_code`, `headers`, `body`. Exposed via `PATCH /api/v1/proxy/mocks/{rule_id}`. Fixed race condition where `list_mocks` returned empty after `update_mock` — the addon's status echo was wiping the adapter's rule mirror. Fix: per-rule echoes are now ignored (caller is the single writer).
 
 ### 9. HTTP endpoints without MCP tools
 

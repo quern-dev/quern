@@ -507,6 +507,69 @@ async def test_mock_delete_all(app, auth_headers, running_adapter):
 
 
 @pytest.mark.asyncio
+async def test_mock_update_success(app, auth_headers, running_adapter):
+    """PATCH /mocks/{rule_id} should update an existing mock rule."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create a rule first
+        resp = await client.post(
+            "/api/v1/proxy/mocks",
+            headers=auth_headers,
+            json={
+                "pattern": "~d api.example.com",
+                "response": {"status_code": 200, "body": '{"ok": true}'},
+            },
+        )
+        rule_id = resp.json()["rule_id"]
+
+        # Update the status_code
+        resp = await client.patch(
+            f"/api/v1/proxy/mocks/{rule_id}",
+            headers=auth_headers,
+            json={"response": {"status_code": 503, "body": '{"error": "down"}'}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "updated"
+        assert data["response"]["status_code"] == 503
+
+        # Verify via list_mocks
+        resp = await client.get("/api/v1/proxy/mocks", headers=auth_headers)
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["rules"][0]["response"]["status_code"] == 503
+
+
+@pytest.mark.asyncio
+async def test_mock_update_not_found(app, auth_headers, running_adapter):
+    """PATCH /mocks/{rule_id} should return 404 for unknown rule."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.patch(
+            "/api/v1/proxy/mocks/nonexistent",
+            headers=auth_headers,
+            json={"response": {"status_code": 500}},
+        )
+        assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_mock_update_no_fields(app, auth_headers, running_adapter):
+    """PATCH /mocks/{rule_id} with no fields should return 400."""
+    running_adapter._mock_rules = [
+        {"rule_id": "r1", "pattern": "~d test.com", "response": {"status_code": 200}},
+    ]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.patch(
+            "/api/v1/proxy/mocks/r1",
+            headers=auth_headers,
+            json={},
+        )
+        assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_mock_requires_running_proxy(app, auth_headers, stopped_adapter):
     """POST /mocks should return 503 when proxy is stopped."""
     transport = ASGITransport(app=app)
