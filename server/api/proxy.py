@@ -61,7 +61,7 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
     system_proxy_info: SystemProxyInfo | None = None
     local_ip = _detect_local_ip()
     try:
-        from server.proxy.cert_state import read_cert_state
+        from server.proxy.cert_state import read_cert_state, strip_noncanonical_fields
         device_certs = read_cert_state()
         if device_certs:
             current_ssid = detect_current_ssid()
@@ -89,15 +89,38 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
                 if not configs:
                     wifi_proxy_stale = False
 
-                cert_setup[udid] = DeviceCertState(
-                    **{k: v for k, v in cert_data.items() if k not in ("wifi_proxy_configs",)},
-                    wifi_proxy_configs={
-                        ssid: WifiProxyNetworkConfig(**cfg)
-                        for ssid, cfg in configs.items()
-                    } if configs else None,
-                    wifi_proxy_stale=wifi_proxy_stale,
-                    active_wifi_network=active_network,
-                )
+                try:
+                    entry = DeviceCertState(
+                        **{k: v for k, v in cert_data.items() if k not in ("wifi_proxy_configs",)},
+                        wifi_proxy_configs={
+                            ssid: WifiProxyNetworkConfig(**cfg)
+                            for ssid, cfg in configs.items()
+                        } if configs else None,
+                        wifi_proxy_stale=wifi_proxy_stale,
+                        active_wifi_network=active_network,
+                    )
+                except Exception:
+                    _proxy_logger.warning(
+                        "cert-state entry for %r has invalid stored fields; "
+                        "stripping non-canonical data and rebuilding", udid
+                    )
+                    strip_noncanonical_fields(udid)
+                    canonical = {
+                        k: v for k, v in cert_data.items()
+                        if k in ("name", "cert_installed", "fingerprint",
+                                 "installed_at", "verified_at")
+                    }
+                    entry = DeviceCertState(
+                        **canonical,
+                        wifi_proxy_configs={
+                            ssid: WifiProxyNetworkConfig(**cfg)
+                            for ssid, cfg in configs.items()
+                        } if configs else None,
+                        wifi_proxy_stale=wifi_proxy_stale,
+                        active_wifi_network=active_network,
+                    )
+
+                cert_setup[udid] = entry
     except Exception as e:
         _proxy_logger.debug(f"Failed to load cert state: {e}")
 

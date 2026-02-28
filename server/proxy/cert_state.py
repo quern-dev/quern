@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 CERT_STATE_FILE = CONFIG_DIR / "cert-state.json"
 
+# Only these fields should ever be written to cert-state.json.
+# Computed fields (wifi_proxy_stale, active_wifi_network) and legacy flat
+# proxy fields must not be stored — they are derived at read time.
+_CANONICAL_FIELDS = frozenset({
+    "name", "cert_installed", "fingerprint",
+    "installed_at", "verified_at", "wifi_proxy_configs",
+})
+
 
 def read_cert_state() -> dict[str, dict]:
     """Read cert-state.json with shared file lock.
@@ -57,11 +65,30 @@ def read_cert_state_for_device(udid: str) -> dict | None:
     return state.get(udid)
 
 
+def _write_cert_state(state: dict) -> None:
+    """Write the full cert state dict to disk with exclusive lock."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = CERT_STATE_FILE.open("a+") if CERT_STATE_FILE.exists() else _create_and_open()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        fd.truncate()
+        fd.write(json.dumps(state, indent=2))
+        fd.flush()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
 def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
     """Update cert state for a single device with exclusive lock.
 
     Performs read-modify-write to preserve other devices' state.
+    Only canonical fields are written — computed fields like wifi_proxy_stale
+    and active_wifi_network are stripped before saving.
     """
+    cert_data = {k: v for k, v in cert_data.items() if k in _CANONICAL_FIELDS}
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Use a+ to create file if it doesn't exist
@@ -88,6 +115,20 @@ def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+def strip_noncanonical_fields(udid: str) -> None:
+    """Remove computed/legacy fields from a stored entry and re-save.
+
+    Called when proxy_status detects a parse failure for a cert-state entry,
+    indicating stale computed fields are stored that shouldn't be there.
+    After this call the entry only contains canonical source-of-truth fields.
+    """
+    state = read_cert_state()
+    if not state or udid not in state:
+        return
+    state[udid] = {k: v for k, v in state[udid].items() if k in _CANONICAL_FIELDS}
+    _write_cert_state(state)
 
 
 def record_device_proxy_config(

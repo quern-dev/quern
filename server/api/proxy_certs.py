@@ -264,17 +264,13 @@ async def _verify_physical_device(
     now = datetime.now(timezone.utc).isoformat()
     cert_state = read_cert_state_for_device(udid) or {}
 
-    # Support both new per-network structure and legacy flat fields
     wifi_configs: dict = cert_state.get("wifi_proxy_configs") or {}
-    has_proxy_config = bool(wifi_configs) or cert_state.get("wifi_proxy_host") is not None
-
-    # Resolve client_ip: prefer new per-network structure, fall back to legacy flat field
-    device_client_ip = cert_state.get("client_ip")
-    if not device_client_ip and wifi_configs:
-        for cfg in wifi_configs.values():
-            if cfg.get("client_ip"):
-                device_client_ip = cfg["client_ip"]
-                break
+    has_proxy_config = bool(wifi_configs)
+    device_client_ip = None
+    for cfg in wifi_configs.values():
+        if cfg.get("client_ip"):
+            device_client_ip = cfg["client_ip"]
+            break
 
     # No proxy configured at all
     if not has_proxy_config:

@@ -804,11 +804,6 @@ class DeviceCertState(BaseModel):
     # Computed at read time
     wifi_proxy_stale: bool = False
     active_wifi_network: str | None = None  # SSID whose config is currently active
-    # Legacy flat fields (kept for backward compat, ignored by new staleness logic)
-    wifi_proxy_host: str | None = None
-    wifi_proxy_port: int | None = None
-    wifi_proxy_set_at: str | None = None
-    client_ip: str | None = None          # Device's LAN IP (legacy flat field)
 
 
 class CertStatusResponse(BaseModel):

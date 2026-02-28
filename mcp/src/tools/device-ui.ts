@@ -253,7 +253,9 @@ This is the recommended first step before interacting with UI. Use this to disco
     "tap",
     `Tap at specific screen coordinates on the simulator. Requires idb.
 
-PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element.`,
+PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element.
+
+If coordinate taps are not landing on the expected element, use take_annotated_screenshot to see exact element bounding boxes overlaid on the screen. Read the element's position as a fraction of the screen (e.g. iPhone 12: 390×844 pt, iPhone 15 Pro: 393×852 pt) to calculate correct tap coordinates, then retry.`,
     {
       x: z.number().describe("X coordinate"),
       y: z.number().describe("Y coordinate"),
