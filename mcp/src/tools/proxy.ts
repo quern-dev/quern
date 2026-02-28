@@ -581,7 +581,7 @@ For physical devices, pass client_ip to isolate that device's traffic — the re
 
   server.tool(
     "proxy_setup_guide",
-    `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy.`,
+    `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
     {},
     async () => {
       try {
