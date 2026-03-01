@@ -1,12 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
+import { strictParams } from "./helpers.js";
 
 export function registerDevicePoolTools(server: McpServer): void {
-  server.tool(
-    "list_device_pool",
-    `List all devices in the pool with their claim status. Shows which devices are available for claiming and which are already claimed by sessions. Use this to see what devices exist before claiming one.`,
-    {
+  server.registerTool("list_device_pool", {
+    description: `List all devices in the pool with their claim status. Shows which devices are available for claiming and which are already claimed by sessions. Use this to see what devices exist before claiming one.`,
+    inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])
         .optional()
@@ -19,8 +19,8 @@ export function registerDevicePoolTools(server: McpServer): void {
         .enum(["simulator", "device"])
         .optional()
         .describe("Filter by device type. Default: no filter (shows all)."),
-    },
-    async ({ state, claimed, type }) => {
+    }),
+  }, async ({ state, claimed, type }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/devices/pool", {
           state,
@@ -47,10 +47,9 @@ export function registerDevicePoolTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "claim_device",
-    `Claim a device for exclusive use by a session. Once claimed, no other session can use this device until it's released. Essential for parallel test execution to ensure device isolation. Provide either a specific UDID or a name pattern.`,
-    {
+  server.registerTool("claim_device", {
+    description: `Claim a device for exclusive use by a session. Once claimed, no other session can use this device until it's released. Essential for parallel test execution to ensure device isolation. Provide either a specific UDID or a name pattern.`,
+    inputSchema: strictParams({
       session_id: z.string().describe("Session ID claiming the device"),
       udid: z
         .string()
@@ -68,8 +67,8 @@ export function registerDevicePoolTools(server: McpServer): void {
         .enum(["simulator", "device"])
         .optional()
         .describe("Filter by device type. Omit to allow either type."),
-    },
-    async ({ session_id, udid, name, device_family, type }) => {
+    }),
+  }, async ({ session_id, udid, name, device_family, type }) => {
       try {
         const body: Record<string, unknown> = { session_id };
         if (udid) body.udid = udid;
@@ -103,17 +102,16 @@ export function registerDevicePoolTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "release_device",
-    `Release a claimed device back to the pool, making it available for other sessions. Always release devices when done to avoid resource exhaustion. Devices are also auto-released after 30 minutes of inactivity.`,
-    {
+  server.registerTool("release_device", {
+    description: `Release a claimed device back to the pool, making it available for other sessions. Always release devices when done to avoid resource exhaustion. Devices are also auto-released after 30 minutes of inactivity.`,
+    inputSchema: strictParams({
       udid: z.string().describe("Device UDID to release"),
       session_id: z
         .string()
         .optional()
         .describe("Session ID releasing the device (for validation)"),
-    },
-    async ({ udid, session_id }) => {
+    }),
+  }, async ({ udid, session_id }) => {
       try {
         const body: Record<string, unknown> = { udid };
         if (session_id) body.session_id = session_id;
@@ -144,12 +142,11 @@ export function registerDevicePoolTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "resolve_device",
-    `Smartly find and optionally claim a device matching criteria. This is the
+  server.registerTool("resolve_device", {
+    description: `Smartly find and optionally claim a device matching criteria. This is the
 preferred way to get a device — it handles booting, waiting, and claiming
 automatically. Use this instead of manually listing the pool and claiming.`,
-    {
+    inputSchema: strictParams({
       name: z
         .string()
         .optional()
@@ -168,19 +165,19 @@ automatically. Use this instead of manually listing the pool and claiming.`,
         .default("simulator")
         .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
       auto_boot: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(false)
         .describe(
           "Boot a matching shutdown device if no booted ones available"
         ),
       wait_if_busy: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(false)
         .describe("Wait for a claimed device to be released"),
       wait_timeout: z
-        .number()
+        .coerce.number()
         .optional()
         .default(30)
         .describe("Max seconds to wait if wait_if_busy is true"),
@@ -188,8 +185,8 @@ automatically. Use this instead of manually listing the pool and claiming.`,
         .string()
         .optional()
         .describe("Claim the device for this session. Devices already claimed by this session are reused without re-claiming."),
-    },
-    async ({ name, os_version, device_family, type, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
+    }),
+  }, async ({ name, os_version, device_family, type, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
       try {
         const body: Record<string, unknown> = {};
         if (name) body.name = name;
@@ -227,14 +224,13 @@ automatically. Use this instead of manually listing the pool and claiming.`,
     }
   );
 
-  server.tool(
-    "ensure_devices",
-    `Ensure N devices matching criteria are booted and ready. Use this to set up
+  server.registerTool("ensure_devices", {
+    description: `Ensure N devices matching criteria are booted and ready. Use this to set up
 parallel test execution — it finds available devices, boots more if needed,
 and optionally claims them all for a session.`,
-    {
+    inputSchema: strictParams({
       count: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(10)
         .describe("Number of devices needed"),
@@ -256,7 +252,7 @@ and optionally claims them all for a session.`,
         .default("simulator")
         .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
       auto_boot: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(true)
         .describe("Boot shutdown devices if not enough booted ones"),
@@ -264,8 +260,8 @@ and optionally claims them all for a session.`,
         .string()
         .optional()
         .describe("Claim all devices for this session. Devices already claimed by this session are reused without re-claiming."),
-    },
-    async ({ count, name, os_version, device_family, type, auto_boot, session_id }) => {
+    }),
+  }, async ({ count, name, os_version, device_family, type, auto_boot, session_id }) => {
       try {
         const body: Record<string, unknown> = { count };
         if (name) body.name = name;

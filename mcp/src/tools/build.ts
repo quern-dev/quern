@@ -1,11 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
+import { strictParams } from "./helpers.js";
 
 export function registerBuildTools(server: McpServer): void {
-  server.tool(
-    "build_and_install",
-    `Build an Xcode scheme and install the resulting app on one or more devices or simulators.
+  server.registerTool("build_and_install", {
+    description: `Build an Xcode scheme and install the resulting app on one or more devices or simulators.
 
 Builds once per required architecture — not once per device:
 - Physical devices  → generic/platform=iOS        (one build, installed on all physical targets)
@@ -24,7 +24,7 @@ Pre-install check: if the device OS is below the app's MinimumOSVersion, that de
 skipped with a clear error rather than a cryptic installer failure.
 
 Returns per-device install results plus per-architecture build results.`,
-    {
+    inputSchema: strictParams({
       project_path: z.string().describe(
         "Path to the .xcodeproj, .xcworkspace, or a directory containing one."
       ),
@@ -38,36 +38,35 @@ Returns per-device install results plus per-architecture build results.`,
       configuration: z.string().optional().default("Debug").describe(
         "Build configuration (default: Debug)"
       ),
-    },
-    async ({ project_path, scheme, udids, configuration }) => {
-      try {
-        const body: Record<string, unknown> = { project_path, configuration };
-        if (scheme) body.scheme = scheme;
-        if (udids && udids.length > 0) body.udids = udids;
+    }),
+  }, async ({ project_path, scheme, udids, configuration }) => {
+    try {
+      const body: Record<string, unknown> = { project_path, configuration };
+      if (scheme) body.scheme = scheme;
+      if (udids && udids.length > 0) body.udids = udids;
 
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/device/build-and-install",
-          undefined,
-          body
-        );
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/build-and-install",
+        undefined,
+        body
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 }
