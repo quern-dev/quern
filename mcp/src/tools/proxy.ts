@@ -2,14 +2,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
+import { strictParams } from "./helpers.js";
 
 export function registerProxyTools(server: McpServer): void {
-  server.tool(
-    "query_flows",
-    `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
+  server.registerTool("query_flows", {
+    description: `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
 
 For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP.`,
-    {
+    inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname"),
       path_contains: z.string().optional().describe("Filter by path substring"),
       method: z
@@ -43,58 +43,56 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .default(100)
         .describe("Max flows to return"),
       offset: z.number().min(0).default(0).describe("Pagination offset"),
-    },
-    async ({
-      host,
-      path_contains,
-      method,
-      status_min,
-      status_max,
-      has_error,
-      simulator_udid,
-      client_ip,
-      limit,
-      offset,
-    }) => {
-      try {
-        const data = await apiRequest("GET", "/api/v1/proxy/flows", {
-          host,
-          path_contains,
-          method,
-          status_min,
-          status_max,
-          has_error,
-          simulator_udid,
-          client_ip,
-          limit,
-          offset,
-        });
+    }),
+  }, async ({
+    host,
+    path_contains,
+    method,
+    status_min,
+    status_max,
+    has_error,
+    simulator_udid,
+    client_ip,
+    limit,
+    offset,
+  }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/flows", {
+        host,
+        path_contains,
+        method,
+        status_min,
+        status_max,
+        has_error,
+        simulator_udid,
+        client_ip,
+        limit,
+        offset,
+      });
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "wait_for_flow",
-    `Wait for an HTTP flow matching filters to appear. Blocks server-side until a match is found or timeout expires. Always returns with matched:true/false — timeouts are not errors.
+  server.registerTool("wait_for_flow", {
+    description: `Wait for an HTTP flow matching filters to appear. Blocks server-side until a match is found or timeout expires. Always returns with matched:true/false — timeouts are not errors.
 
 Use this after triggering a UI action to observe the resulting network request without polling. Auto-sets 'since' to 5 seconds before the call to catch flows that completed between the action and the wait call.`,
-    {
+    inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname"),
       path_contains: z
         .string()
@@ -135,112 +133,108 @@ Use this after triggering a UI action to observe the resulting network request w
         .max(5)
         .default(0.5)
         .describe("Poll interval in seconds (default 0.5)"),
-    },
-    async ({
-      host,
-      path_contains,
-      method,
-      status_min,
-      status_max,
-      has_error,
-      simulator_udid,
-      client_ip,
-      timeout,
-      interval,
-    }) => {
-      try {
-        const body: Record<string, unknown> = {};
-        if (host !== undefined) body.host = host;
-        if (path_contains !== undefined) body.path_contains = path_contains;
-        if (method !== undefined) body.method = method;
-        if (status_min !== undefined) body.status_min = status_min;
-        if (status_max !== undefined) body.status_max = status_max;
-        if (has_error !== undefined) body.has_error = has_error;
-        if (simulator_udid !== undefined)
-          body.simulator_udid = simulator_udid;
-        if (client_ip !== undefined) body.client_ip = client_ip;
-        body.timeout = timeout;
-        body.interval = interval;
+    }),
+  }, async ({
+    host,
+    path_contains,
+    method,
+    status_min,
+    status_max,
+    has_error,
+    simulator_udid,
+    client_ip,
+    timeout,
+    interval,
+  }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (host !== undefined) body.host = host;
+      if (path_contains !== undefined) body.path_contains = path_contains;
+      if (method !== undefined) body.method = method;
+      if (status_min !== undefined) body.status_min = status_min;
+      if (status_max !== undefined) body.status_max = status_max;
+      if (has_error !== undefined) body.has_error = has_error;
+      if (simulator_udid !== undefined)
+        body.simulator_udid = simulator_udid;
+      if (client_ip !== undefined) body.client_ip = client_ip;
+      body.timeout = timeout;
+      body.interval = interval;
 
-        // Extended HTTP timeout so the MCP client doesn't time out before the server
-        const httpTimeoutMs = timeout * 1000 + 5000;
+      // Extended HTTP timeout so the MCP client doesn't time out before the server
+      const httpTimeoutMs = timeout * 1000 + 5000;
 
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/flows/wait",
-          undefined,
-          body,
-          httpTimeoutMs
-        );
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/flows/wait",
+        undefined,
+        body,
+        httpTimeoutMs
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "get_flow_detail",
-    `Get full request/response detail for a single captured HTTP flow, including headers and bodies.`,
-    {
+  server.registerTool("get_flow_detail", {
+    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies.`,
+    inputSchema: strictParams({
       flow_id: z.string().describe("The flow ID to retrieve"),
-    },
-    async ({ flow_id }) => {
-      try {
-        const data = await apiRequest(
-          "GET",
-          `/api/v1/proxy/flows/${encodeURIComponent(flow_id)}`
-        );
+    }),
+  }, async ({ flow_id }) => {
+    try {
+      const data = await apiRequest(
+        "GET",
+        `/api/v1/proxy/flows/${encodeURIComponent(flow_id)}`
+      );
 
-        // Try to parse JSON body strings into objects so they render
-        // as structured JSON instead of escaped strings
-        const record = data as Record<string, Record<string, unknown>>;
-        for (const key of ["request", "response"]) {
-          const section = record?.[key];
-          if (section?.body && typeof section.body === "string") {
-            try {
-              section.body = JSON.parse(section.body as string);
-            } catch {
-              // Not JSON — keep as string
-            }
+      // Try to parse JSON body strings into objects so they render
+      // as structured JSON instead of escaped strings
+      const record = data as Record<string, Record<string, unknown>>;
+      for (const key of ["request", "response"]) {
+        const section = record?.[key];
+        if (section?.body && typeof section.body === "string") {
+          try {
+            section.body = JSON.parse(section.body as string);
+          } catch {
+            // Not JSON — keep as string
           }
         }
-
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
       }
-    }
-  );
 
-  server.tool(
-    "proxy_status",
-    `Check proxy state and configuration. Returns status (running/stopped/error),
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("proxy_status", {
+    description: `Check proxy state and configuration. Returns status (running/stopped/error),
 port, flows captured, intercept state, mock rules count, system proxy state,
 local_capture mode, and local_ip.
 
@@ -284,36 +278,34 @@ TROUBLESHOOTING — no traffic from a physical device:
    - Use the client_ip from the active network config as the filter on query_flows.
      If the device got a new DHCP lease, call record_device_proxy_config again with the
      updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).`,
-    {},
-    async () => {
-      try {
-        const data = await apiRequest("GET", "/api/v1/proxy/status");
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/status");
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "verify_proxy_setup",
-    `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Works for both booted and shutdown simulators. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps, and detects devices that may have been erased.
+  server.registerTool("verify_proxy_setup", {
+    description: `Verify that mitmproxy CA certificate is installed on simulator(s). Performs ground-truth verification by querying the simulator's TrustStore database. Works for both booted and shutdown simulators. Use this to check if proxy setup is complete before capturing traffic. Returns detailed installation status per device with timestamps, and detects devices that may have been erased.
 
 IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s total). Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips. Filter the results client-side if you only need a subset (e.g. iPhones only).`,
-    {
+    inputSchema: strictParams({
       udid: z
         .string()
         .optional()
@@ -330,46 +322,44 @@ IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s tot
         .optional()
         .default("simulator")
         .describe("Filter by device type. Defaults to 'simulator' since cert verification is primarily for simulators."),
-    },
-    async ({ udid, state, device_type }) => {
-      try {
-        const body: Record<string, unknown> = {};
-        if (udid !== undefined) body.udid = udid;
-        if (state) body.state = state;
-        if (device_type) body.device_type = device_type;
+    }),
+  }, async ({ udid, state, device_type }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid !== undefined) body.udid = udid;
+      if (state) body.state = state;
+      if (device_type) body.device_type = device_type;
 
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/cert/verify",
-          undefined,
-          body
-        );
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/cert/verify",
+        undefined,
+        body
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "install_proxy_cert",
-    `Install the mitmproxy CA certificate on simulator(s). Required for HTTPS traffic capture. Idempotent by default — skips simulators that already have the cert installed. Use force to reinstall.
+  server.registerTool("install_proxy_cert", {
+    description: `Install the mitmproxy CA certificate on simulator(s). Required for HTTPS traffic capture. Idempotent by default — skips simulators that already have the cert installed. Use force to reinstall.
 
 IMPORTANT: Prefer omitting udid to install on all booted simulators in a single call. Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips.`,
-    {
+    inputSchema: strictParams({
       udid: z
         .string()
         .optional()
@@ -382,42 +372,40 @@ IMPORTANT: Prefer omitting udid to install on all booted simulators in a single 
         .describe(
           "Force reinstall even if cert is already present (default: false)"
         ),
-    },
-    async ({ udid, force }) => {
-      try {
-        const body: Record<string, unknown> = {};
-        if (udid !== undefined) body.udid = udid;
-        if (force !== undefined) body.force = force;
+    }),
+  }, async ({ udid, force }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid !== undefined) body.udid = udid;
+      if (force !== undefined) body.force = force;
 
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/cert/install",
-          undefined,
-          Object.keys(body).length > 0 ? body : undefined
-        );
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/cert/install",
+        undefined,
+        Object.keys(body).length > 0 ? body : undefined
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "start_proxy",
-    `Start the mitmproxy network capture.
+  server.registerTool("start_proxy", {
+    description: `Start the mitmproxy network capture.
 
 IMPORTANT: By default, this does NOT configure the system proxy.
 The proxy will listen on the specified port but traffic won't be
@@ -445,7 +433,7 @@ WORKFLOW (physical devices):
 NOTE: If local_capture is enabled (check proxy_status), all local traffic
 including simulator traffic is captured transparently without any proxy
 configuration needed.`,
-    {
+    inputSchema: strictParams({
       port: z
         .number()
         .optional()
@@ -460,73 +448,69 @@ configuration needed.`,
         .describe(
           "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control."
         ),
-    },
-    async ({ port, listen_host, system_proxy }) => {
-      try {
-        const body: Record<string, unknown> = {};
-        if (port !== undefined) body.port = port;
-        if (listen_host !== undefined) body.listen_host = listen_host;
-        if (system_proxy !== undefined) body.system_proxy = system_proxy;
+    }),
+  }, async ({ port, listen_host, system_proxy }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (port !== undefined) body.port = port;
+      if (listen_host !== undefined) body.listen_host = listen_host;
+      if (system_proxy !== undefined) body.system_proxy = system_proxy;
 
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/start",
-          undefined,
-          Object.keys(body).length > 0 ? body : undefined
-        );
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/start",
+        undefined,
+        Object.keys(body).length > 0 ? body : undefined
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "stop_proxy",
-    `Stop the mitmproxy network capture. Automatically restores the macOS system proxy to its pre-Quern state if it was configured.`,
-    {},
-    async () => {
-      try {
-        const data = await apiRequest("POST", "/api/v1/proxy/stop");
+  server.registerTool("stop_proxy", {
+    description: `Stop the mitmproxy network capture. Automatically restores the macOS system proxy to its pre-Quern state if it was configured.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/proxy/stop");
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "get_flow_summary",
-    `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
+  server.registerTool("get_flow_summary", {
+    description: `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
 
 For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP.`,
-    {
+    inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
         .default("5m")
@@ -549,150 +533,142 @@ For physical devices, pass client_ip to isolate that device's traffic — the re
         .string()
         .optional()
         .describe("Filter by client IP address (physical device identification)"),
-    },
-    async ({ window, host, since_cursor, simulator_udid, client_ip }) => {
-      try {
-        const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
-          window,
-          host,
-          since_cursor,
-          simulator_udid,
-          client_ip,
-        });
+    }),
+  }, async ({ window, host, since_cursor, simulator_udid, client_ip }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
+        window,
+        host,
+        since_cursor,
+        simulator_udid,
+        client_ip,
+      });
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "proxy_setup_guide",
-    `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
-    {},
-    async () => {
-      try {
-        const data = await apiRequest("GET", "/api/v1/proxy/setup-guide");
+  server.registerTool("proxy_setup_guide", {
+    description: `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/setup-guide");
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "configure_system_proxy",
-    `Manually configure macOS system proxy to route through mitmproxy.
+  server.registerTool("configure_system_proxy", {
+    description: `Manually configure macOS system proxy to route through mitmproxy.
 
 Use this after start_proxy when you're ready to begin capturing traffic.
 Remember to call unconfigure_system_proxy when done to restore the user's browser.
 
 NOTE: The proxy must be running first (call start_proxy).`,
-    {
+    inputSchema: strictParams({
       interface: z
         .string()
         .optional()
         .describe("Network interface name (e.g. 'Wi-Fi'). Auto-detected if omitted."),
-    },
-    async ({ interface: iface }) => {
-      try {
-        const body = iface ? { interface: iface } : undefined;
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/configure-system",
-          undefined,
-          body
-        );
+    }),
+  }, async ({ interface: iface }) => {
+    try {
+      const body = iface ? { interface: iface } : undefined;
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/configure-system",
+        undefined,
+        body
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "unconfigure_system_proxy",
-    `Restore macOS system proxy to its pre-Quern state.
+  server.registerTool("unconfigure_system_proxy", {
+    description: `Restore macOS system proxy to its pre-Quern state.
 
 IMPORTANT: Always call this when you finish capturing traffic to restore
 the user's browser functionality. The proxy server will keep running in
 the background and can be re-enabled with configure_system_proxy.`,
-    {},
-    async () => {
-      try {
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/unconfigure-system"
-        );
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/unconfigure-system"
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "record_device_proxy_config",
-    `Record that the Wi-Fi proxy has been configured on a physical device. ` +
+  server.registerTool("record_device_proxy_config", {
+    description: `Record that the Wi-Fi proxy has been configured on a physical device. ` +
     `Call this after successfully completing the Wi-Fi proxy setup in device Settings. ` +
     `Quern stores the config per Wi-Fi network (SSID) so multiple networks are tracked independently. ` +
     `The proxy host is auto-derived from the Mac interface on the same subnet as the device's client_ip — ` +
     `this is always the correct host regardless of interface names or routing tables. ` +
     `The port is derived from the running server. ` +
     `Passing client_ip also enables per-device flow filtering via the client_ip parameter on query_flows/get_flow_summary.`,
-    {
+    inputSchema: strictParams({
       udid: z.string().describe("Device UDID"),
       ssid: z.string().describe(
         "Wi-Fi network name the device is connected to " +
@@ -705,40 +681,38 @@ the background and can be re-enabled with configure_system_proxy.`,
           "Device's LAN IP address (Settings > Wi-Fi > (network) > IP Address). " +
           "Used to find the correct Mac interface IP automatically and to filter captured flows."
         ),
-    },
-    async ({ udid, ssid, client_ip }) => {
-      try {
-        const body: Record<string, unknown> = { udid, ssid };
-        if (client_ip !== undefined) body.client_ip = client_ip;
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/device-proxy-config",
-          undefined,
-          body
-        );
+    }),
+  }, async ({ udid, ssid, client_ip }) => {
+    try {
+      const body: Record<string, unknown> = { udid, ssid };
+      if (client_ip !== undefined) body.client_ip = client_ip;
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/device-proxy-config",
+        undefined,
+        body
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 
-  server.tool(
-    "set_local_capture",
-    `Set the list of process names for local capture mode. Uses mitmproxy's
+  server.registerTool("set_local_capture", {
+    description: `Set the list of process names for local capture mode. Uses mitmproxy's
 macOS System Extension to transparently capture traffic from specific processes
 without configuring a system proxy.
 
@@ -747,38 +721,37 @@ restart needed. Pass an empty list to disable local capture.
 
 On first use, macOS will prompt to allow the Mitmproxy Redirector system
 extension in System Settings > Privacy & Security.`,
-    {
+    inputSchema: strictParams({
       processes: z
         .array(z.string())
         .describe(
           'List of process names to capture (e.g. ["MobileSafari", "Metatext"]). Empty list disables local capture.'
         ),
-    },
-    async ({ processes }) => {
-      try {
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/proxy/local-capture",
-          undefined,
-          { processes }
-        );
+    }),
+  }, async ({ processes }) => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/local-capture",
+        undefined,
+        { processes }
+      );
 
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  });
 }

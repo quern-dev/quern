@@ -1,17 +1,20 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
+import { strictParams } from "./helpers.js";
 
 export function registerInterceptTools(server: McpServer): void {
-  server.tool(
+  server.registerTool(
     "set_intercept",
-    `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them. Uses mitmproxy filter syntax (e.g. "~d api.example.com", "~m POST & ~d api.example.com").`,
     {
-      pattern: z
-        .string()
-        .describe(
-          'mitmproxy filter pattern (e.g. "~d api.example.com", "~m POST & ~d api.example.com")'
-        ),
+      description: `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them. Uses mitmproxy filter syntax (e.g. "~d api.example.com", "~m POST & ~d api.example.com").`,
+      inputSchema: strictParams({
+        pattern: z
+          .string()
+          .describe(
+            'mitmproxy filter pattern (e.g. "~d api.example.com", "~m POST & ~d api.example.com")'
+          ),
+      }),
     },
     async ({ pattern }) => {
       try {
@@ -41,10 +44,12 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "clear_intercept",
-    `Clear the intercept pattern and release all held flows. Flows will complete normally.`,
-    {},
+    {
+      description: `Clear the intercept pattern and release all held flows. Flows will complete normally.`,
+      inputSchema: strictParams({}),
+    },
     async () => {
       try {
         const data = await apiRequest("DELETE", "/api/v1/proxy/intercept");
@@ -68,18 +73,20 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_held_flows",
-    `List flows currently held by the intercept filter. Supports long-polling: set timeout > 0 to block until a flow is intercepted or timeout expires. This is the recommended approach for MCP agents — make a single blocking call instead of rapid polling.`,
     {
-      timeout: z
-        .number()
-        .min(0)
-        .max(60)
-        .default(0)
-        .describe(
-          "Long-poll timeout in seconds. 0 = return immediately. >0 = block until a flow is caught or timeout expires."
-        ),
+      description: `List flows currently held by the intercept filter. Supports long-polling: set timeout > 0 to block until a flow is intercepted or timeout expires. This is the recommended approach for MCP agents — make a single blocking call instead of rapid polling.`,
+      inputSchema: strictParams({
+        timeout: z
+          .number()
+          .min(0)
+          .max(60)
+          .default(0)
+          .describe(
+            "Long-poll timeout in seconds. 0 = return immediately. >0 = block until a flow is caught or timeout expires."
+          ),
+      }),
     },
     async ({ timeout }) => {
       try {
@@ -106,23 +113,25 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "release_flow",
-    `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method.`,
     {
-      flow_id: z.string().describe("The held flow ID to release"),
-      modifications: z
-        .object({
-          headers: z
-            .record(z.string())
-            .optional()
-            .describe("Headers to add/override"),
-          body: z.string().optional().describe("New request body"),
-          url: z.string().optional().describe("New request URL"),
-          method: z.string().optional().describe("New HTTP method"),
-        })
-        .optional()
-        .describe("Optional request modifications to apply before releasing"),
+      description: `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method.`,
+      inputSchema: strictParams({
+        flow_id: z.string().describe("The held flow ID to release"),
+        modifications: z
+          .object({
+            headers: z
+              .record(z.string())
+              .optional()
+              .describe("Headers to add/override"),
+            body: z.string().optional().describe("New request body"),
+            url: z.string().optional().describe("New request URL"),
+            method: z.string().optional().describe("New HTTP method"),
+          })
+          .optional()
+          .describe("Optional request modifications to apply before releasing"),
+      }),
     },
     async ({ flow_id, modifications }) => {
       try {
@@ -152,19 +161,21 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "replay_flow",
-    `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body.`,
     {
-      flow_id: z.string().describe("The captured flow ID to replay"),
-      modify_headers: z
-        .record(z.string())
-        .optional()
-        .describe("Headers to add/override on the replayed request"),
-      modify_body: z
-        .string()
-        .optional()
-        .describe("New body for the replayed request"),
+      description: `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body.`,
+      inputSchema: strictParams({
+        flow_id: z.string().describe("The captured flow ID to replay"),
+        modify_headers: z
+          .record(z.string())
+          .optional()
+          .describe("Headers to add/override on the replayed request"),
+        modify_body: z
+          .string()
+          .optional()
+          .describe("New body for the replayed request"),
+      }),
     },
     async ({ flow_id, modify_headers, modify_body }) => {
       try {
@@ -198,27 +209,29 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "set_mock",
-    `Add a mock response rule. Requests matching the pattern will receive a synthetic response instead of hitting the real server. Mock rules take priority over intercept. Uses mitmproxy filter syntax.`,
     {
-      pattern: z
-        .string()
-        .describe('mitmproxy filter pattern (e.g. "~d api.example.com & ~m POST")'),
-      status_code: z
-        .number()
-        .default(200)
-        .describe("HTTP status code for the mock response"),
-      headers: z
-        .record(z.string())
-        .optional()
-        .describe(
-          'Response headers (default: {"content-type": "application/json"})'
-        ),
-      body: z
-        .string()
-        .default("")
-        .describe("Response body string"),
+      description: `Add a mock response rule. Requests matching the pattern will receive a synthetic response instead of hitting the real server. Mock rules take priority over intercept. Uses mitmproxy filter syntax.`,
+      inputSchema: strictParams({
+        pattern: z
+          .string()
+          .describe('mitmproxy filter pattern (e.g. "~d api.example.com & ~m POST")'),
+        status_code: z
+          .number()
+          .default(200)
+          .describe("HTTP status code for the mock response"),
+        headers: z
+          .record(z.string())
+          .optional()
+          .describe(
+            'Response headers (default: {"content-type": "application/json"})'
+          ),
+        body: z
+          .string()
+          .default("")
+          .describe("Response body string"),
+      }),
     },
     async ({ pattern, status_code, headers, body }) => {
       try {
@@ -256,10 +269,12 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "list_mocks",
-    `List all active mock response rules.`,
-    {},
+    {
+      description: `List all active mock response rules.`,
+      inputSchema: strictParams({}),
+    },
     async () => {
       try {
         const data = await apiRequest("GET", "/api/v1/proxy/mocks");
@@ -283,29 +298,31 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "update_mock",
-    `Update an existing mock rule's pattern and/or response fields. Only provided fields are changed.`,
     {
-      rule_id: z.string().describe("The mock rule ID to update"),
-      pattern: z
-        .string()
-        .optional()
-        .describe(
-          'New mitmproxy filter pattern (e.g. "~d api.example.com")'
-        ),
-      status_code: z
-        .number()
-        .optional()
-        .describe("New HTTP status code for the mock response"),
-      headers: z
-        .record(z.string())
-        .optional()
-        .describe("New response headers (replaces all headers)"),
-      body: z
-        .string()
-        .optional()
-        .describe("New response body string"),
+      description: `Update an existing mock rule's pattern and/or response fields. Only provided fields are changed.`,
+      inputSchema: strictParams({
+        rule_id: z.string().describe("The mock rule ID to update"),
+        pattern: z
+          .string()
+          .optional()
+          .describe(
+            'New mitmproxy filter pattern (e.g. "~d api.example.com")'
+          ),
+        status_code: z
+          .number()
+          .optional()
+          .describe("New HTTP status code for the mock response"),
+        headers: z
+          .record(z.string())
+          .optional()
+          .describe("New response headers (replaces all headers)"),
+        body: z
+          .string()
+          .optional()
+          .describe("New response body string"),
+      }),
     },
     async ({ rule_id, pattern, status_code, headers, body }) => {
       try {
@@ -351,14 +368,16 @@ export function registerInterceptTools(server: McpServer): void {
     }
   );
 
-  server.tool(
+  server.registerTool(
     "clear_mocks",
-    `Clear mock response rules. If rule_id is provided, removes only that rule. Otherwise removes all mock rules.`,
     {
-      rule_id: z
-        .string()
-        .optional()
-        .describe("Specific mock rule ID to remove. Omit to clear all."),
+      description: `Clear mock response rules. If rule_id is provided, removes only that rule. Otherwise removes all mock rules.`,
+      inputSchema: strictParams({
+        rule_id: z
+          .string()
+          .optional()
+          .describe("Specific mock rule ID to remove. Omit to clear all."),
+      }),
     },
     async ({ rule_id }) => {
       try {

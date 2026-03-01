@@ -4,13 +4,13 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import { readStateFile } from "../config.js";
 import { apiRequest } from "../http.js";
+import { strictParams } from "./helpers.js";
 
 export function registerLogTools(server: McpServer): void {
-  server.tool(
-    "ensure_server",
-    `Ensure the Quern Debug Server is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key.`,
-    {},
-    async () => {
+  server.registerTool("ensure_server", {
+    description: `Ensure the Quern Debug Server is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key.`,
+    inputSchema: strictParams({}),
+  }, async () => {
       try {
         // Check if already running via state file
         const state = readStateFile();
@@ -190,10 +190,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "tail_logs",
-    `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries.`,
-    {
+  server.registerTool("tail_logs", {
+    description: `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries.`,
+    inputSchema: strictParams({
       count: z
         .number()
         .min(1)
@@ -209,8 +208,8 @@ export function registerLogTools(server: McpServer): void {
         .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
-    },
-    async ({ count, level, process, source }) => {
+    }),
+  }, async ({ count, level, process, source }) => {
       try {
         const data = (await apiRequest("GET", "/api/v1/logs/query", {
           limit: count,
@@ -244,10 +243,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "query_logs",
-    `Full-featured log search with time ranges and text search. Use this for investigating specific issues — filter by time, process, level, or search text.`,
-    {
+  server.registerTool("query_logs", {
+    description: `Full-featured log search with time ranges and text search. Use this for investigating specific issues — filter by time, process, level, or search text.`,
+    inputSchema: strictParams({
       since: z
         .string()
         .optional()
@@ -276,8 +274,8 @@ export function registerLogTools(server: McpServer): void {
         .default(100)
         .describe("Max entries to return"),
       offset: z.number().min(0).default(0).describe("Pagination offset"),
-    },
-    async ({ since, until, level, process, source, search, limit, offset }) => {
+    }),
+  }, async ({ since, until, level, process, source, search, limit, offset }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/query", {
           since,
@@ -309,10 +307,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "get_log_summary",
-    `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates.`,
-    {
+  server.registerTool("get_log_summary", {
+    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates.`,
+    inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
         .default("5m")
@@ -324,8 +321,8 @@ export function registerLogTools(server: McpServer): void {
         .describe(
           "Cursor from a previous summary response — returns only new activity since then"
         ),
-    },
-    async ({ window, process, since_cursor }) => {
+    }),
+  }, async ({ window, process, since_cursor }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/summary", {
           window,
@@ -352,10 +349,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "get_errors",
-    `Get error-level log entries and crash reports. Useful for quickly finding what's going wrong.`,
-    {
+  server.registerTool("get_errors", {
+    description: `Get error-level log entries and crash reports. Useful for quickly finding what's going wrong.`,
+    inputSchema: strictParams({
       since: z
         .string()
         .optional()
@@ -370,8 +366,8 @@ export function registerLogTools(server: McpServer): void {
         .boolean()
         .default(true)
         .describe("Include crash reports in results"),
-    },
-    async ({ since, limit, include_crashes }) => {
+    }),
+  }, async ({ since, limit, include_crashes }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/errors", {
           since,
@@ -398,11 +394,10 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "get_build_result",
-    `Get the most recent parsed xcodebuild result, including errors, warnings, and test results.`,
-    {},
-    async () => {
+  server.registerTool("get_build_result", {
+    description: `Get the most recent parsed xcodebuild result, including errors, warnings, and test results.`,
+    inputSchema: strictParams({}),
+  }, async () => {
       try {
         const data = await apiRequest("GET", "/api/v1/builds/latest");
 
@@ -436,10 +431,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "parse_build_output",
-    `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing.`,
-    {
+  server.registerTool("parse_build_output", {
+    description: `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing.`,
+    inputSchema: strictParams({
       file_path: z
         .string()
         .describe("Absolute path to the xcodebuild log file (e.g. /tmp/build.log)"),
@@ -447,8 +441,8 @@ export function registerLogTools(server: McpServer): void {
         .boolean()
         .optional()
         .describe("Use fuzzy word-level template grouping to collapse similar warnings (e.g. conformance warnings differing only by type name). Default: true. Set to false for exact match grouping."),
-    },
-    async ({ file_path, fuzzy_groups }) => {
+    }),
+  }, async ({ file_path, fuzzy_groups }) => {
       try {
         const body: Record<string, unknown> = { file_path };
         if (fuzzy_groups !== undefined) {
@@ -480,10 +474,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "get_latest_crash",
-    `Get recent crash reports with parsed exception types, signals, and stack frames.`,
-    {
+  server.registerTool("get_latest_crash", {
+    description: `Get recent crash reports with parsed exception types, signals, and stack frames.`,
+    inputSchema: strictParams({
       limit: z
         .number()
         .min(1)
@@ -498,8 +491,8 @@ export function registerLogTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Device UDID to pull fresh crashes from before returning results"),
-    },
-    async ({ limit, since, udid }) => {
+    }),
+  }, async ({ limit, since, udid }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/crashes/latest", {
           limit,
@@ -526,10 +519,9 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "set_log_filter",
-    `Reconfigure log capture filters for a source adapter.`,
-    {
+  server.registerTool("set_log_filter", {
+    description: `Reconfigure log capture filters for a source adapter.`,
+    inputSchema: strictParams({
       source: z.string().describe("Source adapter to configure (e.g. 'simulator')"),
       process: z
         .string()
@@ -539,8 +531,8 @@ export function registerLogTools(server: McpServer): void {
         .array(z.string())
         .optional()
         .describe("Message patterns to exclude"),
-    },
-    async ({ source, process, exclude_patterns }) => {
+    }),
+  }, async ({ source, process, exclude_patterns }) => {
       try {
         const data = await apiRequest("POST", "/api/v1/logs/filter", undefined, {
           source,
@@ -567,11 +559,10 @@ export function registerLogTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "list_log_sources",
-    `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
-    {},
-    async () => {
+  server.registerTool("list_log_sources", {
+    description: `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
+    inputSchema: strictParams({}),
+  }, async () => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/sources");
 
