@@ -230,6 +230,37 @@ class TestAppDelegation:
 
 
 # ---------------------------------------------------------------------------
+# Physical device app lifecycle (always uses WDA)
+# ---------------------------------------------------------------------------
+
+
+class TestPhysicalAppLifecycle:
+    async def test_launch_app_physical_uses_wda(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.activate_app = AsyncMock()
+        ctrl.devicectl.launch_app = AsyncMock()
+
+        udid = await ctrl.launch_app("com.example.App")
+        ctrl.wda_client.activate_app.assert_called_once_with("PHYS-0001", "com.example.App")
+        ctrl.devicectl.launch_app.assert_not_called()
+        assert udid == "PHYS-0001"
+
+    async def test_terminate_app_physical_uses_wda(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.terminate_app = AsyncMock()
+        ctrl.devicectl.terminate_app = AsyncMock()
+
+        udid = await ctrl.terminate_app("com.example.App")
+        ctrl.wda_client.terminate_app.assert_called_once_with("PHYS-0001", "com.example.App")
+        ctrl.devicectl.terminate_app.assert_not_called()
+        assert udid == "PHYS-0001"
+
+
+# ---------------------------------------------------------------------------
 # screenshot
 # ---------------------------------------------------------------------------
 

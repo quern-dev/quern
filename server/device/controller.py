@@ -306,7 +306,7 @@ class DeviceController(DeviceControllerUI):
         """Launch an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         if self._is_physical(resolved):
-            await self.devicectl.launch_app(resolved, bundle_id)
+            await self.wda_client.activate_app(resolved, bundle_id)
         else:
             await self.simctl.launch_app(resolved, bundle_id)
         self._invalidate_ui_cache(resolved)  # UI changed
@@ -316,7 +316,7 @@ class DeviceController(DeviceControllerUI):
         """Terminate an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         if self._is_physical(resolved):
-            await self.devicectl.terminate_app(resolved, bundle_id)
+            await self.wda_client.terminate_app(resolved, bundle_id)
         else:
             await self.simctl.terminate_app(resolved, bundle_id)
         return resolved

@@ -820,6 +820,26 @@ class WdaBackend:
                 tool="wda",
             )
 
+    async def activate_app(self, udid: str, bundle_id: str) -> None:
+        """Activate (bring to foreground) an app via WDA."""
+        resp = await self._request("post", udid, "/wda/apps/activate",
+                                    use_session=True, json={"bundleId": bundle_id})
+        if resp.status_code != 200:
+            raise DeviceError(
+                f"WDA activate_app failed (status {resp.status_code}): {resp.text[:200]}",
+                tool="wda",
+            )
+
+    async def terminate_app(self, udid: str, bundle_id: str) -> None:
+        """Terminate an app via WDA."""
+        resp = await self._request("post", udid, "/wda/apps/terminate",
+                                    use_session=True, json={"bundleId": bundle_id})
+        if resp.status_code != 200:
+            raise DeviceError(
+                f"WDA terminate_app failed (status {resp.status_code}): {resp.text[:200]}",
+                tool="wda",
+            )
+
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
         element_type: str | None = None,

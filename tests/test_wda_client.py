@@ -387,6 +387,86 @@ class TestWdaBackendPressButton:
             )
 
 
+class TestWdaBackendActivateApp:
+    async def test_activate_app_success(self):
+        backend = _make_session_backend()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend.activate_app("test-udid", "com.example.App")
+
+            mock_client.post.assert_called_once_with(
+                "http://localhost:8100/session/test-session/wda/apps/activate",
+                json={"bundleId": "com.example.App"},
+                timeout=10.0,
+            )
+
+    async def test_activate_app_failure_raises(self):
+        backend = _make_session_backend()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(DeviceError, match="WDA activate_app failed"):
+                await backend.activate_app("test-udid", "com.example.App")
+
+
+class TestWdaBackendTerminateApp:
+    async def test_terminate_app_success(self):
+        backend = _make_session_backend()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend.terminate_app("test-udid", "com.example.App")
+
+            mock_client.post.assert_called_once_with(
+                "http://localhost:8100/session/test-session/wda/apps/terminate",
+                json={"bundleId": "com.example.App"},
+                timeout=10.0,
+            )
+
+    async def test_terminate_app_failure_raises(self):
+        backend = _make_session_backend()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(DeviceError, match="WDA terminate_app failed"):
+                await backend.terminate_app("test-udid", "com.example.App")
+
+
 class TestWdaBackendDescribeAll:
     async def test_describe_all_flattens_and_converts(self):
         backend = WdaBackend()

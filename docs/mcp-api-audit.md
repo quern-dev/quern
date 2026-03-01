@@ -30,11 +30,9 @@ Audit of the Quern MCP tool surface and HTTP API, evaluated against typical agen
 
 ~~After triggering a UI action, agents must poll `query_flows` to see the resulting network request.~~ Added `wait_for_flow` MCP tool with server-side polling, auto `since` lookback, and all flow filter parameters. Exposed via `POST /api/v1/proxy/flows/wait`.
 
-### 4. Physical device `launch_app` doesn't use WDA
+### ~~4. Physical device `launch_app` doesn't use WDA~~ ✅ Done
 
-`launch_app` uses `devicectl` for physical devices, which opens the app outside WDA's session context. WDA can't see or interact with the app afterward. Should use WDA's `POST /session/{id}/wda/apps/activate` instead.
-
-See: `docs/wda-activate-app-spec.md`
+~~`launch_app` uses `devicectl` for physical devices, which opens the app outside WDA's session context. WDA can't see or interact with the app afterward.~~ `launch_app` and `terminate_app` now use WDA's `activate` and `terminate` endpoints for physical devices, with devicectl fallback when WDA isn't available.
 
 ---
 
@@ -106,6 +104,6 @@ No way to measure "how long did this screen take to load" or "time between tap a
 1. ~~**Build integration** — unblocks the most common workflow~~ ✅
 2. ~~**`install_proxy_cert` MCP tool** — low effort, wraps existing endpoint~~ ✅
 3. ~~**`wait_for_flow` tool** — completes the network debugging loop~~ ✅
-4. **WDA activate for physical devices** — spec already written (`docs/wda-activate-app-spec.md`)
+4. ~~**WDA activate for physical devices** — spec already written (`docs/wda-activate-app-spec.md`)~~ ✅
 5. ~~**Annotated screenshot MCP tool** — low effort, wraps existing endpoint~~ ✅
 6. **Fix or remove `set_log_filter` stub** — avoid confusing agents
