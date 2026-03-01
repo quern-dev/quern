@@ -79,7 +79,7 @@ export function registerInterceptTools(server: McpServer): void {
       description: `List flows currently held by the intercept filter. Supports long-polling: set timeout > 0 to block until a flow is intercepted or timeout expires. This is the recommended approach for MCP agents — make a single blocking call instead of rapid polling.`,
       inputSchema: strictParams({
         timeout: z
-          .number()
+          .coerce.number()
           .min(0)
           .max(60)
           .default(0)
@@ -218,7 +218,7 @@ export function registerInterceptTools(server: McpServer): void {
           .string()
           .describe('mitmproxy filter pattern (e.g. "~d api.example.com & ~m POST")'),
         status_code: z
-          .number()
+          .coerce.number()
           .default(200)
           .describe("HTTP status code for the mock response"),
         headers: z
@@ -311,7 +311,7 @@ export function registerInterceptTools(server: McpServer): void {
             'New mitmproxy filter pattern (e.g. "~d api.example.com")'
           ),
         status_code: z
-          .number()
+          .coerce.number()
           .optional()
           .describe("New HTTP status code for the mock response"),
         headers: z

@@ -19,11 +19,11 @@ export function registerDeviceTools(server: McpServer): void {
         .optional()
         .describe("Filter by device type"),
       cert_installed: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe("Filter by mitmproxy CA certificate installation status (true = cert installed, false = not installed)"),
       include_disconnected: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(false)
         .describe(
@@ -343,13 +343,13 @@ NOTE: If you want to capture network traffic from this app:
         .default("png")
         .describe("Image format"),
       scale: z
-        .number()
+        .coerce.number()
         .min(0.1)
         .max(1.0)
         .default(0.5)
         .describe("Scale factor (0.1-1.0, default 0.5)"),
       quality: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(100)
         .default(85)
@@ -425,13 +425,13 @@ NOTE: If you want to capture network traffic from this app:
         .optional()
         .describe("Target device UDID (auto-resolves if omitted)"),
       scale: z
-        .number()
+        .coerce.number()
         .min(0.1)
         .max(1.0)
         .default(0.5)
         .describe("Scale factor (0.1-1.0, default 0.5)"),
       quality: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(100)
         .default(85)
@@ -500,8 +500,8 @@ NOTE: If you want to capture network traffic from this app:
   server.registerTool("set_location", {
     description: `Set the simulated GPS location on a simulator.`,
     inputSchema: strictParams({
-      latitude: z.number().describe("GPS latitude"),
-      longitude: z.number().describe("GPS longitude"),
+      latitude: z.coerce.number().describe("GPS latitude"),
+      longitude: z.coerce.number().describe("GPS longitude"),
       udid: z
         .string()
         .optional()

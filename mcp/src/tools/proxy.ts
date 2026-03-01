@@ -17,15 +17,15 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .optional()
         .describe("Filter by HTTP method (GET, POST, etc.)"),
       status_min: z
-        .number()
+        .coerce.number()
         .optional()
         .describe("Minimum status code (e.g. 400 for errors)"),
       status_max: z
-        .number()
+        .coerce.number()
         .optional()
         .describe("Maximum status code"),
       has_error: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe("Filter to flows with connection errors"),
       simulator_udid: z
@@ -37,12 +37,12 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .optional()
         .describe("Filter by client IP address (physical device identification)"),
       limit: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(1000)
         .default(100)
         .describe("Max flows to return"),
-      offset: z.number().min(0).default(0).describe("Pagination offset"),
+      offset: z.coerce.number().min(0).default(0).describe("Pagination offset"),
     }),
   }, async ({
     host,
@@ -103,12 +103,12 @@ Use this after triggering a UI action to observe the resulting network request w
         .optional()
         .describe("Filter by HTTP method (GET, POST, etc.)"),
       status_min: z
-        .number()
+        .coerce.number()
         .optional()
         .describe("Minimum status code (e.g. 400 for errors)"),
-      status_max: z.number().optional().describe("Maximum status code"),
+      status_max: z.coerce.number().optional().describe("Maximum status code"),
       has_error: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe("Filter to flows with connection errors"),
       simulator_udid: z
@@ -122,13 +122,13 @@ Use this after triggering a UI action to observe the resulting network request w
         .optional()
         .describe("Filter by client IP address (physical device identification)"),
       timeout: z
-        .number()
+        .coerce.number()
         .min(0.1)
         .max(60)
         .default(10)
         .describe("Max wait time in seconds (default 10, max 60)"),
       interval: z
-        .number()
+        .coerce.number()
         .min(0.1)
         .max(5)
         .default(0.5)
@@ -367,7 +367,7 @@ IMPORTANT: Prefer omitting udid to install on all booted simulators in a single 
           "Specific simulator UDID. If omitted, installs on all booted simulators."
         ),
       force: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe(
           "Force reinstall even if cert is already present (default: false)"
@@ -435,7 +435,7 @@ including simulator traffic is captured transparently without any proxy
 configuration needed.`,
     inputSchema: strictParams({
       port: z
-        .number()
+        .coerce.number()
         .optional()
         .describe("Port for the mitmproxy listener (default: 9101)"),
       listen_host: z
@@ -443,7 +443,7 @@ configuration needed.`,
         .optional()
         .describe("Host to listen on (default: 0.0.0.0)"),
       system_proxy: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe(
           "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control."

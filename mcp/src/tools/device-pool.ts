@@ -165,19 +165,19 @@ automatically. Use this instead of manually listing the pool and claiming.`,
         .default("simulator")
         .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
       auto_boot: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(false)
         .describe(
           "Boot a matching shutdown device if no booted ones available"
         ),
       wait_if_busy: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(false)
         .describe("Wait for a claimed device to be released"),
       wait_timeout: z
-        .number()
+        .coerce.number()
         .optional()
         .default(30)
         .describe("Max seconds to wait if wait_if_busy is true"),
@@ -230,7 +230,7 @@ parallel test execution — it finds available devices, boots more if needed,
 and optionally claims them all for a session.`,
     inputSchema: strictParams({
       count: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(10)
         .describe("Number of devices needed"),
@@ -252,7 +252,7 @@ and optionally claims them all for a session.`,
         .default("simulator")
         .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
       auto_boot: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .default(true)
         .describe("Boot shutdown devices if not enough booted ones"),

@@ -134,7 +134,7 @@ Type inference: boolean values set -bool, integers set -integer, floats set -flo
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().describe("Plist key to set"),
-      value: z.union([z.string(), z.number(), z.boolean()]).describe("Value to set (type is inferred)"),
+      value: z.union([z.string(), z.coerce.number(), z.coerce.boolean()]).describe("Value to set (type is inferred)"),
       udid: z.string().optional().describe("Simulator UDID (auto-resolves if omitted)"),
     }),
   }, async ({ bundle_id, container, plist_path, key, value, udid }) => {

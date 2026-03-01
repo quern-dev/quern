@@ -15,7 +15,7 @@ export function registerWdaTools(server: McpServer): void {
           "Apple Developer Team ID for code signing. Required when multiple signing identities exist."
         ),
       force_rebuild: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe(
           "Force a fresh WDA build even if one already exists for this team."

@@ -16,7 +16,7 @@ export function registerDeviceUITools(server: McpServer): void {
         .optional()
         .describe("Only return children of the element with this identifier or label"),
       snapshot_depth: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(50)
         .optional()
@@ -131,11 +131,11 @@ export function registerDeviceUITools(server: McpServer): void {
         .optional()
         .describe("Required for value_equals and value_contains conditions"),
       timeout: z
-        .number()
+        .coerce.number()
         .default(10)
         .describe("Max wait time in seconds (default 10, max 60)"),
       interval: z
-        .number()
+        .coerce.number()
         .default(0.5)
         .describe("Poll interval in seconds (default 0.5)"),
       udid: z
@@ -197,7 +197,7 @@ export function registerDeviceUITools(server: McpServer): void {
 This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.`,
     inputSchema: strictParams({
       max_elements: z
-        .number()
+        .coerce.number()
         .default(20)
         .describe("Maximum interactive elements to include (0 = unlimited, default 20)"),
       udid: z
@@ -205,7 +205,7 @@ This is the recommended first step before interacting with UI. Use this to disco
         .optional()
         .describe("Target device UDID (auto-resolves if omitted)"),
       snapshot_depth: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(50)
         .optional()
@@ -249,8 +249,8 @@ PREFER tap_element over this tool. Use get_screen_summary to find element labels
 
 If coordinate taps are not landing on the expected element, use take_annotated_screenshot to see exact element bounding boxes overlaid on the screen. Read the element's position as a fraction of the screen (e.g. iPhone 12: 390×844 pt, iPhone 15 Pro: 393×852 pt) to calculate correct tap coordinates, then retry.`,
     inputSchema: strictParams({
-      x: z.number().describe("X coordinate"),
-      y: z.number().describe("Y coordinate"),
+      x: z.coerce.number().describe("X coordinate"),
+      y: z.coerce.number().describe("Y coordinate"),
       udid: z
         .string()
         .optional()
@@ -344,12 +344,12 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
   server.registerTool("swipe", {
     description: `Perform a swipe gesture from one point to another. Requires idb.`,
     inputSchema: strictParams({
-      start_x: z.number().describe("Starting X coordinate"),
-      start_y: z.number().describe("Starting Y coordinate"),
-      end_x: z.number().describe("Ending X coordinate"),
-      end_y: z.number().describe("Ending Y coordinate"),
+      start_x: z.coerce.number().describe("Starting X coordinate"),
+      start_y: z.coerce.number().describe("Starting Y coordinate"),
+      end_x: z.coerce.number().describe("Ending X coordinate"),
+      end_y: z.coerce.number().describe("Ending Y coordinate"),
       duration: z
-        .number()
+        .coerce.number()
         .default(0.5)
         .describe("Swipe duration in seconds (default 0.5)"),
       udid: z

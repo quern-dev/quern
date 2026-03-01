@@ -194,7 +194,7 @@ export function registerLogTools(server: McpServer): void {
     description: `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries.`,
     inputSchema: strictParams({
       count: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(1000)
         .default(50)
@@ -268,12 +268,12 @@ export function registerLogTools(server: McpServer): void {
         .optional()
         .describe("Text search within log messages"),
       limit: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(1000)
         .default(100)
         .describe("Max entries to return"),
-      offset: z.number().min(0).default(0).describe("Pagination offset"),
+      offset: z.coerce.number().min(0).default(0).describe("Pagination offset"),
     }),
   }, async ({ since, until, level, process, source, search, limit, offset }) => {
       try {
@@ -357,13 +357,13 @@ export function registerLogTools(server: McpServer): void {
         .optional()
         .describe("Only errors after this time (ISO 8601)"),
       limit: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(1000)
         .default(50)
         .describe("Max entries to return"),
       include_crashes: z
-        .boolean()
+        .coerce.boolean()
         .default(true)
         .describe("Include crash reports in results"),
     }),
@@ -438,7 +438,7 @@ export function registerLogTools(server: McpServer): void {
         .string()
         .describe("Absolute path to the xcodebuild log file (e.g. /tmp/build.log)"),
       fuzzy_groups: z
-        .boolean()
+        .coerce.boolean()
         .optional()
         .describe("Use fuzzy word-level template grouping to collapse similar warnings (e.g. conformance warnings differing only by type name). Default: true. Set to false for exact match grouping."),
     }),
@@ -478,7 +478,7 @@ export function registerLogTools(server: McpServer): void {
     description: `Get recent crash reports with parsed exception types, signals, and stack frames.`,
     inputSchema: strictParams({
       limit: z
-        .number()
+        .coerce.number()
         .min(1)
         .max(100)
         .default(10)
