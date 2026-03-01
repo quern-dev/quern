@@ -14,11 +14,18 @@ export function registerWdaTools(server: McpServer): void {
         .describe(
           "Apple Developer Team ID for code signing. Required when multiple signing identities exist."
         ),
+      force_rebuild: z
+        .boolean()
+        .optional()
+        .describe(
+          "Force a fresh WDA build even if one already exists for this team."
+        ),
     },
-    async ({ udid, team_id }) => {
+    async ({ udid, team_id, force_rebuild }) => {
       try {
         const body: Record<string, unknown> = { udid };
         if (team_id) body.team_id = team_id;
+        if (force_rebuild) body.force = true;
 
         const data = await apiRequest(
           "POST",

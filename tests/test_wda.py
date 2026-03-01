@@ -407,6 +407,35 @@ class TestBuildWda:
 
         assert result is True
 
+    async def test_force_rebuilds_even_if_same_team(self, tmp_path):
+        state = {
+            "cloned": True,
+            "build_team_id": "TEAM123",
+            "built_at": "2026-01-01T00:00:00+00:00",
+        }
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+
+        # Create derived data dir so we can verify it gets cleaned
+        derived = tmp_path / "build"
+        derived.mkdir()
+        (derived / "Build").mkdir()
+        (derived / "Build" / "stale-artifact").write_text("old")
+
+        proc = _mock_process()
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DERIVED", derived),
+            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            result = await build_wda("TEAM123", force=True)
+
+        assert result is True
+        # Derived data should have been wiped before the build
+        assert not (derived / "Build" / "stale-artifact").exists()
+
     async def test_build_failure(self, tmp_path):
         repo = tmp_path / "WebDriverAgent"
         repo.mkdir()

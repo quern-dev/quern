@@ -907,6 +907,7 @@ class SetupWdaRequest(BaseModel):
 
     udid: str
     team_id: str | None = None
+    force: bool = False
 
 
 class StartDriverRequest(BaseModel):

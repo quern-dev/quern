@@ -263,22 +263,28 @@ def customize_wda(repo: Path | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def build_wda(team_id: str) -> bool:
+async def build_wda(team_id: str, force: bool = False) -> bool:
     """Build WDA for a given signing team.
 
     The build uses ``generic/platform=iOS`` so the artifact works on any
     arm64 device — no device-specific UDID is needed.  Builds are cached
-    by *team_id* only; a rebuild is triggered when the team changes.
+    by *team_id* only; a rebuild is triggered when the team changes or
+    when *force* is True.
 
     Returns True if a fresh build was performed, False if skipped.
     """
     state = read_wda_state()
-    if state.get("build_team_id") == team_id:
+    if not force and state.get("build_team_id") == team_id:
         logger.info("WDA already built for team %s", team_id)
         return False
 
     if not WDA_REPO.exists():
         raise RuntimeError("WDA repo not cloned — call clone_wda() first")
+
+    if force and WDA_DERIVED.exists():
+        import shutil
+        logger.info("Force rebuild: removing derived data at %s", WDA_DERIVED)
+        shutil.rmtree(WDA_DERIVED)
 
     logger.info("Building WDA for team %s", team_id)
     proc = await asyncio.create_subprocess_exec(
@@ -754,6 +760,7 @@ async def setup_wda(
     udid: str,
     os_version: str,
     team_id: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Full WDA setup orchestrator.
 
@@ -818,7 +825,7 @@ async def setup_wda(
     customize_wda()
 
     # Step 5: Build (device-independent, keyed by team_id only)
-    built = await build_wda(team_id)
+    built = await build_wda(team_id, force=force)
 
     # Step 6: Install
     await install_wda(udid, os_version)

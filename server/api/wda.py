@@ -64,6 +64,7 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
             udid=body.udid,
             os_version=device.os_version,
             team_id=body.team_id,
+            force=body.force,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
