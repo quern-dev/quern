@@ -1,7 +1,7 @@
 # Quern Agent Guide
 
 **For**: AI agents using Quern MCP tools for mobile app debugging and testing
-**Last Updated**: February 23, 2026
+**Last Updated**: March 1, 2026
 
 ---
 
@@ -317,9 +317,6 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `press_button`       | POST        | `/api/v1/device/ui/press`              |
 | `set_location`       | POST        | `/api/v1/device/location`              |
 | `grant_permission`   | POST        | `/api/v1/device/permission`            |
-| `list_device_pool`   | GET         | `/api/v1/devices/pool`                 |
-| `claim_device`       | POST        | `/api/v1/devices/claim`                |
-| `release_device`     | POST        | `/api/v1/devices/release`              |
 | `resolve_device`     | POST        | `/api/v1/devices/resolve`              |
 | `ensure_devices`     | POST        | `/api/v1/devices/ensure`               |
 | `start_simulator_logging` | POST   | `/api/v1/device/logging/start`         |
@@ -367,7 +364,9 @@ Mock rules take priority over intercept rules. Clear them with `clear_mocks` whe
 
 ### Device Pool for Parallel Testing
 
-Use `ensure_devices` to boot and claim multiple simulators at once, then run different test scenarios on each in parallel. Each claimed device is isolated — no other session can use it until you call `release_device`. Always release devices when done to avoid resource exhaustion.
+Use `ensure_devices` to boot multiple simulators at once, then run different test scenarios on each in parallel. The first device in the result becomes the active device; pass explicit `udid` parameters to target the others.
+
+**Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria or pass an explicit `udid` to any tool.
 
 **Default behavior**: `resolve_device` and `ensure_devices` default to `type="simulator"` to prevent accidentally targeting physical devices (which may not have your app installed). Pass `type="device"` explicitly to target physical devices.
 

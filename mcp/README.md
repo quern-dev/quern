@@ -66,7 +66,7 @@ src/
     ├── proxy.ts          Network proxy control + flow queries
     ├── intercept.ts      Intercept, replay, and mock rules
     ├── device.ts         Simulator control + UI interaction
-    ├── device-pool.ts    Device pool claim/release/resolve
+    ├── device-pool.ts    Device pool resolve/ensure
     ├── simulator-log.ts  Simulator log capture
     └── device-log.ts     Physical device log capture
 ```
@@ -142,15 +142,12 @@ src/
 | `set_location` | Set simulated GPS location |
 | `grant_permission` | Grant app permission |
 
-### Device Pool (5 tools)
+### Device Pool (2 tools)
 
 | Tool | Description |
 |---|---|
-| `list_device_pool` | List devices with claim status |
-| `claim_device` | Claim device for exclusive use |
-| `release_device` | Release claimed device |
-| `resolve_device` | Smart find + optional claim |
-| `ensure_devices` | Boot N devices for parallel testing |
+| `resolve_device` | Smart device resolution with auto-boot (sets active device) |
+| `ensure_devices` | Boot N devices for parallel testing (first becomes active) |
 
 ### Simulator Logging (2 tools)
 

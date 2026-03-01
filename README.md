@@ -98,7 +98,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 |------|---------|
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
 | `cert-state.json` | Per-device certificate installation state — persists across restarts |
-| `device-pool.json` | Device pool claim/release state — persists across restarts |
+| `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture settings and other configuration |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
@@ -184,7 +184,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
 - **Interaction** — tap (by element label or coordinates), swipe, type text, clear text, press hardware buttons
 - **Configuration** — set GPS location, grant permissions
-- **Device pool** — claim/release devices for parallel test execution
+- **Device pool** — smart device resolution with active device tracking for multi-device workflows
 
 **Simulator UI automation** uses [idb](https://fbidb.io/) (`brew install idb-companion`). Device management and screenshots use `xcrun simctl` (always available with Xcode).
 
@@ -212,7 +212,7 @@ quern disable-local-capture  # Disable local capture
 
 ## MCP Tools
 
-66 tools available via MCP:
+76 tools available via MCP:
 
 | Category | Tools |
 |----------|-------|
@@ -224,7 +224,7 @@ quern disable-local-capture  # Disable local capture
 | Device | `list_devices`, `boot_device`, `shutdown_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps` |
 | UI | `take_screenshot`, `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `type_text`, `clear_text`, `press_button` |
 | Config | `set_location`, `grant_permission` |
-| Device Pool | `list_device_pool`, `claim_device`, `release_device`, `resolve_device`, `ensure_devices` |
+| Device Pool | `resolve_device`, `ensure_devices` |
 | Preview | `preview_device`, `stop_preview`, `preview_status` |
 | Physical Device | `setup_wda`, `start_driver`, `stop_driver` |
 
@@ -319,13 +319,9 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/device/pool` | List pool status |
-| POST | `/api/v1/device/claim` | Claim a device for exclusive use |
-| POST | `/api/v1/device/release` | Release a claimed device |
-| POST | `/api/v1/device/cleanup` | Release stale claims |
-| POST | `/api/v1/device/refresh` | Refresh pool from simctl |
-| POST | `/api/v1/device/resolve` | Resolve a device by requirements |
-| POST | `/api/v1/device/ensure` | Ensure devices matching requirements exist |
+| POST | `/api/v1/devices/refresh` | Refresh pool from simctl |
+| POST | `/api/v1/devices/resolve` | Resolve a device by criteria (sets active device) |
+| POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted |
 
 ## Architecture
 
@@ -341,7 +337,7 @@ server/
   device/              Simulator control (simctl, idb) + physical device control (WDA, pymobiledevice3), device pool
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
-tests/                 855+ tests
+tests/                 993 tests
 ```
 
 ## Development
