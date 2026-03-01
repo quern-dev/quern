@@ -64,23 +64,29 @@ Other things you can ask:
 
 ### Prerequisites
 
-- macOS with Xcode installed
+- macOS with Xcode and Command Line Tools
 - Python 3.11+
-- Node.js 18+ (for MCP server)
-- Optional: `idb` for UI automation (`brew install idb-companion`)
-- Optional: `pymobiledevice3` for physical device support (`pipx install pymobiledevice3`)
-- Optional: [mitmproxy](https://github.com/mitmproxy/mitmproxy) for local capture mode (transparent simulator traffic capture without system proxy)
+- Node.js 18+
 
 ### Install
 
 ```bash
-git clone <repo-url>
+curl -fsSL https://quern.dev/install.sh | bash
+```
+
+This clones Quern to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, and adds `quern` to your PATH.
+
+<details>
+<summary>Manual install</summary>
+
+```bash
+git clone https://github.com/quern-dev/quern.git
 cd quern
 ./quern setup                # creates venv, installs deps, checks tools, adds quern to ~/.local/bin
 ./quern mcp-install          # builds MCP server, adds to ~/.claude.json
 ```
 
-That's it — `setup` creates the `.venv`, installs everything into it, and verifies system dependencies. `mcp-install` builds the TypeScript MCP server and registers it with Claude Code. Setup will offer to add `~/.local/bin` to your PATH, allowing you to use `quern <command>` from anywhere instead of `./quern` from the project folder.
+</details>
 
 ### Run
 
