@@ -9,26 +9,25 @@ import logging
 import re
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from server.config import get_default_device_family
 from server.device.controller import DeviceController
-from server.models import DeviceClaimStatus, DeviceError, DevicePoolEntry, DevicePoolState, DeviceState, DeviceType
+from server.models import DeviceError, DevicePoolEntry, DevicePoolState, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.device-pool")
 
 POOL_FILE = Path.home() / ".quern" / "device-pool.json"
-CLAIM_TIMEOUT = timedelta(minutes=30)  # Auto-release after 30 min
-REFRESH_CACHE_TTL = timedelta(seconds=2)  # Avoid redundant simctl calls
+REFRESH_CACHE_TTL_SECONDS = 2  # Avoid redundant simctl calls
 
 
 class DevicePool:
-    """Manages the pool of available devices and their claim states.
+    """Manages the pool of available devices.
 
-    Includes smart device resolution (Phase 4b-gamma): criteria matching,
-    auto-boot, wait-for-available, and bulk provisioning. Integrates with
-    DeviceController.resolve_udid() as the preferred resolution path.
+    Includes smart device resolution: criteria matching, auto-boot,
+    and bulk provisioning. Integrates with DeviceController.resolve_udid()
+    as the preferred resolution path.
     """
 
     def __init__(self, controller: DeviceController):
@@ -44,7 +43,6 @@ class DevicePool:
     async def list_devices(
         self,
         state_filter: str | None = None,  # "booted", "shutdown", None=all
-        claimed_filter: str | None = None,  # "claimed", "available", None=all
         device_type: DeviceType | None = None,  # "simulator", "device", None=all
     ) -> list[DevicePoolEntry]:
         """List all devices in the pool with optional filters."""
@@ -57,185 +55,25 @@ class DevicePool:
         if state_filter:
             devices = [d for d in devices if d.state.value == state_filter]
 
-        if claimed_filter == "claimed":
-            devices = [d for d in devices if d.claim_status == DeviceClaimStatus.CLAIMED]
-        elif claimed_filter == "available":
-            devices = [d for d in devices if d.claim_status == DeviceClaimStatus.AVAILABLE]
-
         if device_type:
             devices = [d for d in devices if d.device_type == device_type]
 
         return devices
-
-    async def claim_device(
-        self,
-        session_id: str,
-        udid: str | None = None,
-        name: str | None = None,
-        device_family: str | None = None,
-        device_type: DeviceType | None = None,
-    ) -> DevicePoolEntry:
-        """Claim a device for exclusive use by a session.
-
-        Args:
-            session_id: Session claiming the device
-            udid: Specific device to claim (takes precedence)
-            name: Device name pattern to match
-            device_family: Device family filter (e.g. "iPhone", "iPad")
-
-        Returns:
-            The claimed device entry
-
-        Raises:
-            DeviceError: If no matching device found or already claimed
-        """
-        await self.refresh_from_simctl()
-
-        with self._lock_pool_file():
-            state = self._read_state()
-
-            # Find matching device
-            if udid:
-                device = state.devices.get(udid)
-                if not device:
-                    raise DeviceError(f"Device {udid} not found in pool", tool="pool")
-            else:
-                all_devices = list(state.devices.values())
-                effective_family = self._infer_device_family(name, device_family)
-                all_matches = self._find_candidates(
-                    all_devices, name=name, device_family=effective_family,
-                    device_type=device_type,
-                )
-                if not all_matches:
-                    raise DeviceError(
-                        f"No device found matching name='{name}'", tool="pool"
-                    )
-
-                # Check if any are available
-                available_matches = [
-                    d for d in all_matches if d.claim_status == DeviceClaimStatus.AVAILABLE
-                ]
-                if not available_matches:
-                    claimed_device = all_matches[0]
-                    raise DeviceError(
-                        f"Device {claimed_device.udid} ({claimed_device.name}) is already claimed by session {claimed_device.claimed_by}",
-                        tool="pool",
-                    )
-                device = available_matches[0]
-
-            # Final check if already claimed (for UDID path)
-            if device.claim_status == DeviceClaimStatus.CLAIMED:
-                raise DeviceError(
-                    f"Device {device.udid} ({device.name}) is already claimed by session {device.claimed_by}",
-                    tool="pool",
-                )
-
-            # Claim it
-            device.claim_status = DeviceClaimStatus.CLAIMED
-            device.claimed_by = session_id
-            device.claimed_at = datetime.now(timezone.utc)
-            device.last_used = datetime.now(timezone.utc)
-
-            state.devices[device.udid] = device
-            state.updated_at = datetime.now(timezone.utc)
-            self._write_state(state)
-
-            logger.info(
-                "Device claimed: %s (%s) by session %s", device.udid, device.name, session_id
-            )
-
-            return device
-
-    async def release_device(
-        self,
-        udid: str,
-        session_id: str | None = None,
-    ) -> None:
-        """Release a claimed device back to the pool.
-
-        Args:
-            udid: Device to release
-            session_id: Session releasing (validated if provided)
-
-        Raises:
-            DeviceError: If device not found or not claimed by session
-        """
-        with self._lock_pool_file():
-            state = self._read_state()
-
-            device = state.devices.get(udid)
-            if not device:
-                raise DeviceError(f"Device {udid} not found in pool", tool="pool")
-
-            if device.claim_status != DeviceClaimStatus.CLAIMED:
-                logger.warning("Device %s was not claimed, ignoring release", udid)
-                return
-
-            # Validate session owns this device
-            if session_id and device.claimed_by != session_id:
-                raise DeviceError(
-                    f"Device {udid} is claimed by session {device.claimed_by}, "
-                    f"cannot release by session {session_id}",
-                    tool="pool",
-                )
-
-            # Release it
-            device.claim_status = DeviceClaimStatus.AVAILABLE
-            device.claimed_by = None
-            device.claimed_at = None
-            device.last_used = datetime.now(timezone.utc)
-
-            state.devices[device.udid] = device
-            state.updated_at = datetime.now(timezone.utc)
-            self._write_state(state)
-
-            logger.info("Device released: %s (%s)", device.udid, device.name)
 
     async def get_device_state(self, udid: str) -> DevicePoolEntry | None:
         """Get the current state of a specific device."""
         state = self._read_state()
         return state.devices.get(udid)
 
-    async def cleanup_stale_claims(self) -> list[str]:
-        """Release devices with expired claims. Returns list of released UDIDs."""
-        with self._lock_pool_file():
-            state = self._read_state()
-            now = datetime.now(timezone.utc)
-            released = []
-
-            for udid, device in state.devices.items():
-                if device.claim_status == DeviceClaimStatus.CLAIMED and device.claimed_at:
-                    age = now - device.claimed_at
-                    if age > CLAIM_TIMEOUT:
-                        age_minutes = int(age.total_seconds() / 60)
-                        logger.warning(
-                            "Released device %s (%s) - claimed by %s %d minutes ago (expired)",
-                            device.udid,
-                            device.name,
-                            device.claimed_by,
-                            age_minutes,
-                        )
-                        device.claim_status = DeviceClaimStatus.AVAILABLE
-                        device.claimed_by = None
-                        device.claimed_at = None
-                        device.last_used = now
-                        released.append(udid)
-
-            if released:
-                state.updated_at = now
-                self._write_state(state)
-
-            return released
-
-    async def refresh_from_simctl(self) -> None:
+    async def refresh_from_simctl(self, *, force: bool = False) -> None:
         """Refresh pool state from simctl (discover new devices, update boot states).
 
-        Cached for 2 seconds to avoid redundant simctl calls during rapid operations
-        (e.g., parallel test execution claiming multiple devices).
+        Cached for 2 seconds to avoid redundant simctl calls during rapid operations.
+        Use force=True to bypass the cache (e.g. after booting a device).
         """
         # Check cache
         now = datetime.now(timezone.utc)
-        if self._last_refresh_at and (now - self._last_refresh_at) < REFRESH_CACHE_TTL:
+        if not force and self._last_refresh_at and (now - self._last_refresh_at).total_seconds() < REFRESH_CACHE_TTL_SECONDS:
             return
 
         # Get current devices from simctl (~200-500ms, expensive)
@@ -248,7 +86,7 @@ class DevicePool:
             # Update or add devices
             for device_info in simctl_devices:
                 if device_info.udid in state.devices:
-                    # Update existing entry (preserve claim info)
+                    # Update existing entry
                     entry = state.devices[device_info.udid]
                     entry.name = device_info.name
                     entry.state = device_info.state
@@ -266,9 +104,6 @@ class DevicePool:
                         os_version=device_info.os_version,
                         runtime=device_info.runtime,
                         device_family=device_info.device_family,
-                        claim_status=DeviceClaimStatus.AVAILABLE,
-                        claimed_by=None,
-                        claimed_at=None,
                         last_used=now,
                         is_available=device_info.is_available,
                     )
@@ -289,7 +124,7 @@ class DevicePool:
             self._last_refresh_at = now
 
     # ----------------------------------------------------------------
-    # Resolution protocol (Phase 4b-gamma)
+    # Resolution protocol
     # ----------------------------------------------------------------
 
     @staticmethod
@@ -424,13 +259,11 @@ class DevicePool:
 
         Priority:
         1. Booted before shutdown (avoid boot cost)
-        2. Unclaimed before claimed (available now)
-        3. Most recently used (warm simulator state, caches)
-        4. Name alphabetical (deterministic tie-breaking)
+        2. Most recently used (warm simulator state, caches)
+        3. Name alphabetical (deterministic tie-breaking)
         """
         return (
             0 if device.state == DeviceState.BOOTED else 1,
-            0 if device.claim_status == DeviceClaimStatus.AVAILABLE else 1,
             -device.last_used.timestamp(),
             device.name,
         )
@@ -453,7 +286,7 @@ class DevicePool:
             devices = await self.controller.simctl.list_devices()
             for d in devices:
                 if d.udid == udid and d.state == DeviceState.BOOTED:
-                    await self.refresh_from_simctl()
+                    await self.refresh_from_simctl(force=True)
                     logger.info("Device %s booted in %.1fs", udid[:8], time.time() - start)
                     return
 
@@ -461,45 +294,6 @@ class DevicePool:
             f"Device {udid} did not boot within {timeout}s",
             tool="simctl",
         )
-
-    async def _wait_for_available(
-        self,
-        name: str | None = None,
-        os_version: str | None = None,
-        device_type: DeviceType | None = None,
-        device_family: str | None = None,
-        session_id: str | None = None,
-        timeout: float = 30.0,
-        poll_interval: float = 1.0,
-    ) -> DevicePoolEntry | None:
-        """Wait for a matching device to become available.
-
-        Calls refresh_from_simctl() each iteration to detect both pool file
-        changes (releases) and simctl state changes (external boots).
-        Returns the first matching device or None on timeout.
-        """
-        start = time.time()
-        while True:
-            remaining = timeout - (time.time() - start)
-            if remaining <= 0:
-                return None
-            await asyncio.sleep(min(poll_interval, remaining))
-
-            await self.refresh_from_simctl()
-            state = self._read_state()
-            candidates = self._find_candidates(
-                list(state.devices.values()),
-                name=name, os_version=os_version,
-                device_type=device_type, device_family=device_family,
-            )
-            for device in candidates:
-                is_available = (
-                    device.claim_status == DeviceClaimStatus.AVAILABLE
-                    or (session_id and device.claimed_by == session_id)
-                )
-                if is_available and device.state == DeviceState.BOOTED:
-                    return device
-        return None
 
     def _build_resolution_error(
         self,
@@ -553,26 +347,13 @@ class DevicePool:
             return DeviceError(" ".join(parts), tool="pool")
 
         # Devices matched criteria but none are usable
-        booted_unclaimed = [d for d in both_matched if d.state == DeviceState.BOOTED and d.claim_status == DeviceClaimStatus.AVAILABLE]
-        claimed = [d for d in both_matched if d.claim_status == DeviceClaimStatus.CLAIMED]
-        shutdown = [d for d in both_matched if d.state == DeviceState.SHUTDOWN and d.claim_status == DeviceClaimStatus.AVAILABLE]
+        shutdown = [d for d in both_matched if d.state == DeviceState.SHUTDOWN]
 
-        if claimed and not booted_unclaimed and not shutdown:
-            claimed_info = ", ".join(
-                f"{d.claimed_by} ({d.name}, {d.udid[:8]})" for d in claimed
-            )
-            return DeviceError(
-                f"All {len(claimed)} devices matching {criteria_str} are claimed. "
-                f"Use wait_if_busy=true to wait, or release a device first. "
-                f"Claimed by: {claimed_info}",
-                tool="pool",
-            )
-
-        if shutdown and not booted_unclaimed:
+        if shutdown:
             shutdown_info = ", ".join(f"{d.name} ({d.udid[:8]})" for d in shutdown)
             return DeviceError(
                 f"Found {len(shutdown)} matching devices but all are shutdown: {shutdown_info}. "
-                f"Use auto_boot=true to boot one, or boot manually with boot_device.",
+                f"Set auto_boot=true to boot one, or boot manually with boot_device.",
                 tool="pool",
             )
 
@@ -585,45 +366,33 @@ class DevicePool:
         os_version: str | None = None,
         device_type: DeviceType | None = None,
         device_family: str | None = None,
-        auto_boot: bool = False,
-        wait_if_busy: bool = False,
-        wait_timeout: float = 30.0,
-        session_id: str | None = None,
+        auto_boot: bool = True,
     ) -> str:
-        """Resolve a device matching criteria, optionally boot and/or claim it.
+        """Resolve a device matching criteria, optionally booting it.
 
-        Returns the UDID of the resolved device.
+        Returns the UDID of the resolved device and sets it as the active device.
 
         Resolution priority:
-        1. Explicit UDID → use directly
-        2. Booted + available (unclaimed or owned by session) → use best match
-        3. Shutdown + available + auto_boot → boot best match
-        4. All claimed + wait_if_busy → wait for release
+        1. No criteria + active device already set → return active
+        2. Explicit UDID → use directly
+        3. Booted match → use best ranked
+        4. Shutdown + auto_boot → boot best match
         5. No matches → diagnostic error
         """
+        # Short-circuit: no criteria and active device already set
+        has_criteria = any([udid, name, os_version, device_family])
+        if not has_criteria and self.controller._active_udid:
+            return self.controller._active_udid
+
         await self.refresh_from_simctl()
 
         # Priority 1: explicit UDID
         if udid:
-            with self._lock_pool_file():
-                state = self._read_state()
-                if udid not in state.devices:
-                    raise DeviceError(f"Device {udid} not found in pool", tool="pool")
-                device = state.devices[udid]
-                if session_id:
-                    if device.claim_status == DeviceClaimStatus.CLAIMED and device.claimed_by != session_id:
-                        raise DeviceError(
-                            f"Device {udid} ({device.name}) is already claimed by session {device.claimed_by}",
-                            tool="pool",
-                        )
-                    if device.claim_status != DeviceClaimStatus.CLAIMED:
-                        device.claim_status = DeviceClaimStatus.CLAIMED
-                        device.claimed_by = session_id
-                        device.claimed_at = datetime.now(timezone.utc)
-                    device.last_used = datetime.now(timezone.utc)
-                    state.updated_at = datetime.now(timezone.utc)
-                    self._write_state(state)
-                return udid
+            state = self._read_state()
+            if udid not in state.devices:
+                raise DeviceError(f"Device {udid} not found in pool", tool="pool")
+            self.controller._active_udid = udid
+            return udid
 
         effective_family = self._infer_device_family(name, device_family)
 
@@ -642,103 +411,22 @@ class DevicePool:
 
         candidates.sort(key=self._rank_candidate)
 
-        def _is_available(d: DevicePoolEntry) -> bool:
-            return (
-                d.claim_status == DeviceClaimStatus.AVAILABLE
-                or (session_id is not None and d.claimed_by == session_id)
-            )
-
-        # Priority 2: booted + available (unclaimed or owned by session)
-        booted_available = [
-            d for d in candidates
-            if d.state == DeviceState.BOOTED and _is_available(d)
-        ]
-        if booted_available:
-            chosen = booted_available[0]
-            if session_id and chosen.claimed_by != session_id:
-                with self._lock_pool_file():
-                    state = self._read_state()
-                    device = state.devices[chosen.udid]
-                    if device.claim_status == DeviceClaimStatus.CLAIMED and device.claimed_by != session_id:
-                        raise DeviceError(
-                            f"Device {chosen.udid} was claimed by another session during resolution",
-                            tool="pool",
-                        )
-                    device.claim_status = DeviceClaimStatus.CLAIMED
-                    device.claimed_by = session_id
-                    device.claimed_at = datetime.now(timezone.utc)
-                    device.last_used = datetime.now(timezone.utc)
-                    state.updated_at = datetime.now(timezone.utc)
-                    self._write_state(state)
+        # Priority 2: booted match
+        booted = [d for d in candidates if d.state == DeviceState.BOOTED]
+        if booted:
+            chosen = booted[0]
+            self.controller._active_udid = chosen.udid
             return chosen.udid
 
-        # Priority 3: shutdown + available + auto_boot
-        shutdown_available = [
-            d for d in candidates
-            if d.state == DeviceState.SHUTDOWN and _is_available(d)
-        ]
-        if shutdown_available and auto_boot:
-            chosen = shutdown_available[0]
+        # Priority 3: shutdown + auto_boot
+        shutdown = [d for d in candidates if d.state == DeviceState.SHUTDOWN]
+        if shutdown and auto_boot:
+            chosen = shutdown[0]
             await self._boot_and_wait(chosen.udid)
-            if session_id and chosen.claimed_by != session_id:
-                with self._lock_pool_file():
-                    state = self._read_state()
-                    device = state.devices[chosen.udid]
-                    device.claim_status = DeviceClaimStatus.CLAIMED
-                    device.claimed_by = session_id
-                    device.claimed_at = datetime.now(timezone.utc)
-                    device.last_used = datetime.now(timezone.utc)
-                    state.updated_at = datetime.now(timezone.utc)
-                    self._write_state(state)
+            self.controller._active_udid = chosen.udid
             return chosen.udid
 
-        # Priority 4: wait for release
-        if wait_if_busy:
-            found = await self._wait_for_available(
-                name=name, os_version=os_version, device_type=device_type,
-                device_family=effective_family, session_id=session_id,
-                timeout=wait_timeout,
-            )
-            if found:
-                if session_id and found.claimed_by != session_id:
-                    with self._lock_pool_file():
-                        state = self._read_state()
-                        device = state.devices[found.udid]
-                        if device.claim_status == DeviceClaimStatus.AVAILABLE:
-                            device.claim_status = DeviceClaimStatus.CLAIMED
-                            device.claimed_by = session_id
-                            device.claimed_at = datetime.now(timezone.utc)
-                            device.last_used = datetime.now(timezone.utc)
-                            state.updated_at = datetime.now(timezone.utc)
-                            self._write_state(state)
-                return found.udid
-
-            # Timed out — build diagnostic error about claimed devices
-            state = self._read_state()
-            all_devices = list(state.devices.values())
-            claimed_candidates = [
-                d for d in self._find_candidates(
-                    all_devices, name=name, os_version=os_version,
-                    device_type=device_type, device_family=effective_family,
-                )
-                if d.claim_status == DeviceClaimStatus.CLAIMED
-            ]
-            criteria_parts = []
-            if name:
-                criteria_parts.append(f"name={name!r}")
-            if os_version:
-                criteria_parts.append(f"os_version={os_version!r}")
-            if effective_family:
-                criteria_parts.append(f"device_family={effective_family!r}")
-            criteria_str = ", ".join(criteria_parts) or "any"
-            claimed_sessions = ", ".join(d.claimed_by or "unknown" for d in claimed_candidates)
-            raise DeviceError(
-                f"Timed out after {wait_timeout}s waiting for a device matching {criteria_str} "
-                f"to become available. {len(claimed_candidates)} matching devices are claimed by: {claimed_sessions}",
-                tool="pool",
-            )
-
-        # Priority 5: nothing viable
+        # Priority 4: nothing viable
         raise self._build_resolution_error(
             all_devices, name=name, os_version=os_version,
             device_type=device_type, device_family=effective_family,
@@ -752,14 +440,11 @@ class DevicePool:
         device_type: DeviceType | None = None,
         device_family: str | None = None,
         auto_boot: bool = True,
-        session_id: str | None = None,
     ) -> list[str]:
         """Ensure N devices matching criteria are booted and available.
 
         Returns list of UDIDs for the ready devices.
-        When session_id is provided, devices already claimed by the session
-        count as available and won't be re-claimed.
-        Rolls back claims on partial failure.
+        Sets the first device as the active device.
         """
         await self.refresh_from_simctl()
 
@@ -772,18 +457,12 @@ class DevicePool:
             device_type=device_type, device_family=effective_family,
         )
 
-        def _is_available(d: DevicePoolEntry) -> bool:
-            return (
-                d.claim_status == DeviceClaimStatus.AVAILABLE
-                or (session_id is not None and d.claimed_by == session_id)
-            )
-
         booted_available = sorted(
-            [d for d in matching if d.state == DeviceState.BOOTED and _is_available(d)],
+            [d for d in matching if d.state == DeviceState.BOOTED],
             key=self._rank_candidate,
         )
         shutdown_available = sorted(
-            [d for d in matching if d.state == DeviceState.SHUTDOWN and _is_available(d)],
+            [d for d in matching if d.state == DeviceState.SHUTDOWN],
             key=self._rank_candidate,
         )
 
@@ -797,60 +476,33 @@ class DevicePool:
             if effective_family:
                 criteria_parts.append(f"device_family='{effective_family}'")
             criteria_str = ", ".join(criteria_parts) if criteria_parts else "any"
-            claimed_count = len([d for d in matching if d.claim_status == DeviceClaimStatus.CLAIMED and not _is_available(d)])
             raise DeviceError(
                 f"Need {count} devices matching {criteria_str} but only {total_available} available "
-                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown, {claimed_count} claimed).",
+                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown).",
                 tool="pool",
             )
 
         # Select devices: booted first (ranked), then shutdown to boot (ranked)
         selected_udids: list[str] = []
-        newly_claimed_udids: list[str] = []
 
-        try:
-            # Take booted first
-            for d in booted_available:
-                if len(selected_udids) >= count:
-                    break
-                selected_udids.append(d.udid)
+        # Take booted first
+        for d in booted_available:
+            if len(selected_udids) >= count:
+                break
+            selected_udids.append(d.udid)
 
-            # Boot more if needed
-            for d in shutdown_available:
-                if len(selected_udids) >= count:
-                    break
-                await self._boot_and_wait(d.udid)
-                selected_udids.append(d.udid)
+        # Boot more if needed
+        for d in shutdown_available:
+            if len(selected_udids) >= count:
+                break
+            await self._boot_and_wait(d.udid)
+            selected_udids.append(d.udid)
 
-            # Claim all if session_id provided (skip devices already owned)
-            if session_id:
-                with self._lock_pool_file():
-                    state = self._read_state()
-                    for udid in selected_udids:
-                        device = state.devices[udid]
-                        if device.claimed_by == session_id:
-                            # Already owned by this session — just update last_used
-                            device.last_used = datetime.now(timezone.utc)
-                        else:
-                            device.claim_status = DeviceClaimStatus.CLAIMED
-                            device.claimed_by = session_id
-                            device.claimed_at = datetime.now(timezone.utc)
-                            device.last_used = datetime.now(timezone.utc)
-                            newly_claimed_udids.append(udid)
-                    state.updated_at = datetime.now(timezone.utc)
-                    self._write_state(state)
+        # Set first device as active
+        if selected_udids:
+            self.controller._active_udid = selected_udids[0]
 
-            return selected_udids
-
-        except Exception:
-            # Rollback: release only newly claimed devices (not session-owned ones)
-            if newly_claimed_udids:
-                for udid in newly_claimed_udids:
-                    try:
-                        await self.release_device(udid, session_id=session_id)
-                    except Exception:
-                        pass
-            raise
+        return selected_udids
 
     # ----------------------------------------------------------------
     # Internal helpers

@@ -1,4 +1,4 @@
-"""API tests for resolution protocol endpoints (Phase 4b-gamma)."""
+"""API tests for resolution protocol endpoints."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.device.pool import DevicePool
 from server.main import create_app
-from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType
+from server.models import DeviceInfo, DeviceState, DeviceType
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def auth_headers():
 
 @pytest.fixture
 def mock_device_pool(app, tmp_path):
-    """Set up a mock DevicePool with 5 devices."""
+    """Set up a mock DevicePool with 4 devices."""
     ctrl = DeviceController()
     ctrl.simctl = AsyncMock()
     ctrl.simctl.boot = AsyncMock()
@@ -46,6 +46,7 @@ def mock_device_pool(app, tmp_path):
                 device_type=DeviceType.SIMULATOR,
                 os_version="iOS 18.2",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="BBBB-2222",
@@ -54,6 +55,7 @@ def mock_device_pool(app, tmp_path):
                 device_type=DeviceType.SIMULATOR,
                 os_version="iOS 18.2",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="CCCC-3333",
@@ -62,6 +64,7 @@ def mock_device_pool(app, tmp_path):
                 device_type=DeviceType.SIMULATOR,
                 os_version="iOS 18.2",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                device_family="iPhone",
             ),
             DeviceInfo(
                 udid="DDDD-4444",
@@ -70,6 +73,7 @@ def mock_device_pool(app, tmp_path):
                 device_type=DeviceType.SIMULATOR,
                 os_version="iOS 17.5",
                 runtime="com.apple.CoreSimulator.SimRuntime.iOS-17-5",
+                device_family="iPhone",
             ),
         ]
     )
@@ -99,6 +103,7 @@ class TestResolveEndpoint:
         assert "udid" in data
         assert data["udid"] in ("AAAA-1111", "BBBB-2222")
         assert data["name"] == "iPhone 16 Pro"
+        assert data["active"] is True
         assert "waited_seconds" in data
 
     async def test_resolve_by_os_version(self, app, auth_headers, mock_device_pool):
@@ -112,19 +117,6 @@ class TestResolveEndpoint:
             )
         assert resp.status_code == 200
         assert resp.json()["udid"] == "DDDD-4444"
-
-    async def test_resolve_with_claim(self, app, auth_headers, mock_device_pool):
-        """Resolve with session_id claims the device."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/devices/resolve",
-                headers=auth_headers,
-                json={"name": "iPhone 16 Pro", "session_id": "my-session"},
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["claimed_by"] == "my-session"
 
     async def test_resolve_no_match_returns_404(self, app, auth_headers, mock_device_pool):
         """Resolve with impossible criteria returns 404."""
@@ -180,6 +172,7 @@ class TestEnsureEndpoint:
         data = resp.json()
         assert len(data["devices"]) == 2
         assert data["total_available"] == 2
+        assert "active_udid" in data
 
     async def test_ensure_boots_additional(self, app, auth_headers, mock_device_pool):
         """Ensure boots shutdown devices to meet count."""
@@ -194,6 +187,7 @@ class TestEnsureEndpoint:
                     DeviceInfo(
                         udid="CCCC-3333", name="iPhone 16 Pro", state=DeviceState.BOOTED,
                         os_version="iOS 18.2", runtime="...", is_available=True,
+                        device_family="iPhone",
                     ),
                 ]
             return await original_list(*args, **kwargs)
@@ -221,7 +215,6 @@ class TestEnsureEndpoint:
                 json={"count": 10, "name": "iPhone 16 Pro"},
             )
         assert resp.status_code == 500 or resp.status_code == 404
-        # The error message should mention "Need 10"
         assert "Need 10" in resp.json()["detail"] or "10" in resp.json()["detail"]
 
     async def test_ensure_with_device_type(self, app, auth_headers, mock_device_pool):
@@ -235,18 +228,4 @@ class TestEnsureEndpoint:
             )
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data["devices"]) == 2
-
-    async def test_ensure_with_session_claims(self, app, auth_headers, mock_device_pool):
-        """Ensure with session_id claims all devices."""
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/devices/ensure",
-                headers=auth_headers,
-                json={"count": 2, "name": "iPhone 16 Pro", "session_id": "test-run"},
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["session_id"] == "test-run"
         assert len(data["devices"]) == 2

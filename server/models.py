@@ -720,13 +720,6 @@ class WaitForElementRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class DeviceClaimStatus(str, enum.Enum):
-    """Device claim state."""
-
-    AVAILABLE = "available"
-    CLAIMED = "claimed"
-
-
 class DevicePoolEntry(BaseModel):
     """Single device in the pool."""
 
@@ -738,9 +731,6 @@ class DevicePoolEntry(BaseModel):
     runtime: str
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
 
-    claim_status: DeviceClaimStatus
-    claimed_by: str | None = None
-    claimed_at: datetime | None = None
     last_used: datetime
     is_available: bool
 
@@ -766,10 +756,7 @@ class ResolveDeviceRequest(BaseModel):
     os_version: str | None = None
     device_family: str | None = None
     device_type: str | None = "simulator"
-    auto_boot: bool = False
-    wait_if_busy: bool = False
-    wait_timeout: float = Field(default=30.0, ge=1.0, le=120.0)
-    session_id: str | None = None
+    auto_boot: bool = True
 
 
 class EnsureDevicesRequest(BaseModel):
@@ -781,7 +768,6 @@ class EnsureDevicesRequest(BaseModel):
     device_family: str | None = None
     device_type: str | None = "simulator"
     auto_boot: bool = True
-    session_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

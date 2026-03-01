@@ -16,7 +16,7 @@ Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") 
       bundle_id: z.string().describe("App bundle identifier (e.g. com.example.MyApp)"),
       label: z.string().describe('Short name for this checkpoint (e.g. "logged_in", "fresh_install")'),
       description: z.string().optional().describe("Human-readable description of this state"),
-      udid: z.string().optional().describe("Simulator UDID (auto-resolves if omitted)"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, label, description, udid }) => {
     try {
@@ -38,7 +38,7 @@ Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") 
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       label: z.string().describe("Name of the checkpoint to restore"),
-      udid: z.string().optional().describe("Simulator UDID (auto-resolves if omitted)"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, label, udid }) => {
     try {
@@ -108,7 +108,7 @@ If key is omitted, returns the entire plist as JSON.`,
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().optional().describe("Specific key to read (omit to return entire plist)"),
-      udid: z.string().optional().describe("Simulator UDID (auto-resolves if omitted)"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, container, plist_path, key, udid }) => {
     try {
@@ -135,7 +135,7 @@ Type inference: boolean values set -bool, integers set -integer, floats set -flo
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().describe("Plist key to set"),
       value: z.union([z.string(), z.coerce.number(), z.coerce.boolean()]).describe("Value to set (type is inferred)"),
-      udid: z.string().optional().describe("Simulator UDID (auto-resolves if omitted)"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, container, plist_path, key, value, udid }) => {
     try {
@@ -158,7 +158,7 @@ Type inference: boolean values set -bool, integers set -integer, floats set -flo
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().describe("Plist key to remove"),
-      udid: z.string().optional().describe("Simulator UDID (auto-resolves if omitted)"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, container, plist_path, key, udid }) => {
     try {

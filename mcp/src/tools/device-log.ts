@@ -16,7 +16,7 @@ an in-app log drain (freopen redirect).`,
       udid: z
         .string()
         .optional()
-        .describe("Device UDID (auto-resolves if omitted)"),
+        .describe("Device UDID (defaults to active device)"),
       process: z
         .string()
         .optional()
@@ -64,7 +64,7 @@ an in-app log drain (freopen redirect).`,
       udid: z
         .string()
         .optional()
-        .describe("Device UDID (auto-resolves if omitted)"),
+        .describe("Device UDID (defaults to active device)"),
     }),
   }, async ({ udid }) => {
     try {

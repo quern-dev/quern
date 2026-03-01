@@ -4,148 +4,11 @@ import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
 
 export function registerDevicePoolTools(server: McpServer): void {
-  server.registerTool("list_device_pool", {
-    description: `List all devices in the pool with their claim status. Shows which devices are available for claiming and which are already claimed by sessions. Use this to see what devices exist before claiming one.`,
-    inputSchema: strictParams({
-      state: z
-        .enum(["booted", "shutdown"])
-        .optional()
-        .describe("Filter by boot state"),
-      claimed: z
-        .enum(["claimed", "available"])
-        .optional()
-        .describe("Filter by claim status"),
-      type: z
-        .enum(["simulator", "device"])
-        .optional()
-        .describe("Filter by device type. Default: no filter (shows all)."),
-    }),
-  }, async ({ state, claimed, type }) => {
-      try {
-        const data = await apiRequest("GET", "/api/v1/devices/pool", {
-          state,
-          claimed,
-          device_type: type,
-        });
-
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  server.registerTool("claim_device", {
-    description: `Claim a device for exclusive use by a session. Once claimed, no other session can use this device until it's released. Essential for parallel test execution to ensure device isolation. Provide either a specific UDID or a name pattern.`,
-    inputSchema: strictParams({
-      session_id: z.string().describe("Session ID claiming the device"),
-      udid: z
-        .string()
-        .optional()
-        .describe("Specific device UDID to claim"),
-      name: z
-        .string()
-        .optional()
-        .describe("Device name pattern to match (e.g., 'iPhone 16 Pro')"),
-      device_family: z
-        .string()
-        .optional()
-        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
-      type: z
-        .enum(["simulator", "device"])
-        .optional()
-        .describe("Filter by device type. Omit to allow either type."),
-    }),
-  }, async ({ session_id, udid, name, device_family, type }) => {
-      try {
-        const body: Record<string, unknown> = { session_id };
-        if (udid) body.udid = udid;
-        if (name) body.name = name;
-        if (device_family) body.device_family = device_family;
-        if (type) body.device_type = type;
-
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/devices/claim",
-          undefined,
-          body
-        );
-
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  server.registerTool("release_device", {
-    description: `Release a claimed device back to the pool, making it available for other sessions. Always release devices when done to avoid resource exhaustion. Devices are also auto-released after 30 minutes of inactivity.`,
-    inputSchema: strictParams({
-      udid: z.string().describe("Device UDID to release"),
-      session_id: z
-        .string()
-        .optional()
-        .describe("Session ID releasing the device (for validation)"),
-    }),
-  }, async ({ udid, session_id }) => {
-      try {
-        const body: Record<string, unknown> = { udid };
-        if (session_id) body.session_id = session_id;
-
-        const data = await apiRequest(
-          "POST",
-          "/api/v1/devices/release",
-          undefined,
-          body
-        );
-
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(data, null, 2) },
-          ],
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
-
   server.registerTool("resolve_device", {
-    description: `Smartly find and optionally claim a device matching criteria. This is the
-preferred way to get a device — it handles booting, waiting, and claiming
-automatically. Use this instead of manually listing the pool and claiming.`,
+    description: `Smartly find a device matching criteria. This is the preferred way to get a
+device — it handles booting automatically. The resolved device becomes the
+active device, so subsequent tools (take_screenshot, tap, etc.) use it by
+default without needing to pass udid.`,
     inputSchema: strictParams({
       name: z
         .string()
@@ -167,26 +30,12 @@ automatically. Use this instead of manually listing the pool and claiming.`,
       auto_boot: z
         .coerce.boolean()
         .optional()
-        .default(false)
+        .default(true)
         .describe(
-          "Boot a matching shutdown device if no booted ones available"
+          "Boot a matching shutdown device if no booted ones available (default: true)"
         ),
-      wait_if_busy: z
-        .coerce.boolean()
-        .optional()
-        .default(false)
-        .describe("Wait for a claimed device to be released"),
-      wait_timeout: z
-        .coerce.number()
-        .optional()
-        .default(30)
-        .describe("Max seconds to wait if wait_if_busy is true"),
-      session_id: z
-        .string()
-        .optional()
-        .describe("Claim the device for this session. Devices already claimed by this session are reused without re-claiming."),
     }),
-  }, async ({ name, os_version, device_family, type, auto_boot, wait_if_busy, wait_timeout, session_id }) => {
+  }, async ({ name, os_version, device_family, type, auto_boot }) => {
       try {
         const body: Record<string, unknown> = {};
         if (name) body.name = name;
@@ -194,9 +43,6 @@ automatically. Use this instead of manually listing the pool and claiming.`,
         if (device_family) body.device_family = device_family;
         if (type) body.device_type = type;
         if (auto_boot !== undefined) body.auto_boot = auto_boot;
-        if (wait_if_busy !== undefined) body.wait_if_busy = wait_if_busy;
-        if (wait_timeout !== undefined) body.wait_timeout = wait_timeout;
-        if (session_id) body.session_id = session_id;
 
         const data = await apiRequest(
           "POST",
@@ -226,8 +72,8 @@ automatically. Use this instead of manually listing the pool and claiming.`,
 
   server.registerTool("ensure_devices", {
     description: `Ensure N devices matching criteria are booted and ready. Use this to set up
-parallel test execution — it finds available devices, boots more if needed,
-and optionally claims them all for a session.`,
+parallel test execution — it finds available devices and boots more if needed.
+The first device becomes the active device for subsequent tool calls.`,
     inputSchema: strictParams({
       count: z
         .coerce.number()
@@ -256,12 +102,8 @@ and optionally claims them all for a session.`,
         .optional()
         .default(true)
         .describe("Boot shutdown devices if not enough booted ones"),
-      session_id: z
-        .string()
-        .optional()
-        .describe("Claim all devices for this session. Devices already claimed by this session are reused without re-claiming."),
     }),
-  }, async ({ count, name, os_version, device_family, type, auto_boot, session_id }) => {
+  }, async ({ count, name, os_version, device_family, type, auto_boot }) => {
       try {
         const body: Record<string, unknown> = { count };
         if (name) body.name = name;
@@ -269,7 +111,6 @@ and optionally claims them all for a session.`,
         if (device_family) body.device_family = device_family;
         if (type) body.device_type = type;
         if (auto_boot !== undefined) body.auto_boot = auto_boot;
-        if (session_id) body.session_id = session_id;
 
         const data = await apiRequest(
           "POST",

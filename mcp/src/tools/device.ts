@@ -8,7 +8,7 @@ import { strictParams } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
-    description: `List available iOS simulators and physical devices, plus tool availability (simctl, idb, devicectl). Returns device UDIDs, names, states, and OS versions.`,
+    description: `List available iOS simulators and physical devices, plus tool availability (simctl, idb, devicectl). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
     inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])
@@ -18,6 +18,18 @@ export function registerDeviceTools(server: McpServer): void {
         .enum(["simulator", "device"])
         .optional()
         .describe("Filter by device type"),
+      name: z
+        .string()
+        .optional()
+        .describe("Filter by device name (case-insensitive, exact match preferred, substring fallback)"),
+      os_version: z
+        .string()
+        .optional()
+        .describe("Filter by OS version prefix (e.g. '18', '18.2', 'iOS 18.2')"),
+      device_family: z
+        .string()
+        .optional()
+        .describe("Filter by device family: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'"),
       cert_installed: z
         .coerce.boolean()
         .optional()
@@ -30,11 +42,14 @@ export function registerDeviceTools(server: McpServer): void {
           "Include physical devices that are paired but not currently reachable. By default, only connected devices are shown."
         ),
     }),
-  }, async ({ state, type, cert_installed, include_disconnected }) => {
+  }, async ({ state, type, name, os_version, device_family, cert_installed, include_disconnected }) => {
     try {
       const params: Record<string, string | number | boolean | undefined> = {};
       if (state) params.state = state;
       if (type) params.device_type = type;
+      if (name) params.name = name;
+      if (os_version) params.os_version = os_version;
+      if (device_family) params.device_family = device_family;
       if (cert_installed !== undefined) params.cert_installed = cert_installed;
       if (include_disconnected) params.include_disconnected = true;
 
@@ -144,7 +159,7 @@ export function registerDeviceTools(server: McpServer): void {
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ app_path, udid }) => {
     try {
@@ -189,7 +204,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, udid }) => {
     try {
@@ -228,7 +243,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, udid }) => {
     try {
@@ -267,7 +282,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, udid }) => {
     try {
@@ -305,7 +320,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ udid }) => {
     try {
@@ -337,7 +352,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
       format: z
         .enum(["png", "jpeg"])
         .default("png")
@@ -423,7 +438,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
       scale: z
         .coerce.number()
         .min(0.1)
@@ -505,7 +520,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ latitude, longitude, udid }) => {
     try {
@@ -549,7 +564,7 @@ NOTE: If you want to capture network traffic from this app:
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, permission, udid }) => {
     try {

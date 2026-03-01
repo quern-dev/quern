@@ -10,7 +10,7 @@ export function registerDeviceUITools(server: McpServer): void {
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
       children_of: z
         .string()
         .optional()
@@ -71,7 +71,7 @@ export function registerDeviceUITools(server: McpServer): void {
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ label, identifier, element_type, udid }) => {
     try {
@@ -141,7 +141,7 @@ export function registerDeviceUITools(server: McpServer): void {
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({
     label,
@@ -203,7 +203,7 @@ This is the recommended first step before interacting with UI. Use this to disco
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
       snapshot_depth: z
         .coerce.number()
         .min(1)
@@ -254,7 +254,7 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ x, y, udid }) => {
     try {
@@ -306,7 +306,7 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ label, identifier, element_type, udid }) => {
     try {
@@ -355,7 +355,7 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ start_x, start_y, end_x, end_y, duration, udid }) => {
     try {
@@ -400,7 +400,7 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ text, udid }) => {
     try {
@@ -438,7 +438,7 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ udid }) => {
     try {
@@ -481,7 +481,7 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
       udid: z
         .string()
         .optional()
-        .describe("Target device UDID (auto-resolves if omitted)"),
+        .describe("Target device UDID (defaults to active device)"),
     }),
   }, async ({ button, udid }) => {
     try {

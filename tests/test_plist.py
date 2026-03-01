@@ -22,18 +22,17 @@ def _mock_proc(returncode: int, stdout: bytes = b"", stderr: bytes = b""):
 
 class TestReadPlist:
     async def test_read_plist_parses_output(self, tmp_path):
-        payload = json.dumps({"foo": "bar", "count": 42}).encode()
-        with patch("asyncio.create_subprocess_exec", return_value=_mock_proc(0, stdout=payload)):
-            result = await read_plist(tmp_path / "test.plist")
+        # Write a real plist file and read it back
+        import plistlib
+        plist_path = tmp_path / "test.plist"
+        with open(plist_path, "wb") as f:
+            plistlib.dump({"foo": "bar", "count": 42}, f)
+        result = await read_plist(plist_path)
         assert result == {"foo": "bar", "count": 42}
 
     async def test_read_plist_raises_on_nonzero(self, tmp_path):
-        with patch(
-            "asyncio.create_subprocess_exec",
-            return_value=_mock_proc(1, stderr=b"No such file"),
-        ):
-            with pytest.raises(DeviceError, match="plutil read failed"):
-                await read_plist(tmp_path / "missing.plist")
+        with pytest.raises(DeviceError, match="plistlib read failed"):
+            await read_plist(tmp_path / "missing.plist")
 
 
 class TestSetPlistValue:

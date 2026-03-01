@@ -69,6 +69,9 @@ async def list_devices(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
     device_type: str | None = Query(default=None, pattern="^(simulator|device)$"),
+    name: str | None = Query(default=None),
+    os_version: str | None = Query(default=None),
+    device_family: str | None = Query(default=None),
     cert_installed: bool | None = Query(default=None),
     include_disconnected: bool = Query(default=False),
 ):
@@ -77,6 +80,9 @@ async def list_devices(
     Query params:
     - state: Filter by boot state (booted, shutdown)
     - device_type: Filter by device type (simulator, device)
+    - name: Filter by device name (case-insensitive, exact preferred, substring fallback)
+    - os_version: Filter by OS version prefix (e.g. '18', '18.2', 'iOS 18.2')
+    - device_family: Filter by device family ('iPhone', 'iPad', 'Apple Watch', 'Apple TV')
     - cert_installed: Filter by cert installation status (true/false)
     - include_disconnected: Include paired but unreachable physical devices
     """
@@ -93,6 +99,35 @@ async def list_devices(
         if device_type:
             dt = DeviceType(device_type)
             devices = [d for d in devices if d.device_type == dt]
+
+        # Name filter: exact match preferred, substring fallback
+        if name:
+            name_lower = name.lower()
+            exact = [d for d in devices if d.name.lower() == name_lower]
+            if exact:
+                devices = exact
+            else:
+                devices = [d for d in devices if name_lower in d.name.lower()]
+
+        # OS version filter: prefix match
+        if os_version:
+            import re
+            def _os_matches(device_os: str, requested: str) -> bool:
+                m = re.search(r"[\d.]+", device_os)
+                if not m:
+                    return False
+                dev_ver = m.group()
+                rm = re.search(r"[\d.]+", requested)
+                if not rm:
+                    return False
+                req_ver = rm.group()
+                return dev_ver == req_ver or dev_ver.startswith(req_ver + ".")
+            devices = [d for d in devices if _os_matches(d.os_version, os_version)]
+
+        # Device family filter: case-insensitive
+        if device_family:
+            family_lower = device_family.lower()
+            devices = [d for d in devices if d.device_family.lower() == family_lower]
 
         device_dicts = [d.model_dump() for d in devices]
 

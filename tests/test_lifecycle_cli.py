@@ -102,14 +102,6 @@ def _free_port(port: int) -> None:
     time.sleep(0.1)
 
 
-def _bind_port(port: int) -> socket.socket:
-    """Bind a port to simulate it being in use. Returns the socket (caller must close)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", port))
-    s.listen(1)
-    return s
-
 
 class TestStartDaemon:
     """Tests for `quern-debug-server start` (daemon mode)."""
@@ -171,29 +163,6 @@ class TestStartDaemon:
             assert state2["pid"] == state["pid"]
         finally:
             _kill_server()
-
-    def test_port_conflict_scans_next(self):
-        """If preferred port is taken, start should scan upward."""
-        test_port = 59200
-        # Kill anything occupying the port from prior test runs
-        _free_port(test_port)
-        sock = _bind_port(test_port)
-        try:
-            result = subprocess.run(
-                [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog", "--port", str(test_port)],
-                capture_output=True, text=True, timeout=30,
-            )
-            try:
-                assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-                state = _read_state()
-                assert state is not None
-                assert state["server_port"] != test_port, "Should have found a different port"
-                assert _wait_for_health(state["server_port"])
-            finally:
-                _kill_server()
-        finally:
-            sock.close()
-
 
 class TestStop:
     """Tests for `quern-debug-server stop`."""

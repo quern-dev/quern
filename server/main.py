@@ -235,11 +235,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Refresh pool state on startup
     await device_pool.refresh_from_simctl()
 
-    # Cleanup stale claims from previous runs
-    released = await device_pool.cleanup_stale_claims()
-    if released:
-        logger.info("Cleaned up %d stale device claims on startup", len(released))
-
     # Warm device caches in the background (device type dispatch, WDA os_versions)
     async def _warmup_devices():
         try:

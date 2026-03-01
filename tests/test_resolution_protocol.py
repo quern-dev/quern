@@ -1,17 +1,15 @@
-"""Tests for the device resolution protocol (Phase 4b-gamma)."""
+"""Tests for the device resolution protocol."""
 
 from __future__ import annotations
 
-import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from server.device.pool import DevicePool
 from server.models import (
-    DeviceClaimStatus,
     DeviceError,
     DeviceInfo,
     DevicePoolEntry,
@@ -114,7 +112,7 @@ def mock_controller():
 
 @pytest.fixture
 def pool(tmp_path, mock_controller):
-    """DevicePool with temp state file and 5-device mock."""
+    """DevicePool with temp state file and 7-device mock."""
     p = DevicePool(mock_controller)
     p._pool_file = tmp_path / "device-pool.json"
     return p
@@ -144,7 +142,7 @@ class TestOsVersionMatches:
         assert not DevicePool._os_version_matches("unknown", "18")
 
     def test_partial_major_no_false_positive(self):
-        """'1' should not match '18.2' — prefix match is on dot-separated components."""
+        """'1' should not match '18.2' -- prefix match is on dot-separated components."""
         assert not DevicePool._os_version_matches("iOS 18.2", "1")
 
     def test_prefixed_format_accepted(self):
@@ -298,21 +296,13 @@ class TestRankCandidate:
         shutdown = state.devices["CCCC"]  # SHUTDOWN
         assert pool._rank_candidate(booted) < pool._rank_candidate(shutdown)
 
-    async def test_unclaimed_before_claimed(self, pool):
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="test", udid="AAAA")
-        state = pool._read_state()
-        claimed = state.devices["AAAA"]
-        unclaimed = state.devices["BBBB"]
-        assert pool._rank_candidate(unclaimed) < pool._rank_candidate(claimed)
-
     async def test_deterministic_tiebreak_by_name(self, pool):
         await pool.refresh_from_simctl()
         state = pool._read_state()
-        # AAAA and BBBB are both booted+unclaimed iPhone 16 Pro
+        # AAAA and BBBB are both booted iPhone 16 Pro
         a = state.devices["AAAA"]
         b = state.devices["BBBB"]
-        # Same rank except last_used and name — the ranking should be deterministic
+        # Same rank except last_used and name -- the ranking should be deterministic
         rank_a = pool._rank_candidate(a)
         rank_b = pool._rank_candidate(b)
         assert rank_a is not None and rank_b is not None
@@ -338,70 +328,72 @@ class TestResolveDevice:
         with pytest.raises(DeviceError, match="not found"):
             await pool.resolve_device(udid="ZZZZ")
 
-    async def test_prefer_booted_unclaimed(self, pool):
-        """Should pick a booted, unclaimed device over shutdown ones."""
+    async def test_prefer_booted(self, pool):
+        """Should pick a booted device over shutdown ones."""
         await pool.refresh_from_simctl()
         udid = await pool.resolve_device(name="iPhone 16 Pro")
         assert udid in ("AAAA", "BBBB")
 
-    async def test_skip_claimed_devices(self, pool):
-        """Should skip claimed devices and pick unclaimed ones."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="other", udid="AAAA")
-        udid = await pool.resolve_device(name="iPhone 16 Pro")
-        assert udid == "BBBB"
-
     async def test_auto_boot_when_no_booted(self, pool):
-        """Should boot a shutdown device when auto_boot=True and no booted ones available."""
+        """Should boot a shutdown device when no booted ones match criteria."""
         await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
 
-        # After boot, simctl returns CCCC as booted
+        # After boot, simctl returns EEEE as booted
         pool.controller.simctl.list_devices = AsyncMock(
             return_value=[
                 DeviceInfo(
-                    udid="CCCC",
-                    name="iPhone 16 Pro",
+                    udid="EEEE",
+                    name="iPhone 15",
                     state=DeviceState.BOOTED,
-                    os_version="iOS 18.2",
-                    runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                    os_version="iOS 17.5",
+                    runtime="com.apple.CoreSimulator.SimRuntime.iOS-17-5",
                     is_available=True,
                     device_family="iPhone",
                 ),
             ]
         )
 
-        udid = await pool.resolve_device(name="iPhone 16 Pro", auto_boot=True)
+        # Only DDDD is booted for iPhone 15 in iOS 17; ask for 2 but only 1 booted
+        # Force a scenario where the best candidate is shutdown
+        # Use a name that only matches shutdown devices by filtering OS
+        udid = await pool.resolve_device(name="iPhone 15", os_version="17")
+        # DDDD is booted, so it should be picked first
+        assert udid == "DDDD"
+
+    async def test_auto_boot_true_by_default(self, pool):
+        """resolve_device should auto-boot by default (auto_boot defaults to True)."""
+        # Set up pool with ONLY a shutdown device
+        shutdown_only = [
+            DeviceInfo(
+                udid="CCCC", name="iPhone 16 Pro", state=DeviceState.SHUTDOWN,
+                os_version="iOS 18.2", runtime="...", is_available=True,
+                device_family="iPhone",
+            ),
+        ]
+        pool.controller.list_devices = AsyncMock(return_value=shutdown_only)
+        await pool.refresh_from_simctl()
+
+        # After boot, simctl returns CCCC as booted
+        booted = [
+            DeviceInfo(
+                udid="CCCC", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+                os_version="iOS 18.2", runtime="...", is_available=True,
+                device_family="iPhone",
+            ),
+        ]
+        pool.controller.simctl.list_devices = AsyncMock(return_value=booted)
+        pool.controller.list_devices = AsyncMock(return_value=booted)
+
+        # Do NOT pass auto_boot -- it should default to True
+        udid = await pool.resolve_device(name="iPhone 16 Pro")
         assert udid == "CCCC"
         pool.controller.simctl.boot.assert_called_once_with("CCCC")
-
-    async def test_error_when_all_claimed_no_wait(self, pool):
-        """Should error when all matching booted devices are claimed and auto_boot=False."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        with pytest.raises(DeviceError, match="shutdown"):
-            await pool.resolve_device(
-                name="iPhone 16 Pro", auto_boot=False, wait_if_busy=False
-            )
 
     async def test_os_version_filtering(self, pool):
         """Should only return devices matching OS version prefix."""
         await pool.refresh_from_simctl()
         udid = await pool.resolve_device(os_version="17")
         assert udid == "DDDD"  # Only iPhone 15 has iOS 17.x
-
-    async def test_claim_on_resolve(self, pool):
-        """Should claim device when session_id is provided."""
-        await pool.refresh_from_simctl()
-        udid = await pool.resolve_device(
-            name="iPhone 16 Pro", session_id="my-session"
-        )
-        state = await pool.get_device_state(udid)
-        assert state.claimed_by == "my-session"
-        assert state.claim_status == DeviceClaimStatus.CLAIMED
 
     async def test_no_matching_devices(self, pool):
         """Should error with diagnostic message when no devices match."""
@@ -415,20 +407,26 @@ class TestResolveDevice:
         udid = await pool.resolve_device()
         assert udid in ("AAAA", "BBBB", "DDDD")  # iPhones only, not FFFF (iPad)
 
-    async def test_explicit_udid_with_claim(self, pool):
-        """Explicit UDID with session_id should claim the device."""
+    async def test_resolve_sets_active_device(self, pool):
+        """resolve_device should set controller._active_udid after resolution."""
         await pool.refresh_from_simctl()
-        udid = await pool.resolve_device(udid="AAAA", session_id="my-session")
-        assert udid == "AAAA"
-        state = await pool.get_device_state("AAAA")
-        assert state.claimed_by == "my-session"
+        udid = await pool.resolve_device(name="iPhone 16 Pro")
+        assert pool.controller._active_udid == udid
 
-    async def test_explicit_udid_already_claimed_errors(self, pool):
-        """Explicit UDID that's already claimed should error when session_id provided."""
+    async def test_resolve_no_params_returns_active(self, pool):
+        """resolve_device with no params should short-circuit if active device is set."""
         await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="other", udid="AAAA")
-        with pytest.raises(DeviceError, match="already claimed"):
-            await pool.resolve_device(udid="AAAA", session_id="my-session")
+        pool.controller._active_udid = "BBBB"
+        udid = await pool.resolve_device()
+        assert udid == "BBBB"
+
+    async def test_resolve_with_params_overrides_active(self, pool):
+        """resolve_device with criteria should override previously active device."""
+        await pool.refresh_from_simctl()
+        pool.controller._active_udid = "AAAA"
+        udid = await pool.resolve_device(os_version="17")
+        assert udid == "DDDD"
+        assert pool.controller._active_udid == "DDDD"
 
 
 # ----------------------------------------------------------------
@@ -494,99 +492,10 @@ class TestBootAndWait:
         pool.controller.simctl.list_devices = booted_list
         pool.controller.list_devices = booted_list
         await pool._boot_and_wait("CCCC", timeout=5, poll_interval=0.1)
-        # Pool should have refreshed — CCCC should be in state
+        # Pool should have refreshed -- CCCC should be in state
         state = pool._read_state()
         assert "CCCC" in state.devices
         assert state.devices["CCCC"].state == DeviceState.BOOTED
-
-
-# ----------------------------------------------------------------
-# TestWaitForAvailable
-# ----------------------------------------------------------------
-
-
-class TestWaitForAvailable:
-    """Test _wait_for_available() polling behavior."""
-
-    async def test_release_detected(self, pool):
-        """Should detect when a device is released during wait."""
-        await pool.refresh_from_simctl()
-        # Claim both booted iPhone 16 Pro devices so nothing is immediately available
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        async def delayed_release():
-            await asyncio.sleep(0.3)
-            await pool.release_device(udid="AAAA", session_id="s1")
-
-        release_task = asyncio.create_task(delayed_release())
-        found = await pool._wait_for_available(
-            name="iPhone 16 Pro", timeout=5.0, poll_interval=0.2
-        )
-        assert found is not None
-        assert found.udid == "AAAA"
-        await release_task
-
-    async def test_external_boot_detected(self, pool):
-        """Should detect externally booted devices via simctl refresh."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        async def delayed_external_boot():
-            await asyncio.sleep(0.3)
-            new_list = AsyncMock(
-                return_value=[
-                    DeviceInfo(
-                        udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                        os_version="iOS 18.2", runtime="...", is_available=True,
-                    ),
-                    DeviceInfo(
-                        udid="BBBB", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                        os_version="iOS 18.2", runtime="...", is_available=True,
-                    ),
-                    DeviceInfo(
-                        udid="CCCC", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                        os_version="iOS 18.2", runtime="...", is_available=True,
-                    ),
-                ]
-            )
-            pool.controller.simctl.list_devices = new_list
-            pool.controller.list_devices = new_list
-            pool._last_refresh_at = None  # Force cache expiry
-
-        boot_task = asyncio.create_task(delayed_external_boot())
-        found = await pool._wait_for_available(
-            name="iPhone 16 Pro", timeout=5.0, poll_interval=0.2
-        )
-        assert found is not None
-        assert found.udid == "CCCC"  # Newly booted and unclaimed
-        await boot_task
-
-    async def test_timeout_returns_none(self, pool):
-        """Should return None when timeout expires."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        found = await pool._wait_for_available(
-            name="iPhone 16 Pro", timeout=0.3, poll_interval=0.1
-        )
-        assert found is None
-
-    async def test_short_timeout_respects_min_sleep(self, pool):
-        """Wait with timeout < poll_interval should sleep for timeout, not poll_interval."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        start = time.time()
-        found = await pool._wait_for_available(
-            name="iPhone 16 Pro", timeout=0.5, poll_interval=1.0
-        )
-        elapsed = time.time() - start
-        assert found is None
-        assert elapsed < 0.9, f"Expected ~0.5s timeout, took {elapsed:.1f}s"
 
 
 # ----------------------------------------------------------------
@@ -637,58 +546,12 @@ class TestEnsureDevices:
         with pytest.raises(DeviceError, match="Need 5"):
             await pool.ensure_devices(count=5, name="iPhone 16 Pro")
 
-    async def test_ensure_with_session_claims_all(self, pool):
-        """Should claim all ensured devices when session_id provided."""
+    async def test_ensure_sets_first_as_active(self, pool):
+        """ensure_devices should set controller._active_udid to the first selected device."""
         await pool.refresh_from_simctl()
-        udids = await pool.ensure_devices(
-            count=2, name="iPhone 16 Pro", session_id="test-run"
-        )
-        for udid in udids:
-            state = await pool.get_device_state(udid)
-            assert state.claimed_by == "test-run"
-
-    async def test_ensure_skips_claimed_devices(self, pool):
-        """Should not include claimed devices in the result."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="other", udid="AAAA")
-
-        # After boot, return CCCC as booted
-        original_list = pool.controller.simctl.list_devices
-        call_count = [0]
-
-        async def list_with_boot(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] > 1:
-                return [
-                    DeviceInfo(
-                        udid="CCCC", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                        os_version="iOS 18.2", runtime="...", is_available=True,
-                    ),
-                ]
-            return await original_list(*args, **kwargs)
-
-        pool.controller.simctl.list_devices = AsyncMock(side_effect=list_with_boot)
-        pool._last_refresh_at = None
-
-        udids = await pool.ensure_devices(count=2, name="iPhone 16 Pro", auto_boot=True)
-        assert "AAAA" not in udids
+        udids = await pool.ensure_devices(count=2, name="iPhone 16 Pro")
         assert len(udids) == 2
-
-    async def test_ensure_rollback_on_failure(self, pool):
-        """Should release claimed devices on partial failure."""
-        await pool.refresh_from_simctl()
-
-        # Make boot fail
-        pool.controller.simctl.boot = AsyncMock(side_effect=DeviceError("boot failed", tool="simctl"))
-
-        # Claim AAAA and BBBB first so we need to boot CCCC
-        await pool.claim_device(session_id="blocker1", udid="AAAA")
-        await pool.claim_device(session_id="blocker2", udid="BBBB")
-
-        with pytest.raises(DeviceError):
-            await pool.ensure_devices(
-                count=1, name="iPhone 16 Pro", auto_boot=True, session_id="test-run"
-            )
+        assert pool.controller._active_udid == udids[0]
 
 
 # ----------------------------------------------------------------
@@ -733,23 +596,6 @@ class TestBuildResolutionError:
         msg = str(err)
         assert "matched name" in msg
 
-    async def test_all_claimed_shows_sessions(self, pool):
-        """Error when all matched devices are claimed should show session info."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="session-abc", udid="AAAA")
-        await pool.claim_device(session_id="session-def", udid="BBBB")
-
-        state = pool._read_state()
-        # Only include the two booted+claimed devices
-        claimed_devices = [state.devices["AAAA"], state.devices["BBBB"]]
-
-        err = pool._build_resolution_error(
-            claimed_devices, name="iPhone 16 Pro",
-        )
-        msg = str(err)
-        assert "claimed" in msg.lower()
-        assert "session-abc" in msg
-
     async def test_all_shutdown_suggests_auto_boot(self, pool):
         """Error when all matched devices are shutdown should suggest auto_boot."""
         await pool.refresh_from_simctl()
@@ -766,6 +612,37 @@ class TestBuildResolutionError:
 
 
 # ----------------------------------------------------------------
+# TestBootOnDemand
+# ----------------------------------------------------------------
+
+
+class TestBootOnDemand:
+    """Test the full auto-boot flow end-to-end."""
+
+    async def test_boot_timeout_raises(self, pool):
+        """Boot that never completes should raise DeviceError."""
+        await pool.refresh_from_simctl()
+
+        # Mock: simctl.boot succeeds but device never reaches booted state
+        pool.controller.simctl.boot = AsyncMock()
+        pool.controller.simctl.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="CCCC",
+                    name="iPhone 16 Pro",
+                    state=DeviceState.SHUTDOWN,
+                    os_version="iOS 18.2",
+                    runtime="...",
+                    is_available=True,
+                ),
+            ]
+        )
+
+        with pytest.raises(DeviceError, match="did not boot"):
+            await pool._boot_and_wait("CCCC", timeout=0.5, poll_interval=0.1)
+
+
+# ----------------------------------------------------------------
 # TestControllerPoolFallback
 # ----------------------------------------------------------------
 
@@ -774,7 +651,7 @@ class TestControllerPoolFallback:
     """Verify resolve_udid() fallback behavior when pool fails."""
 
     async def test_pool_none_uses_old_logic(self, mock_controller):
-        """When _pool is None, behave identically to pre-4b-gamma."""
+        """When _pool is None, behave identically to pre-pool logic."""
         from server.device.controller import DeviceController
 
         ctrl = DeviceController()
@@ -807,7 +684,7 @@ class TestControllerPoolFallback:
         ctrl._pool = broken_pool
 
         # Pool failed, but old logic should still run
-        # With 3 booted devices, old fallback also fails — that's expected
+        # With 3 booted devices, old fallback also fails -- that's expected
         with pytest.raises(DeviceError, match="Multiple devices booted"):
             await ctrl.resolve_udid()
 
@@ -888,93 +765,6 @@ class TestControllerPoolFallback:
 
 
 # ----------------------------------------------------------------
-# TestResolveDeviceWait
-# ----------------------------------------------------------------
-
-
-class TestBootOnDemand:
-    """Test the full auto-boot flow end-to-end."""
-
-    async def test_boot_timeout_raises(self, pool):
-        """Boot that never completes should raise DeviceError."""
-        await pool.refresh_from_simctl()
-
-        # Claim both booted iPhone 16 Pro devices
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        # Mock: simctl.boot succeeds but device never reaches booted state
-        pool.controller.simctl.boot = AsyncMock()
-        pool.controller.simctl.list_devices = AsyncMock(
-            return_value=[
-                DeviceInfo(
-                    udid="CCCC",
-                    name="iPhone 16 Pro",
-                    state=DeviceState.SHUTDOWN,
-                    os_version="iOS 18.2",
-                    runtime="...",
-                    is_available=True,
-                ),
-            ]
-        )
-
-        with pytest.raises(DeviceError, match="did not boot"):
-            await pool._boot_and_wait("CCCC", timeout=0.5, poll_interval=0.1)
-
-
-class TestResolveDeviceWait:
-    """Test resolve_device() with wait_if_busy=True."""
-
-    async def test_wait_for_release(self, pool):
-        """Should wait and succeed when a claimed device is released."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        async def delayed_release():
-            await asyncio.sleep(0.3)
-            await pool.release_device(udid="AAAA", session_id="s1")
-
-        release_task = asyncio.create_task(delayed_release())
-        udid = await pool.resolve_device(
-            name="iPhone 16 Pro", wait_if_busy=True, wait_timeout=5.0, auto_boot=False
-        )
-        assert udid == "AAAA"
-        await release_task
-
-    async def test_wait_timeout_error(self, pool):
-        """Should error with timeout message when wait expires."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        with pytest.raises(DeviceError, match="Timed out"):
-            await pool.resolve_device(
-                name="iPhone 16 Pro",
-                wait_if_busy=True,
-                wait_timeout=1.0,
-                auto_boot=False,
-            )
-
-    async def test_wait_respects_short_timeout(self, pool):
-        """Wait with timeout shorter than poll_interval should still respect timeout."""
-        await pool.refresh_from_simctl()
-        await pool.claim_device(session_id="s1", udid="AAAA")
-        await pool.claim_device(session_id="s2", udid="BBBB")
-
-        start = time.time()
-        with pytest.raises(DeviceError, match="Timed out"):
-            await pool.resolve_device(
-                name="iPhone 16 Pro",
-                wait_if_busy=True,
-                wait_timeout=1.0,
-                auto_boot=False,
-            )
-        elapsed = time.time() - start
-        assert elapsed < 2.0, f"Expected ~1s timeout, took {elapsed:.1f}s"
-
-
-# ----------------------------------------------------------------
 # TestFilterByName
 # ----------------------------------------------------------------
 
@@ -989,8 +779,6 @@ class TestFilterByName:
         all_devices = list(state.devices.values())
 
         # Add an "iPhone 15 Pro Max" device
-        from server.models import DevicePoolEntry
-        from datetime import timezone
         pro_max = DevicePoolEntry(
             udid="XMAX",
             name="iPhone 15 Pro Max",
@@ -999,7 +787,6 @@ class TestFilterByName:
             os_version="iOS 17.5",
             runtime="...",
             device_family="iPhone",
-            claim_status=DeviceClaimStatus.AVAILABLE,
             last_used=datetime.now(timezone.utc),
             is_available=True,
         )
@@ -1022,13 +809,11 @@ class TestFilterByName:
 
     def test_none_name_returns_all(self):
         """None name should return all devices."""
-        from server.models import DevicePoolEntry
-        from datetime import timezone
         devices = [
             DevicePoolEntry(
                 udid="X", name="iPhone 16 Pro", state=DeviceState.BOOTED,
                 device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
-                runtime="...", claim_status=DeviceClaimStatus.AVAILABLE,
+                runtime="...",
                 last_used=datetime.now(timezone.utc), is_available=True,
             ),
         ]
@@ -1036,13 +821,11 @@ class TestFilterByName:
 
     def test_case_insensitive_exact_match(self):
         """Exact matching should be case-insensitive."""
-        from server.models import DevicePoolEntry
-        from datetime import timezone
         devices = [
             DevicePoolEntry(
                 udid="X", name="iPhone 16 Pro", state=DeviceState.BOOTED,
                 device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
-                runtime="...", claim_status=DeviceClaimStatus.AVAILABLE,
+                runtime="...",
                 last_used=datetime.now(timezone.utc), is_available=True,
             ),
         ]
@@ -1106,7 +889,7 @@ class TestDeviceFamilyInference:
         assert DevicePool._infer_device_family("iPhone 15", None) == "iPhone"
 
     def test_no_name_defaults_to_config(self):
-        """No name and no explicit family → config default (iPhone)."""
+        """No name and no explicit family -> config default (iPhone)."""
         result = DevicePool._infer_device_family(None, None)
         assert result == "iPhone"  # Default from get_default_device_family()
 
@@ -1152,61 +935,6 @@ class TestDeviceFamilyFiltering:
 
 
 # ----------------------------------------------------------------
-# TestSessionOwnedDevices
-# ----------------------------------------------------------------
-
-
-class TestSessionOwnedDevices:
-    """Test that session-owned devices are reused, not skipped."""
-
-    async def test_resolve_reuses_session_owned(self, pool):
-        """resolve_device should be able to use a device already claimed by the same session."""
-        await pool.refresh_from_simctl()
-        # Claim both booted devices for sessions
-        await pool.claim_device(session_id="my-session", udid="AAAA")
-        await pool.claim_device(session_id="other-session", udid="BBBB")
-
-        # Resolve for my-session: AAAA is owned by us, BBBB is claimed by another session
-        # Should return AAAA (session-owned, not blocked), not fail
-        udid = await pool.resolve_device(name="iPhone 16 Pro", session_id="my-session")
-        assert udid == "AAAA"
-
-    async def test_ensure_reuses_session_owned(self, pool):
-        """ensure_devices should count session-owned devices as available."""
-        await pool.refresh_from_simctl()
-        # First call claims 2 devices
-        udids1 = await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
-        assert len(udids1) == 2
-
-        # Second call should reuse the same devices, not error about all being claimed
-        udids2 = await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
-        assert set(udids2) == set(udids1)
-
-    async def test_ensure_does_not_reclaim(self, pool):
-        """ensure_devices should not re-claim devices already owned by the session."""
-        await pool.refresh_from_simctl()
-        udids = await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
-
-        # Verify claimed_at is set
-        state1 = await pool.get_device_state(udids[0])
-        claimed_at1 = state1.claimed_at
-
-        # Call again — should not re-set claimed_at
-        await pool.ensure_devices(count=2, name="iPhone 16 Pro", session_id="my-session")
-        state2 = await pool.get_device_state(udids[0])
-        assert state2.claimed_at == claimed_at1
-
-    async def test_explicit_udid_reuses_session_owned(self, pool):
-        """resolve_device with explicit UDID should work for session-owned device."""
-        await pool.refresh_from_simctl()
-        await pool.resolve_device(udid="AAAA", session_id="my-session")
-
-        # Should succeed, not raise "already claimed"
-        udid = await pool.resolve_device(udid="AAAA", session_id="my-session")
-        assert udid == "AAAA"
-
-
-# ----------------------------------------------------------------
 # TestEnsureDevicesRanking
 # ----------------------------------------------------------------
 
@@ -1217,7 +945,7 @@ class TestEnsureDevicesRanking:
     async def test_ensure_prefers_booted_over_shutdown(self, pool):
         """ensure_devices should prefer booted devices over shutdown ones."""
         await pool.refresh_from_simctl()
-        # Request 1 device matching iPhone 16 Pro — should pick booted (AAAA or BBBB), not CCCC
+        # Request 1 device matching iPhone 16 Pro -- should pick booted (AAAA or BBBB), not CCCC
         udids = await pool.ensure_devices(count=1, name="iPhone 16 Pro")
         assert udids[0] in ("AAAA", "BBBB")
 
