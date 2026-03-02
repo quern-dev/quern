@@ -478,13 +478,29 @@ def _cmd_start(args: argparse.Namespace) -> None:
         print("Warning: MCP server build failed — MCP tools may be stale")
 
     # Non-blocking update check (once per 24h)
-    try:
-        from server.lifecycle.update_check import check_for_updates
-        update_msg = check_for_updates()
-        if update_msg:
-            print(update_msg)
-    except Exception:
-        pass  # Never block startup
+    # In daemon mode, run in a background thread so it never delays startup.
+    # In foreground mode, run synchronously so the user sees the message.
+    if not args.foreground:
+        import threading
+
+        def _bg_update_check():
+            try:
+                from server.lifecycle.update_check import check_for_updates
+                msg = check_for_updates()
+                if msg:
+                    logger.info(msg)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg_update_check, daemon=True).start()
+    else:
+        try:
+            from server.lifecycle.update_check import check_for_updates
+            update_msg = check_for_updates()
+            if update_msg:
+                print(update_msg)
+        except Exception:
+            pass  # Never block startup
 
     # Check for existing instance
     existing = read_state()

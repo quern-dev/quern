@@ -136,6 +136,10 @@ curl -H "Authorization: Bearer $API_KEY" \
      "http://localhost:9100/api/v1/logs/summary?window=5m"
 ```
 
+## Update Checks
+
+When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version's commit SHA — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored. To disable, add `"update_check": false` to `~/.quern/config.json`.
+
 ## What It Does
 
 ### Log Capture
