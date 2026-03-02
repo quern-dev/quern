@@ -6,8 +6,6 @@ Quern is a local debug server that lets AI coding agents — Claude Code, Cursor
 
 No cloud. No telemetry. Just a daemon on your Mac that bridges the gap between "build succeeded" and "it actually works."
 
-![Quern: Giving AI Agents Eyes and Ears for Mobile Debugging](docs/Quern_Infographic.png)
-
 > Supports iOS Simulators and physical iOS devices (via WebDriverAgent). Android emulator and device support is on the roadmap.
 
 ```
