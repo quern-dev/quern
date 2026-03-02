@@ -24,15 +24,15 @@ Quern (localhost:9100)
 
 AI agents are good at writing code. They're bad at knowing whether it worked -- especially on mobile devices. A build error gets caught; a silent API failure, a wrong screen, or a crash on launch usually doesn't — unless you paste logs back into the chat yourself.
 
-Quern closes that loop. It gives agents direct, token-efficient access to everything they need to diagnose and fix problems autonomously: structured logs, network request/response pairs, parsed crash reports, screenshots, and the ability to interact with the running app.
+Quern closes that loop. It gives agents direct, token-efficient access to everything they need to diagnose and fix problems autonomously: structured logs, network request/response pairs, parsed crash reports, screenshots, and the ability to interact with the running appon a simulator or real device. 
 
-Quern isn't a cloud testing platform. It's local infrastructure that makes the AI tools you already use actually effective at debugging.
+Quern isn't a cloud testing platform. It's local infrastructure that makes the AI tools you already use actually effective at debugging and testing mobile apps. 
 
 - **Local-first** — No cloud, no accounts, no third-party API keys. Your code and logs never leave your machine.
 - **Works with your existing AI** — Not a replacement for Claude, Cursor, or Codex. It makes them better by giving them live access to what your app is actually doing.
 - **Built for your editor and CLI** — Designed for agents already in your workflow, not a separate QA portal.
 - **Great for QA and SDET workflows** — Pair with an agent during manual testing. Let it intercept network calls, mock error responses, or verify analytics payloads while you drive the app — no more juggling Charles Proxy and a terminal.
-- **Free and open source** — Apache 2.0 licensed. Run it forever on your own hardware.
+- **Free and open source** — Apache 2.0 licensed. Run it free, forever, on your own hardware.
 
 ### Podcast
 
@@ -119,6 +119,8 @@ The MCP server auto-discovers the running server via `state.json` — no URL or 
 
 ### Use the HTTP API
 
+*For writing scripts that perform repeatable actions available in Quern. These can augment or replace XCUITests if you wish*
+
 ```bash
 API_KEY=$(cat ~/.quern/api-key)
 
@@ -138,7 +140,7 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version's commit SHA — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored. To disable, add `"update_check": false` to `~/.quern/config.json`.
 
-## What It Does
+## What Quern Does
 
 ### Log Capture
 
@@ -220,7 +222,7 @@ quern disable-local-capture  # Disable local capture
 
 ## MCP Tools
 
-76 tools available via MCP:
+76 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use. 
 
 | Category | Tools |
 |----------|-------|
