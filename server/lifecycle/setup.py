@@ -195,6 +195,75 @@ def _add_to_path(shell_rc: Path, directory: Path) -> bool:
         return False
 
 
+def _build_mcp(project_root: Path) -> CheckResult:
+    """Build the MCP TypeScript server (npm install + npm run build)."""
+    mcp_dir = project_root / "mcp"
+    src_dir = mcp_dir / "src"
+    dist_file = mcp_dir / "dist" / "index.js"
+
+    if not src_dir.exists():
+        return CheckResult(
+            name="MCP server",
+            status=CheckStatus.WARNING,
+            message="mcp/src/ not found — skipped",
+        )
+
+    node_modules = mcp_dir / "node_modules"
+    stamp = node_modules / ".install-stamp"
+    pkg_json = mcp_dir / "package.json"
+    needs_install = (
+        not node_modules.exists()
+        or not stamp.exists()
+        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
+    )
+
+    if needs_install:
+        print("    Installing MCP server dependencies...")
+        result = subprocess.run(
+            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
+        )
+        if result.returncode != 0:
+            return CheckResult(
+                name="MCP server",
+                status=CheckStatus.ERROR,
+                message="npm install failed",
+                detail="Try manually: cd mcp && npm install",
+            )
+        stamp.touch()
+
+    needs_build = not dist_file.exists()
+    if not needs_build:
+        dist_mtime = dist_file.stat().st_mtime
+        for src_file in src_dir.rglob("*"):
+            if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
+                needs_build = True
+                break
+
+    if needs_build:
+        print("    Building MCP server...")
+        result = subprocess.run(
+            ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
+        )
+        if result.returncode != 0:
+            return CheckResult(
+                name="MCP server",
+                status=CheckStatus.ERROR,
+                message="npm run build failed",
+                detail="Try manually: cd mcp && npm run build",
+            )
+        return CheckResult(
+            name="MCP server",
+            status=CheckStatus.OK,
+            message="Built successfully",
+        )
+
+    return CheckResult(
+        name="MCP server",
+        status=CheckStatus.OK,
+        message="Up to date",
+    )
+
+
 def install_wrapper_script() -> CheckResult:
     """Install quern wrapper script to ~/.local/bin."""
     local_bin = Path.home() / ".local" / "bin"
@@ -1255,6 +1324,13 @@ def run_setup() -> int:
     # ── Wrapper script installation ──
 
     report.add(install_wrapper_script())
+
+    # ── Build MCP server ──
+    # Build the TypeScript MCP server so it's ready when Claude Code connects.
+    # Without this, the MCP shows as broken until the first `quern start`.
+
+    if node_result.status == CheckStatus.OK and project_root:
+        report.add(_build_mcp(project_root))
 
     # ── Summary ──
 

@@ -478,22 +478,11 @@ def _cmd_start(args: argparse.Namespace) -> None:
         print("Warning: MCP server build failed — MCP tools may be stale")
 
     # Non-blocking update check (once per 24h)
-    # In daemon mode, run in a background thread so it never delays startup.
     # In foreground mode, run synchronously so the user sees the message.
-    if not args.foreground:
-        import threading
-
-        def _bg_update_check():
-            try:
-                from server.lifecycle.update_check import check_for_updates
-                msg = check_for_updates()
-                if msg:
-                    logger.info(msg)
-            except Exception:
-                pass
-
-        threading.Thread(target=_bg_update_check, daemon=True).start()
-    else:
+    # In daemon mode, defer to after fork — threads before fork are not
+    # safe on macOS (ObjC runtime detects partially-initialized state from
+    # dead threads in the child and aborts on the next fork/subprocess call).
+    if args.foreground:
         try:
             from server.lifecycle.update_check import check_for_updates
             update_msg = check_for_updates()
@@ -549,6 +538,22 @@ def _cmd_start(args: argparse.Namespace) -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # Daemon-mode update check — runs in the child process after fork,
+    # so threads and ObjC state are clean.
+    if not args.foreground:
+        import threading
+
+        def _bg_update_check():
+            try:
+                from server.lifecycle.update_check import check_for_updates
+                msg = check_for_updates()
+                if msg:
+                    logger.info(msg)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg_update_check, daemon=True).start()
 
     config = ServerConfig(
         host=args.host,
