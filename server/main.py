@@ -843,6 +843,9 @@ def cli() -> None:
     # setup
     subparsers.add_parser("setup", help="Check environment and install dependencies")
 
+    # uninstall
+    subparsers.add_parser("uninstall", help="Remove Quern and its dependencies")
+
     # regenerate-key (preserved)
     subparsers.add_parser("regenerate-key", help="Generate a new API key")
 
@@ -891,6 +894,9 @@ def cli() -> None:
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())
+    elif args.command == "uninstall":
+        from server.lifecycle.setup import run_uninstall
+        sys.exit(run_uninstall())
 
 
 if __name__ == "__main__":

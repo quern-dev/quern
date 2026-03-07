@@ -5,6 +5,7 @@ missing tools via Homebrew, and optionally configures simulators for proxy use.
 
 Usage:
     ./quern setup
+    ./quern uninstall
 """
 
 from __future__ import annotations
@@ -120,6 +121,34 @@ def _get_version(cmd: list[str]) -> str | None:
     return None
 
 
+INSTALL_MANIFEST = Path.home() / ".quern" / "installed-by-setup.json"
+
+
+def _read_manifest() -> dict:
+    """Read the install manifest (what quern setup has installed)."""
+    import json
+    try:
+        return json.loads(INSTALL_MANIFEST.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"brew": [], "pip": [], "pipx": []}
+
+
+def _write_manifest(data: dict) -> None:
+    """Write the install manifest."""
+    import json
+    INSTALL_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    INSTALL_MANIFEST.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _record_install(category: str, name: str) -> None:
+    """Record that setup installed something."""
+    manifest = _read_manifest()
+    items = manifest.setdefault(category, [])
+    if name not in items:
+        items.append(name)
+    _write_manifest(manifest)
+
+
 def _brew_install(formula: str) -> bool:
     """Install a Homebrew formula. Returns True on success."""
     print(f"    Installing {formula} via Homebrew...")
@@ -128,17 +157,31 @@ def _brew_install(formula: str) -> bool:
             ["brew", "install", formula],
             timeout=300,  # 5 min timeout for installs
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            _record_install("brew", formula)
+            return True
+        return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
 def _prompt_yn(question: str, default: bool = True) -> bool:
-    """Prompt the user for yes/no confirmation."""
+    """Prompt the user for yes/no confirmation.
+
+    When stdin is not a TTY (e.g. ``curl | bash``), reopens /dev/tty so
+    interactive prompts still work.
+    """
     suffix = " [Y/n] " if default else " [y/N] "
     try:
-        answer = input(question + suffix).strip().lower()
-    except (EOFError, KeyboardInterrupt):
+        if sys.stdin.isatty():
+            answer = input(question + suffix).strip().lower()
+        else:
+            # stdin is a pipe (curl | bash) — read from the real terminal
+            tty = open("/dev/tty")
+            print(question + suffix, end="", flush=True)
+            answer = tty.readline().strip().lower()
+            tty.close()
+    except (EOFError, KeyboardInterrupt, OSError):
         print()
         return False
     if not answer:
@@ -1187,6 +1230,7 @@ def run_setup() -> int:
             try:
                 result = subprocess.run([pip_cmd, "install", "fb-idb"], timeout=120)
                 if result.returncode == 0:
+                    _record_install("pip", "fb-idb")
                     # Rehash pyenv if it's being used
                     if _which("pyenv"):
                         subprocess.run(["pyenv", "rehash"], timeout=10)
@@ -1226,6 +1270,7 @@ def run_setup() -> int:
                         timeout=300,
                     )
                     if result.returncode == 0:
+                        _record_install("pipx", "pymobiledevice3")
                         pmd3_result = check_pymobiledevice3()  # re-check
                     else:
                         pmd3_result = CheckResult(
@@ -1336,3 +1381,217 @@ def run_setup() -> int:
 
     report.print_summary()
     return 1 if report.has_errors else 0
+
+
+# ── Uninstall ────────────────────────────────────────────────────────────
+
+
+def _brew_uninstall(formula: str) -> bool:
+    """Uninstall a Homebrew formula. Returns True on success."""
+    print(f"    Uninstalling {formula} via Homebrew...")
+    try:
+        result = subprocess.run(
+            ["brew", "uninstall", formula],
+            timeout=120,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def run_uninstall() -> int:
+    """Remove Quern and its dependencies. Returns 0 on success, 1 on error."""
+    print()
+    print("  Quern Debug Server — Uninstall")
+    print()
+
+    project_root = _find_project_root()
+    manifest = _read_manifest()
+    brew_packages = manifest.get("brew", [])
+    pip_packages = manifest.get("pip", [])
+    pipx_packages = manifest.get("pipx", [])
+
+    # ── Confirmation ──
+
+    print("  This will remove:")
+    if brew_packages:
+        print(f"    • Homebrew packages installed by setup: {', '.join(brew_packages)}")
+    else:
+        print("    • Homebrew packages: (none tracked — setup didn't install any)")
+    if pipx_packages:
+        print(f"    • pipx packages: {', '.join(pipx_packages)}")
+    print("    • The quern wrapper script (~/.local/bin/quern)")
+    print("    • The Python virtual environment (.venv/)")
+    print("    • MCP server registrations (claude-code, claude-desktop, cursor, opencode, codex)")
+    print()
+    if not _prompt_yn("  Proceed with uninstall?", default=False):
+        print("  Aborted.")
+        return 0
+
+    errors = 0
+
+    # ── Stop running server ──
+
+    from server.lifecycle.state import read_state, is_server_healthy
+    state = read_state()
+    if state and is_server_healthy(state.get("server_port", 9100)):
+        print()
+        print("  Stopping running server...")
+        pid = state.get("pid")
+        if pid:
+            import signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+                import time
+                for _ in range(50):
+                    time.sleep(0.1)
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                print("    Server stopped.")
+            except ProcessLookupError:
+                pass
+
+    # ── Uninstall Homebrew formulas (only ones we installed) ──
+
+    if brew_packages and _which("brew"):
+        print()
+        print(f"  Removing {len(brew_packages)} Homebrew package(s)...")
+        for formula in brew_packages:
+            if not _brew_uninstall(formula):
+                print(f"    Warning: failed to uninstall {formula}")
+                errors += 1
+    elif not brew_packages:
+        print()
+        print("  No Homebrew packages to remove (none were installed by setup).")
+
+    # ── Uninstall pipx packages (only ones we installed) ──
+
+    if pipx_packages and _which("pipx"):
+        print()
+        for pkg in pipx_packages:
+            print(f"  Removing {pkg} (pipx)...")
+            try:
+                result = subprocess.run(["pipx", "uninstall", pkg], timeout=60)
+                if result.returncode != 0:
+                    print(f"    Warning: failed to uninstall {pkg}")
+                    errors += 1
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                print(f"    Warning: failed to uninstall {pkg}")
+                errors += 1
+
+    # ── Remove wrapper script ──
+
+    wrapper = Path.home() / ".local" / "bin" / "quern"
+    if wrapper.exists():
+        print()
+        print(f"  Removing wrapper script ({wrapper})...")
+        try:
+            wrapper.unlink()
+            print("    Removed.")
+        except OSError as e:
+            print(f"    Warning: could not remove {wrapper}: {e}")
+            errors += 1
+
+    # ── Remove MCP registrations ──
+
+    print()
+    print("  Removing MCP server registrations...")
+    _remove_mcp_registrations()
+
+    # ── Remove tunneld LaunchDaemon ──
+
+    try:
+        from server.device.tunneld import PLIST_PATH
+        if PLIST_PATH.exists():
+            print()
+            if _prompt_yn("  Remove tunneld LaunchDaemon (requires sudo)?", default=True):
+                from server.device.tunneld import uninstall_daemon
+                uninstall_daemon()
+    except Exception:
+        pass  # tunneld module may not import if deps are gone
+
+    # ── Remove .venv ──
+
+    if project_root:
+        venv_path = project_root / ".venv"
+        if venv_path.exists():
+            print()
+            print(f"  Removing virtual environment ({venv_path})...")
+            shutil.rmtree(venv_path, ignore_errors=True)
+            print("    Removed.")
+
+    # ── Remove manifest and quern config dir ──
+
+    if INSTALL_MANIFEST.exists():
+        INSTALL_MANIFEST.unlink(missing_ok=True)
+
+    # ── Summary ──
+
+    print()
+    print("─" * 50)
+    if errors:
+        print(f"  Uninstall completed with {errors} warning(s).")
+    else:
+        print("  Uninstall complete.")
+    print()
+    if project_root:
+        print(f"  The source code is still at {project_root}")
+        print("  To remove it entirely: rm -rf " + str(project_root))
+    print()
+    return 0
+
+
+def _remove_mcp_registrations() -> None:
+    """Remove quern-debug from all known MCP config files."""
+    import json
+
+    configs = [
+        ("claude-code", Path.home() / ".claude.json", "mcpServers", "quern-debug"),
+        (
+            "claude-desktop",
+            Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+            "mcpServers",
+            "quern-debug",
+        ),
+        ("cursor", Path.home() / ".cursor" / "mcp.json", "mcpServers", "quern-debug"),
+        ("opencode", Path.home() / ".config" / "opencode" / "opencode.json", "mcp", "quern"),
+    ]
+
+    for name, path, section_key, entry_key in configs:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+            section = data.get(section_key, {})
+            if entry_key in section:
+                del section[entry_key]
+                data[section_key] = section
+                path.write_text(json.dumps(data, indent=2) + "\n")
+                print(f"    Removed from {name} ({path})")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Codex uses TOML — simple text removal
+    codex_path = Path.home() / ".codex" / "config.toml"
+    if codex_path.exists():
+        try:
+            text = codex_path.read_text()
+            if "[mcp_servers.quern]" in text:
+                lines = text.splitlines(keepends=True)
+                new_lines = []
+                skip = False
+                for line in lines:
+                    if line.strip() == "[mcp_servers.quern]":
+                        skip = True
+                        continue
+                    if skip and line.strip().startswith("["):
+                        skip = False
+                    if skip and (line.strip().startswith(("command", "args", "enabled")) or not line.strip()):
+                        continue
+                    new_lines.append(line)
+                codex_path.write_text("".join(new_lines))
+                print(f"    Removed from codex ({codex_path})")
+        except OSError:
+            pass

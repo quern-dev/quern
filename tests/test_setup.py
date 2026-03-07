@@ -9,11 +9,15 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from server.lifecycle.setup import (
+    INSTALL_MANIFEST,
     PYTHON_MAX,
     PYTHON_MIN,
     CheckResult,
     CheckStatus,
     SetupReport,
+    _read_manifest,
+    _record_install,
+    _write_manifest,
     check_booted_simulators,
     check_homebrew,
     check_libimobiledevice,
@@ -27,6 +31,7 @@ from server.lifecycle.setup import (
     check_xcode_cli_tools,
     create_venv,
     install_cert_simulator,
+    run_uninstall,
 )
 
 
@@ -513,3 +518,179 @@ class TestInstallCertSimulator:
              patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed):
             result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.ERROR
+
+
+# ── Install manifest ───────────────────────────────────────────────────
+
+
+class TestInstallManifest:
+    def test_read_missing_manifest(self, tmp_path):
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "nope.json"):
+            data = _read_manifest()
+            assert data == {"brew": [], "pip": [], "pipx": []}
+
+    def test_write_and_read(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path):
+            _write_manifest({"brew": ["node"], "pip": [], "pipx": []})
+            data = _read_manifest()
+            assert data["brew"] == ["node"]
+
+    def test_record_install_deduplicates(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path):
+            _record_install("brew", "node")
+            _record_install("brew", "node")
+            data = _read_manifest()
+            assert data["brew"] == ["node"]
+
+    def test_record_install_multiple(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path):
+            _record_install("brew", "node")
+            _record_install("brew", "pipx")
+            _record_install("pipx", "pymobiledevice3")
+            data = _read_manifest()
+            assert data["brew"] == ["node", "pipx"]
+            assert data["pipx"] == ["pymobiledevice3"]
+
+
+# ── brew_install records to manifest ───────────────────────────────────
+
+
+class TestBrewInstallTracking:
+    def test_successful_install_recorded(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
+             patch("server.lifecycle.setup.subprocess.run",
+                   return_value=_mock_run(returncode=0)):
+            from server.lifecycle.setup import _brew_install
+            assert _brew_install("libimobiledevice") is True
+            data = _read_manifest()
+            assert "libimobiledevice" in data["brew"]
+
+    def test_failed_install_not_recorded(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
+             patch("server.lifecycle.setup.subprocess.run",
+                   return_value=_mock_run(returncode=1)):
+            from server.lifecycle.setup import _brew_install
+            assert _brew_install("node") is False
+            data = _read_manifest()
+            assert "node" not in data.get("brew", [])
+
+
+# ── Prompt TTY fallback ───────────────────────────────────────────────
+
+
+class TestPromptYn:
+    def test_tty_stdin(self):
+        """Normal TTY stdin reads via input()."""
+        from server.lifecycle.setup import _prompt_yn
+        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
+             patch("builtins.input", return_value="y"):
+            mock_stdin.isatty.return_value = True
+            assert _prompt_yn("Install?") is True
+
+    def test_piped_stdin_opens_tty(self, tmp_path):
+        """When stdin is a pipe, _prompt_yn opens /dev/tty."""
+        from server.lifecycle.setup import _prompt_yn
+        from io import StringIO
+
+        mock_tty = StringIO("y\n")
+        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
+             patch("builtins.open", return_value=mock_tty):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install?") is True
+
+    def test_piped_stdin_default_on_empty_yes(self, tmp_path):
+        """Empty answer uses the default=True."""
+        from server.lifecycle.setup import _prompt_yn
+        from io import StringIO
+
+        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
+             patch("builtins.open", return_value=StringIO("\n")):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install?", default=True) is True
+
+    def test_piped_stdin_default_on_empty_no(self, tmp_path):
+        """Empty answer uses the default=False."""
+        from server.lifecycle.setup import _prompt_yn
+        from io import StringIO
+
+        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
+             patch("builtins.open", return_value=StringIO("\n")):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install?", default=False) is False
+
+    def test_piped_stdin_no_tty_returns_false(self):
+        """If /dev/tty can't be opened, returns False."""
+        from server.lifecycle.setup import _prompt_yn
+        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
+             patch("builtins.open", side_effect=OSError("no tty")):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install?") is False
+
+
+# ── Uninstall ──────────────────────────────────────────────────────────
+
+
+class TestRunUninstall:
+    def test_abort_on_decline(self, tmp_path):
+        """Declining the confirmation aborts cleanly."""
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=False), \
+             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path):
+            assert run_uninstall() == 0
+
+    def test_removes_tracked_brew_packages(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        manifest_path.parent.mkdir(parents=True)
+        import json
+        manifest_path.write_text(json.dumps({
+            "brew": ["libimobiledevice", "idb-companion"],
+            "pip": [],
+            "pipx": [],
+        }))
+
+        uninstalled = []
+
+        prompt_calls = [0]
+        def mock_prompt(q, default=True):
+            prompt_calls[0] += 1
+            if prompt_calls[0] == 1:
+                return True  # main confirmation
+            return False  # decline tunneld
+
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
+             patch("server.lifecycle.setup._prompt_yn", side_effect=mock_prompt), \
+             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path), \
+             patch("server.lifecycle.setup._which", return_value="/opt/homebrew/bin/brew"), \
+             patch("server.lifecycle.setup._brew_uninstall", side_effect=lambda f: (uninstalled.append(f), True)[-1]), \
+             patch("server.lifecycle.state.read_state", return_value=None), \
+             patch("server.lifecycle.setup._remove_mcp_registrations"):
+            result = run_uninstall()
+            assert result == 0
+            assert "libimobiledevice" in uninstalled
+            assert "idb-companion" in uninstalled
+
+    def test_skips_brew_when_nothing_tracked(self, tmp_path, capsys):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+
+        prompt_calls = [0]
+        def mock_prompt(q, default=True):
+            prompt_calls[0] += 1
+            if prompt_calls[0] == 1:
+                return True
+            return False
+
+        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
+             patch("server.lifecycle.setup._prompt_yn", side_effect=mock_prompt), \
+             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path), \
+             patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.state.read_state", return_value=None), \
+             patch("server.lifecycle.setup._remove_mcp_registrations"):
+            run_uninstall()
+            output = capsys.readouterr().out
+            assert "none were installed by setup" in output

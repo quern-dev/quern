@@ -326,6 +326,10 @@ def main() -> None:
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
+        from server.lifecycle.setup import run_uninstall
+        sys.exit(run_uninstall())
+
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
         sys.exit(_cmd_mcp_install())
 
