@@ -1,16 +1,17 @@
 """Daemon mode for Quern Debug Server.
 
-Forks the server into a background process, redirects stdio to a log file,
-and waits for the server to become healthy before the parent exits.
+Spawns the server as a detached background process and waits for it to
+become healthy before the parent exits.
 
-IMPORTANT: daemonize() must be called BEFORE any asyncio event loop is
-created — Python asyncio is not fork-safe.
+Uses subprocess.Popen (posix_spawn) instead of os.fork() — on macOS, the
+ObjC runtime aborts forked children of multi-threaded processes.
 """
 
 from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -21,49 +22,42 @@ LOG_FILE = CONFIG_DIR / "server.log"
 
 
 def daemonize(server_port: int) -> None:
-    """Fork the current process into a daemon.
+    """Spawn the server as a detached background process.
 
-    After this call:
-    - The parent process waits for the server to become healthy, prints
-      status, and calls sys.exit().
-    - The child process returns normally (caller should proceed to start
-      the server).
+    Re-invokes the current command with ``--foreground`` so the child
+    runs the normal foreground code path with its own fresh Python
+    interpreter (no fork).  The parent waits for the server to become
+    healthy, prints status, and calls ``sys.exit()``.
 
-    Must be called before creating an asyncio event loop.
-    """
-    pid = os.fork()
-
-    if pid > 0:
-        # Parent process — wait for health check, then exit
-        _parent_wait_and_exit(pid, server_port)
-        # _parent_wait_and_exit always calls sys.exit()
-
-    # Child process — become session leader, redirect stdio
-    os.setsid()
-    _redirect_stdio()
-    # Child returns to caller
-
-
-def _redirect_stdio() -> None:
-    """Redirect stdin/stdout/stderr to /dev/null and log file.
-
-    Redirects at the file descriptor level so subprocess output
-    (e.g., mitmdump) is also captured.
+    This function never returns — it always calls ``sys.exit()`` in the
+    parent.  The caller must check ``args.foreground`` and skip this
+    call when already in foreground mode.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Open targets
-    devnull_fd = os.open(os.devnull, os.O_RDWR)
     log_fd = os.open(str(LOG_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    devnull_fd = os.open(os.devnull, os.O_RDONLY)
 
-    # Redirect: stdin <- /dev/null, stdout/stderr -> log file
-    os.dup2(devnull_fd, 0)
-    os.dup2(log_fd, 1)
-    os.dup2(log_fd, 2)
+    # Build the child command: same Python, same module, force foreground.
+    # Strip any existing -f/--foreground from argv (shouldn't be there, but
+    # be safe), then pass through all remaining args after the subcommand.
+    passthrough = [
+        a for a in sys.argv[2:]
+        if a not in ("-f", "--foreground")
+    ]
+    child_cmd = [sys.executable, "-m", "server", "start", "--foreground"] + passthrough
 
-    # Close originals (they're now duped)
-    os.close(devnull_fd)
+    proc = subprocess.Popen(
+        child_cmd,
+        stdin=devnull_fd,
+        stdout=log_fd,
+        stderr=log_fd,
+        start_new_session=True,  # equivalent to os.setsid()
+    )
+
     os.close(log_fd)
+    os.close(devnull_fd)
+
+    _parent_wait_and_exit(proc.pid, server_port)
 
 
 def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:

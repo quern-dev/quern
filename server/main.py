@@ -531,7 +531,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # Daemonize if not foreground mode
     if not args.foreground:
         daemonize(server_port)
-        # Only the child process reaches here
+        # daemonize() never returns — it spawns a child process and exits.
 
     # Configure logging
     logging.basicConfig(
@@ -635,6 +635,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         host=config.host,
         port=server_port,
         log_level="debug" if args.verbose else "info",
+        loop="asyncio",  # uvloop uses fork+exec for subprocesses, which crashes on macOS
     )
     server = uvicorn.Server(uv_config)
     try:
