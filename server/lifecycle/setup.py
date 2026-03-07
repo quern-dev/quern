@@ -1387,11 +1387,15 @@ def run_setup() -> int:
 
 
 def _brew_uninstall(formula: str) -> bool:
-    """Uninstall a Homebrew formula. Returns True on success."""
+    """Uninstall a Homebrew formula. Returns True on success.
+
+    Uses --ignore-dependencies to avoid cascading removal of shared
+    dependencies (e.g. uninstalling pipx pulling python along with it).
+    """
     print(f"    Uninstalling {formula} via Homebrew...")
     try:
         result = subprocess.run(
-            ["brew", "uninstall", formula],
+            ["brew", "uninstall", "--ignore-dependencies", formula],
             timeout=120,
         )
         return result.returncode == 0
