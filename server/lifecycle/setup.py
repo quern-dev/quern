@@ -155,6 +155,7 @@ def _brew_install(formula: str) -> bool:
     try:
         result = subprocess.run(
             ["brew", "install", formula],
+            stdin=subprocess.DEVNULL,
             timeout=300,  # 5 min timeout for installs
         )
         if result.returncode == 0:
@@ -263,7 +264,8 @@ def _build_mcp(project_root: Path) -> CheckResult:
     if needs_install:
         print("    Installing MCP server dependencies...")
         result = subprocess.run(
-            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
+            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir),
+            stdin=subprocess.DEVNULL, timeout=120,
         )
         if result.returncode != 0:
             return CheckResult(
@@ -285,7 +287,8 @@ def _build_mcp(project_root: Path) -> CheckResult:
     if needs_build:
         print("    Building MCP server...")
         result = subprocess.run(
-            ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
+            ["npm", "run", "build"], cwd=str(mcp_dir),
+            stdin=subprocess.DEVNULL, timeout=60,
         )
         if result.returncode != 0:
             return CheckResult(
@@ -472,7 +475,7 @@ def create_venv(project_root: Path) -> bool:
     try:
         result = subprocess.run(
             [pip, "install", "-e", f"{project_root}[dev]"],
-            timeout=300,
+            stdin=subprocess.DEVNULL, timeout=300,
         )
         if result.returncode != 0:
             print("    pip install failed")
@@ -1020,11 +1023,22 @@ def _reexec_in_venv(venv_path: Path) -> int:
     venv_bin = str(venv_path / "bin")
     env["PATH"] = venv_bin + ":" + env.get("PATH", "")
     env["VIRTUAL_ENV"] = str(venv_path)
+    # When running under `curl | bash`, stdin is the pipe — pass /dev/tty
+    # so the re-exec'd process can prompt interactively.
+    stdin_arg: int | None = None
+    if not sys.stdin.isatty():
+        try:
+            stdin_arg = os.open("/dev/tty", os.O_RDONLY)
+        except OSError:
+            pass
     result = subprocess.run(
         [str(venv_python), "-m", "server.main", "setup"],
         cwd=str(venv_path.parent),
+        stdin=stdin_arg,
         env=env,
     )
+    if stdin_arg is not None:
+        os.close(stdin_arg)
     return result.returncode
 
 
@@ -1228,12 +1242,12 @@ def run_setup() -> int:
                 pip_cmd = "pip" if _which("pip") else "pip3"
             print(f"    Installing fb-idb...")
             try:
-                result = subprocess.run([pip_cmd, "install", "fb-idb"], timeout=120)
+                result = subprocess.run([pip_cmd, "install", "fb-idb"], stdin=subprocess.DEVNULL, timeout=120)
                 if result.returncode == 0:
                     _record_install("pip", "fb-idb")
                     # Rehash pyenv if it's being used
                     if _which("pyenv"):
-                        subprocess.run(["pyenv", "rehash"], timeout=10)
+                        subprocess.run(["pyenv", "rehash"], stdin=subprocess.DEVNULL, timeout=10)
                     idb_result = check_idb()  # re-check
                 else:
                     idb_result = CheckResult(
@@ -1260,14 +1274,14 @@ def run_setup() -> int:
             if _which("brew") and _prompt_yn("    pipx not found (needed for pymobiledevice3). Install via Homebrew?"):
                 if _brew_install("pipx"):
                     # pipx needs its PATH entry ensured
-                    subprocess.run(["pipx", "ensurepath"], timeout=30, capture_output=True)
+                    subprocess.run(["pipx", "ensurepath"], stdin=subprocess.DEVNULL, timeout=30, capture_output=True)
         if _which("pipx"):
             if _prompt_yn("    pymobiledevice3 not found. Install via pipx?"):
                 print("    Installing pymobiledevice3 via pipx...")
                 try:
                     result = subprocess.run(
                         ["pipx", "install", "pymobiledevice3"],
-                        timeout=300,
+                        stdin=subprocess.DEVNULL, timeout=300,
                     )
                     if result.returncode == 0:
                         _record_install("pipx", "pymobiledevice3")
@@ -1396,7 +1410,7 @@ def _brew_uninstall(formula: str) -> bool:
     try:
         result = subprocess.run(
             ["brew", "uninstall", "--ignore-dependencies", formula],
-            timeout=120,
+            stdin=subprocess.DEVNULL, timeout=120,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1464,7 +1478,7 @@ def run_uninstall() -> int:
         for pkg in pipx_packages:
             print(f"  Removing {pkg} (pipx)...")
             try:
-                result = subprocess.run(["pipx", "uninstall", pkg], timeout=60)
+                result = subprocess.run(["pipx", "uninstall", pkg], stdin=subprocess.DEVNULL, timeout=60)
                 if result.returncode != 0:
                     print(f"    Warning: failed to uninstall {pkg}")
                     errors += 1
