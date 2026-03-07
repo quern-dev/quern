@@ -1453,20 +1453,7 @@ def run_uninstall() -> int:
             except ProcessLookupError:
                 pass
 
-    # ── Uninstall Homebrew formulas (only ones we installed) ──
-
-    if brew_packages and _which("brew"):
-        print()
-        print(f"  Removing {len(brew_packages)} Homebrew package(s)...")
-        for formula in brew_packages:
-            if not _brew_uninstall(formula):
-                print(f"    Warning: failed to uninstall {formula}")
-                errors += 1
-    elif not brew_packages:
-        print()
-        print("  No Homebrew packages to remove (none were installed by setup).")
-
-    # ── Uninstall pipx packages (only ones we installed) ──
+    # ── Uninstall pipx packages first (before brew removes pipx itself) ──
 
     if pipx_packages and _which("pipx"):
         print()
@@ -1480,6 +1467,19 @@ def run_uninstall() -> int:
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 print(f"    Warning: failed to uninstall {pkg}")
                 errors += 1
+
+    # ── Uninstall Homebrew formulas (only ones we installed) ──
+
+    if brew_packages and _which("brew"):
+        print()
+        print(f"  Removing {len(brew_packages)} Homebrew package(s)...")
+        for formula in brew_packages:
+            if not _brew_uninstall(formula):
+                print(f"    Warning: failed to uninstall {formula}")
+                errors += 1
+    elif not brew_packages:
+        print()
+        print("  No Homebrew packages to remove (none were installed by setup).")
 
     # ── Remove wrapper script ──
 
