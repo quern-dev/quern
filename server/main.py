@@ -29,6 +29,7 @@ from typing import AsyncGenerator
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 from server.auth import APIKeyMiddleware
 from server.device.controller import DeviceController
@@ -367,17 +368,9 @@ def create_app(
     app.include_router(app_state_router)
 
     @app.get("/")
-    async def root() -> dict:
-        """Root route — public info about the running server."""
-        return {
-            "name": "Quern Debug Server",
-            "version": "0.1.0",
-            "docs": "/docs",
-            "health": "/health",
-            "hint": "Quern is an MCP server for AI-assisted mobile development. "
-                    "Connect via Claude Code, Cursor, or any MCP-compatible tool. "
-                    "API endpoints require an API key (see ~/.quern/api-key).",
-        }
+    async def root() -> RedirectResponse:
+        """Redirect root to API docs."""
+        return RedirectResponse(url="/docs")
 
     @app.get("/health")
     async def health() -> dict:
