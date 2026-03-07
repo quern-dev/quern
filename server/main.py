@@ -366,6 +366,19 @@ def create_app(
     app.include_router(build_app_router)
     app.include_router(app_state_router)
 
+    @app.get("/")
+    async def root() -> dict:
+        """Root route — public info about the running server."""
+        return {
+            "name": "Quern Debug Server",
+            "version": "0.1.0",
+            "docs": "/docs",
+            "health": "/health",
+            "hint": "Quern is an MCP server for AI-assisted mobile development. "
+                    "Connect via Claude Code, Cursor, or any MCP-compatible tool. "
+                    "API endpoints require an API key (see ~/.quern/api-key).",
+        }
+
     @app.get("/health")
     async def health() -> dict:
         """Health check with tool availability status and cache stats."""
