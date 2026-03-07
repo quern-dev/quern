@@ -150,4 +150,19 @@ def run_update() -> int:
 
     run_setup()
 
+    # 8. Restart the server if it was running
+    from server.lifecycle.state import read_state, is_server_healthy
+
+    state = read_state()
+    if state and is_server_healthy(state.get("server_port", 9100)):
+        print("Restarting server to pick up changes...")
+        venv_python = project_root / ".venv" / "bin" / "python"
+        subprocess.run(
+            [str(venv_python), "-m", "server", "restart"],
+            cwd=str(project_root),
+            timeout=30,
+        )
+    else:
+        print("Server is not running — start it with: quern start")
+
     return 0
