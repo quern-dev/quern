@@ -435,6 +435,82 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 ---
 
+## iOS Logging Best Practices for App Developers
+
+Quern captures logs from Apple's unified logging system. How your app emits logs directly affects what Quern can capture and filter. These recommendations help developers get the most out of remote log capture.
+
+### Use os.Logger, not print()
+
+Swift's `print()` writes to stdout, which is **not captured** by the unified logging system. On a physical device, `print()` output is invisible to Quern (and to Console.app). Always use `os.Logger` instead:
+
+```swift
+import os
+
+// Create a logger with your app's subsystem and a category
+let logger = Logger(subsystem: "com.example.myapp", category: "networking")
+
+// Log at appropriate levels
+logger.notice("Request started: \(url.absoluteString, privacy: .public)")
+logger.error("Request failed: \(error.localizedDescription, privacy: .public)")
+```
+
+The subsystem and category are what make Quern's filtering powerful — they let agents filter to exactly your code's output with zero framework noise.
+
+### Choose the right log level
+
+| Level | Use for | Quern visibility |
+|-------|---------|-----------------|
+| `.debug` | Verbose development traces, variable dumps | Captured but high volume — filter aggressively |
+| `.info` | Routine operations (request started, cache hit) | Good default for most app events |
+| `.notice` | Significant events worth seeing in production (login, navigation, state changes) | **Recommended default** — survives aggressive level filters |
+| `.error` | Failures that need attention (network errors, decode failures) | Always visible in `get_errors` |
+| `.fault` | Invariant violations, "this should never happen" | Always visible, triggers crash-adjacent alerts |
+
+**Recommended default: `.notice`**. It's high enough to survive `min_level` filters but doesn't imply something is wrong. Use `.info` for chatty operational logs, `.error` only for actual failures.
+
+### Mark strings as .public for debugging
+
+By default, the unified logging system redacts dynamic string interpolations as `<private>` on physical devices. This makes logs useless for debugging. Mark values you need to see:
+
+```swift
+// BAD — shows as "<private>" on device
+logger.notice("User tapped \(buttonName)")
+
+// GOOD — visible in Quern logs
+logger.notice("User tapped \(buttonName, privacy: .public)")
+```
+
+**When to use `.public`**: Any value you'd want to see while debugging — URLs, view names, error messages, state descriptions. Don't mark genuinely sensitive data (auth tokens, passwords, PII) as public.
+
+### Structure your subsystems for filtering
+
+Use a consistent subsystem hierarchy so agents can filter at the right granularity:
+
+```swift
+// Top-level subsystem for the app
+Logger(subsystem: "com.example.myapp", category: "general")
+
+// Feature-specific loggers
+Logger(subsystem: "com.example.myapp", category: "networking")
+Logger(subsystem: "com.example.myapp", category: "auth")
+Logger(subsystem: "com.example.myapp", category: "ui")
+```
+
+With this structure, an agent can filter to your entire app with `subsystems: ["com.example.myapp"]` or drill into a specific category with `query_logs(search: "auth")`.
+
+### What Quern captures vs. what it doesn't
+
+| Output method | Simulator | Physical device |
+|--------------|-----------|-----------------|
+| `os.Logger` / `Logger` | Captured | Captured |
+| `NSLog()` | Captured | Captured (routes through unified logging on iOS 10+) |
+| `print()` / `debugPrint()` | Not captured | Not captured |
+| `dump()` | Not captured | Not captured |
+
+If your app uses `print()` extensively and you can't change it immediately, consider adding a `freopen` redirect at app launch to route stdout to os_log — but migrating to `os.Logger` is the proper fix.
+
+---
+
 ## Summary
 
 1. **Think in structured data**, not visuals
