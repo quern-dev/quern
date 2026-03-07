@@ -86,6 +86,14 @@ cd quern
 
 </details>
 
+### Uninstall
+
+```bash
+quern uninstall
+```
+
+Removes Homebrew packages, pipx packages, MCP registrations, the wrapper script, and the virtualenv. Only removes packages that were installed by `quern setup` — pre-existing tools (like Node.js) are left untouched. The source code directory is preserved; the command prints instructions to remove it if desired.
+
 ### Run
 
 ```bash
@@ -94,6 +102,7 @@ quern start -f             # run in the foreground (Ctrl-C to stop)
 quern status               # check status
 quern stop                 # stop
 quern update               # pull latest changes and rebuild
+quern uninstall            # remove Quern and its dependencies
 ```
 
 The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`:
@@ -104,6 +113,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `cert-state.json` | Per-device certificate installation state — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture settings and other configuration |
+| `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
 
@@ -221,6 +231,7 @@ quern stop                   # Graceful shutdown
 quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime
 quern update                 # Pull latest changes, reinstall deps, rebuild MCP
+quern uninstall              # Remove Quern and dependencies installed by setup
 quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
 quern enable-local-capture   # Enable transparent simulator traffic capture
