@@ -149,6 +149,24 @@ def _record_install(category: str, name: str) -> None:
     _write_manifest(manifest)
 
 
+def _find_brew_binary(name: str) -> str | None:
+    """Find a binary by name, checking PATH then Homebrew prefix.
+
+    After a fresh ``brew install`` the binary may not be on the running
+    process's PATH yet. This falls back to ``brew --prefix`` to locate it.
+    """
+    found = _which(name)
+    if found:
+        return found
+    # Ask Homebrew for its top-level prefix (e.g. /opt/homebrew)
+    rc, prefix, _ = _run(["brew", "--prefix"])
+    if rc == 0 and prefix:
+        candidate = Path(prefix.strip()) / "bin" / name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _brew_install(formula: str) -> bool:
     """Install a Homebrew formula. Returns True on success."""
     print(f"    Installing {formula} via Homebrew...")
@@ -1273,30 +1291,13 @@ def run_setup() -> int:
         if not _which("pipx"):
             if _which("brew") and _prompt_yn("    pipx not found (needed for pymobiledevice3). Install via Homebrew?"):
                 if _brew_install("pipx"):
-                    # Resolve the freshly installed pipx — shutil.which may
-                    # not find it if the brew prefix isn't on our PATH yet.
-                    pipx_bin = _which("pipx")
-                    if not pipx_bin:
-                        rc, prefix, _ = _run(["brew", "--prefix", "pipx"])
-                        if rc == 0 and prefix:
-                            candidate = Path(prefix.strip()) / "bin" / "pipx"
-                            if candidate.exists():
-                                pipx_bin = str(candidate)
-                    if not pipx_bin:
-                        # Last resort: standard Homebrew bin
-                        for p in ("/opt/homebrew/bin/pipx", "/usr/local/bin/pipx"):
-                            if Path(p).exists():
-                                pipx_bin = p
-                                break
+                    pipx_bin = _find_brew_binary("pipx")
                     if pipx_bin:
-                        subprocess.run([pipx_bin, "ensurepath"], stdin=subprocess.DEVNULL, timeout=30, capture_output=True)
-        pipx_bin = _which("pipx")
-        if not pipx_bin:
-            # Check common Homebrew locations in case PATH is stale
-            for p in ("/opt/homebrew/bin/pipx", "/usr/local/bin/pipx"):
-                if Path(p).exists():
-                    pipx_bin = p
-                    break
+                        try:
+                            subprocess.run([pipx_bin, "ensurepath"], stdin=subprocess.DEVNULL, timeout=30, capture_output=True)
+                        except (FileNotFoundError, subprocess.TimeoutExpired):
+                            pass  # non-critical
+        pipx_bin = _find_brew_binary("pipx")
         if pipx_bin:
             if _prompt_yn("    pymobiledevice3 not found. Install via pipx?"):
                 print("    Installing pymobiledevice3 via pipx...")
