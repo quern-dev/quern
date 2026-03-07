@@ -79,7 +79,7 @@ Use `wait_for_flow` after triggering a UI action to observe the resulting networ
 
 Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
-**Logs**: Filter by `level`, `process`, `search` text, and time range. Don't fetch 1,000 entries when 50 filtered ones will do.
+**Logs**: Filter by `level`, `process`, `search` text, and time range. Don't fetch 1,000 entries when 50 filtered ones will do. For sustained debugging, use `set_log_filter` to drop noise at ingestion — the `device-quiet` preset removes common system daemons, or combine `process` + `subsystems` includes for app-only output with zero framework noise. Setting a process filter automatically restarts running log adapters with subprocess-level filtering, cutting noise at the source. You can also apply presets at start time: `start_device_logging(process: "MyApp", preset: "device-quiet")`.
 
 **Flows**: Filter by `host`, `method`, `path_contains`, and `status_min`/`status_max`. Use `get_flow_summary` first to identify which hosts or patterns to investigate.
 
@@ -186,7 +186,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - `boot_device` / `shutdown_device` — simulators only
 - `set_location` — simulators only
 - `grant_permission` — simulators only
-- `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators)
+- `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators). Captures os_log and Logger output only — `print()` writes to stdout and is not captured. Both support `preset` parameter to apply ingestion filters at start time
 - `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
 - `preview_device` — opens a live macOS video preview window of the device screen via CoreMediaIO (USB-connected physical devices only, not simulators). Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and available devices
 
@@ -248,6 +248,9 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Overview: `get_log_summary`
 - Specific search: `query_logs` with filters
 - Errors only: `get_errors`
+- Reduce noise at start: `start_device_logging(process: "MyApp", preset: "device-quiet")` — applies subprocess-level process filter and ingestion preset in one call
+- Reduce noise mid-session: `set_log_filter(source: "device", process: "MyApp")` — automatically restarts the adapter with subprocess-level filtering and purges old entries
+- **App-only mode** (zero noise): First `tail_logs` with the process filter to discover your app's subsystem name, then lock it down with `set_log_filter(source: "device", process: "MyApp", subsystems: ["MyApp.debug.dylib"])`. This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's os_log output.
 
 **"I need to control the device"**
 - Boot: `boot_device` or `resolve_device` with auto_boot

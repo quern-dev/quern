@@ -25,6 +25,8 @@ from server.sources.oslog import (
 
 logger = logging.getLogger(__name__)
 
+_UNCHANGED = object()  # Sentinel for reconfigure() defaults
+
 
 class SimulatorLogAdapter(BaseSourceAdapter):
     """Captures simulator app logs via `xcrun simctl spawn <UDID> log stream`."""
@@ -68,6 +70,27 @@ class SimulatorLogAdapter(BaseSourceAdapter):
             cmd.extend(["--predicate", " AND ".join(predicates)])
 
         return cmd
+
+    async def reconfigure(
+        self,
+        process_filter: str | None = _UNCHANGED,  # type: ignore[assignment]
+        subsystem_filter: str | None = _UNCHANGED,  # type: ignore[assignment]
+        level: str | None = _UNCHANGED,  # type: ignore[assignment]
+    ) -> None:
+        """Stop subprocess, update filters, restart. Preserves on_entry callback."""
+        was_running = self._running
+        if was_running:
+            await self.stop()
+        if process_filter is not _UNCHANGED:
+            self.process_filter = process_filter
+        if subsystem_filter is not _UNCHANGED:
+            self.subsystem_filter = subsystem_filter
+        if level is not _UNCHANGED:
+            self.level = level or "debug"
+        self.entries_captured = 0
+        self._error = None
+        if was_running:
+            await self.start()
 
     async def start(self) -> None:
         """Spawn simctl log stream and begin reading JSON output."""

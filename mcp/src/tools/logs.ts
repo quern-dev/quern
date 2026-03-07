@@ -216,6 +216,7 @@ export function registerLogTools(server: McpServer): void {
           level,
           process,
           source,
+          tail: true,
         })) as { entries: unknown[] };
 
         // Reverse to show most recent first
@@ -520,25 +521,96 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("set_log_filter", {
-    description: `Reconfigure log capture filters for a source adapter.`,
+    description: `Configure the ingestion filter to drop noisy log entries before they reach the ring buffer. Supports presets ("device-quiet", "simulator-quiet") and per-field overrides. Filters can be scoped globally, per-source, or per-device (most specific wins). Use get_log_filter to see current state.
+
+When a process include filter is set, running log adapters are automatically restarted with subprocess-level filtering (e.g. pymobiledevice3 -pn flag or simctl --predicate). This cuts noise at the source instead of just filtering in Python. The response includes "adapter_restarted": true when this happens.
+
+For app-only filtering (zero noise), combine process + subsystems include. First find your app's subsystem by calling tail_logs with the process filter, then lock it down:
+  set_log_filter(source: "device", process: "MyApp", subsystems: ["MyApp.debug.dylib"])
+This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's os_log output.`,
     inputSchema: strictParams({
-      source: z.string().describe("Source adapter to configure (e.g. 'simulator')"),
+      source: z
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
+        .optional()
+        .describe("Scope filter to this source adapter"),
+      device_id: z
+        .string()
+        .optional()
+        .describe("Scope filter to this device UDID (most specific, overrides source/global)"),
       process: z
         .string()
         .optional()
-        .describe("Filter to this process name"),
-      exclude_patterns: z
+        .describe("Include only entries from this process (exact match)"),
+      processes: z
         .array(z.string())
         .optional()
-        .describe("Message patterns to exclude"),
+        .describe("Include only entries from these processes"),
+      subsystems: z
+        .array(z.string())
+        .optional()
+        .describe("Include only entries from these subsystems"),
+      exclude_processes: z
+        .array(z.string())
+        .optional()
+        .describe("Drop entries from these processes"),
+      exclude_subsystems: z
+        .array(z.string())
+        .optional()
+        .describe("Drop entries from these subsystems"),
+      exclude_messages: z
+        .array(z.string())
+        .optional()
+        .describe("Drop entries whose message contains any of these substrings (case-insensitive)"),
+      min_level: z
+        .enum(["debug", "info", "notice", "warning", "error", "fault"])
+        .optional()
+        .describe("Drop entries below this severity level"),
+      preset: z
+        .enum(["device-quiet", "simulator-quiet"])
+        .optional()
+        .describe("Load a named preset as base config (can be combined with other fields as overrides). device-quiet excludes common system daemons (bluetoothd, wifid, kernel, symptomsd, remotepairingdeviced, signpost_reporter) and noisy subsystems (CoreBrightness, CFNetwork)."),
     }),
-  }, async ({ source, process, exclude_patterns }) => {
+  }, async ({ source, device_id, process, processes, subsystems, exclude_processes, exclude_subsystems, exclude_messages, min_level, preset }) => {
       try {
-        const data = await apiRequest("POST", "/api/v1/logs/filter", undefined, {
-          source,
-          process,
-          exclude_patterns,
-        });
+        const body: Record<string, unknown> = {};
+        if (source !== undefined) body.source = source;
+        if (device_id !== undefined) body.device_id = device_id;
+        if (process !== undefined) body.process = process;
+        if (processes !== undefined) body.processes = processes;
+        if (subsystems !== undefined) body.subsystems = subsystems;
+        if (exclude_processes !== undefined) body.exclude_processes = exclude_processes;
+        if (exclude_subsystems !== undefined) body.exclude_subsystems = exclude_subsystems;
+        if (exclude_messages !== undefined) body.exclude_messages = exclude_messages;
+        if (min_level !== undefined) body.min_level = min_level;
+        if (preset !== undefined) body.preset = preset;
+
+        const data = await apiRequest("POST", "/api/v1/logs/filter", undefined, body);
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool("get_log_filter", {
+    description: `Show the current ingestion filter configuration at all scopes (global, per-source, per-device).`,
+    inputSchema: strictParams({}),
+  }, async () => {
+      try {
+        const data = await apiRequest("GET", "/api/v1/logs/filter");
 
         return {
           content: [

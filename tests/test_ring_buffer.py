@@ -146,6 +146,62 @@ async def test_filter_entries_applies_filters():
 
 
 @pytest.mark.asyncio
+async def test_purge_removes_non_matching():
+    buf = RingBuffer(max_size=100)
+
+    await buf.append(_make_entry("keep", process="MyApp"))
+    await buf.append(_make_entry("drop", process="noisyd"))
+    await buf.append(_make_entry("keep2", process="MyApp"))
+    await buf.append(_make_entry("drop2", process="wifid"))
+
+    removed = await buf.purge(lambda e: e.process == "MyApp")
+    assert removed == 2
+    assert buf.size == 2
+
+    recent = await buf.get_recent(10)
+    assert all(e.process == "MyApp" for e in recent)
+
+
+@pytest.mark.asyncio
+async def test_purge_empty_buffer():
+    buf = RingBuffer(max_size=100)
+    removed = await buf.purge(lambda e: True)
+    assert removed == 0
+
+
+@pytest.mark.asyncio
+async def test_query_tail_returns_newest():
+    buf = RingBuffer(max_size=100)
+
+    for i in range(10):
+        await buf.append(_make_entry(f"msg {i}"))
+
+    params = LogQueryParams(limit=3, tail=True)
+    results, total = await buf.query(params)
+
+    assert total == 10
+    assert len(results) == 3
+    assert [e.message for e in results] == ["msg 7", "msg 8", "msg 9"]
+
+
+@pytest.mark.asyncio
+async def test_query_tail_with_filter():
+    buf = RingBuffer(max_size=100)
+
+    for i in range(10):
+        proc = "MyApp" if i % 2 == 0 else "Other"
+        await buf.append(_make_entry(f"msg {i}", process=proc))
+
+    params = LogQueryParams(process="MyApp", limit=2, tail=True)
+    results, total = await buf.query(params)
+
+    assert total == 5  # 5 MyApp entries
+    assert len(results) == 2
+    # Should be the last 2 MyApp entries: msg 6, msg 8
+    assert [e.message for e in results] == ["msg 6", "msg 8"]
+
+
+@pytest.mark.asyncio
 async def test_subscribe_receives_new_entries():
     buf = RingBuffer(max_size=100)
     queue = buf.subscribe()

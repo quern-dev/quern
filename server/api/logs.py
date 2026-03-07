@@ -55,9 +55,17 @@ class SourcesResponse(BaseModel):
 
 
 class FilterRequest(BaseModel):
-    source: str
+    source: str | None = None
+    device_id: str | None = None
     process: str | None = None
-    exclude_patterns: list[str] | None = None
+    processes: list[str] | None = None
+    subsystems: list[str] | None = None
+    exclude_processes: list[str] | None = None
+    exclude_subsystems: list[str] | None = None
+    exclude_messages: list[str] | None = None
+    min_level: str | None = None
+    preset: str | None = None
+    flush: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +180,7 @@ async def query_logs(
     device_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    tail: bool = Query(default=False, description="If true, return the last N matching entries"),
 ) -> LogQueryResponse:
     """Query historical log entries with filters and pagination."""
     params = LogQueryParams(
@@ -184,6 +193,7 @@ async def query_logs(
         device_id=device_id,
         limit=limit,
         offset=offset,
+        tail=tail,
     )
 
     buffers = _get_buffers(request, source)
@@ -197,7 +207,10 @@ async def query_logs(
             all_entries.extend(buf_entries)
         all_entries.sort(key=lambda e: e.timestamp)
         total = len(all_entries)
-        entries = all_entries[offset : offset + limit]
+        if tail:
+            entries = all_entries[-limit:]
+        else:
+            entries = all_entries[offset : offset + limit]
 
     return LogQueryResponse(
         entries=entries,
@@ -295,19 +308,108 @@ async def list_sources(request: Request) -> SourcesResponse:
 
 
 @router.post("/filter")
-async def set_filter(request: Request, filter_req: FilterRequest) -> dict[str, str]:
-    """Reconfigure capture filters for a source adapter.
+async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
+    """Configure the ingestion filter to drop noisy entries before the ring buffer.
 
-    Spec (phase1-architecture.md): Let agents dynamically narrow log capture
-    without restarting the server — e.g., filter to a single process or exclude
-    noisy subsystems. Request body: {"source": "syslog", "process": "MyApp",
-    "exclude_patterns": ["noise_keyword"]}.
-
-    Current limitation: BaseSourceAdapter only accepts filter args at construction
-    (process_filter, subsystem_filter, etc.). There is no reconfigure() method.
-    Implementation path: stop the adapter, rebuild it with new filter args, restart
-    it, and re-wire the on_entry callback. The exclude_patterns field would need
-    new support in the adapters or the processing pipeline.
+    Supports presets (e.g. "device-quiet") and per-field overrides.
+    Filters can be scoped globally, per-source, or per-device.
     """
-    # TODO: Implement dynamic filter reconfiguration (see docstring for plan)
-    return {"status": "accepted", "note": "Filter reconfiguration not yet implemented"}
+    from fastapi import HTTPException
+    from server.processing.ingestion_filter import PRESETS, build_config
+
+    ingestion_filter = request.app.state.ingestion_filter
+    if ingestion_filter is None:
+        raise HTTPException(status_code=503, detail="Server not fully started")
+
+    # Validate preset
+    if filter_req.preset and filter_req.preset not in PRESETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown preset: {filter_req.preset!r}. Available: {sorted(PRESETS)}",
+        )
+
+    # Validate source
+    source = None
+    if filter_req.source:
+        try:
+            source = LogSource(filter_req.source)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown source: {filter_req.source!r}. Available: {[s.value for s in LogSource]}",
+            )
+
+    # Validate min_level
+    min_level = None
+    if filter_req.min_level:
+        try:
+            min_level = LogLevel(filter_req.min_level)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown level: {filter_req.min_level!r}. Available: {[l.value for l in LogLevel]}",
+            )
+
+    # Build config from preset + overrides
+    overrides = {}
+    if filter_req.process is not None:
+        overrides["process"] = filter_req.process
+    if filter_req.processes is not None:
+        overrides["processes"] = filter_req.processes
+    if filter_req.subsystems is not None:
+        overrides["subsystems"] = filter_req.subsystems
+    if filter_req.exclude_processes is not None:
+        overrides["exclude_processes"] = filter_req.exclude_processes
+    if filter_req.exclude_subsystems is not None:
+        overrides["exclude_subsystems"] = filter_req.exclude_subsystems
+    if filter_req.exclude_messages is not None:
+        overrides["exclude_messages"] = filter_req.exclude_messages
+    if min_level is not None:
+        overrides["min_level"] = min_level
+
+    config = build_config(preset=filter_req.preset, **overrides)
+    ingestion_filter.update_filter(config, source=source, device_id=filter_req.device_id)
+
+    # Purge pre-filter entries from the buffer so tail_logs sees clean results
+    purged = 0
+    if filter_req.flush:
+        buffer: RingBuffer = request.app.state.ring_buffer
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+
+    # Restart adapters with subprocess-level filters when a process include is set
+    adapter_restarted = False
+    if config.process and source in (LogSource.DEVICE, LogSource.SIMULATOR, None):
+        if source in (LogSource.DEVICE, None):
+            for adapter in request.app.state.device_log_adapters.values():
+                if adapter.is_running:
+                    await adapter.reconfigure(process_filter=config.process)
+                    adapter_restarted = True
+        if source in (LogSource.SIMULATOR, None):
+            for adapter in request.app.state.sim_log_adapters.values():
+                if adapter.is_running:
+                    await adapter.reconfigure(process_filter=config.process)
+                    adapter_restarted = True
+
+    return {
+        "status": "applied",
+        "filter": config.to_dict(),
+        "scope": (
+            f"device:{filter_req.device_id}" if filter_req.device_id
+            else f"source:{source.value}" if source
+            else "global"
+        ),
+        "purged": purged,
+        "adapter_restarted": adapter_restarted,
+    }
+
+
+@router.get("/filter")
+async def get_filter(request: Request) -> dict:
+    """Return the current ingestion filter configuration at all scopes."""
+    from fastapi import HTTPException
+
+    ingestion_filter = request.app.state.ingestion_filter
+    if ingestion_filter is None:
+        raise HTTPException(status_code=503, detail="Server not fully started")
+
+    return ingestion_filter.get_all_configs()

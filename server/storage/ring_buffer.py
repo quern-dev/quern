@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
 
 from server.models import LogEntry, LogLevel, LogQueryParams, LogSource
@@ -50,13 +51,29 @@ class RingBuffer:
         for dead in dead_subs:
             self._subscribers.remove(dead)
 
+    async def purge(self, keep: Callable[[LogEntry], bool]) -> int:
+        """Remove entries that don't match the predicate. Returns count removed."""
+        async with self._lock:
+            before = len(self._buffer)
+            self._buffer = deque(
+                (e for e in self._buffer if keep(e)),
+                maxlen=self._buffer.maxlen,
+            )
+            return before - len(self._buffer)
+
     async def query(self, params: LogQueryParams) -> tuple[list[LogEntry], int]:
-        """Query the buffer with filters. Returns (entries, total_matching)."""
+        """Query the buffer with filters. Returns (entries, total_matching).
+
+        If params.tail is True, returns the LAST N matching entries instead of
+        paginating from the start.
+        """
         async with self._lock:
             results = self._filter(params)
             total = len(results)
-            # Apply pagination
-            paginated = results[params.offset : params.offset + params.limit]
+            if params.tail:
+                paginated = results[-params.limit:]
+            else:
+                paginated = results[params.offset : params.offset + params.limit]
             return paginated, total
 
     async def filter_entries(self, params: LogQueryParams) -> list[LogEntry]:

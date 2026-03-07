@@ -29,6 +29,8 @@ from server.sources import BaseSourceAdapter, EntryCallback
 
 logger = logging.getLogger(__name__)
 
+_UNCHANGED = object()  # Sentinel for reconfigure() defaults
+
 # Regex to parse pymobiledevice3 syslog live output lines
 # Format: "2026-02-21 21:22:45.272141 LogTester{Foundation}[2915] <NOTICE>: message"
 # Groups: datetime, process, subsystem (optional), pid, level, message
@@ -105,6 +107,24 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             cmd.extend(["-m", self.match_filter])
 
         return cmd
+
+    async def reconfigure(
+        self,
+        process_filter: str | None = _UNCHANGED,  # type: ignore[assignment]
+        match_filter: str | None = _UNCHANGED,  # type: ignore[assignment]
+    ) -> None:
+        """Stop subprocess, update filters, restart. Preserves on_entry callback."""
+        was_running = self._running
+        if was_running:
+            await self.stop()
+        if process_filter is not _UNCHANGED:
+            self.process_filter = process_filter
+        if match_filter is not _UNCHANGED:
+            self.match_filter = match_filter
+        self.entries_captured = 0
+        self._error = None
+        if was_running:
+            await self.start()
 
     async def start(self) -> None:
         """Spawn pymobiledevice3 syslog live and begin reading output."""

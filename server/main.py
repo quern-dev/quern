@@ -49,7 +49,9 @@ from server.lifecycle.state import (
     write_state,
 )
 from server.lifecycle.watchdog import proxy_watchdog
+from server.models import LogEntry
 from server.processing.deduplicator import Deduplicator
+from server.processing.ingestion_filter import IngestionFilter
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter
 from server.sources.build import BuildAdapter
@@ -81,8 +83,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config: ServerConfig = app.state.config
     buffer: RingBuffer = app.state.ring_buffer
 
-    # Processing pipeline: adapter → deduplicator → ring buffer
-    dedup = Deduplicator(on_entry=buffer.append)
+    # Processing pipeline: adapter → deduplicator → filter → ring buffer
+    ingestion_filter = IngestionFilter()
+    app.state.ingestion_filter = ingestion_filter
+
+    async def filtered_append(entry: LogEntry) -> None:
+        if ingestion_filter.should_admit(entry):
+            await buffer.append(entry)
+
+    dedup = Deduplicator(on_entry=filtered_append)
     dedup.start()
     app.state.deduplicator = dedup
 
@@ -339,6 +348,7 @@ def create_app(
     app.state.proxy_port = proxy_port
     app.state.on_crash_hook = on_crash_hook
     app.state.local_capture_processes = local_capture_processes or []
+    app.state.ingestion_filter = None
     app.state.source_adapters = {}
     app.state.crash_adapter = None
     app.state.build_adapter = None

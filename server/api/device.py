@@ -360,7 +360,25 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     sim_adapters[udid] = adapter
     request.app.state.source_adapters[adapter.adapter_id] = adapter
 
-    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id}
+    # Apply ingestion filter preset if requested
+    preset_applied = None
+    if body.preset:
+        from server.processing.ingestion_filter import PRESETS, build_config
+
+        if body.preset not in PRESETS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown preset: {body.preset!r}. Available: {sorted(PRESETS)}",
+            )
+        ingestion_filter = request.app.state.ingestion_filter
+        config = build_config(preset=body.preset)
+        from server.models import LogSource
+        ingestion_filter.update_filter(config, source=LogSource.SIMULATOR)
+        buffer = request.app.state.ring_buffer
+        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        preset_applied = body.preset
+
+    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id, "preset_applied": preset_applied}
 
 
 @router.post("/logging/stop")
@@ -397,10 +415,13 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
 async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     """Start capturing logs from a physical device via pymobiledevice3 syslog.
 
-    Captures os_log, Logger, and NSLog output. Logs appear in tail_logs/query_logs
-    with source="device". Use process filter to limit noise.
+    Captures os_log and Logger output. Logs appear in tail_logs/query_logs
+    with source="device". Use process filter to limit noise — applied at the
+    subprocess level (pymobiledevice3 -pn flag). Use preset to apply an
+    ingestion filter at start time.
 
-    NOTE: This does NOT capture print() output.
+    NOTE: This does NOT capture print() output — print() writes to stdout,
+    not the unified logging system.
     """
     from server.sources.device_log import PhysicalDeviceLogAdapter
 
@@ -443,7 +464,25 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     dev_adapters[udid] = adapter
     request.app.state.source_adapters[adapter.adapter_id] = adapter
 
-    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id}
+    # Apply ingestion filter preset if requested
+    preset_applied = None
+    if body.preset:
+        from server.processing.ingestion_filter import PRESETS, build_config
+
+        if body.preset not in PRESETS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown preset: {body.preset!r}. Available: {sorted(PRESETS)}",
+            )
+        ingestion_filter = request.app.state.ingestion_filter
+        config = build_config(preset=body.preset)
+        from server.models import LogSource
+        ingestion_filter.update_filter(config, source=LogSource.DEVICE)
+        buffer = request.app.state.ring_buffer
+        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        preset_applied = body.preset
+
+    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id, "preset_applied": preset_applied}
 
 
 @router.post("/logging/device/stop")

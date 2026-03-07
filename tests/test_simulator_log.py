@@ -1,7 +1,7 @@
 """Tests for the SimulatorLogAdapter."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -305,3 +305,77 @@ async def test_read_loop_pretty_printed_json():
     assert len(emitted) == 1
     assert emitted[0].message == "hello pretty"
     assert emitted[0].source == LogSource.SIMULATOR
+
+
+# ---------------------------------------------------------------------------
+# Reconfigure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_updates_filters_and_restarts():
+    """reconfigure() stops, updates filters, restarts with new command."""
+    mock_proc = AsyncMock()
+    mock_proc.returncode = None
+    mock_proc.stdout = AsyncMock()
+    mock_proc.stdout.__aiter__ = MagicMock(return_value=iter([]))
+    mock_proc.terminate = MagicMock()
+    mock_proc.wait = AsyncMock()
+    mock_proc.kill = MagicMock()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        adapter = SimulatorLogAdapter(
+            udid=SAMPLE_UDID,
+            process_filter="OldApp",
+            subsystem_filter="com.old",
+        )
+        await adapter.start()
+        assert adapter.is_running
+
+        # Reconfigure with new process filter
+        mock_proc.returncode = None
+        await adapter.reconfigure(process_filter="NewApp")
+
+        assert adapter.process_filter == "NewApp"
+        # subsystem_filter unchanged (sentinel default)
+        assert adapter.subsystem_filter == "com.old"
+        assert adapter.entries_captured == 0
+        assert adapter.is_running
+
+        # Verify the new command uses the updated filter
+        cmd = adapter._build_command()
+        assert "--predicate" in cmd
+        predicate = cmd[-1]
+        assert 'process == "NewApp"' in predicate
+        assert 'subsystem == "com.old"' in predicate
+
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_can_clear_filter():
+    """reconfigure() with explicit None clears a filter."""
+    adapter = SimulatorLogAdapter(
+        udid=SAMPLE_UDID,
+        process_filter="MyApp",
+        subsystem_filter="com.myapp",
+    )
+
+    # Not running — reconfigure should just update filters without start/stop
+    await adapter.reconfigure(process_filter=None, subsystem_filter=None)
+
+    assert adapter.process_filter is None
+    assert adapter.subsystem_filter is None
+    cmd = adapter._build_command()
+    assert "--predicate" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_noop_when_stopped():
+    """reconfigure() on a stopped adapter updates filters but doesn't start."""
+    adapter = SimulatorLogAdapter(udid=SAMPLE_UDID, process_filter="Old")
+
+    await adapter.reconfigure(process_filter="New")
+
+    assert adapter.process_filter == "New"
+    assert not adapter.is_running

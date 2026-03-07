@@ -8,10 +8,15 @@ export function registerSimulatorLogTools(server: McpServer): void {
     description: `Start capturing logs from a simulator app via unified logging.
 
 Captures os_log, Logger, and NSLog output. Logs appear in tail_logs/query_logs
-with source="simulator". Use process or subsystem filters to limit noise.
+with source="simulator". Use process or subsystem filters to limit noise — these
+are applied at the subprocess level (simctl log stream --predicate) for efficiency.
 
-NOTE: This does NOT capture print() output. For apps using print(), you need
-an in-app log drain (freopen redirect).`,
+Use the preset parameter to apply an ingestion filter at start time (e.g.
+"simulator-quiet"). For cleanest results, set both subprocess and ingestion filters:
+  start_simulator_logging(process: "MyApp", subsystem: "com.myapp", preset: "simulator-quiet")
+
+NOTE: This does NOT capture print() output — print() writes to stdout, not
+the unified logging system. Use os.Logger in your app instead.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -29,14 +34,19 @@ an in-app log drain (freopen redirect).`,
         .enum(["debug", "info", "default", "error"])
         .optional()
         .describe("Minimum log level (default: debug)"),
+      preset: z
+        .string()
+        .optional()
+        .describe("Apply an ingestion filter preset at start (e.g. 'simulator-quiet')"),
     }),
-  }, async ({ udid, process, subsystem, level }) => {
+  }, async ({ udid, process, subsystem, level, preset }) => {
     try {
       const body: Record<string, unknown> = {};
       if (udid) body.udid = udid;
       if (process) body.process = process;
       if (subsystem) body.subsystem = subsystem;
       if (level) body.level = level;
+      if (preset) body.preset = preset;
 
       const data = await apiRequest(
         "POST",

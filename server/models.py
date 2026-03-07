@@ -74,6 +74,7 @@ class LogQueryParams(BaseModel):
     device_id: str | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+    tail: bool = Field(default=False, description="If true, return the last N matching entries instead of paginating from offset")
 
 
 class LogStreamParams(BaseModel):
@@ -854,6 +855,7 @@ class StartSimLogRequest(BaseModel):
     process: str | None = None
     subsystem: str | None = None
     level: str = "debug"
+    preset: str | None = None
 
 
 class StopSimLogRequest(BaseModel):
@@ -868,6 +870,7 @@ class StartDeviceLogRequest(BaseModel):
     udid: str | None = None
     process: str | None = None
     match: str | None = None
+    preset: str | None = None
 
 
 class StopDeviceLogRequest(BaseModel):
