@@ -963,7 +963,7 @@ class DeviceControllerUI:
             target = text_fields[0]
 
         if target is None or target.frame is None:
-            raise DeviceError("No text field found to clear", tool="idb")
+            raise DeviceError("No text field found to clear", tool="wda" if self._is_physical(resolved) else "idb")
 
         cx = target.frame["x"] + target.frame["width"] / 2
         cy = target.frame["y"] + target.frame["height"] / 2

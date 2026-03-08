@@ -99,6 +99,7 @@ class DeviceController(DeviceControllerUI):
             return udid
 
         if self._active_udid:
+            await self._ensure_device_type_cached(self._active_udid)
             return self._active_udid
 
         # Step 3: try pool-based resolution (silent upgrade)
