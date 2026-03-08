@@ -544,6 +544,7 @@ class WdaBackend:
         self, method: str, udid: str, path: str,
         use_session: bool = False, timeout: float | None = None,
         raise_on_timeout: bool = False, _is_retry: bool = False,
+        _is_connection_retry: bool = False,
         **kwargs,
     ) -> httpx.Response:
         """Make an HTTP request to WDA, converting transport errors to DeviceError.
@@ -554,6 +555,9 @@ class WdaBackend:
 
         On WdaInvalidSessionError with use_session=True, automatically clears
         the stale session, creates a new one, and retries once.
+
+        On ConnectError/ReadError, automatically clears the stale connection,
+        reconnects via _get_base_url(), and retries once.
         """
         if use_session:
             session_id = await self._ensure_session(udid)
@@ -572,11 +576,27 @@ class WdaBackend:
                 # Caller wants to handle timeouts — don't invalidate connection
                 # (WDA may still be alive, just slow on this request)
                 raise
-            # Connection lost — invalidate cached connection so next call reconnects
+            # Connection lost — invalidate cached connection
             self._connections.pop(udid, None)
+
+            # Retry once: _get_base_url() will reconnect (tunneld/usbmux/auto-start)
+            if not _is_connection_retry:
+                self._current_depth.pop(udid, None)
+                logger.info(
+                    "WDA transport error on %s (%s), reconnecting",
+                    udid[:8], type(exc).__name__,
+                )
+                return await self._request(
+                    method, udid, path, use_session=use_session,
+                    timeout=timeout, raise_on_timeout=raise_on_timeout,
+                    _is_retry=_is_retry,
+                    _is_connection_retry=True,
+                    **kwargs,
+                )
+
             raise DeviceError(
-                f"WDA connection failed on {udid[:8]} ({type(exc).__name__}). "
-                "Ensure WDA is running on the device.",
+                f"WDA connection failed on {udid[:8]} ({type(exc).__name__}) "
+                "after reconnect attempt. Ensure WDA is running on the device.",
                 tool="wda",
             )
 
@@ -600,7 +620,9 @@ class WdaBackend:
                 return await self._request(
                     method, udid, path, use_session=True,
                     timeout=timeout, raise_on_timeout=raise_on_timeout,
-                    _is_retry=True, **kwargs,
+                    _is_retry=True,
+                    _is_connection_retry=_is_connection_retry,
+                    **kwargs,
                 )
             raise error
 

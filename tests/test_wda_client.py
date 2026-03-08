@@ -2426,3 +2426,211 @@ class TestElementSelector:
 
         args = mock_query.call_args[0]
         assert args[2] == "label ==[c] 'It\\'s here'"
+
+
+# ---------------------------------------------------------------------------
+# Connection auto-recovery tests
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionRecovery:
+    """Tests for transparent connection recovery on transport errors."""
+
+    async def test_connection_retry_on_connect_error(self):
+        """ConnectError → reconnect → success."""
+        backend = _make_session_backend()
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("Connection refused")
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch.object(backend, "_get_base_url",
+                              return_value="http://localhost:8100"):
+                resp = await backend._request("get", "test-udid", "/status")
+
+        assert resp.status_code == 200
+        assert call_count == 2
+
+    async def test_connection_retry_on_read_error(self):
+        """ReadError → reconnect → success."""
+        backend = _make_session_backend()
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ReadError("Connection reset")
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch.object(backend, "_get_base_url",
+                              return_value="http://localhost:8100"):
+                resp = await backend._request("get", "test-udid", "/status")
+
+        assert resp.status_code == 200
+        assert call_count == 2
+
+    async def test_no_double_connection_retry(self):
+        """Both attempts fail → raises DeviceError (no infinite loop)."""
+        backend = _make_session_backend()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch.object(backend, "_get_base_url",
+                              return_value="http://localhost:8100"):
+                with pytest.raises(DeviceError, match="after reconnect attempt"):
+                    await backend._request("get", "test-udid", "/status")
+
+    async def test_timeout_passthrough_no_connection_retry(self):
+        """raise_on_timeout=True + TimeoutException → no retry, raw exception."""
+        backend = _make_session_backend()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(
+                side_effect=httpx.TimeoutException("timed out"),
+            )
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.TimeoutException):
+                await backend._request(
+                    "get", "test-udid", "/status", raise_on_timeout=True,
+                )
+
+            # Connection should NOT have been popped (timeout passthrough)
+            assert "test-udid" in backend._connections
+
+    async def test_connection_retry_clears_depth_cache(self):
+        """_current_depth cleared so new session gets settings reapplied."""
+        backend = _make_session_backend()
+        backend._current_depth["test-udid"] = 25
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("refused")
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch.object(backend, "_get_base_url",
+                              return_value="http://localhost:8100"):
+                await backend._request("get", "test-udid", "/status")
+
+        assert "test-udid" not in backend._current_depth
+
+    async def test_connection_then_session_recovery_chains(self):
+        """ConnectError → reconnect → invalid session → session recovery → success.
+
+        Verifies that connection and session recovery chain properly:
+        3 HTTP attempts total.
+        """
+        backend = _make_session_backend()
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("refused")
+            if call_count == 2:
+                return _invalid_session_response()
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            async def patched_ensure(udid):
+                conn = backend._connections.get(udid)
+                if conn and conn.session_id:
+                    return conn.session_id
+                conn = MagicMock(
+                    base_url="http://localhost:8100",
+                    session_id="new-session",
+                )
+                backend._connections[udid] = conn
+                return "new-session"
+
+            with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
+                with patch.object(backend, "_get_base_url",
+                                  return_value="http://localhost:8100"):
+                    resp = await backend._request(
+                        "get", "test-udid", "/element",
+                        use_session=True,
+                    )
+
+        assert resp.status_code == 200
+        assert call_count == 3
+
+    async def test_connection_retry_pops_connection_cache(self):
+        """_connections[udid] is removed before the retry."""
+        backend = _make_session_backend()
+        assert "test-udid" in backend._connections
+
+        popped = False
+
+        async def mock_get(url, **kwargs):
+            nonlocal popped
+            if not popped:
+                popped = True
+                raise httpx.ReadError("reset")
+            # On retry, verify connection was popped (will be re-added by _get_base_url mock)
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            connections_during_retry = {}
+
+            original_get_base_url = backend._get_base_url
+
+            async def tracking_get_base_url(udid):
+                connections_during_retry[udid] = udid in backend._connections
+                return "http://localhost:8100"
+
+            with patch.object(backend, "_get_base_url",
+                              side_effect=tracking_get_base_url):
+                await backend._request("get", "test-udid", "/status")
+
+        # Connection should have been absent when _get_base_url was called on retry
+        assert connections_during_retry["test-udid"] is False
