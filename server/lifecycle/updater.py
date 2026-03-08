@@ -6,9 +6,14 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
+
+from server.lifecycle.update_check import ENDPOINT, TIMEOUT as CHECK_TIMEOUT
 
 
 def _find_project_root() -> Path | None:
@@ -22,6 +27,72 @@ def _find_project_root() -> Path | None:
             break
         path = parent
     return None
+
+
+def _check_via_quern_dev(head_sha: str) -> bool | None:
+    """Check quern.dev for updates. Returns True/False, or None on failure."""
+    try:
+        url = f"{ENDPOINT}?sha={head_sha}"
+        req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
+        with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+        return data.get("update_available", False)
+    except Exception:
+        return None
+
+
+def _check_via_git(project_root: Path) -> tuple[bool, str, int] | None:
+    """Fall back to git fetch to check for updates.
+
+    Returns (has_updates, branch, behind_count) or None on failure.
+    """
+    result = subprocess.run(
+        ["git", "fetch", "origin"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        print(f"Error: git fetch failed: {result.stderr.strip()}")
+        return None
+
+    # Get current branch
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        print("Error: could not determine current branch")
+        return None
+    branch = result.stdout.strip()
+
+    # Count commits behind
+    result = subprocess.run(
+        ["git", "rev-list", f"HEAD..origin/{branch}", "--count"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        result = subprocess.run(
+            ["git", "rev-list", "HEAD..origin/main", "--count"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            print("Error: could not compare with remote (no tracking branch)")
+            return None
+        branch = "main"
+
+    behind_count = int(result.stdout.strip())
+    return (behind_count > 0, branch, behind_count)
 
 
 def run_update() -> int:
@@ -40,57 +111,31 @@ def run_update() -> int:
         print("Error: not a git repository")
         return 1
 
-    # 1. Fetch from origin
+    # 1. Check for updates via quern.dev, fall back to git fetch
     print("Checking for updates...")
-    result = subprocess.run(
-        ["git", "fetch", "origin"],
+
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
         cwd=str(project_root),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=5,
     )
-    if result.returncode != 0:
-        print(f"Error: git fetch failed: {result.stderr.strip()}")
+    sha = head_sha.stdout.strip() if head_sha.returncode == 0 else None
+
+    update_available = _check_via_quern_dev(sha) if sha else None
+
+    if update_available is False:
+        print("Already up to date.")
+        return 0
+
+    # quern.dev said yes or was unreachable — need git fetch either way for the pull
+    git_check = _check_via_git(project_root)
+    if git_check is None:
         return 1
 
-    # 2. Check if we're behind
-    # Get current branch
-    result = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=str(project_root),
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        print("Error: could not determine current branch")
-        return 1
-    branch = result.stdout.strip()
-
-    # Count commits behind
-    result = subprocess.run(
-        ["git", "rev-list", f"HEAD..origin/{branch}", "--count"],
-        cwd=str(project_root),
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        # No upstream tracking — try origin/main
-        result = subprocess.run(
-            ["git", "rev-list", "HEAD..origin/main", "--count"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            print("Error: could not compare with remote (no tracking branch)")
-            return 1
-        branch = "main"
-
-    behind_count = int(result.stdout.strip())
-    if behind_count == 0:
+    has_updates, branch, behind_count = git_check
+    if not has_updates:
         print("Already up to date.")
         return 0
 
