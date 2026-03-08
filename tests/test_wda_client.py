@@ -2134,3 +2134,295 @@ class TestSessionAutoRecovery:
         assert len(results) == 5
         # Session should only be created once (lock serializes, others see cached)
         assert creation_count == 1
+
+
+# ---------------------------------------------------------------------------
+# ElementSelector DSL tests
+# ---------------------------------------------------------------------------
+
+
+class TestElementSelector:
+    """Tests for the ElementSelector chainable query builder."""
+
+    async def test_find_returns_all_matches(self):
+        backend = _make_session_backend()
+        mock_resp = _mock_response(200, {"value": WDA_TABBAR_BUTTONS})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp):
+            results = await backend.element("test-udid", type="Button").find()
+
+        assert len(results) == 2
+        assert results[0]["AXLabel"] == "Home"
+        assert results[1]["AXLabel"] == "Search"
+
+    async def test_find_returns_empty_on_no_match(self):
+        backend = _make_session_backend()
+        mock_resp = _mock_response(200, {"value": []})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp):
+            results = await backend.element("test-udid", name="NonExistent").find()
+
+        assert results == []
+
+    async def test_get_returns_first_match(self):
+        backend = _make_session_backend()
+        mock_resp = _mock_response(200, {"value": WDA_TABBAR_BUTTONS})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp):
+            el = await backend.element("test-udid", type="Button").get()
+
+        assert el["AXLabel"] == "Home"
+
+    async def test_get_raises_on_no_match(self):
+        backend = _make_session_backend()
+        mock_resp = _mock_response(200, {"value": []})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp):
+            with pytest.raises(WdaElementNotFoundError, match="No element found"):
+                await backend.element("test-udid", name="Ghost").get()
+
+    async def test_tap_hits_element_center(self):
+        """tap() finds the element and taps its center coordinates."""
+        backend = _make_session_backend()
+
+        # Element at (100, 200) with size (120, 44) → center (160, 222)
+        el_response = [{
+            "ELEMENT": "btn-001",
+            "element-6066-11e4-a52e-4f735466cecf": "btn-001",
+            "type": "XCUIElementTypeButton",
+            "label": "Login",
+            "name": "loginButton",
+            "rect": {"x": 100, "y": 200, "width": 120, "height": 44},
+            "isEnabled": True,
+            "value": None,
+        }]
+
+        find_resp = _mock_response(200, {"value": el_response})
+        tap_resp = _mock_response(200, {"value": {}})
+
+        call_log = []
+
+        async def mock_request(method, udid, path, **kwargs):
+            call_log.append((method, path, kwargs.get("json")))
+            if path == "/elements":
+                return find_resp
+            return tap_resp
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, side_effect=mock_request):
+            el = await backend.element("test-udid", name="loginButton").tap()
+
+        assert el["AXLabel"] == "Login"
+        # Second call should be the tap
+        assert call_log[1][0] == "post"
+        assert call_log[1][1] == "/wda/tap"
+        assert call_log[1][2]["x"] == pytest.approx(160.0)
+        assert call_log[1][2]["y"] == pytest.approx(222.0)
+
+    async def test_clear_uses_wda_element_id(self):
+        """clear() uses the native /element/{id}/clear endpoint when element has a WDA ID."""
+        backend = _make_session_backend()
+
+        el_response = [{
+            "ELEMENT": "field-001",
+            "element-6066-11e4-a52e-4f735466cecf": "field-001",
+            "type": "XCUIElementTypeTextField",
+            "label": "Email",
+            "name": "emailField",
+            "rect": {"x": 20, "y": 300, "width": 300, "height": 44},
+            "isEnabled": True,
+            "value": "old text",
+        }]
+
+        find_resp = _mock_response(200, {"value": el_response})
+        clear_resp = _mock_response(200, {"value": {}})
+
+        call_log = []
+
+        async def mock_request(method, udid, path, **kwargs):
+            call_log.append((method, path))
+            if path == "/elements":
+                return find_resp
+            return clear_resp
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, side_effect=mock_request):
+            await backend.element("test-udid", name="emailField").clear()
+
+        assert call_log[1] == ("post", "/element/field-001/clear")
+
+    async def test_wait_returns_when_element_appears(self):
+        """wait() polls until the element appears."""
+        backend = _make_session_backend()
+
+        call_count = 0
+
+        async def mock_find(udid, using, value, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return []
+            return [{"AXLabel": "Done", "frame": {"x": 0, "y": 0, "width": 100, "height": 44}}]
+
+        with patch.object(backend, "find_elements_by_query", new_callable=AsyncMock, side_effect=mock_find):
+            el = await backend.element("test-udid", label="Done").wait(timeout=5, interval=0.05)
+
+        assert el["AXLabel"] == "Done"
+        assert call_count == 3
+
+    async def test_wait_raises_on_timeout(self):
+        """wait() raises WdaElementNotFoundError after timeout."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ):
+            with pytest.raises(WdaElementNotFoundError, match="Timed out"):
+                await backend.element("test-udid", name="Never").wait(timeout=0.1, interval=0.03)
+
+    async def test_name_uses_accessibility_id_strategy(self):
+        """name= alone uses 'accessibility id' (fastest strategy)."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", name="loginButton").find()
+
+        mock_query.assert_called_once_with(
+            "test-udid", "accessibility id", "loginButton",
+            scope_element_id=None, timeout=None,
+        )
+
+    async def test_label_uses_predicate_string(self):
+        """label= uses 'predicate string' with case-insensitive match."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", label="Submit").find()
+
+        mock_query.assert_called_once_with(
+            "test-udid", "predicate string", "label ==[c] 'Submit'",
+            scope_element_id=None, timeout=None,
+        )
+
+    async def test_type_adds_xcui_prefix(self):
+        """type= adds XCUIElementType prefix automatically."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", type="Button").find()
+
+        mock_query.assert_called_once_with(
+            "test-udid", "predicate string", "type == 'XCUIElementTypeButton'",
+            scope_element_id=None, timeout=None,
+        )
+
+    async def test_combined_criteria_uses_and_predicate(self):
+        """Multiple criteria combine with AND in predicate string."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", name="login", label="Log In", type="Button").find()
+
+        args = mock_query.call_args[0]
+        assert args[1] == "predicate string"
+        assert "name == 'login'" in args[2]
+        assert "label ==[c] 'Log In'" in args[2]
+        assert "type == 'XCUIElementTypeButton'" in args[2]
+
+    async def test_class_chain_passthrough(self):
+        """class_chain= passes through directly."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", class_chain="**/XCUIElementTypeTabBar").find()
+
+        mock_query.assert_called_once_with(
+            "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+            scope_element_id=None, timeout=None,
+        )
+
+    async def test_predicate_passthrough(self):
+        """predicate= passes through directly."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", predicate="value == '1' AND visible == 1").find()
+
+        mock_query.assert_called_once_with(
+            "test-udid", "predicate string", "value == '1' AND visible == 1",
+            scope_element_id=None, timeout=None,
+        )
+
+    async def test_child_scoped_query(self):
+        """child() resolves parent then queries within its scope."""
+        backend = _make_session_backend()
+
+        parent_response = _mock_response(200, {"value": [WDA_TABBAR_ELEMENT]})
+        child_response = _mock_response(200, {"value": WDA_TABBAR_BUTTONS})
+
+        call_log = []
+
+        async def mock_request(method, udid, path, **kwargs):
+            call_log.append((method, path, kwargs.get("json")))
+            if "/element/" in path:
+                return child_response
+            return parent_response
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, side_effect=mock_request):
+            children = await backend.element(
+                "test-udid", type="TabBar",
+            ).child(type="Button").find()
+
+        assert len(children) == 2
+        # First call: find parent (unscoped /elements)
+        assert call_log[0][1] == "/elements"
+        # Second call: find children scoped to parent
+        assert call_log[1][1] == "/element/tabbar-uuid-001/elements"
+
+    async def test_child_raises_when_parent_not_found(self):
+        """child() raises when parent element doesn't exist."""
+        backend = _make_session_backend()
+        mock_resp = _mock_response(200, {"value": []})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp):
+            with pytest.raises(WdaElementNotFoundError, match="No element found"):
+                await backend.element(
+                    "test-udid", name="NonExistent",
+                ).child(type="Button").find()
+
+    async def test_no_criteria_raises_valueerror(self):
+        """ElementSelector with no criteria raises ValueError on execute."""
+        backend = _make_session_backend()
+
+        with pytest.raises(ValueError, match="at least one criterion"):
+            await backend.element("test-udid").find()
+
+    async def test_label_escapes_quotes(self):
+        """Single quotes in label values are escaped for NSPredicate."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "find_elements_by_query",
+            new_callable=AsyncMock, return_value=[],
+        ) as mock_query:
+            await backend.element("test-udid", label="It's here").find()
+
+        args = mock_query.call_args[0]
+        assert args[2] == "label ==[c] 'It\\'s here'"

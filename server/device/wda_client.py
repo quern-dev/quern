@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from server.device.wda_selector import ElementSelector
 from server.models import (
     DeviceError,
     WdaAppCrashedError,
@@ -932,6 +933,35 @@ class WdaBackend:
         """Terminate an app via WDA."""
         await self._request("post", udid, "/wda/apps/terminate",
                             use_session=True, json={"bundleId": bundle_id})
+
+    def element(
+        self,
+        udid: str,
+        *,
+        name: str | None = None,
+        label: str | None = None,
+        type: str | None = None,
+        predicate: str | None = None,
+        class_chain: str | None = None,
+    ) -> ElementSelector:
+        """Create a chainable element selector for this device.
+
+        Returns a lazy query builder — no WDA call is made until a terminal
+        operation (find, get, wait, tap, clear) is awaited.
+
+        Args:
+            udid: Device UDID.
+            name: Accessibility identifier (uses 'accessibility id' strategy).
+            label: Display label (case-insensitive predicate match).
+            type: Element type without XCUIElementType prefix (e.g. "Button").
+            predicate: Raw NSPredicate string (advanced).
+            class_chain: Raw class chain expression (advanced).
+        """
+        return ElementSelector(
+            self, udid,
+            name=name, label=label, type=type,
+            predicate=predicate, class_chain=class_chain,
+        )
 
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
