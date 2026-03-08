@@ -542,13 +542,17 @@ class WdaBackend:
     async def _request(
         self, method: str, udid: str, path: str,
         use_session: bool = False, timeout: float | None = None,
-        raise_on_timeout: bool = False, **kwargs,
+        raise_on_timeout: bool = False, _is_retry: bool = False,
+        **kwargs,
     ) -> httpx.Response:
         """Make an HTTP request to WDA, converting transport errors to DeviceError.
 
         If use_session=True, prepends /session/{sessionId} to the path.
         If raise_on_timeout=True, re-raises httpx.TimeoutException directly
         instead of wrapping it in DeviceError (so callers can handle timeouts).
+
+        On WdaInvalidSessionError with use_session=True, automatically clears
+        the stale session, creates a new one, and retries once.
         """
         if use_session:
             session_id = await self._ensure_session(udid)
@@ -581,6 +585,22 @@ class WdaBackend:
 
         error = _parse_wda_error(resp, udid)
         if error is not None:
+            # Session recovery: if the session went stale, clear it and retry once
+            if (
+                isinstance(error, WdaInvalidSessionError)
+                and use_session
+                and not _is_retry
+            ):
+                conn = self._connections.get(udid)
+                if conn:
+                    conn.session_id = None
+                self._current_depth.pop(udid, None)
+                logger.info("WDA session invalid on %s, recovering", udid[:8])
+                return await self._request(
+                    method, udid, path, use_session=True,
+                    timeout=timeout, raise_on_timeout=raise_on_timeout,
+                    _is_retry=True, **kwargs,
+                )
             raise error
 
         return resp
@@ -639,27 +659,19 @@ class WdaBackend:
         Returns idb-format dicts with _wda_element_id preserved for scoped child queries.
         Timeout/non-200 returns [] — graceful degradation.
         """
-        session_id = await self._ensure_session(udid)
-        base_url = self._connections[udid].base_url
-
         if scope_element_id:
-            url = f"{base_url}/session/{session_id}/element/{scope_element_id}/elements"
+            path = f"/element/{scope_element_id}/elements"
         else:
-            url = f"{base_url}/session/{session_id}/elements"
+            path = "/elements"
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    url,
-                    json={"using": using, "value": value},
-                    timeout=timeout or SKELETON_QUERY_TIMEOUT,
-                )
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+            resp = await self._request(
+                "post", udid, path, use_session=True,
+                timeout=timeout or SKELETON_QUERY_TIMEOUT,
+                json={"using": using, "value": value},
+            )
+        except (DeviceError, WdaError):
             logger.debug("Element query failed (%s=%s) on %s", using, value, udid[:8])
-            return []
-
-        if resp.status_code != 200:
-            logger.debug("Element query non-200 (%s=%s) on %s: %d", using, value, udid[:8], resp.status_code)
             return []
 
         elements = resp.json().get("value", [])
@@ -683,9 +695,6 @@ class WdaBackend:
                     mapped["_wda_element_id"] = wda_id
                 results.append(mapped)
 
-        # Track interaction for idle timeout
-        self._last_interaction[udid] = time.monotonic()
-        self._ensure_idle_task()
         return results
 
     async def build_screen_skeleton(self, udid: str) -> list[dict]:

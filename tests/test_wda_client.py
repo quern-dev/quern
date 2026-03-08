@@ -1856,3 +1856,281 @@ class TestRequestRaisesWdaError:
 
             with pytest.raises(DeviceError):
                 await backend._request("get", "test-udid", "/element")
+
+
+# ---------------------------------------------------------------------------
+# Session auto-recovery tests
+# ---------------------------------------------------------------------------
+
+
+def _invalid_session_response() -> MagicMock:
+    """Helper: mock httpx.Response for an invalid session error."""
+    return _mock_response(404, {
+        "value": {"error": "invalid session id", "message": "Session does not exist"},
+    })
+
+
+def _ok_response(json_body: dict | None = None) -> MagicMock:
+    """Helper: mock httpx.Response for a 200 OK."""
+    return _mock_response(200, json_body or {"value": {}})
+
+
+class TestSessionAutoRecovery:
+    async def test_request_retries_on_invalid_session(self):
+        """Recovery succeeds: first call gets invalid session, retry with new session works."""
+        backend = _make_session_backend()
+
+        # First call: invalid session. Second call (after recovery): success.
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _invalid_session_response()
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            # Mock _ensure_session to provide a new session on retry
+            original_ensure = backend._ensure_session
+
+            async def patched_ensure(udid):
+                conn = backend._connections.get(udid)
+                if conn and conn.session_id:
+                    return conn.session_id
+                # Simulate creating a new session
+                conn.session_id = "new-session"
+                return "new-session"
+
+            with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
+                resp = await backend._request(
+                    "get", "test-udid", "/element", use_session=True,
+                )
+
+            assert resp.status_code == 200
+            assert call_count == 2
+            assert backend._connections["test-udid"].session_id == "new-session"
+
+    async def test_request_does_not_retry_twice(self):
+        """No infinite loops: if retry also gets invalid session, raises."""
+        backend = _make_session_backend()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=_invalid_session_response())
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            async def patched_ensure(udid):
+                conn = backend._connections.get(udid)
+                if conn and conn.session_id:
+                    return conn.session_id
+                conn.session_id = "new-session"
+                return "new-session"
+
+            with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
+                with pytest.raises(WdaInvalidSessionError):
+                    await backend._request(
+                        "get", "test-udid", "/element", use_session=True,
+                    )
+
+    async def test_request_no_retry_without_use_session(self):
+        """Non-session requests don't attempt recovery."""
+        backend = _make_session_backend()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=_invalid_session_response())
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(WdaInvalidSessionError):
+                await backend._request("get", "test-udid", "/status")
+
+            # Session should NOT have been cleared (no recovery attempted)
+            assert backend._connections["test-udid"].session_id == "test-session"
+
+    async def test_session_recovery_clears_depth_cache(self):
+        """Depth cache is cleared so the new session gets WDA settings reapplied."""
+        backend = _make_session_backend()
+        backend._current_depth["test-udid"] = 25
+
+        call_count = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _invalid_session_response()
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            async def patched_ensure(udid):
+                conn = backend._connections.get(udid)
+                if conn and conn.session_id:
+                    return conn.session_id
+                conn.session_id = "new-session"
+                return "new-session"
+
+            with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
+                await backend._request(
+                    "get", "test-udid", "/element", use_session=True,
+                )
+
+            assert "test-udid" not in backend._current_depth
+
+    async def test_find_elements_recovers_from_invalid_session(self):
+        """Element queries get session recovery via _request()."""
+        backend = _make_session_backend()
+
+        call_count = 0
+
+        async def mock_post(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _invalid_session_response()
+            return _mock_response(200, {"value": [WDA_TABBAR_ELEMENT]})
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=mock_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            async def patched_ensure(udid):
+                conn = backend._connections.get(udid)
+                if conn and conn.session_id:
+                    return conn.session_id
+                conn.session_id = "new-session"
+                return "new-session"
+
+            with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
+                result = await backend.find_elements_by_query(
+                    "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                )
+
+            assert len(result) == 1
+            assert call_count == 2
+
+    async def test_find_elements_returns_empty_on_transport_error(self):
+        """Graceful [] on DeviceError (backward compat)."""
+        backend = _make_session_backend()
+
+        with patch.object(
+            backend, "_request",
+            new_callable=AsyncMock,
+            side_effect=DeviceError("connection lost", tool="wda"),
+        ):
+            result = await backend.find_elements_by_query(
+                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+            )
+
+            assert result == []
+
+    async def test_find_elements_scoped_query_path(self):
+        """Scoped queries build /element/{id}/elements path."""
+        backend = _make_session_backend()
+
+        mock_resp = _mock_response(200, {"value": WDA_TABBAR_BUTTONS})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp) as mock_req:
+            await backend.find_elements_by_query(
+                "test-udid", "class name", "XCUIElementTypeButton",
+                scope_element_id="tabbar-uuid-001",
+            )
+
+            call_args = mock_req.call_args
+            assert call_args[0][2] == "/element/tabbar-uuid-001/elements"
+            assert call_args[1]["use_session"] is True
+
+    async def test_find_elements_unscoped_query_path(self):
+        """Unscoped queries build /elements path."""
+        backend = _make_session_backend()
+
+        mock_resp = _mock_response(200, {"value": []})
+
+        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp) as mock_req:
+            await backend.find_elements_by_query(
+                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+            )
+
+            call_args = mock_req.call_args
+            assert call_args[0][2] == "/elements"
+            assert call_args[1]["use_session"] is True
+
+    async def test_concurrent_session_recovery(self):
+        """Multiple parallel queries with invalid session → only 1 session creation.
+
+        Uses the real _ensure_session locking to verify that concurrent recovery
+        serializes session creation properly.
+        """
+        backend = _make_session_backend()
+        creation_count = 0
+
+        # Track which HTTP calls have been made per "session"
+        # First batch (with test-session) all get invalid session.
+        # Second batch (with recovered-session) succeed.
+        def make_post_response(url, **kwargs):
+            resp = MagicMock()
+            if "test-session" in url:
+                resp.status_code = 404
+                resp.text = '{"value": {"error": "invalid session id", "message": "gone"}}'
+                resp.json = MagicMock(return_value={
+                    "value": {"error": "invalid session id", "message": "gone"},
+                })
+            elif "/appium/settings" in url:
+                resp.status_code = 200
+                resp.text = '{}'
+                resp.json = MagicMock(return_value={})
+            elif url.endswith("/session"):
+                # Session creation POST /session
+                nonlocal creation_count
+                creation_count += 1
+                resp.status_code = 200
+                resp.text = '{"sessionId": "recovered-session"}'
+                resp.json = MagicMock(return_value={
+                    "sessionId": "recovered-session",
+                    "value": {"sessionId": "recovered-session"},
+                })
+            else:
+                # Element query with recovered session
+                resp.status_code = 200
+                resp.text = '{"value": []}'
+                resp.json = MagicMock(return_value={"value": []})
+            return resp
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=make_post_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            tasks = [
+                backend.find_elements_by_query(
+                    "test-udid", "class chain", "**/XCUIElementTypeButton",
+                )
+                for _ in range(5)
+            ]
+            results = await asyncio.gather(*tasks)
+
+        # All tasks should complete
+        assert len(results) == 5
+        # Session should only be created once (lock serializes, others see cached)
+        assert creation_count == 1
