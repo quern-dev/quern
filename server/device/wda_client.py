@@ -24,6 +24,7 @@ logger = logging.getLogger("quern-debug-server.wda-client")
 
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
+ACTION_TIMEOUT = 25.0  # seconds for tap/swipe/type — WDA serializes requests, so actions queue behind slow queries
 SOURCE_TIMEOUT = 3.0  # seconds — most screens return /source in <2s
 SOURCE_TIMEOUT_SLOW = 6.0  # seconds — for A13 and older devices
 SNAPSHOT_MAX_DEPTH = 25  # WDA default is 50 — 25 resolves most screens; skeleton fallback handles dense maps
@@ -801,7 +802,8 @@ class WdaBackend:
     async def tap(self, udid: str, x: float, y: float) -> None:
         """Tap at coordinates via WDA."""
         resp = await self._request("post", udid, "/wda/tap",
-                                    use_session=True, json={"x": x, "y": y})
+                                    use_session=True, json={"x": x, "y": y},
+                                    timeout=ACTION_TIMEOUT)
         if resp.status_code != 200:
             raise DeviceError(
                 f"WDA tap failed (status {resp.status_code}): {resp.text[:200]}",
@@ -819,7 +821,8 @@ class WdaBackend:
     ) -> None:
         """Swipe gesture via WDA."""
         resp = await self._request("post", udid, "/wda/dragfromtoforduration",
-                                    use_session=True, json={
+                                    use_session=True, timeout=ACTION_TIMEOUT,
+                                    json={
             "fromX": start_x,
             "fromY": start_y,
             "toX": end_x,
@@ -835,7 +838,8 @@ class WdaBackend:
     async def type_text(self, udid: str, text: str) -> None:
         """Type text via WDA."""
         resp = await self._request("post", udid, "/wda/keys",
-                                    use_session=True, json={"value": list(text)})
+                                    use_session=True, timeout=ACTION_TIMEOUT,
+                                    json={"value": list(text)})
         if resp.status_code != 200:
             raise DeviceError(
                 f"WDA type_text failed (status {resp.status_code}): {resp.text[:200]}",
@@ -845,7 +849,8 @@ class WdaBackend:
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button via WDA."""
         resp = await self._request("post", udid, "/wda/pressButton",
-                                    use_session=True, json={"name": button})
+                                    use_session=True, timeout=ACTION_TIMEOUT,
+                                    json={"name": button})
         if resp.status_code != 200:
             raise DeviceError(
                 f"WDA pressButton failed (status {resp.status_code}): {resp.text[:200]}",
@@ -855,7 +860,8 @@ class WdaBackend:
     async def activate_app(self, udid: str, bundle_id: str) -> None:
         """Activate (bring to foreground) an app via WDA."""
         resp = await self._request("post", udid, "/wda/apps/activate",
-                                    use_session=True, json={"bundleId": bundle_id})
+                                    use_session=True, timeout=ACTION_TIMEOUT,
+                                    json={"bundleId": bundle_id})
         if resp.status_code != 200:
             raise DeviceError(
                 f"WDA activate_app failed (status {resp.status_code}): {resp.text[:200]}",

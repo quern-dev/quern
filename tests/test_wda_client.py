@@ -11,6 +11,7 @@ import pytest
 import httpx
 
 from server.device.wda_client import (
+    ACTION_TIMEOUT,
     IDLE_TIMEOUT,
     SKELETON_QUERY_TIMEOUT,
     SNAPSHOT_MAX_DEPTH,
@@ -308,7 +309,7 @@ class TestWdaBackendTap:
             mock_client.post.assert_called_once_with(
                 "http://localhost:8100/session/test-session/wda/tap",
                 json={"x": 150.5, "y": 300.7},
-                timeout=10.0,
+                timeout=ACTION_TIMEOUT,
             )
 
 
@@ -337,7 +338,7 @@ class TestWdaBackendSwipe:
                     "toY": 200,
                     "duration": 0.5,
                 },
-                timeout=10.0,
+                timeout=ACTION_TIMEOUT,
             )
 
 
@@ -360,7 +361,7 @@ class TestWdaBackendTypeText:
             mock_client.post.assert_called_once_with(
                 "http://localhost:8100/session/test-session/wda/keys",
                 json={"value": ["h", "e", "l", "l", "o"]},
-                timeout=10.0,
+                timeout=ACTION_TIMEOUT,
             )
 
 
@@ -383,7 +384,7 @@ class TestWdaBackendPressButton:
             mock_client.post.assert_called_once_with(
                 "http://localhost:8100/session/test-session/wda/pressButton",
                 json={"name": "home"},
-                timeout=10.0,
+                timeout=ACTION_TIMEOUT,
             )
 
 
@@ -406,7 +407,7 @@ class TestWdaBackendActivateApp:
             mock_client.post.assert_called_once_with(
                 "http://localhost:8100/session/test-session/wda/apps/activate",
                 json={"bundleId": "com.example.App"},
-                timeout=10.0,
+                timeout=ACTION_TIMEOUT,
             )
 
     async def test_activate_app_failure_raises(self):
