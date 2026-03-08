@@ -96,7 +96,7 @@ func filterDevices(_ devices: [AVCaptureDevice], args: [String]) -> [AVCaptureDe
 
 // MARK: - Menu bar setup
 
-func setupMenuBar() {
+func setupMenuBar(devicesMenuDelegate: DevicesMenuDelegate, quitTarget: AnyObject? = nil, quitAction: Selector = #selector(NSApplication.terminate(_:))) {
     let mainMenu = NSMenu()
 
     // App menu
@@ -104,35 +104,8 @@ func setupMenuBar() {
     let appMenu = NSMenu()
     appMenu.addItem(withTitle: "About Quern Preview", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
     appMenu.addItem(.separator())
-    let quitItem = NSMenuItem(title: "Quit Quern Preview", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-    appMenu.addItem(quitItem)
-    appMenuItem.submenu = appMenu
-    mainMenu.addItem(appMenuItem)
-
-    // Window menu
-    let windowMenuItem = NSMenuItem()
-    let windowMenu = NSMenu(title: "Window")
-    windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
-    windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.zoom(_:)), keyEquivalent: "")
-    windowMenu.addItem(.separator())
-    windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
-    windowMenuItem.submenu = windowMenu
-    mainMenu.addItem(windowMenuItem)
-
-    NSApplication.shared.mainMenu = mainMenu
-    NSApplication.shared.windowsMenu = windowMenu
-}
-
-func setupMenuBarInteractive(delegate: InteractiveDelegate) {
-    let mainMenu = NSMenu()
-
-    // App menu
-    let appMenuItem = NSMenuItem()
-    let appMenu = NSMenu()
-    appMenu.addItem(withTitle: "About Quern Preview", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-    appMenu.addItem(.separator())
-    let quitItem = NSMenuItem(title: "Quit Quern Preview", action: #selector(InteractiveDelegate.menuQuit(_:)), keyEquivalent: "q")
-    quitItem.target = delegate
+    let quitItem = NSMenuItem(title: "Quit Quern Preview", action: quitAction, keyEquivalent: "q")
+    quitItem.target = quitTarget
     appMenu.addItem(quitItem)
     appMenuItem.submenu = appMenu
     mainMenu.addItem(appMenuItem)
@@ -140,7 +113,7 @@ func setupMenuBarInteractive(delegate: InteractiveDelegate) {
     // Devices menu
     let devicesMenuItem = NSMenuItem()
     let devicesMenu = NSMenu(title: "Devices")
-    devicesMenu.delegate = delegate.devicesMenuDelegate
+    devicesMenu.delegate = devicesMenuDelegate
     devicesMenuItem.submenu = devicesMenu
     mainMenu.addItem(devicesMenuItem)
 
@@ -187,17 +160,30 @@ func loadAppIcon() {
     }
 }
 
+// MARK: - PreviewController protocol
+
+protocol PreviewController: AnyObject {
+    var allDevices: [AVCaptureDevice] { get set }
+    var activeDeviceNames: Set<String> { get }
+    func togglePreview(name: String, position: Int)
+    func nextPosition() -> Int
+}
+
 // MARK: - Devices menu delegate
 
 class DevicesMenuDelegate: NSObject, NSMenuDelegate {
-    weak var interactiveDelegate: InteractiveDelegate?
+    weak var controller: PreviewController?
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        guard let delegate = interactiveDelegate else { return }
+        guard let controller = controller else { return }
 
-        let devices = delegate.allDevices
+        // Re-discover devices every time the menu opens — AVCaptureDevice
+        // references go stale after capture sessions are torn down.
+        enableScreenCaptureDevices()
+        controller.allDevices = discoverDevices()
+        let devices = controller.allDevices
         if devices.isEmpty {
             let noDevices = NSMenuItem(title: "No Devices Found", action: nil, keyEquivalent: "")
             noDevices.isEnabled = false
@@ -207,7 +193,7 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
                 let item = NSMenuItem(title: device.localizedName, action: #selector(DevicesMenuDelegate.toggleDevice(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = device.localizedName
-                if delegate.sessions[device.localizedName] != nil {
+                if controller.activeDeviceNames.contains(device.localizedName) {
                     item.state = .on
                 }
                 menu.addItem(item)
@@ -221,35 +207,25 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
     }
 
     @objc func toggleDevice(_ sender: NSMenuItem) {
-        guard let delegate = interactiveDelegate,
+        guard let controller = controller,
               let name = sender.representedObject as? String else { return }
-
-        if delegate.sessions[name] != nil {
-            delegate.handleRemove(name: name)
-        } else {
-            let position = delegate.nextPosition()
-            delegate.handleAdd(name: name, position: position)
-        }
+        controller.togglePreview(name: name, position: controller.nextPosition())
     }
 
     @objc func refreshDevices(_ sender: NSMenuItem) {
-        guard let delegate = interactiveDelegate else { return }
+        guard let controller = controller else { return }
         enableScreenCaptureDevices()
-        delegate.allDevices = discoverDevices()
-
-        let deviceList = delegate.allDevices.map { d -> [String: String] in
-            return ["name": d.localizedName, "id": d.uniqueID]
-        }
-        delegate.emit(["event": "devices", "devices": deviceList, "previewing": Array(delegate.sessions.keys)] as [String: Any])
+        controller.allDevices = discoverDevices()
     }
 }
 
 // MARK: - Preview window
 
-class PreviewWindow {
+class PreviewWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let session: AVCaptureSession
     let device: AVCaptureDevice
+    var onWindowClosed: ((String) -> Void)?
 
     init(device: AVCaptureDevice, index: Int) {
         self.device = device
@@ -295,18 +271,36 @@ class PreviewWindow {
         view.layer?.addSublayer(previewLayer)
         window.contentView = view
 
+        super.init()
+        window.delegate = self
         window.makeKeyAndOrderFront(nil)
     }
 
     func start() { session.startRunning() }
-    func stop() { session.stopRunning() }
+
+    func stop() {
+        session.stopRunning()
+        window.delegate = nil
+        window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        session.stopRunning()
+        onWindowClosed?(device.localizedName)
+    }
 }
 
 // MARK: - App delegate (standalone mode)
 
-class AppDelegate: NSObject, NSApplicationDelegate {
-    var previews: [PreviewWindow] = []
+class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
+    var allDevices: [AVCaptureDevice] = []
+    var activePreviews: [String: PreviewWindow] = [:]
+    let devicesMenuDelegate = DevicesMenuDelegate()
     let mode: FilterMode
+
+    var activeDeviceNames: Set<String> {
+        return Set(activePreviews.keys)
+    }
 
     init(mode: FilterMode) {
         self.mode = mode
@@ -315,7 +309,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ProcessInfo.processInfo.processName = "Quern Preview"
         loadAppIcon()
-        setupMenuBar()
+        devicesMenuDelegate.controller = self
+        setupMenuBar(devicesMenuDelegate: devicesMenuDelegate)
         enableScreenCaptureDevices()
         fputs("Waiting for devices...\n", stderr)
 
@@ -325,7 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func onDevicesReady() {
-        let allDevices = discoverDevices()
+        allDevices = discoverDevices()
 
         if allDevices.isEmpty {
             fputs("No iOS devices found.\n", stderr)
@@ -365,26 +360,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("  \(device.localizedName)")
             fputs("  Creating preview window for \(device.localizedName) (index \(i))...\n", stderr)
             let preview = PreviewWindow(device: device, index: i)
-            previews.append(preview)
+            preview.onWindowClosed = { [weak self] name in
+                self?.activePreviews.removeValue(forKey: name)
+            }
+            activePreviews[device.localizedName] = preview
             fputs("  Preview window created for \(device.localizedName)\n", stderr)
         }
         // Stagger session starts to avoid CoreMediaIO race conditions
-        startNextSession(index: 0)
+        let names = devices.map { $0.localizedName }
+        startNextSession(names: names, index: 0)
         print("Close all windows or Ctrl+C to quit.")
     }
 
-    func startNextSession(index: Int) {
-        guard index < previews.count else { return }
-        previews[index].start()
-        if index + 1 < previews.count {
+    func startNextSession(names: [String], index: Int) {
+        guard index < names.count, let preview = activePreviews[names[index]] else { return }
+        preview.start()
+        if index + 1 < names.count {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.startNextSession(index: index + 1)
+                self.startNextSession(names: names, index: index + 1)
             }
         }
     }
 
+    func togglePreview(name: String, position: Int) {
+        if let preview = activePreviews[name] {
+            preview.onWindowClosed = nil
+            preview.stop()
+            activePreviews.removeValue(forKey: name)
+        } else {
+            guard let device = allDevices.first(where: { $0.localizedName == name }) else { return }
+            let preview = PreviewWindow(device: device, index: position)
+            preview.onWindowClosed = { [weak self] name in
+                self?.activePreviews.removeValue(forKey: name)
+            }
+            activePreviews[name] = preview
+            preview.start()
+        }
+    }
+
+    func nextPosition() -> Int {
+        var pos = 0
+        let used = Set(activePreviews.values.map { Int(($0.window.frame.origin.x - 50) / 420) })
+        while used.contains(pos) { pos += 1 }
+        return pos
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false  // User quits via ⌘Q or menu
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return true
     }
 }
 
@@ -459,17 +485,22 @@ class PreviewSession: NSObject, NSWindowDelegate {
 
 // MARK: - Interactive delegate
 
-class InteractiveDelegate: NSObject, NSApplicationDelegate {
+class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var sessions: [String: PreviewSession] = [:]
     var allDevices: [AVCaptureDevice] = []
     var positions: Set<Int> = []
+    var stdinConnected = true
     let devicesMenuDelegate = DevicesMenuDelegate()
+
+    var activeDeviceNames: Set<String> {
+        return Set(sessions.keys)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ProcessInfo.processInfo.processName = "Quern Preview"
         loadAppIcon()
-        devicesMenuDelegate.interactiveDelegate = self
-        setupMenuBarInteractive(delegate: self)
+        devicesMenuDelegate.controller = self
+        setupMenuBar(devicesMenuDelegate: devicesMenuDelegate, quitTarget: self, quitAction: #selector(menuQuit(_:)))
         enableScreenCaptureDevices()
         fputs("Interactive mode: waiting for device discovery...\n", stderr)
 
@@ -513,9 +544,12 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate {
                     self.handleCommand(cmd: cmd, json: json)
                 }
             }
-            // EOF — stdin closed
+            // EOF — stdin closed (server restarted or stopped).
+            // Stay alive so the user can still use the Devices menu
+            // to toggle previews via CoreMediaIO directly.
             DispatchQueue.main.async {
-                NSApplication.shared.terminate(nil)
+                self.stdinConnected = false
+                fputs("Server disconnected (stdin EOF). Devices menu still available.\n", stderr)
             }
         }
     }
@@ -621,6 +655,18 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate {
         handleQuit()
     }
 
+    func togglePreview(name: String, position: Int) {
+        if sessions[name] != nil {
+            handleRemove(name: name)
+        } else {
+            handleAdd(name: name, position: position)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return true
+    }
+
     // MARK: Helpers
 
     func onWindowClosed(name: String) {
@@ -642,6 +688,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate {
     }
 
     func emit(_ dict: [String: Any]) {
+        guard stdinConnected else { return }
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
               let str = String(data: data, encoding: .utf8) else {
             return
