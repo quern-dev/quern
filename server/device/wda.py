@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 ICON_PATH = Path(__file__).parent / "resources" / "wda-icon.png"
 
+WDA_BUNDLE_ID = "dev.quern.driver"
+WDA_RUNNER_BUNDLE_ID = f"{WDA_BUNDLE_ID}.xctrunner"
+
 WDA_DIR = CONFIG_DIR / "wda"
 WDA_REPO = WDA_DIR / "WebDriverAgent"
 WDA_DERIVED = WDA_DIR / "build"
@@ -241,6 +244,13 @@ def customize_wda(repo: Path | None = None) -> bool:
         logger.info("WDA already customized — skipping")
         return False
 
+    # --- Replace bundle ID ---
+    content = content.replace(
+        "PRODUCT_BUNDLE_IDENTIFIER = com.facebook.WebDriverAgentRunner;",
+        f"PRODUCT_BUNDLE_IDENTIFIER = {WDA_BUNDLE_ID};",
+    )
+
+    # --- Inject PRODUCT_NAME into Runner build configs ---
     for config_uuid in (_DEBUG_CONFIG_UUID, _RELEASE_CONFIG_UUID):
         config_pattern = re.compile(
             rf"({config_uuid}\s*/\*[^*]*\*/\s*=\s*\{{[^}}]*?"
@@ -254,7 +264,7 @@ def customize_wda(repo: Path | None = None) -> bool:
         )
 
     pbxproj_path.write_text(content)
-    logger.info("Customized WDA project: replaced icons and set PRODUCT_NAME")
+    logger.info("Customized WDA project: replaced icons, bundle ID, and set PRODUCT_NAME")
     return True
 
 
@@ -293,6 +303,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
         "-scheme", "WebDriverAgentRunner",
         "-destination", "generic/platform=iOS",
         f"DEVELOPMENT_TEAM={team_id}",
+        f"PRODUCT_BUNDLE_IDENTIFIER={WDA_BUNDLE_ID}",
         "CODE_SIGNING_ALLOWED=YES",
         "-allowProvisioningUpdates",
         "-derivedDataPath", str(WDA_DERIVED),

@@ -100,13 +100,12 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
 
     tunnel_udids = list(devices.keys())
 
-    # If only one device is tunneled, assume it's the one we want
-    if len(tunnel_udids) == 1:
-        udid = tunnel_udids[0]
-        _tunnel_udid_cache[coredevice_uuid] = udid
-        return udid
+    # If the input is already a tunnel UDID, return it directly
+    if coredevice_uuid in devices:
+        _tunnel_udid_cache[coredevice_uuid] = coredevice_uuid
+        return coredevice_uuid
 
-    # Multiple tunnels — try to match via devicectl JSON which includes
+    # Map CoreDevice UUIDs to tunnel UDIDs via devicectl JSON which includes
     # both the CoreDevice UUID and the hardwareProperties.udid
     tmp_path = None
     try:
