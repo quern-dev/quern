@@ -94,6 +94,156 @@ func filterDevices(_ devices: [AVCaptureDevice], args: [String]) -> [AVCaptureDe
     return result
 }
 
+// MARK: - Menu bar setup
+
+func setupMenuBar() {
+    let mainMenu = NSMenu()
+
+    // App menu
+    let appMenuItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "About Quern Preview", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    appMenu.addItem(.separator())
+    let quitItem = NSMenuItem(title: "Quit Quern Preview", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appMenu.addItem(quitItem)
+    appMenuItem.submenu = appMenu
+    mainMenu.addItem(appMenuItem)
+
+    // Window menu
+    let windowMenuItem = NSMenuItem()
+    let windowMenu = NSMenu(title: "Window")
+    windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
+    windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.zoom(_:)), keyEquivalent: "")
+    windowMenu.addItem(.separator())
+    windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+    windowMenuItem.submenu = windowMenu
+    mainMenu.addItem(windowMenuItem)
+
+    NSApplication.shared.mainMenu = mainMenu
+    NSApplication.shared.windowsMenu = windowMenu
+}
+
+func setupMenuBarInteractive(delegate: InteractiveDelegate) {
+    let mainMenu = NSMenu()
+
+    // App menu
+    let appMenuItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "About Quern Preview", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    appMenu.addItem(.separator())
+    let quitItem = NSMenuItem(title: "Quit Quern Preview", action: #selector(InteractiveDelegate.menuQuit(_:)), keyEquivalent: "q")
+    quitItem.target = delegate
+    appMenu.addItem(quitItem)
+    appMenuItem.submenu = appMenu
+    mainMenu.addItem(appMenuItem)
+
+    // Devices menu
+    let devicesMenuItem = NSMenuItem()
+    let devicesMenu = NSMenu(title: "Devices")
+    devicesMenu.delegate = delegate.devicesMenuDelegate
+    devicesMenuItem.submenu = devicesMenu
+    mainMenu.addItem(devicesMenuItem)
+
+    // Window menu
+    let windowMenuItem = NSMenuItem()
+    let windowMenu = NSMenu(title: "Window")
+    windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
+    windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.zoom(_:)), keyEquivalent: "")
+    windowMenu.addItem(.separator())
+    windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+    windowMenuItem.submenu = windowMenu
+    mainMenu.addItem(windowMenuItem)
+
+    NSApplication.shared.mainMenu = mainMenu
+    NSApplication.shared.windowsMenu = windowMenu
+}
+
+func makeRoundedIcon(_ image: NSImage) -> NSImage {
+    let canvas = NSSize(width: 512, height: 512)
+    let inset: CGFloat = canvas.width * 0.1  // ~10% padding on each side
+    let iconRect = NSRect(x: inset, y: inset, width: canvas.width - inset * 2, height: canvas.height - inset * 2)
+    let radius = iconRect.width * 0.2237  // macOS icon corner radius ratio
+    let result = NSImage(size: canvas)
+    result.lockFocus()
+    NSBezierPath(roundedRect: iconRect, xRadius: radius, yRadius: radius).addClip()
+    image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+    result.unlockFocus()
+    return result
+}
+
+func loadAppIcon() {
+    // Try bundle Resources first (when running inside .app bundle),
+    // then fall back to icon next to the binary
+    let candidates = [
+        Bundle.main.resourcePath.map { $0 + "/AppIcon.png" },
+        Bundle.main.executablePath.map { (($0 as NSString).deletingLastPathComponent as NSString).appendingPathComponent("../Resources/AppIcon.png") },
+    ].compactMap { $0 }
+
+    for path in candidates {
+        if let icon = NSImage(contentsOfFile: path) {
+            NSApplication.shared.applicationIconImage = makeRoundedIcon(icon)
+            return
+        }
+    }
+}
+
+// MARK: - Devices menu delegate
+
+class DevicesMenuDelegate: NSObject, NSMenuDelegate {
+    weak var interactiveDelegate: InteractiveDelegate?
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        guard let delegate = interactiveDelegate else { return }
+
+        let devices = delegate.allDevices
+        if devices.isEmpty {
+            let noDevices = NSMenuItem(title: "No Devices Found", action: nil, keyEquivalent: "")
+            noDevices.isEnabled = false
+            menu.addItem(noDevices)
+        } else {
+            for device in devices {
+                let item = NSMenuItem(title: device.localizedName, action: #selector(DevicesMenuDelegate.toggleDevice(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = device.localizedName
+                if delegate.sessions[device.localizedName] != nil {
+                    item.state = .on
+                }
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
+        let refreshItem = NSMenuItem(title: "Refresh Devices", action: #selector(DevicesMenuDelegate.refreshDevices(_:)), keyEquivalent: "r")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+    }
+
+    @objc func toggleDevice(_ sender: NSMenuItem) {
+        guard let delegate = interactiveDelegate,
+              let name = sender.representedObject as? String else { return }
+
+        if delegate.sessions[name] != nil {
+            delegate.handleRemove(name: name)
+        } else {
+            let position = delegate.nextPosition()
+            delegate.handleAdd(name: name, position: position)
+        }
+    }
+
+    @objc func refreshDevices(_ sender: NSMenuItem) {
+        guard let delegate = interactiveDelegate else { return }
+        enableScreenCaptureDevices()
+        delegate.allDevices = discoverDevices()
+
+        let deviceList = delegate.allDevices.map { d -> [String: String] in
+            return ["name": d.localizedName, "id": d.uniqueID]
+        }
+        delegate.emit(["event": "devices", "devices": deviceList, "previewing": Array(delegate.sessions.keys)] as [String: Any])
+    }
+}
+
 // MARK: - Preview window
 
 class PreviewWindow {
@@ -163,6 +313,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.processName = "Quern Preview"
+        loadAppIcon()
+        setupMenuBar()
         enableScreenCaptureDevices()
         fputs("Waiting for devices...\n", stderr)
 
@@ -210,8 +363,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("Opening preview for \(devices.count) device(s):")
         for (i, device) in devices.enumerated() {
             print("  \(device.localizedName)")
+            fputs("  Creating preview window for \(device.localizedName) (index \(i))...\n", stderr)
             let preview = PreviewWindow(device: device, index: i)
             previews.append(preview)
+            fputs("  Preview window created for \(device.localizedName)\n", stderr)
         }
         // Stagger session starts to avoid CoreMediaIO race conditions
         startNextSession(index: 0)
@@ -229,7 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+        return false  // User quits via ⌘Q or menu
     }
 }
 
@@ -308,8 +463,13 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate {
     var sessions: [String: PreviewSession] = [:]
     var allDevices: [AVCaptureDevice] = []
     var positions: Set<Int> = []
+    let devicesMenuDelegate = DevicesMenuDelegate()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.processName = "Quern Preview"
+        loadAppIcon()
+        devicesMenuDelegate.interactiveDelegate = self
+        setupMenuBarInteractive(delegate: self)
         enableScreenCaptureDevices()
         fputs("Interactive mode: waiting for device discovery...\n", stderr)
 
@@ -455,6 +615,10 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate {
         }
         sessions.removeAll()
         NSApplication.shared.terminate(nil)
+    }
+
+    @objc func menuQuit(_ sender: Any?) {
+        handleQuit()
     }
 
     // MARK: Helpers

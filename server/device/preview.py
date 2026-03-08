@@ -19,9 +19,39 @@ logger = logging.getLogger("quern-debug-server.preview")
 
 QUERN_BIN_DIR = Path.home() / ".quern" / "bin"
 BINARY_NAME = "ios-preview"
+APP_BUNDLE_NAME = "Quern Preview.app"
 _SOURCE_CANDIDATES = [
     Path(__file__).resolve().parent.parent.parent / "tools" / "ios-preview.swift",
 ]
+_RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
+
+_INFO_PLIST = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Quern Preview</string>
+    <key>CFBundleDisplayName</key>
+    <string>Quern Preview</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.quern.preview</string>
+    <key>CFBundleExecutable</key>
+    <string>ios-preview</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon.png</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Quern Preview uses camera access to display live iOS device screens connected via USB.</string>
+</dict>
+</plist>
+"""
 
 
 def _find_source() -> Path | None:
@@ -56,7 +86,8 @@ class PreviewManager:
         self._pending: dict[str, asyncio.Future] = {}
         self._positions: set[int] = set()
         self._stagger_lock = asyncio.Lock()
-        self._binary_path = QUERN_BIN_DIR / BINARY_NAME
+        self._bundle_path = QUERN_BIN_DIR / APP_BUNDLE_NAME
+        self._binary_path = self._bundle_path / "Contents" / "MacOS" / BINARY_NAME
 
     async def ensure_binary(self) -> Path:
         """Lazy-compile ios-preview if needed. Returns path to binary."""
@@ -80,7 +111,9 @@ class PreviewManager:
                 "xcode-select --install"
             )
 
-        QUERN_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        # Create bundle directory structure before compiling into it
+        macos_dir = self._bundle_path / "Contents" / "MacOS"
+        macos_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Compiling ios-preview: %s → %s", source, self._binary_path)
 
         proc = await asyncio.create_subprocess_exec(
@@ -100,7 +133,32 @@ class PreviewManager:
             raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
 
         logger.info("ios-preview compiled successfully")
+
+        # Finalize .app bundle (Info.plist, icon)
+        self._create_app_bundle()
+
         return self._binary_path
+
+    def _create_app_bundle(self) -> None:
+        """Create a minimal .app bundle so macOS shows the correct name and icon."""
+        contents = self._bundle_path / "Contents"
+        macos_dir = contents / "MacOS"
+        resources_dir = contents / "Resources"
+
+        macos_dir.mkdir(parents=True, exist_ok=True)
+        resources_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write Info.plist
+        plist_path = contents / "Info.plist"
+        plist_path.write_text(_INFO_PLIST)
+
+        # Copy icon
+        icon_src = _RESOURCES_DIR / "wda-icon.png"
+        icon_dst = resources_dir / "AppIcon.png"
+        if icon_src.exists():
+            shutil.copy2(icon_src, icon_dst)
+
+        logger.info("Created app bundle: %s", self._bundle_path)
 
     # ------------------------------------------------------------------
     # Process lifecycle
