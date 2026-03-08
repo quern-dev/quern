@@ -642,6 +642,7 @@ class TapElementRequest(BaseModel):
     element_type: str | None = None
     udid: str | None = None
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
+    source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
 
 
 class SwipeRequest(BaseModel):

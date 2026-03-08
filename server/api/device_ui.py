@@ -36,6 +36,7 @@ async def get_ui_elements(
     children_of: str | None = Query(default=None, description="Only return children of the element with this identifier or label"),
     snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
     strategy: str | None = Query(default=None, description="Use 'skeleton' to skip /source timeout on complex screens. Physical devices only."),
+    source_timeout: float | None = Query(default=None, ge=1, le=60, description="Override WDA /source timeout in seconds. Physical devices only."),
 ):
     """Get all UI accessibility elements from the current screen.
 
@@ -53,13 +54,13 @@ async def get_ui_elements(
                 from server.device.ui_elements import parse_elements
                 elements = parse_elements(raw)
             else:
-                elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth)
+                elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
         elif children_of:
             elements, resolved_udid = await controller.get_ui_elements_children_of(
                 children_of=children_of, udid=udid, snapshot_depth=snapshot_depth,
             )
         else:
-            elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth)
+            elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
 
         end = time.perf_counter()
         logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
@@ -174,6 +175,7 @@ async def get_screen_summary(
     udid: str | None = Query(default=None),
     snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
     strategy: str | None = Query(default=None, description="Use 'skeleton' to skip /source timeout on complex screens. Physical devices only."),
+    source_timeout: float | None = Query(default=None, ge=1, le=60, description="Override WDA /source timeout in seconds. Use for slow screens on older devices. Physical devices only."),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
@@ -182,6 +184,7 @@ async def get_screen_summary(
     - udid: Device UDID (auto-resolves if omitted)
     - snapshot_depth: WDA accessibility tree depth (1-50, default 10). Only affects physical devices.
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
+    - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
 
     Returns summary with truncated, total_interactive_elements fields.
     """
@@ -192,6 +195,7 @@ async def get_screen_summary(
             udid=udid,
             snapshot_depth=snapshot_depth,
             strategy=strategy,
+            source_timeout=source_timeout,
         )
         summary["udid"] = resolved_udid
         return summary
@@ -238,6 +242,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             element_type=body.element_type,
             udid=body.udid,
             skip_stability_check=body.skip_stability_check,
+            source_timeout=body.source_timeout,
         )
 
         end = time.perf_counter()

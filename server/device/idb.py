@@ -95,7 +95,7 @@ class IdbBackend:
             )
         return stdout.decode(), stderr.decode()
 
-    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
+    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None, source_timeout: float | None = None) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
         Args:

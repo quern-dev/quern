@@ -25,14 +25,21 @@ export function registerDeviceUITools(server: McpServer): void {
         .enum(["skeleton"])
         .optional()
         .describe("Use 'skeleton' to skip /source timeout on complex screens (maps with many pins). Returns navigation chrome only. Physical devices only."),
+      source_timeout: z
+        .coerce.number()
+        .min(1)
+        .max(60)
+        .optional()
+        .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Physical devices only."),
     }),
-  }, async ({ udid, children_of, snapshot_depth, strategy }) => {
+  }, async ({ udid, children_of, snapshot_depth, strategy, source_timeout }) => {
     try {
       const params: Record<string, string> = {};
       if (udid) params.udid = udid;
       if (children_of) params.children_of = children_of;
       if (snapshot_depth !== undefined) params.snapshot_depth = String(snapshot_depth);
       if (strategy) params.strategy = strategy;
+      if (source_timeout !== undefined) params.source_timeout = String(source_timeout);
       const data = await apiRequest("GET", "/api/v1/device/ui", params);
 
       return {
@@ -214,14 +221,21 @@ This is the recommended first step before interacting with UI. Use this to disco
         .enum(["skeleton"])
         .optional()
         .describe("Use 'skeleton' to skip /source timeout on complex screens (maps with many pins). Returns navigation chrome only. Physical devices only."),
+      source_timeout: z
+        .coerce.number()
+        .min(1)
+        .max(60)
+        .optional()
+        .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Physical devices only."),
     }),
-  }, async ({ max_elements, udid, snapshot_depth, strategy }) => {
+  }, async ({ max_elements, udid, snapshot_depth, strategy, source_timeout }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/screen-summary", {
         max_elements,
         udid,
         snapshot_depth,
         strategy,
+        source_timeout,
       });
 
       return {
@@ -307,14 +321,21 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      source_timeout: z
+        .coerce.number()
+        .min(1)
+        .max(60)
+        .optional()
+        .describe("Override WDA /source timeout in seconds. Use 10-15 for slow screens on older devices. Physical devices only."),
     }),
-  }, async ({ label, identifier, element_type, udid }) => {
+  }, async ({ label, identifier, element_type, udid, source_timeout }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (element_type) body.element_type = element_type;
       if (udid) body.udid = udid;
+      if (source_timeout) body.source_timeout = source_timeout;
 
       const data = await apiRequest(
         "POST",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
@@ -587,9 +587,10 @@ class TestWdaDirectQuery:
         ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
 
         await ctrl._wda_direct_query("PHYS-0001", identifier="myButton")
-        ctrl.wda_client.find_elements_by_query.assert_called_once_with(
-            "PHYS-0001", "accessibility id", "myButton",
-        )
+        # First tries accessibility id, then falls back to predicate string
+        calls = ctrl.wda_client.find_elements_by_query.call_args_list
+        assert calls[0] == call("PHYS-0001", "accessibility id", "myButton")
+        assert calls[1] == call("PHYS-0001", "predicate string", "name == 'myButton'")
 
     async def test_label_only_uses_predicate(self):
         ctrl = DeviceController()
@@ -639,7 +640,7 @@ class TestWdaDirectQuery:
             },
         ])
 
-        elements = await ctrl._wda_direct_query("PHYS-0001", identifier="done_btn")
+        elements, elapsed = await ctrl._wda_direct_query("PHYS-0001", identifier="done_btn")
         assert len(elements) == 1
         assert elements[0].type == "Button"
         assert elements[0].label == "Done"

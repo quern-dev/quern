@@ -279,7 +279,7 @@ class DeviceControllerUI:
         label: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
-    ) -> list[UIElement]:
+    ) -> tuple[list[UIElement], float]:
         """Query WDA directly for specific elements without fetching the full tree.
 
         Translates label/identifier/type into WDA locator strategies:
@@ -287,7 +287,7 @@ class DeviceControllerUI:
         - label only → 'predicate string' with label ==[c] (case-insensitive)
         - combined filters → 'predicate string' with AND clauses
 
-        Returns parsed UIElement objects. Empty list on no match or error.
+        Returns (parsed UIElement objects, elapsed seconds). Empty list on no match or error.
         """
         def _escape(val: str) -> str:
             """Escape single quotes for NSPredicate string literals."""
@@ -311,14 +311,29 @@ class DeviceControllerUI:
                 clauses.append(f"type == '{xcui_type}'")
 
             if not clauses:
-                return []
+                return [], 0.0
 
             using = "predicate string"
             value = " AND ".join(clauses)
 
         logger.info("[WDA DIRECT] %s=%s on %s", using, value, udid[:8])
+        start = time.perf_counter()
         raw = await self.wda_client.find_elements_by_query(udid, using, value)
-        return parse_elements(raw)
+        elapsed = time.perf_counter() - start
+        elements = parse_elements(raw)
+
+        # If accessibility id returned nothing, retry with predicate string —
+        # but only if the first query was fast (<2s). On dense screens, WDA
+        # queries are uniformly slow so retrying just wastes time.
+        if not elements and using == "accessibility id" and identifier and elapsed < 2.0:
+            pred_value = f"name == '{_escape(identifier)}'"
+            logger.info("[WDA DIRECT] retrying with predicate string=%s on %s", pred_value, udid[:8])
+            raw = await self.wda_client.find_elements_by_query(udid, "predicate string", pred_value)
+            elements = parse_elements(raw)
+        elif not elements and elapsed >= 2.0:
+            logger.info("[WDA DIRECT] skipping predicate retry (first query took %.1fs) on %s", elapsed, udid[:8])
+
+        return elements, elapsed
 
     async def get_ui_elements(
         self,
@@ -328,6 +343,7 @@ class DeviceControllerUI:
         filter_identifier: str | None = None,
         filter_type: str | None = None,
         snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -376,19 +392,25 @@ class DeviceControllerUI:
 
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and self._is_physical(resolved):
-            elements = await self._wda_direct_query(resolved, filter_label, filter_identifier, filter_type)
+            elements, query_elapsed = await self._wda_direct_query(resolved, filter_label, filter_identifier, filter_type)
             if elements:
                 return elements, resolved
-            # Direct query found nothing — fall through to /source snapshot.
-            # WDA 'accessibility id' doesn't always match identifiers that
-            # appear in the full /source tree on physical devices.
+            # Direct query found nothing. If the query was slow (>3s), the screen
+            # is too dense for any WDA query to work — skip /source to avoid a
+            # 30s+ cascade of timeouts and WDA restarts.
+            if query_elapsed > 3.0:
+                logger.warning(
+                    "[WDA DIRECT] query took %.1fs with 0 results on %s — skipping /source fallback",
+                    query_elapsed, resolved[:8],
+                )
+                return [], resolved
             logger.info("[WDA DIRECT FALLBACK] No results for id=%s label=%s, trying /source",
                         filter_identifier, filter_label)
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
 
-        raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth)
+        raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -661,6 +683,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         snapshot_depth: int | None = None,
         strategy: str | None = None,
+        source_timeout: float | None = None,
     ) -> tuple[dict, str]:
         """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
 
@@ -669,13 +692,14 @@ class DeviceControllerUI:
             udid: Device UDID (auto-resolves if omitted)
             snapshot_depth: WDA accessibility tree depth (1-50, physical devices only)
             strategy: 'skeleton' to skip /source timeout on complex screens (physical only)
+            source_timeout: Override WDA /source timeout in seconds (physical devices only)
         """
         resolved = await self.resolve_udid(udid)
         if strategy == "skeleton" and self._is_physical(resolved):
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)
         else:
-            elements, resolved = await self.get_ui_elements(udid, snapshot_depth=snapshot_depth)
+            elements, resolved = await self.get_ui_elements(udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
         return generate_screen_summary(elements, max_elements=max_elements), resolved
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
@@ -692,10 +716,7 @@ class DeviceControllerUI:
         element_type: str | None = None,
         udid: str | None = None,
         skip_stability_check: bool = False,
-        # Future enhancements to consider:
-        # stability_check_ms: int = 100,  # Configurable stability check interval
-        # verify_disappears: bool = False,  # Verify element disappears after tap
-        # retry_attempts: int = 1,  # Number of retry attempts if tap fails
+        source_timeout: float | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -761,6 +782,7 @@ class DeviceControllerUI:
             filter_label=label,
             filter_identifier=identifier,
             filter_type=element_type,
+            source_timeout=source_timeout,
         )
 
         # Use shared search helper

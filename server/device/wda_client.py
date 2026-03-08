@@ -25,6 +25,7 @@ logger = logging.getLogger("quern-debug-server.wda-client")
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 SOURCE_TIMEOUT = 3.0  # seconds — most screens return /source in <2s
+SOURCE_TIMEOUT_SLOW = 6.0  # seconds — for A13 and older devices
 SNAPSHOT_MAX_DEPTH = 25  # WDA default is 50 — 25 resolves most screens; skeleton fallback handles dense maps
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
@@ -42,6 +43,25 @@ _SKELETON_CONTAINER_TYPES = [
 ]
 SKELETON_QUERY_TIMEOUT = 8.0  # seconds — busy map: container ~1.6s + children ~4.7s
 _ELEMENT_RESPONSE_ATTRIBUTES = "type,label,name,rect,enabled,value"
+
+# iPhone models with A13 chip or older (slower WDA /source).
+# A14+ (iPhone 12 and later) are fast enough for the default timeout.
+_SLOW_DEVICE_PREFIXES = (
+    "iPhone 11", "iPhone XS", "iPhone XR", "iPhone X ",  # trailing space to avoid "XS"/"XR"
+    "iPhone SE",  # SE 1st/2nd gen both have A13 or older
+    "iPhone 8", "iPhone 7", "iPhone 6",
+    "iPad Air 2", "iPad Air (3", "iPad Air (4",  # A14 is iPad Air 4th gen, but borderline
+    "iPad mini", "iPad (", "iPad Pro (9", "iPad Pro (10", "iPad Pro (11",
+    "iPod",
+)
+
+
+def _is_slow_device(name: str) -> bool:
+    """Check if a device name corresponds to an A13 or older chip."""
+    # iPhone X (no suffix) needs special handling — "iPhone X" without S/R
+    if name == "iPhone X":
+        return True
+    return name.startswith(_SLOW_DEVICE_PREFIXES)
 
 
 @dataclass
@@ -63,6 +83,8 @@ class WdaBackend:
         self._next_port = FORWARD_START_PORT
         # os_version cache for auto-start — populated by controller
         self._device_os_versions: dict[str, str] = {}
+        # device name cache for timeout tuning — populated by controller
+        self._device_names: dict[str, str] = {}
         # Idle timeout tracking
         self._last_interaction: dict[str, float] = {}
         self._idle_task: asyncio.Task | None = None
@@ -70,6 +92,13 @@ class WdaBackend:
         self._current_depth: dict[str, int] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
         self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def _source_timeout(self, udid: str) -> float:
+        """Return the /source timeout for a device, doubled for slower chips."""
+        name = self._device_names.get(udid, "")
+        if name and _is_slow_device(name):
+            return SOURCE_TIMEOUT_SLOW
+        return SOURCE_TIMEOUT
 
     async def close(self) -> None:
         """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
@@ -653,7 +682,7 @@ class WdaBackend:
         )
         return flat
 
-    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
+    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None, source_timeout: float | None = None) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
 
         Fetches WDA's /source?format=json, flattens the nested tree,
@@ -671,11 +700,12 @@ class WdaBackend:
         target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
         await self._set_snapshot_depth(udid, target_depth)
 
+        effective_timeout = source_timeout if source_timeout is not None else self._source_timeout(udid)
         start = time.perf_counter()
         try:
             resp = await self._request(
                 "get", udid, "/source", params={"format": "json"},
-                timeout=SOURCE_TIMEOUT, raise_on_timeout=True,
+                timeout=effective_timeout, raise_on_timeout=True,
             )
         except httpx.TimeoutException:
             elapsed = (time.perf_counter() - start) * 1000
@@ -709,7 +739,7 @@ class WdaBackend:
         )
         return flat
 
-    async def describe_all_nested(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
+    async def describe_all_nested(self, udid: str, *, snapshot_depth: int | None = None, source_timeout: float | None = None) -> list[dict]:
         """Get UI elements with hierarchy preserved, in idb-compatible format.
 
         Falls back to flat element queries if /source times out.
@@ -717,15 +747,17 @@ class WdaBackend:
         Args:
             snapshot_depth: WDA accessibility tree depth (1-50). If provided
                 and different from current, updates WDA settings before fetching.
+            source_timeout: Override /source timeout in seconds (default: auto per device).
         """
         target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
         await self._set_snapshot_depth(udid, target_depth)
 
+        effective_timeout = source_timeout if source_timeout is not None else self._source_timeout(udid)
         start = time.perf_counter()
         try:
             resp = await self._request(
                 "get", udid, "/source", params={"format": "json"},
-                timeout=SOURCE_TIMEOUT, raise_on_timeout=True,
+                timeout=effective_timeout, raise_on_timeout=True,
             )
         except httpx.TimeoutException:
             elapsed = (time.perf_counter() - start) * 1000
