@@ -129,10 +129,31 @@ class TestResolveTunnelUdid:
         result = await resolve_tunnel_udid("53DA57AA-1234")
         assert result == "00008130-AAAA"
 
-    async def test_single_tunnel_auto_maps(self):
-        """With only one tunneled device, it maps automatically."""
+    async def test_single_tunnel_maps_via_devicectl(self):
+        """With one tunneled device, devicectl JSON maps the CoreDevice UUID."""
         devices = {"00008130-AAAA": [{"tunnel-address": "fd35::1"}]}
-        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices):
+        devicectl_output = {
+            "result": {
+                "devices": [
+                    {
+                        "identifier": "53DA57AA-1234",
+                        "hardwareProperties": {"udid": "00008130-AAAA"},
+                    },
+                ]
+            }
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+
+        async def fake_subprocess(*args, **kwargs):
+            json_path = args[-1]
+            Path(json_path).write_text(json.dumps(devicectl_output))
+            return mock_proc
+
+        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices), \
+             patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess):
             result = await resolve_tunnel_udid("53DA57AA-1234")
             assert result == "00008130-AAAA"
             assert _tunnel_udid_cache["53DA57AA-1234"] == "00008130-AAAA"

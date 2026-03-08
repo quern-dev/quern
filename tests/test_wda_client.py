@@ -21,11 +21,21 @@ from server.device.wda_client import (
     _SKELETON_CONTAINER_TYPES,
     _map_wda_element,
     _map_wda_element_from_query,
+    _parse_wda_error,
     convert_wda_tree_nested,
     find_element_at_point,
     flatten_wda_tree,
 )
-from server.models import DeviceError
+from server.models import (
+    DeviceError,
+    WdaAppCrashedError,
+    WdaElementNotFoundError,
+    WdaElementNotInteractableError,
+    WdaError,
+    WdaInvalidSessionError,
+    WdaKeyboardNotPresentError,
+    WdaStaleElementError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +426,9 @@ class TestWdaBackendActivateApp:
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
+        mock_response.json = MagicMock(return_value={
+            "value": {"error": "unknown error", "message": "activate failed"},
+        })
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -424,7 +437,7 @@ class TestWdaBackendActivateApp:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with pytest.raises(DeviceError, match="WDA activate_app failed"):
+            with pytest.raises(WdaError):
                 await backend.activate_app("test-udid", "com.example.App")
 
 
@@ -456,6 +469,9 @@ class TestWdaBackendTerminateApp:
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
+        mock_response.json = MagicMock(return_value={
+            "value": {"error": "unknown error", "message": "terminate failed"},
+        })
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -464,7 +480,7 @@ class TestWdaBackendTerminateApp:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with pytest.raises(DeviceError, match="WDA terminate_app failed"):
+            with pytest.raises(WdaError):
                 await backend.terminate_app("test-udid", "com.example.App")
 
 
@@ -1698,3 +1714,145 @@ class TestDescribeAllSkeletonFallback:
                 assert len(result) == 2
                 assert result[0]["type"] == "TabBar"
                 assert result[1]["AXLabel"] == "Home"
+
+
+# ---------------------------------------------------------------------------
+# WDA error parsing tests
+# ---------------------------------------------------------------------------
+
+
+def _mock_response(status_code: int, json_body: dict | None = None, text: str = "") -> MagicMock:
+    """Helper: create a mock httpx.Response."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text or str(json_body)
+    if json_body is not None:
+        resp.json = MagicMock(return_value=json_body)
+    else:
+        resp.json = MagicMock(side_effect=ValueError("No JSON"))
+    return resp
+
+
+class TestParseWdaError:
+    def test_200_returns_none(self):
+        resp = _mock_response(200, {"value": {}})
+        assert _parse_wda_error(resp, "test-udid") is None
+
+    def test_invalid_session(self):
+        resp = _mock_response(404, {
+            "value": {"error": "invalid session id", "message": "Session does not exist"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaInvalidSessionError)
+        assert error.wda_error == "invalid session id"
+
+    def test_no_such_element(self):
+        resp = _mock_response(404, {
+            "value": {"error": "no such element", "message": "unable to find element"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaElementNotFoundError)
+
+    def test_stale_element(self):
+        resp = _mock_response(404, {
+            "value": {"error": "stale element reference", "message": "Element is stale"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaStaleElementError)
+
+    def test_element_not_interactable(self):
+        resp = _mock_response(400, {
+            "value": {"error": "element not interactable", "message": "Element is not hittable"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaElementNotInteractableError)
+
+    def test_keyboard_not_present(self):
+        resp = _mock_response(400, {
+            "value": {"error": "invalid element state", "message": "No keyboard is present"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaKeyboardNotPresentError)
+
+    def test_invalid_element_state_non_keyboard(self):
+        resp = _mock_response(400, {
+            "value": {"error": "invalid element state", "message": "Element is not enabled"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaElementNotInteractableError)
+
+    def test_app_crashed(self):
+        resp = _mock_response(500, {
+            "value": {"error": "unknown error", "message": "Application crash detected"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaAppCrashedError)
+
+    def test_non_json_body(self):
+        resp = _mock_response(502, json_body=None, text="Bad Gateway")
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaError)
+        assert not isinstance(error, WdaInvalidSessionError)
+        assert "502" in str(error)
+
+    def test_unknown_w3c_error(self):
+        resp = _mock_response(500, {
+            "value": {"error": "some new error", "message": "Something unexpected"},
+        })
+        error = _parse_wda_error(resp, "test-udid")
+        assert isinstance(error, WdaError)
+        assert error.wda_error == "some new error"
+
+
+class TestRequestRaisesWdaError:
+    async def test_request_raises_specific_error(self):
+        backend = _make_session_backend()
+
+        mock_response = _mock_response(404, {
+            "value": {"error": "no such element", "message": "unable to find element"},
+        })
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(WdaElementNotFoundError):
+                await backend._request("get", "test-udid", "/element")
+
+    async def test_tap_raises_wda_error(self):
+        backend = _make_session_backend()
+
+        mock_response = _mock_response(400, {
+            "value": {"error": "invalid element state", "message": "No keyboard is present"},
+        })
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(WdaKeyboardNotPresentError):
+                await backend.tap("test-udid", 100, 200)
+
+    async def test_backward_compat_except_device_error(self):
+        """WdaError subclasses are caught by except DeviceError."""
+        backend = _make_session_backend()
+
+        mock_response = _mock_response(404, {
+            "value": {"error": "no such element", "message": "unable to find element"},
+        })
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(DeviceError):
+                await backend._request("get", "test-udid", "/element")

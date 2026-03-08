@@ -11,6 +11,10 @@ from server.models import (
     BootDeviceRequest,
     DeviceError,
     DeviceType,
+    WdaElementNotFoundError,
+    WdaElementNotInteractableError,
+    WdaInvalidSessionError,
+    WdaKeyboardNotPresentError,
     GrantPermissionRequest,
     InstallAppRequest,
     LaunchAppRequest,
@@ -46,6 +50,13 @@ def _get_controller(request: Request):
 def _handle_device_error(e: DeviceError) -> HTTPException:
     """Map a DeviceError to an appropriate HTTPException."""
     msg = str(e)
+    # Type-based routing for WDA errors (more reliable than string matching)
+    if isinstance(e, WdaElementNotFoundError):
+        return HTTPException(status_code=404, detail=msg)
+    if isinstance(e, WdaInvalidSessionError):
+        return HTTPException(status_code=503, detail=msg)
+    if isinstance(e, (WdaKeyboardNotPresentError, WdaElementNotInteractableError)):
+        return HTTPException(status_code=400, detail=msg)
     if "No booted device" in msg or "Multiple devices booted" in msg:
         return HTTPException(status_code=400, detail=msg)
     if "only supported on simulators" in msg:

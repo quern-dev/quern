@@ -18,7 +18,16 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from server.models import DeviceError
+from server.models import (
+    DeviceError,
+    WdaAppCrashedError,
+    WdaElementNotFoundError,
+    WdaElementNotInteractableError,
+    WdaError,
+    WdaInvalidSessionError,
+    WdaKeyboardNotPresentError,
+    WdaStaleElementError,
+)
 
 logger = logging.getLogger("quern-debug-server.wda-client")
 
@@ -74,6 +83,80 @@ class _WdaConnection:
     forward_proc: asyncio.subprocess.Process | None = None
     local_port: int | None = None
     session_id: str | None = None
+
+
+# W3C error code → WdaError subclass mapping
+_W3C_ERROR_MAP: dict[str, type[WdaError]] = {
+    "invalid session id": WdaInvalidSessionError,
+    "no such element": WdaElementNotFoundError,
+    "stale element reference": WdaStaleElementError,
+    "element not interactable": WdaElementNotInteractableError,
+}
+
+
+def _parse_wda_error(resp: httpx.Response, udid: str) -> WdaError | None:
+    """Inspect an httpx.Response and return a WdaError subclass, or None for 200."""
+    if resp.status_code == 200:
+        return None
+
+    try:
+        body = resp.json()
+    except Exception:
+        return WdaError(
+            f"WDA request failed on {udid[:8]} (HTTP {resp.status_code}): {resp.text[:200]}",
+        )
+
+    value = body.get("value", {})
+    if isinstance(value, str):
+        # Some WDA responses have value as a plain string
+        return WdaError(
+            f"WDA error on {udid[:8]}: {value[:200]}",
+            wda_error="unknown",
+            wda_message=value,
+        )
+
+    wda_error = value.get("error", "")
+    wda_message = value.get("message", "")
+    error_lower = wda_error.lower()
+    message_lower = wda_message.lower()
+
+    # Direct mapping for known W3C error codes
+    for code, cls in _W3C_ERROR_MAP.items():
+        if code in error_lower:
+            return cls(
+                f"WDA error on {udid[:8]}: {wda_message[:200]}",
+                wda_error=wda_error,
+                wda_message=wda_message,
+            )
+
+    # Special cases for "invalid element state"
+    if "invalid element state" in error_lower:
+        if "keyboard" in message_lower:
+            return WdaKeyboardNotPresentError(
+                f"WDA error on {udid[:8]}: {wda_message[:200]}",
+                wda_error=wda_error,
+                wda_message=wda_message,
+            )
+        return WdaElementNotInteractableError(
+            f"WDA error on {udid[:8]}: {wda_message[:200]}",
+            wda_error=wda_error,
+            wda_message=wda_message,
+        )
+
+    # Crash detection
+    if "unknown error" in error_lower and "crash" in message_lower:
+        return WdaAppCrashedError(
+            f"WDA error on {udid[:8]}: {wda_message[:200]}",
+            wda_error=wda_error,
+            wda_message=wda_message,
+        )
+
+    # Anything else non-200
+    return WdaError(
+        f"WDA error on {udid[:8]} ({wda_error}): {wda_message[:200]}",
+        wda_error=wda_error,
+        wda_message=wda_message,
+    )
 
 
 class WdaBackend:
@@ -346,7 +429,8 @@ class WdaBackend:
                     tool="wda",
                 )
 
-            if resp.status_code != 200:
+            error = _parse_wda_error(resp, udid)
+            if error is not None:
                 raise DeviceError(
                     f"WDA session creation failed (status {resp.status_code})",
                     tool="wda",
@@ -494,6 +578,10 @@ class WdaBackend:
         # Track interaction for idle timeout
         self._last_interaction[udid] = time.monotonic()
         self._ensure_idle_task()
+
+        error = _parse_wda_error(resp, udid)
+        if error is not None:
+            raise error
 
         return resp
 
@@ -722,12 +810,6 @@ class WdaBackend:
 
             return await self.build_screen_skeleton(udid)
 
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA /source failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
-
         data = resp.json()
         # WDA returns {"value": {...tree...}, "sessionId": ...}
         tree = data.get("value", data)
@@ -774,12 +856,6 @@ class WdaBackend:
             # Fallback returns flat list — no hierarchy, but better than an error
             return await self.build_screen_skeleton(udid)
 
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA /source failed (status {resp.status_code})",
-                tool="wda",
-            )
-
         data = resp.json()
         tree = data.get("value", data)
 
@@ -801,14 +877,9 @@ class WdaBackend:
 
     async def tap(self, udid: str, x: float, y: float) -> None:
         """Tap at coordinates via WDA."""
-        resp = await self._request("post", udid, "/wda/tap",
-                                    use_session=True, json={"x": x, "y": y},
-                                    timeout=ACTION_TIMEOUT)
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA tap failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
+        await self._request("post", udid, "/wda/tap",
+                            use_session=True, json={"x": x, "y": y},
+                            timeout=ACTION_TIMEOUT)
 
     async def swipe(
         self,
@@ -820,63 +891,38 @@ class WdaBackend:
         duration: float = 0.5,
     ) -> None:
         """Swipe gesture via WDA."""
-        resp = await self._request("post", udid, "/wda/dragfromtoforduration",
-                                    use_session=True, timeout=ACTION_TIMEOUT,
-                                    json={
+        await self._request("post", udid, "/wda/dragfromtoforduration",
+                            use_session=True, timeout=ACTION_TIMEOUT,
+                            json={
             "fromX": start_x,
             "fromY": start_y,
             "toX": end_x,
             "toY": end_y,
             "duration": duration,
         })
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA swipe failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
 
     async def type_text(self, udid: str, text: str) -> None:
         """Type text via WDA."""
-        resp = await self._request("post", udid, "/wda/keys",
-                                    use_session=True, timeout=ACTION_TIMEOUT,
-                                    json={"value": list(text)})
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA type_text failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
+        await self._request("post", udid, "/wda/keys",
+                            use_session=True, timeout=ACTION_TIMEOUT,
+                            json={"value": list(text)})
 
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button via WDA."""
-        resp = await self._request("post", udid, "/wda/pressButton",
-                                    use_session=True, timeout=ACTION_TIMEOUT,
-                                    json={"name": button})
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA pressButton failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
+        await self._request("post", udid, "/wda/pressButton",
+                            use_session=True, timeout=ACTION_TIMEOUT,
+                            json={"name": button})
 
     async def activate_app(self, udid: str, bundle_id: str) -> None:
         """Activate (bring to foreground) an app via WDA."""
-        resp = await self._request("post", udid, "/wda/apps/activate",
-                                    use_session=True, timeout=ACTION_TIMEOUT,
-                                    json={"bundleId": bundle_id})
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA activate_app failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
+        await self._request("post", udid, "/wda/apps/activate",
+                            use_session=True, timeout=ACTION_TIMEOUT,
+                            json={"bundleId": bundle_id})
 
     async def terminate_app(self, udid: str, bundle_id: str) -> None:
         """Terminate an app via WDA."""
-        resp = await self._request("post", udid, "/wda/apps/terminate",
-                                    use_session=True, json={"bundleId": bundle_id})
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA terminate_app failed (status {resp.status_code}): {resp.text[:200]}",
-                tool="wda",
-            )
+        await self._request("post", udid, "/wda/apps/terminate",
+                            use_session=True, json={"bundleId": bundle_id})
 
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
@@ -909,32 +955,24 @@ class WdaBackend:
                     "using": "class name",
                     "value": class_name,
                 })
-                if resp.status_code != 200:
-                    continue
                 value = resp.json().get("value", {})
                 element_id = (value.get("ELEMENT")
                               or value.get("element-6066-11e4-a52e-4f735466cecf"))
                 if not element_id:
                     continue
-                clear_resp = await self._request("post", udid,
-                                                  f"/element/{element_id}/clear",
-                                                  use_session=True)
-                if clear_resp.status_code == 200:
-                    return
-            except DeviceError:
+                await self._request("post", udid,
+                                    f"/element/{element_id}/clear",
+                                    use_session=True)
+                return
+            except WdaError:
                 continue
 
         # Fallback: triple-tap + backspace (works on simulators via idb)
         for _ in range(3):
             await self.tap(udid, x, y)
         await asyncio.sleep(0.15)
-        resp = await self._request("post", udid, "/wda/keys",
-                                    use_session=True, json={"value": ["\b"]})
-        if resp.status_code != 200:
-            raise DeviceError(
-                f"WDA select_all_and_delete failed: {resp.text[:200]}",
-                tool="wda",
-            )
+        await self._request("post", udid, "/wda/keys",
+                            use_session=True, json={"value": ["\b"]})
 
 
 # ------------------------------------------------------------------

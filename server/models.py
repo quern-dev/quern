@@ -564,6 +564,23 @@ class DeviceError(Exception):
         super().__init__(message)
 
 
+class WdaError(DeviceError):
+    """Base for all WDA-specific errors. Carries the W3C error code."""
+
+    def __init__(self, message: str, wda_error: str = "", wda_message: str = ""):
+        self.wda_error = wda_error
+        self.wda_message = wda_message
+        super().__init__(message, tool="wda")
+
+
+class WdaInvalidSessionError(WdaError): ...
+class WdaElementNotFoundError(WdaError): ...
+class WdaStaleElementError(WdaError): ...
+class WdaKeyboardNotPresentError(WdaError): ...
+class WdaElementNotInteractableError(WdaError): ...
+class WdaAppCrashedError(WdaError): ...
+
+
 class BootDeviceRequest(BaseModel):
     """Request body for POST /device/boot."""
 
