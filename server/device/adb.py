@@ -273,10 +273,181 @@ class AdbBackend:
                 ))
         return apps
 
+    async def is_rootable(self, serial: str) -> bool:
+        """Check if the device supports adb root (dev-keys build)."""
+        tags = await self._get_device_property(serial, "ro.build.tags")
+        return tags == "dev-keys"
+
+    async def get_api_level(self, serial: str) -> int:
+        """Get the device API level as an integer."""
+        sdk = await self._get_device_property(serial, "ro.build.version.sdk")
+        try:
+            return int(sdk)
+        except (ValueError, TypeError):
+            return 0
+
+    async def _enable_root(self, serial: str) -> None:
+        """Enable adb root on a dev-keys device."""
+        proc = await asyncio.create_subprocess_exec(
+            self._adb_path, "-s", serial, "root",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        output = (stdout.decode() + stderr.decode()).strip()
+        if "cannot run as root" in output or "production builds" in output:
+            raise DeviceError(
+                f"Cannot enable root on {serial}: {output}", tool="adb",
+            )
+        # adb root restarts adbd — wait for device to come back
+        await asyncio.sleep(2)
+        await self._run_adb("-s", serial, "wait-for-device")
+
+    async def _get_cert_hash(self, cert_path: Path) -> str:
+        """Get the Android cert hash filename (subject_hash_old)."""
+        proc = await asyncio.create_subprocess_exec(
+            "openssl", "x509", "-inform", "PEM",
+            "-subject_hash_old", "-in", str(cert_path), "-noout",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise DeviceError(
+                f"openssl failed: {stderr.decode().strip()}", tool="openssl",
+            )
+        return stdout.decode().strip()
+
+    async def install_system_cert(self, serial: str, cert_path: Path) -> bool:
+        """Install a CA cert into the system trust store.
+
+        Requires a rootable (dev-keys) device. Detects API level and uses
+        the appropriate technique:
+        - API < 34: adb root + remount + push to /system/etc/security/cacerts/
+        - API >= 34: adb root + nsenter APEX injection
+
+        Returns True if newly installed, False if already present.
+        """
+        if not cert_path.exists():
+            raise DeviceError(f"Cert file not found: {cert_path}", tool="adb")
+
+        if not await self.is_rootable(serial):
+            raise DeviceError(
+                "Device is not rootable (requires Google APIs image, not Google Play)",
+                tool="adb",
+            )
+
+        cert_hash = await self._get_cert_hash(cert_path)
+        cert_filename = f"{cert_hash}.0"
+        api_level = await self.get_api_level(serial)
+
+        # Check if already installed
+        if await self.is_system_cert_installed(serial, cert_filename):
+            logger.info("Cert %s already installed on %s", cert_filename, serial)
+            return False
+
+        await self._enable_root(serial)
+
+        # Push cert to temp location
+        tmp_cert = f"/data/local/tmp/{cert_filename}"
+        proc = await asyncio.create_subprocess_exec(
+            self._adb_path, "-s", serial, "push", str(cert_path), tmp_cert,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        if api_level >= 34:
+            await self._install_cert_api34(serial, cert_filename, tmp_cert)
+        else:
+            await self._install_cert_remount(serial, cert_filename, tmp_cert)
+
+        logger.info("Installed system cert %s on %s (API %d)", cert_filename, serial, api_level)
+        return True
+
+    async def _install_cert_remount(self, serial: str, cert_filename: str, tmp_cert: str) -> None:
+        """Install cert via remount for API < 34."""
+        await self._run_adb_for_device(serial, "remount")
+        await self._run_adb_for_device(
+            serial, "shell",
+            f"cp {tmp_cert} /system/etc/security/cacerts/{cert_filename} && "
+            f"chmod 644 /system/etc/security/cacerts/{cert_filename} && "
+            f"chown root:root /system/etc/security/cacerts/{cert_filename}",
+        )
+
+    async def _install_cert_api34(self, serial: str, cert_filename: str, tmp_cert: str) -> None:
+        """Install cert via nsenter APEX injection for API >= 34."""
+        # Script runs on the device as root
+        script = f"""set -e
+# Copy existing APEX certs to temp
+mkdir -p -m 700 /data/local/tmp/tmp-ca-copy
+cp /apex/com.android.conscrypt/cacerts/* /data/local/tmp/tmp-ca-copy/
+
+# Create tmpfs mount over system certs dir
+mount -t tmpfs tmpfs /system/etc/security/cacerts
+
+# Restore existing certs + add new one
+mv /data/local/tmp/tmp-ca-copy/* /system/etc/security/cacerts/
+cp {tmp_cert} /system/etc/security/cacerts/{cert_filename}
+
+# Fix permissions
+chown root:root /system/etc/security/cacerts/*
+chmod 644 /system/etc/security/cacerts/*
+chcon u:object_r:system_file:s0 /system/etc/security/cacerts/*
+
+# Inject into Zygote mount namespaces
+ZYGOTE_PID=$(pidof zygote || true)
+ZYGOTE64_PID=$(pidof zygote64 || true)
+
+for Z_PID in $ZYGOTE_PID $ZYGOTE64_PID; do
+    if [ -n "$Z_PID" ]; then
+        nsenter --mount=/proc/$Z_PID/ns/mnt -- \\
+            /bin/mount --bind /system/etc/security/cacerts \\
+            /apex/com.android.conscrypt/cacerts
+    fi
+done
+
+# Inject into all running app processes
+echo "$ZYGOTE_PID $ZYGOTE64_PID" | \\
+    xargs -n1 ps -o PID -P 2>/dev/null | grep -v PID | while read PID; do
+        nsenter --mount=/proc/$PID/ns/mnt -- \\
+            /bin/mount --bind /system/etc/security/cacerts \\
+            /apex/com.android.conscrypt/cacerts 2>/dev/null || true
+    done
+
+# Cleanup
+rm -f {tmp_cert}
+rm -rf /data/local/tmp/tmp-ca-copy
+"""
+        await self._run_adb_for_device(serial, "shell", script)
+
+    async def is_system_cert_installed(self, serial: str, cert_filename: str) -> bool:
+        """Check if a cert file exists in the system cert store."""
+        try:
+            # Check both the classic and APEX locations
+            await self._run_adb_for_device(
+                serial, "shell",
+                f"test -f /system/etc/security/cacerts/{cert_filename} || "
+                f"test -f /apex/com.android.conscrypt/cacerts/{cert_filename}",
+            )
+            return True
+        except DeviceError:
+            return False
+
+    async def set_http_proxy(self, serial: str, host: str, port: int) -> None:
+        """Set the global HTTP proxy on the device."""
+        await self._run_adb_for_device(
+            serial, "shell", "settings", "put", "global",
+            "http_proxy", f"{host}:{port}",
+        )
+        logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
+
     async def screenshot(self, serial: str) -> bytes:
         """Capture a screenshot as PNG bytes."""
+        if not self._adb_path:
+            raise DeviceError("adb not found", tool="adb")
         proc = await asyncio.create_subprocess_exec(
-            "adb", "-s", serial, "exec-out", "screencap", "-p",
+            self._adb_path, "-s", serial, "exec-out", "screencap", "-p",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

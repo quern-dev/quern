@@ -50,6 +50,7 @@ def mock_truststore_db(tmp_path):
 def mock_controller():
     """Create a mock DeviceController."""
     controller = MagicMock()
+    controller._is_android = MagicMock(return_value=False)
     controller.simctl = MagicMock()
     controller.simctl._run_simctl = AsyncMock(return_value=("", ""))
     controller.list_devices = AsyncMock(return_value=[

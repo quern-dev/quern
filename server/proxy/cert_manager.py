@@ -1,10 +1,18 @@
-"""Certificate installation verification for iOS simulators.
+"""Certificate installation and verification for iOS simulators and Android devices.
 
 Hybrid verification approach:
 - Fast path: Check persistent cert-state.json cache (recent verification < 1 hour)
-- Slow path: Query simulator's TrustStore.sqlite3 via SQLite
-- Always update cache after SQLite verification
+- Slow path: Query simulator's TrustStore.sqlite3 via SQLite (iOS) or check system
+  cert store via adb (Android)
+- Always update cache after verification
 - Detects device erasure (cert was installed, now missing)
+
+Android cert installation:
+- Rootable emulators (Google APIs / dev-keys): Automated system cert injection
+  - API < 34: adb remount + push to /system/etc/security/cacerts/
+  - API >= 34: nsenter APEX mount injection
+- Non-rootable (Google Play images, physical devices): Not supported (user must
+  install manually as user cert + add networkSecurityConfig to debug builds)
 """
 
 from __future__ import annotations
@@ -18,7 +26,7 @@ from pathlib import Path
 from typing import Literal
 
 from server.proxy.cert_state import read_cert_state, read_cert_state_for_device, update_cert_state
-from server.models import DeviceCertState
+from server.models import DeviceCertState, DeviceType
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +182,10 @@ async def is_cert_installed(
         logger.error(f"Cert file does not exist: {cert_path}")
         return False
 
+    # Android: check system cert store via adb
+    if controller._is_android(udid):
+        return await _is_cert_installed_android(controller, udid, cert_path, device_name=device_name)
+
     expected_fingerprint = get_cert_fingerprint(cert_path)
 
     # Fast path: Check cache
@@ -217,10 +229,45 @@ async def is_cert_installed(
     return is_installed
 
 
+async def _is_cert_installed_android(
+    controller, udid: str, cert_path: Path, *, device_name: str | None = None,
+) -> bool:
+    """Check if the mitmproxy cert is installed as a system cert on Android."""
+    adb = controller.adb
+
+    try:
+        cert_hash = await adb._get_cert_hash(cert_path)
+        cert_filename = f"{cert_hash}.0"
+        is_installed = await adb.is_system_cert_installed(udid, cert_filename)
+    except Exception as e:
+        logger.warning(f"Failed to check cert on Android device {udid}: {e}")
+        is_installed = False
+
+    # Update cache
+    if device_name is None:
+        device_name = await _get_device_name(controller, udid)
+    fingerprint = get_cert_fingerprint(cert_path) if is_installed else None
+
+    cert_state = DeviceCertState(
+        name=device_name,
+        cert_installed=is_installed,
+        fingerprint=fingerprint,
+        verified_at=datetime.now(timezone.utc).isoformat(),
+    )
+    update_cert_state(udid, cert_state.model_dump())
+
+    return is_installed
+
+
 async def install_cert(
     controller, udid: str, force: bool = False, *, device_name: str | None = None,
 ) -> bool:
     """Install mitmproxy CA cert if not already present.
+
+    Dispatches to the appropriate backend:
+    - iOS simulators: simctl keychain add-root-cert
+    - Android (rootable): adb system cert injection (remount or nsenter)
+    - Android (non-rootable): raises RuntimeError with guidance
 
     Args:
         controller: DeviceController instance
@@ -234,16 +281,19 @@ async def install_cert(
     Raises:
         RuntimeError: If installation fails
     """
+    cert_path = get_cert_path()
+    if not cert_path.exists():
+        raise RuntimeError(f"Cert file does not exist: {cert_path}")
+
+    if controller._is_android(udid):
+        return await _install_cert_android(controller, udid, cert_path, force, device_name=device_name)
+
     # Check if already installed (unless force=True)
     if not force and await is_cert_installed(
         controller, udid, verify=True, device_name=device_name,
     ):
         logger.info(f"Cert already installed on {udid}")
         return False  # Already installed
-
-    cert_path = get_cert_path()
-    if not cert_path.exists():
-        raise RuntimeError(f"Cert file does not exist: {cert_path}")
 
     # Install via simctl
     try:
@@ -269,6 +319,83 @@ async def install_cert(
 
     logger.info(f"Installed mitmproxy CA cert on {udid}")
     return True  # Newly installed
+
+
+async def _install_cert_android(
+    controller, udid: str, cert_path: Path, force: bool,
+    *, device_name: str | None = None,
+) -> bool:
+    """Install mitmproxy CA cert on an Android device.
+
+    Rootable devices (dev-keys): Automated system cert injection.
+    Non-rootable devices: Raises with guidance for manual user cert install.
+    """
+    adb = controller.adb
+
+    if not await adb.is_rootable(udid):
+        raise RuntimeError(
+            f"Cannot auto-install cert on {udid}: device is not rootable "
+            "(Google Play image or physical device). "
+            "Options:\n"
+            "1. Create a rootable emulator (Google APIs image, not Google Play) — "
+            "identical for app development since apps install via adb:\n"
+            '   sdkmanager "system-images;android-34;google_apis;arm64-v8a"\n'
+            '   avdmanager create avd -n <name> -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_6\n'
+            "2. Or install the cert manually as a user certificate and add "
+            "networkSecurityConfig with <certificates src=\"user\" /> to your "
+            "app's debug build."
+        )
+
+    cert_hash = await adb._get_cert_hash(cert_path)
+    cert_filename = f"{cert_hash}.0"
+
+    # Check if already installed (unless force=True)
+    if not force and await adb.is_system_cert_installed(udid, cert_filename):
+        logger.info(f"Cert already installed on Android device {udid}")
+        # Update state cache
+        if device_name is None:
+            device_name = await _get_device_name(controller, udid)
+        fingerprint = get_cert_fingerprint(cert_path)
+        cert_state = DeviceCertState(
+            name=device_name,
+            cert_installed=True,
+            fingerprint=fingerprint,
+            verified_at=datetime.now(timezone.utc).isoformat(),
+        )
+        update_cert_state(udid, cert_state.model_dump())
+        return False
+
+    # Install system cert
+    try:
+        was_new = await adb.install_system_cert(udid, cert_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to install cert on Android device {udid}: {e}") from e
+
+    # Update state
+    fingerprint = get_cert_fingerprint(cert_path)
+    if device_name is None:
+        device_name = await _get_device_name(controller, udid)
+    now = datetime.now(timezone.utc).isoformat()
+
+    cert_state = DeviceCertState(
+        name=device_name,
+        cert_installed=True,
+        fingerprint=fingerprint,
+        installed_at=now,
+        verified_at=now,
+    )
+    update_cert_state(udid, cert_state.model_dump())
+
+    # Also set HTTP proxy for emulators (10.0.2.2 = host loopback)
+    if controller._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+        try:
+            await adb.set_http_proxy(udid, "10.0.2.2", 9101)
+            logger.info(f"Configured HTTP proxy on Android emulator {udid}")
+        except Exception as e:
+            logger.warning(f"Failed to set HTTP proxy on {udid}: {e}")
+
+    logger.info(f"Installed mitmproxy CA cert on Android device {udid}")
+    return True
 
 
 async def get_device_cert_state(
