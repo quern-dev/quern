@@ -8,14 +8,14 @@ import { strictParams } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
-    description: `List available iOS simulators and physical devices, plus tool availability (simctl, idb, devicectl). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
+    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
     inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])
         .optional()
         .describe("Filter by device state"),
       type: z
-        .enum(["simulator", "device"])
+        .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
         .describe("Filter by device type"),
       name: z
@@ -153,9 +153,9 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("install_app", {
-    description: `Install an app (.app or .ipa) on a simulator or physical device.`,
+    description: `Install an app (.app, .ipa, or .apk) on an iOS or Android device.`,
     inputSchema: strictParams({
-      app_path: z.string().describe("Path to the .app or .ipa file"),
+      app_path: z.string().describe("Path to the .app, .ipa, or .apk file"),
       udid: z
         .string()
         .optional()
@@ -192,7 +192,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("launch_app", {
-    description: `Launch an app by bundle ID on a simulator or physical device.
+    description: `Launch an app by bundle ID (iOS) or package name (Android) on any device.
 
 NOTE: If you want to capture network traffic from this app:
 1. Ensure the proxy is running (start_proxy)
@@ -200,7 +200,7 @@ NOTE: If you want to capture network traffic from this app:
 3. Launch the app (this tool)
 4. When done, disable system proxy (unconfigure_system_proxy)`,
     inputSchema: strictParams({
-      bundle_id: z.string().describe("App bundle identifier (e.g. com.example.MyApp)"),
+      bundle_id: z.string().describe("App bundle ID (iOS) or package name (Android), e.g. com.example.MyApp"),
       udid: z
         .string()
         .optional()
@@ -237,9 +237,9 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("terminate_app", {
-    description: `Terminate a running app by bundle ID.`,
+    description: `Terminate a running app by bundle ID (iOS) or package name (Android).`,
     inputSchema: strictParams({
-      bundle_id: z.string().describe("App bundle identifier"),
+      bundle_id: z.string().describe("App bundle ID or package name"),
       udid: z
         .string()
         .optional()
@@ -276,9 +276,9 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("uninstall_app", {
-    description: `Uninstall an app from a simulator or physical device by bundle ID.`,
+    description: `Uninstall an app from an iOS or Android device by bundle ID or package name.`,
     inputSchema: strictParams({
-      bundle_id: z.string().describe("App bundle identifier"),
+      bundle_id: z.string().describe("App bundle ID or package name"),
       udid: z
         .string()
         .optional()
@@ -315,7 +315,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("list_apps", {
-    description: `List installed apps on a simulator or physical device.`,
+    description: `List installed apps on an iOS or Android device.`,
     inputSchema: strictParams({
       udid: z
         .string()

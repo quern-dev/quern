@@ -62,7 +62,7 @@ class TestListDevices:
 
     async def test_filter_by_state(self, pool):
         """Filter by boot state works correctly."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         booted = await pool.list_devices(state_filter="booted")
         assert len(booted) == 1
         assert booted[0].state == DeviceState.BOOTED
@@ -124,15 +124,15 @@ class TestRefreshCaching:
     """Test refresh caching behavior."""
 
     async def test_refresh_cache_prevents_redundant_simctl_calls(self, pool, mock_controller):
-        """Verify 2-second cache TTL on refresh_from_simctl()."""
-        await pool.refresh_from_simctl()
+        """Verify 2-second cache TTL on refresh()."""
+        await pool.refresh()
         first_call_count = mock_controller.list_devices.call_count
 
         # Immediate second refresh should use cache
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         assert mock_controller.list_devices.call_count == first_call_count
 
         # After 2.1 seconds, should refresh again
         pool._last_refresh_at = datetime.now(timezone.utc) - timedelta(seconds=2.1)
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         assert mock_controller.list_devices.call_count == first_call_count + 1

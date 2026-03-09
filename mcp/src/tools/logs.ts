@@ -205,7 +205,7 @@ export function registerLogTools(server: McpServer): void {
         .describe("Minimum log level filter"),
       process: z.string().optional().describe("Filter by process name"),
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "logcat", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
     }),
@@ -261,7 +261,7 @@ export function registerLogTools(server: McpServer): void {
         .describe("Minimum log level"),
       process: z.string().optional().describe("Filter by process name"),
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "logcat", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
       search: z
@@ -530,7 +530,7 @@ For app-only filtering (zero noise), combine process + subsystems include. First
 This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's os_log output.`,
     inputSchema: strictParams({
       source: z
-        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "server"])
+        .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "logcat", "server"])
         .optional()
         .describe("Scope filter to this source adapter"),
       device_id: z

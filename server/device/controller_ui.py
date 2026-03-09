@@ -71,7 +71,13 @@ class DeviceControllerUI:
         """Return the appropriate UI automation backend for a device.
 
         Physical devices use WdaBackend; simulators use IdbBackend.
+        Android devices are not yet supported.
         """
+        if self._is_android(udid):
+            raise DeviceError(
+                "UI automation not yet supported for Android devices",
+                tool="adb",
+            )
         if self._is_physical(udid):
             return self.wda_client
         return self.idb
@@ -1013,6 +1019,11 @@ class DeviceControllerUI:
         Returns (image_bytes, media_type).
         """
         resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            raise DeviceError(
+                "Annotated screenshots not yet supported for Android devices",
+                tool="adb",
+            )
         if self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)
         else:

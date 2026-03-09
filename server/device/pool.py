@@ -46,7 +46,7 @@ class DevicePool:
         device_type: DeviceType | None = None,  # "simulator", "device", None=all
     ) -> list[DevicePoolEntry]:
         """List all devices in the pool with optional filters."""
-        await self.refresh_from_simctl()
+        await self.refresh()
 
         state = self._read_state()
         devices = list(state.devices.values())
@@ -65,10 +65,11 @@ class DevicePool:
         state = self._read_state()
         return state.devices.get(udid)
 
-    async def refresh_from_simctl(self, *, force: bool = False) -> None:
-        """Refresh pool state from simctl (discover new devices, update boot states).
+    async def refresh(self, *, force: bool = False) -> None:
+        """Refresh pool state from all backends (iOS + Android).
 
-        Cached for 2 seconds to avoid redundant simctl calls during rapid operations.
+        Discovers new devices and updates boot states. Cached for 2 seconds
+        to avoid redundant calls during rapid operations.
         Use force=True to bypass the cache (e.g. after booting a device).
         """
         # Check cache
@@ -286,7 +287,7 @@ class DevicePool:
             devices = await self.controller.simctl.list_devices()
             for d in devices:
                 if d.udid == udid and d.state == DeviceState.BOOTED:
-                    await self.refresh_from_simctl(force=True)
+                    await self.refresh(force=True)
                     logger.info("Device %s booted in %.1fs", udid[:8], time.time() - start)
                     return
 
@@ -384,7 +385,7 @@ class DevicePool:
         if not has_criteria and self.controller._active_udid:
             return self.controller._active_udid
 
-        await self.refresh_from_simctl()
+        await self.refresh()
 
         # Priority 1: explicit UDID
         if udid:
@@ -446,7 +447,7 @@ class DevicePool:
         Returns list of UDIDs for the ready devices.
         Sets the first device as the active device.
         """
-        await self.refresh_from_simctl()
+        await self.refresh()
 
         effective_family = self._infer_device_family(name, device_family)
 

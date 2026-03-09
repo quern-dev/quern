@@ -37,6 +37,7 @@ class LogSource(str, enum.Enum):
     APP_DRAIN = "app_drain"
     SIMULATOR = "simulator"
     DEVICE = "device"
+    LOGCAT = "logcat"
     SERVER = "server"
 
 
@@ -516,10 +517,12 @@ class MockListResponse(BaseModel):
 
 
 class DeviceType(str, enum.Enum):
-    """Type of iOS device."""
+    """Type of device."""
 
     SIMULATOR = "simulator"
     DEVICE = "device"
+    ANDROID_EMULATOR = "android_emulator"
+    ANDROID_DEVICE = "android_device"
 
 
 class DeviceState(str, enum.Enum):
@@ -528,6 +531,7 @@ class DeviceState(str, enum.Enum):
     BOOTED = "booted"
     SHUTDOWN = "shutdown"
     BOOTING = "booting"
+    UNAUTHORIZED = "unauthorized"
 
 
 class DeviceInfo(BaseModel):

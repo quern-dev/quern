@@ -163,7 +163,7 @@ class TestCriteriaMatching:
     """Test _match_criteria() and _filter_by_name() filtering logic."""
 
     async def test_match_by_os_version_prefix(self, pool):
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         device = state.devices["AAAA"]  # iOS 18.2
         assert pool._match_criteria(device, os_version="18")
@@ -172,7 +172,7 @@ class TestCriteriaMatching:
         assert not pool._match_criteria(device, os_version="17")
 
     async def test_match_by_device_family(self, pool):
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         iphone = state.devices["AAAA"]
         ipad = state.devices["FFFF"]
@@ -182,14 +182,14 @@ class TestCriteriaMatching:
         assert not pool._match_criteria(ipad, device_family="iPhone")
 
     async def test_no_criteria_matches_all(self, pool):
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         for device in state.devices.values():
             assert pool._match_criteria(device)
 
     async def test_unavailable_device_rejected(self, pool):
         """Devices with is_available=False are never matched."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         device = state.devices["AAAA"]
         device.is_available = False
@@ -197,7 +197,7 @@ class TestCriteriaMatching:
 
     async def test_find_candidates_combined(self, pool):
         """_find_candidates applies name + os_version + device_family."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         all_devices = list(state.devices.values())
         results = pool._find_candidates(
@@ -257,26 +257,26 @@ class TestDeviceTypeFiltering:
 
     async def test_resolve_simulator_only(self, mixed_pool):
         """resolve_device with device_type=SIMULATOR excludes physical devices."""
-        await mixed_pool.refresh_from_simctl()
+        await mixed_pool.refresh()
         udid = await mixed_pool.resolve_device(device_type=DeviceType.SIMULATOR)
         assert udid in ("SIM-1", "SIM-2")
 
     async def test_resolve_device_only(self, mixed_pool):
         """resolve_device with device_type=DEVICE returns only physical device."""
-        await mixed_pool.refresh_from_simctl()
+        await mixed_pool.refresh()
         udid = await mixed_pool.resolve_device(device_type=DeviceType.DEVICE, device_family=None)
         assert udid == "DEV-1"
 
     async def test_ensure_simulator_only(self, mixed_pool):
         """ensure_devices with device_type=SIMULATOR excludes physical devices."""
-        await mixed_pool.refresh_from_simctl()
+        await mixed_pool.refresh()
         udids = await mixed_pool.ensure_devices(count=2, device_type=DeviceType.SIMULATOR)
         assert "DEV-1" not in udids
         assert set(udids) == {"SIM-1", "SIM-2"}
 
     async def test_ensure_device_type_none_returns_all(self, mixed_pool):
         """ensure_devices with device_type=None returns simulators and physical devices."""
-        await mixed_pool.refresh_from_simctl()
+        await mixed_pool.refresh()
         udids = await mixed_pool.ensure_devices(count=3, device_type=None, device_family=None)
         assert set(udids) == {"SIM-1", "SIM-2", "DEV-1"}
 
@@ -290,14 +290,14 @@ class TestRankCandidate:
     """Test _rank_candidate() sort ordering."""
 
     async def test_booted_before_shutdown(self, pool):
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         booted = state.devices["AAAA"]  # BOOTED
         shutdown = state.devices["CCCC"]  # SHUTDOWN
         assert pool._rank_candidate(booted) < pool._rank_candidate(shutdown)
 
     async def test_deterministic_tiebreak_by_name(self, pool):
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         # AAAA and BBBB are both booted iPhone 16 Pro
         a = state.devices["AAAA"]
@@ -318,25 +318,25 @@ class TestResolveDevice:
 
     async def test_explicit_udid(self, pool):
         """Explicit UDID bypasses all criteria matching."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(udid="AAAA")
         assert udid == "AAAA"
 
     async def test_explicit_udid_not_found(self, pool):
         """Error when explicit UDID doesn't exist."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         with pytest.raises(DeviceError, match="not found"):
             await pool.resolve_device(udid="ZZZZ")
 
     async def test_prefer_booted(self, pool):
         """Should pick a booted device over shutdown ones."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(name="iPhone 16 Pro")
         assert udid in ("AAAA", "BBBB")
 
     async def test_auto_boot_when_no_booted(self, pool):
         """Should boot a shutdown device when no booted ones match criteria."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
 
         # After boot, simctl returns EEEE as booted
         pool.controller.simctl.list_devices = AsyncMock(
@@ -371,7 +371,7 @@ class TestResolveDevice:
             ),
         ]
         pool.controller.list_devices = AsyncMock(return_value=shutdown_only)
-        await pool.refresh_from_simctl()
+        await pool.refresh()
 
         # After boot, simctl returns CCCC as booted
         booted = [
@@ -391,38 +391,38 @@ class TestResolveDevice:
 
     async def test_os_version_filtering(self, pool):
         """Should only return devices matching OS version prefix."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(os_version="17")
         assert udid == "DDDD"  # Only iPhone 15 has iOS 17.x
 
     async def test_no_matching_devices(self, pool):
         """Should error with diagnostic message when no devices match."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         with pytest.raises(DeviceError, match="No device matching"):
             await pool.resolve_device(name="Pixel 9")
 
     async def test_no_args_resolves_any_booted_iphone(self, pool):
         """resolve_device() with no args should resolve any booted iPhone (default family)."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device()
         assert udid in ("AAAA", "BBBB", "DDDD")  # iPhones only, not FFFF (iPad)
 
     async def test_resolve_sets_active_device(self, pool):
         """resolve_device should set controller._active_udid after resolution."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(name="iPhone 16 Pro")
         assert pool.controller._active_udid == udid
 
     async def test_resolve_no_params_returns_active(self, pool):
         """resolve_device with no params should short-circuit if active device is set."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         pool.controller._active_udid = "BBBB"
         udid = await pool.resolve_device()
         assert udid == "BBBB"
 
     async def test_resolve_with_params_overrides_active(self, pool):
         """resolve_device with criteria should override previously active device."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         pool.controller._active_udid = "AAAA"
         udid = await pool.resolve_device(os_version="17")
         assert udid == "DDDD"
@@ -473,7 +473,7 @@ class TestBootAndWait:
 
     async def test_boot_refreshes_pool(self, pool):
         """After boot, pool state should be refreshed."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         # Force cache expiry for the refresh that happens after boot
         pool._last_refresh_at = None
 
@@ -508,14 +508,14 @@ class TestEnsureDevices:
 
     async def test_enough_booted_devices(self, pool):
         """Should return already-booted devices without booting more."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udids = await pool.ensure_devices(count=2, name="iPhone 16 Pro")
         assert len(udids) == 2
         assert set(udids) == {"AAAA", "BBBB"}
 
     async def test_boot_additional_devices(self, pool):
         """Should boot shutdown devices to meet the count."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
 
         # After boot, simctl returns CCCC as booted
         original_list = pool.controller.simctl.list_devices
@@ -542,13 +542,13 @@ class TestEnsureDevices:
 
     async def test_not_enough_devices_error(self, pool):
         """Should error when not enough matching devices exist."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         with pytest.raises(DeviceError, match="Need 5"):
             await pool.ensure_devices(count=5, name="iPhone 16 Pro")
 
     async def test_ensure_sets_first_as_active(self, pool):
         """ensure_devices should set controller._active_udid to the first selected device."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udids = await pool.ensure_devices(count=2, name="iPhone 16 Pro")
         assert len(udids) == 2
         assert pool.controller._active_udid == udids[0]
@@ -564,7 +564,7 @@ class TestBuildResolutionError:
 
     async def test_name_mismatch_lists_available(self, pool):
         """Error for name mismatch should list available device names."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
@@ -575,7 +575,7 @@ class TestBuildResolutionError:
 
     async def test_os_mismatch_lists_versions(self, pool):
         """Error for OS mismatch should list available versions."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
@@ -586,7 +586,7 @@ class TestBuildResolutionError:
 
     async def test_cross_criteria_mismatch(self, pool):
         """Error for name+OS cross-mismatch should explain partial matches."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
@@ -598,7 +598,7 @@ class TestBuildResolutionError:
 
     async def test_all_shutdown_suggests_auto_boot(self, pool):
         """Error when all matched devices are shutdown should suggest auto_boot."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         # Only include shutdown devices
         shutdown_devices = [state.devices["CCCC"]]
@@ -621,7 +621,7 @@ class TestBootOnDemand:
 
     async def test_boot_timeout_raises(self, pool):
         """Boot that never completes should raise DeviceError."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
 
         # Mock: simctl.boot succeeds but device never reaches booted state
         pool.controller.simctl.boot = AsyncMock()
@@ -774,7 +774,7 @@ class TestFilterByName:
 
     async def test_exact_match_preferred_over_substring(self, pool):
         """'iPhone 15' should NOT match 'iPhone 15 Pro Max' when exact match exists."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
@@ -799,7 +799,7 @@ class TestFilterByName:
 
     async def test_substring_fallback_when_no_exact(self, pool):
         """'iPhone 16' should match 'iPhone 16 Pro' via substring when no exact match."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         state = pool._read_state()
         all_devices = list(state.devices.values())
 
@@ -904,32 +904,32 @@ class TestDeviceFamilyFiltering:
 
     async def test_resolve_excludes_ipad_by_default(self, pool):
         """resolve_device with no device_family should return iPhone, not iPad."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(os_version="18")
         assert udid in ("AAAA", "BBBB")  # iPhones, not FFFF (iPad)
 
     async def test_resolve_explicit_ipad(self, pool):
         """resolve_device with device_family='iPad' should return iPad."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(os_version="18", device_family="iPad")
         assert udid == "FFFF"  # The booted iPad
 
     async def test_ensure_excludes_ipad_by_default(self, pool):
         """ensure_devices with os_version should return iPhones, not iPads."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udids = await pool.ensure_devices(count=2, os_version="18")
         assert "FFFF" not in udids  # iPad excluded
         assert set(udids) == {"AAAA", "BBBB"}
 
     async def test_ensure_explicit_ipad(self, pool):
         """ensure_devices with device_family='iPad' should return iPad."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udids = await pool.ensure_devices(count=1, os_version="18", device_family="iPad")
         assert udids == ["FFFF"]
 
     async def test_name_ipad_infers_family(self, pool):
         """Passing name='iPad' should infer device_family='iPad'."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         udid = await pool.resolve_device(name="iPad Pro")
         assert udid == "FFFF"
 
@@ -944,7 +944,7 @@ class TestEnsureDevicesRanking:
 
     async def test_ensure_prefers_booted_over_shutdown(self, pool):
         """ensure_devices should prefer booted devices over shutdown ones."""
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         # Request 1 device matching iPhone 16 Pro -- should pick booted (AAAA or BBBB), not CCCC
         udids = await pool.ensure_devices(count=1, name="iPhone 16 Pro")
         assert udids[0] in ("AAAA", "BBBB")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 
+from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.devicectl import DevicectlBackend
 from server.device.pmd3 import Pmd3Backend
@@ -28,6 +29,7 @@ class DeviceController(DeviceControllerUI):
         self.pmd3 = Pmd3Backend()
         self.usbmux = UsbmuxBackend()
         self.wda_client = WdaBackend()
+        self.adb = AdbBackend()
         self._active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
         # UI tree cache: {udid: (elements, timestamp)}
@@ -52,6 +54,7 @@ class DeviceController(DeviceControllerUI):
             "devicectl": await self.devicectl.is_available(),
             "pymobiledevice3": await self.pmd3.is_available(),
             "tunneld": await is_tunneld_running(),
+            "adb": await self.adb.is_available(),
         }
 
     def _device_type(self, udid: str) -> DeviceType:
@@ -60,6 +63,9 @@ class DeviceController(DeviceControllerUI):
 
     def _is_physical(self, udid: str) -> bool:
         return self._device_type(udid) == DeviceType.DEVICE
+
+    def _is_android(self, udid: str) -> bool:
+        return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
     def _require_simulator(self, udid: str, operation: str) -> None:
         """Raise DeviceError if the device is physical (operation not supported)."""
@@ -158,10 +164,11 @@ class DeviceController(DeviceControllerUI):
         }
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List all devices (simulators + physical + pre-iOS 17 USB)."""
+        """List all devices (simulators + physical + pre-iOS 17 USB + Android)."""
         sim_devices = await self.simctl.list_devices()
         physical_devices = await self.devicectl.list_devices()
         usbmux_devices = await self.usbmux.list_devices()
+        android_devices = await self.adb.list_devices()
 
         # Populate device type cache and WDA os_version cache
         for d in sim_devices:
@@ -178,6 +185,8 @@ class DeviceController(DeviceControllerUI):
                 self.wda_client._device_os_versions[d.udid] = d.os_version
             if d.name:
                 self.wda_client._device_names[d.udid] = d.name
+        for d in android_devices:
+            self._device_type_cache[d.udid] = d.device_type
 
         # Build CoreDevice UUID -> libimobiledevice UDID mapping
         # by correlating device names between devicectl and usbmux
@@ -186,7 +195,7 @@ class DeviceController(DeviceControllerUI):
             if d.name in usb_name_map:
                 self._usbmux_udid_map[d.udid] = usb_name_map[d.name]
 
-        return sim_devices + physical_devices + usbmux_devices
+        return sim_devices + physical_devices + usbmux_devices + android_devices
 
     async def get_libimobiledevice_udid(self, coredevice_udid: str) -> str | None:
         """Look up the libimobiledevice UDID for a CoreDevice UUID.
@@ -228,18 +237,32 @@ class DeviceController(DeviceControllerUI):
         return None
 
     async def boot(self, udid: str | None = None, name: str | None = None) -> str:
-        """Boot a simulator by udid or name. Returns the udid that was booted."""
+        """Boot a simulator or Android emulator by udid or name. Returns the udid that was booted."""
         if udid:
+            if self._is_android(udid):
+                raise DeviceError(
+                    "Cannot boot Android emulator by serial — use name (AVD name) instead",
+                    tool="adb",
+                )
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
             self._active_udid = udid
             return udid
 
         if name:
+            # Check if name matches an Android AVD first
+            if await self.adb.is_available():
+                avds = await self.adb.list_avds()
+                if name in avds:
+                    serial = await self.adb.boot_emulator(name)
+                    self._active_udid = serial
+                    return serial
+
+            # Fall back to iOS simulator
             devices = await self.simctl.list_devices()
             matches = [d for d in devices if d.name == name]
             if not matches:
-                raise DeviceError(f"No simulator found with name '{name}'", tool="simctl")
+                raise DeviceError(f"No simulator or AVD found with name '{name}'", tool="simctl")
             target = matches[0]
             await self.simctl.boot(target.udid)
             self._active_udid = target.udid
@@ -248,7 +271,14 @@ class DeviceController(DeviceControllerUI):
         raise DeviceError("Either udid or name is required to boot", tool="simctl")
 
     async def shutdown(self, udid: str) -> None:
-        """Shutdown a simulator."""
+        """Shutdown a simulator or Android emulator."""
+        if self._is_android(udid):
+            if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+                await self.adb._run_adb_for_device(udid, "emu", "kill")
+                if self._active_udid == udid:
+                    self._active_udid = None
+                return
+            raise DeviceError("Shutdown not supported for physical Android devices", tool="adb")
         self._require_simulator(udid, "Shutdown")
         await self.simctl.shutdown(udid)
         if self._active_udid == udid:
@@ -298,7 +328,9 @@ class DeviceController(DeviceControllerUI):
     async def install_app(self, app_path: str, udid: str | None = None) -> str:
         """Install an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            await self.adb.install_app(resolved, app_path)
+        elif self._is_physical(resolved):
             if self._is_pre_ios17_udid(resolved):
                 await self._install_app_legacy(resolved, app_path)
             else:
@@ -310,7 +342,9 @@ class DeviceController(DeviceControllerUI):
     async def launch_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Launch an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            await self.adb.launch_app(resolved, bundle_id)
+        elif self._is_physical(resolved):
             await self.wda_client.activate_app(resolved, bundle_id)
         else:
             await self.simctl.launch_app(resolved, bundle_id)
@@ -320,7 +354,9 @@ class DeviceController(DeviceControllerUI):
     async def terminate_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Terminate an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            await self.adb.terminate_app(resolved, bundle_id)
+        elif self._is_physical(resolved):
             await self.wda_client.terminate_app(resolved, bundle_id)
         else:
             await self.simctl.terminate_app(resolved, bundle_id)
@@ -329,7 +365,9 @@ class DeviceController(DeviceControllerUI):
     async def uninstall_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Uninstall an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            await self.adb.uninstall_app(resolved, bundle_id)
+        elif self._is_physical(resolved):
             await self.devicectl.uninstall_app(resolved, bundle_id)
         else:
             await self.simctl.uninstall_app(resolved, bundle_id)
@@ -338,7 +376,9 @@ class DeviceController(DeviceControllerUI):
     async def list_apps(self, udid: str | None = None) -> tuple[list[AppInfo], str]:
         """List installed apps. Returns (apps, resolved_udid)."""
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            apps = await self.adb.list_apps(resolved)
+        elif self._is_physical(resolved):
             apps = await self.devicectl.list_apps(resolved)
         else:
             apps = await self.simctl.list_apps(resolved)
@@ -353,7 +393,9 @@ class DeviceController(DeviceControllerUI):
     ) -> tuple[bytes, str]:
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            raw_png = await self.adb.screenshot(resolved)
+        elif self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)
         else:
             raw_png = await self.simctl.screenshot(resolved)

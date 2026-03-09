@@ -79,7 +79,7 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 async def list_devices(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
-    device_type: str | None = Query(default=None, pattern="^(simulator|device)$"),
+    device_type: str | None = Query(default=None, pattern="^(simulator|device|android_emulator|android_device)$"),
     name: str | None = Query(default=None),
     os_version: str | None = Query(default=None),
     device_family: str | None = Query(default=None),
@@ -424,17 +424,18 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
 
 @router.post("/logging/device/start")
 async def start_device_logging(request: Request, body: StartDeviceLogRequest):
-    """Start capturing logs from a physical device via pymobiledevice3 syslog.
+    """Start capturing logs from a physical device.
 
-    Captures os_log and Logger output. Logs appear in tail_logs/query_logs
-    with source="device". Use process filter to limit noise — applied at the
-    subprocess level (pymobiledevice3 -pn flag). Use preset to apply an
-    ingestion filter at start time.
+    For iOS devices: uses pymobiledevice3 syslog. Captures os_log and Logger
+    output with source="device".
+    For Android devices: uses adb logcat. Captures logcat output with
+    source="logcat".
 
-    NOTE: This does NOT capture print() output — print() writes to stdout,
-    not the unified logging system.
+    Use process filter to limit noise. Use preset to apply an ingestion
+    filter at start time.
     """
     from server.sources.device_log import PhysicalDeviceLogAdapter
+    from server.sources.logcat import LogcatAdapter
 
     controller = _get_controller(request)
 
@@ -444,8 +445,9 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
-    # Verify it's a physical device
-    if not controller._is_physical(udid):
+    # Verify it's a physical or Android device (not a simulator)
+    is_android = controller._is_android(udid)
+    if not controller._is_physical(udid) and not is_android:
         raise HTTPException(
             status_code=400,
             detail=f"Device {udid} is a simulator. Use start_simulator_logging instead.",
@@ -459,12 +461,19 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     # Get the deduplicator as the entry callback (same pipeline as other adapters)
     dedup = request.app.state.deduplicator
 
-    adapter = PhysicalDeviceLogAdapter(
-        udid=udid,
-        on_entry=dedup.process,
-        process_filter=body.process,
-        match_filter=body.match,
-    )
+    if is_android:
+        adapter = LogcatAdapter(
+            serial=udid,
+            on_entry=dedup.process,
+            process_filter=body.process,
+        )
+    else:
+        adapter = PhysicalDeviceLogAdapter(
+            udid=udid,
+            on_entry=dedup.process,
+            process_filter=body.process,
+            match_filter=body.match,
+        )
 
     await adapter.start()
 
