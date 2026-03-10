@@ -45,7 +45,7 @@ Google Play emulator images and physical devices (without root) can't have syste
 
 Create a Google APIs emulator (see [Getting Started](android-getting-started.md#creating-a-rootable-emulator)). This is the easiest path.
 
-Your agent will suggest this if you try to install a cert on a non-rootable device — it'll even tell you the exact `sdkmanager` and `avdmanager` commands to create one.
+Your agent will suggest this if you try to install a cert on a non-rootable device — it'll tell you the exact `sdkmanager` and `avdmanager` commands to create one. If you ask nicely, it might even run them for you.
 
 ### Option 2: networkSecurityConfig (Debug Builds)
 

@@ -29,6 +29,10 @@ The first time the preview app runs, macOS will ask for screen recording permiss
 
 Your iPhone must trust the Mac ("Trust This Computer?" dialog). If you haven't accepted this, the device won't appear for preview.
 
+### "Headphones or Other Device" Dialog
+
+On iOS 18 and later, when the preview capture session starts, your iPhone may show a dialog asking whether you're connecting headphones or another device. Tap **"Other"** (or whatever the non-headphones option is) to dismiss it. This is iOS reacting to the CoreMediaIO capture session — it only appears once per connection.
+
 ## Multi-Device
 
 You can preview multiple devices simultaneously — each gets its own window. Just ask your agent to start preview on each device.

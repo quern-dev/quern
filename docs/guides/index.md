@@ -27,6 +27,9 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 - [WebDriverAgent Guide](ios-wda.md) — What you need to know about physical device automation
 - [Live Video Preview](ios-preview.md) — Real-time screen mirroring over USB
 
+### Simulators
+- [App State Management](app-state.md) — Saving and restoring app state for reproducible debugging
+
 ---
 
 ## Android
@@ -40,4 +43,3 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 ## Cross-Platform
 
 - [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, and replaying network traffic
-- [App State Management](app-state.md) — Saving and restoring app state for reproducible debugging

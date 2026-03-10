@@ -24,14 +24,6 @@ The build is cached — subsequent sessions skip it unless something changes.
 
 If you have multiple Apple Developer teams in Xcode, your agent will ask which one to use. Pick the one you use for development on this device.
 
-### Device Trust
-
-The first time WDA is installed on a device, iOS requires you to trust the developer profile:
-
-**Settings > General > VPN & Device Management > [your developer name] > Trust**
-
-Your agent can navigate to this screen via WDA itself (ironic, but it works for the initial trust flow). If WDA won't start at all, this is usually why.
-
 ## Free vs Paid Developer Accounts
 
 This matters more than you'd think.
@@ -40,24 +32,32 @@ This matters more than you'd think.
 
 - Provisioning profiles last 1 year
 - Wildcard App IDs (one covers everything)
-- WDA just works, indefinitely
+- Quern Driver (WDA) just works, indefinitely
+- No device trust step required — apps signed by paid accounts are trusted automatically
 
 ### Free Account (Apple ID, no enrollment fee)
 
 - Profiles expire after **7 days**
 - No wildcard App IDs — each bundle identifier uses a slot
 - **~3 active App ID slots** per 7-day window
-- WDA uses **2 slots** (`dev.quern.driver` + `dev.quern.driver.xctrunner`), leaving ~1 for your actual app
+- Quern Driver uses **2 slots** (`dev.quern.driver` + `dev.quern.driver.xctrunner`), leaving ~1 for your actual app
 - Must re-setup WDA every 7 days
-- The device must trust the developer profile
 
-**If you're on a free account**, tell your agent. It will warn you about slot limits and profile expiry. When WDA stops working after 7 days, tell your agent to rebuild it:
+**If you're on a free account**, tell your agent. It will warn you about slot limits and profile expiry. When Quern Driver stops working after 7 days, tell your agent to rebuild it:
 
 > "Rebuild WDA — my profile expired"
 
+#### Device Trust (Free Accounts Only)
+
+Free developer accounts require you to manually trust the developer profile on the device before Quern Driver can run:
+
+**Settings > General > VPN & Device Management > [your developer name] > Trust**
+
+You need to do this on the device itself — it's a one-time step per developer identity per device. If Quern Driver won't launch at all and you're on a free account, this is almost certainly why. The runner log will show something about being unable to launch the app.
+
 ### How Your Agent Detects This
 
-When WDA setup discovers your account type, it includes warnings in the response. Your agent should surface these to you — things like "this is a free account, profiles expire in 7 days" and "WDA is using 2 of your ~3 App ID slots."
+When WDA setup discovers your account type, it includes warnings in the response. Your agent should surface these to you — things like "this is a free account, profiles expire in 7 days" and "Quern Driver is using 2 of your ~3 App ID slots."
 
 ## How the Driver Works
 
@@ -131,7 +131,7 @@ emailField.accessibilityIdentifier = "login-email-field"
 
 ### Don't
 
-- **Don't use full-screen overlays that block the accessibility tree.** Loading overlays, splash screens, or modal backgrounds that cover everything underneath make elements invisible to WDA.
+- **Don't present views over complex screens without truly replacing them.** If you push a simple modal over a complex screen (a list with hundreds of cells, a map view), the elements underneath still appear in the accessibility tree — even though the user can't see them. The agent sees a polluted tree full of irrelevant elements from the screen behind the modal, making it hard to find what's actually on screen. Use proper modal presentation (`.fullScreenCover` in SwiftUI, `modalPresentationStyle = .fullScreen` in UIKit) or remove the underlying view's accessibility when it's covered.
 
 - **Don't rely on complex custom gestures.** WDA supports tap, swipe, and long-press. No pinch-to-zoom, 3D touch, or custom multi-finger gestures. Provide alternative navigation paths if your app uses these.
 
@@ -145,7 +145,7 @@ When WDA fails to start, Quern parses the runner log and tells your agent what w
 |---|---|---|
 | "Profile expired" or "Supported platforms empty" | Signing profile is invalid | Tell your agent to rebuild WDA |
 | "Device is locked" | Screen lock is on | Unlock the device |
-| "App not trusted" | Developer profile not trusted | Settings > VPN & Device Management > Trust |
+| "App not trusted" | Developer profile not trusted (free accounts) | Settings > VPN & Device Management > Trust |
 | "Entitlement mismatch" | WDA was reinstalled with different signing | Tell your agent to force-rebuild WDA |
 | "No signing certificate" | Xcode doesn't have a valid cert | Xcode > Settings > Accounts > Manage Certificates |
 | "Maximum number of apps" | Free account slot limit | Wait 7 days for slots to free up, or use a paid account |
