@@ -55,4 +55,5 @@ Real-world scenarios showing how the pieces fit together.
 - [Multi-Device Testing](workflow-multi-device.md) — Boot a fleet, build once, test across screen sizes and OS versions
 - [Physical Device Setup from Zero](workflow-physical-device-setup.md) — The complete first-time flow: trust, WDA, proxy, preview
 - [Onboarding onto a Project](workflow-onboarding.md) — From git clone to productive in an hour
+- [Location Simulation](workflow-location-testing.md) — GPS routes, geofences, and multi-device coordination (rideshare, delivery)
 - [Agent-Generated Test Scripts](workflow-test-scripts.md) — Write once, run forever, bring the agent back only when things break
