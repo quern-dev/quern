@@ -1,89 +1,54 @@
 # Live Video Preview
 
-Real-time screen mirroring for physical iOS devices over USB. Uses Apple's CoreMediaIO framework to capture the device screen as a video stream, displayed in a native macOS window.
-
-## What It Is
-
-When you plug an iPhone or iPad into your Mac via USB, macOS can capture the device's screen through CoreMediaIO — the same mechanism that lets you use an iOS device as a camera source in QuickTime or OBS. Quern wraps this in a lightweight Swift app that provides:
-
-- Real-time video preview in a native macOS window
-- Multi-device support (multiple windows, one per device)
-- MCP tool control (start/stop from AI agents)
-- A Devices menu for manual device selection
-
-This is **USB only**. Wi-Fi connections don't support CoreMediaIO screen capture.
+Real-time screen mirroring for physical iOS devices over USB. See exactly what's on the device screen in a native macOS window — useful for watching what happens when your agent interacts with the device, or just keeping an eye on things.
 
 ## Usage
 
-### From MCP Tools
+Tell your agent:
 
-```
-preview_device(name="iPhone")        # Start preview (partial name match)
-stop_preview(name="iPhone")          # Stop a specific preview
-preview_status                       # List active previews
-```
+> "Show me the device screen"
+> "Start a live preview of my iPhone"
 
-The `name` parameter does partial matching — "iPhone" will match "iPhone 15 Pro", "iPad" will match "iPad Air". If multiple devices match, you'll get an error asking you to be more specific.
+A native macOS window opens showing the device's screen in real time. The preview updates at whatever frame rate the device provides (typically 60fps).
 
-### Manual Control
+To stop:
 
-Once the preview window is open, the Devices menu (in the menu bar) shows all connected USB devices. Click a device to toggle its preview on/off. Devices with active previews are marked with a checkmark.
+> "Close the preview" or just close the window.
 
-## How It Works Under the Hood
+## What You Need to Know
 
-### Binary Management
+### USB Only
 
-The preview app is a single-file Swift program (`tools/ios-preview.swift`) that Quern compiles on first use:
+CoreMediaIO screen capture requires a **wired USB connection**. Lightning and USB-C both work. Wi-Fi does not. If you're working with a physical device wirelessly, preview won't be available.
 
-1. `preview_device` is called
-2. Quern checks if `~/.quern/bin/ios-preview` exists and is newer than the source
-3. If not, compiles with `swiftc` (linking AVFoundation, CoreMediaIO, AppKit)
-4. Creates a proper `.app` bundle at `~/.quern/bin/Quern Preview.app/` with Info.plist and icon
-5. Launches the app in interactive mode
+### First-Launch Permission
 
-The binary is cached — subsequent calls skip compilation unless the Swift source changes.
+The first time the preview app runs, macOS will ask for screen recording permission. Grant it, or the capture will fail silently. This is a standard macOS privacy prompt — you'll find it in System Settings > Privacy & Security > Screen Recording.
 
-### CoreMediaIO Capture
+### Device Trust
 
-The app uses `AVCaptureDevice.DiscoverySession` to discover connected iOS devices, then creates an `AVCaptureSession` with the device as input and an `AVCaptureVideoPreviewLayer` for display. The capture runs at whatever resolution and frame rate the device provides (typically 60fps at native resolution).
-
-### Interactive Protocol
-
-When launched by Quern, the preview app communicates via JSON Lines on stdin/stdout:
-
-- **Commands** (Quern → app): `add`, `remove`, `list`, `quit`
-- **Events** (app → Quern): `ready`, `added`, `removed`, `window_closed`, `devices`, `error`
-
-This lets Quern manage preview windows programmatically while the app stays alive between operations.
+Your iPhone must trust the Mac ("Trust This Computer?" dialog). If you haven't accepted this, the device won't appear for preview.
 
 ## Multi-Device
 
-You can preview multiple devices simultaneously. Each device gets its own window.
+You can preview multiple devices simultaneously — each gets its own window. Just ask your agent to start preview on each device.
 
-### The Stagger Rule
+Behind the scenes, Quern staggers the capture sessions by 1 second between devices to work around a CoreMediaIO race condition. This is automatic.
 
-CoreMediaIO has a race condition when starting multiple `AVCaptureSession` instances simultaneously. Quern works around this by staggering session starts by 1 second:
+### Manual Control
 
-```
-preview_device(name="iPhone 15")     # Starts immediately
-preview_device(name="iPad Air")      # Waits ~1s after first
-```
-
-If you try to start them too fast (e.g., scripting rapid `preview_device` calls), the second session may fail silently. The 1-second stagger is handled automatically by the server.
+Once a preview window is open, the **Devices** menu in the menu bar shows all connected USB devices. Click to toggle preview on/off. Devices with active previews are marked with a checkmark.
 
 ## Orientation
 
-CoreMediaIO always captures in the device's native orientation (portrait). When an app rotates to landscape, the captured frames show the rotated content within the portrait-oriented buffer (with black bars).
+CoreMediaIO always captures in the device's native orientation (portrait). When your app rotates to landscape, the captured frames show the rotated content within the portrait-oriented buffer — it'll look sideways.
 
-The preview window does not auto-rotate. What you see matches what CoreMediaIO delivers: the raw frame buffer. This means landscape apps look sideways in the preview.
+The preview window doesn't auto-rotate currently. What you see is the raw frame buffer from CoreMediaIO.
 
-Future work: auto-rotation by polling WDA's orientation endpoint and applying `CATransform3DMakeRotation` to the preview layer.
+## Limitations
 
-## Known Limitations
-
-- **USB only.** CoreMediaIO screen capture requires a wired USB connection. Lightning and USB-C both work. Wi-Fi does not.
-- **No click-to-tap.** The preview is view-only. You can't interact with the device by clicking on the preview window. (This is planned — mapping window coordinates to device screen coordinates via WDA.)
-- **No audio.** CoreMediaIO captures video only. Audio capture would require a separate AVAudioSession which isn't implemented.
-- **macOS only.** CoreMediaIO is an Apple framework. This feature doesn't work on Linux.
-- **First-launch permission.** macOS will ask for screen recording permission the first time the preview app runs. Grant it, or the capture will fail silently.
-- **Device trust required.** The iOS device must trust the Mac (the "Trust This Computer?" dialog). If you haven't trusted, the device won't appear in the device discovery list.
+- **USB only.** Wi-Fi connections don't support CoreMediaIO screen capture.
+- **View only.** You can't interact with the device by clicking on the preview window. (This is planned — mapping clicks to taps via WDA.)
+- **No audio.** Video only.
+- **macOS only.** CoreMediaIO is an Apple framework.
+- **No brightness control.** But the preview always shows full brightness via CoreMediaIO regardless of the device's actual screen brightness. So for dark-room scenarios: face the device down, the preview still works fine.

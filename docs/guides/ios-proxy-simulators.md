@@ -1,127 +1,81 @@
 # Simulator Proxy Setup
 
-Capturing HTTPS traffic from iOS simulators through Quern's mitmproxy. This is the simplest proxy setup — most of it is automatic.
+Quern can capture and display all HTTPS traffic from your iOS simulators. This is how you watch every API call your app makes in real time, without modifying your app's code.
 
-## Two Modes: Local Capture vs System Proxy
+## The Simple Version
 
-### Local Capture (Recommended)
+Tell your agent:
 
-Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. No system proxy configuration needed — your Mac's browser and other apps are unaffected.
+> "Set up network capture for my simulator and show me what API calls my app is making"
 
-```
-set_local_capture(processes=["MobileSafari"])
-```
+Your agent will make sure the proxy certificate is installed on the simulator, enable local capture for your app's process, and start showing you traffic. That's it for most workflows.
 
-This tells mitmproxy to capture traffic from `MobileSafari` (or whatever process names you specify) without touching system network settings. The first time you use it, macOS will prompt you to approve the System Extension.
+## How Capture Works
 
-**Why this is better:**
-- Your browser keeps working normally
-- No cleanup needed — you can't "forget to unconfigure" anything
-- Per-simulator flow tagging works automatically (see below)
-- Multiple simulators captured simultaneously with isolated traffic
+### Local Capture (The Default)
 
-### System Proxy
+Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. Safari and WebKit networking are typically enabled by default (configured in `~/.quern/config.json`). When you start debugging an app, ask your agent to add your app's process name to the capture list.
 
-The system proxy configures macOS network settings to route *all* traffic through mitmproxy. This captures everything — simulators, your browser, curl commands, everything on the active network interface.
+**Why this is the right default:**
+- Your Mac's browser and other apps are unaffected
+- Nothing to clean up when you're done
+- Traffic from each simulator is automatically tagged so you can tell them apart
 
-```
-configure_system_proxy     # Turn on
-unconfigure_system_proxy   # Turn off — don't forget this
-```
+The first time local capture is used, macOS will ask you to approve the System Extension in System Settings > Privacy & Security. This is a one-time approval.
 
-Use this when you need to capture traffic from processes whose names you don't know, or when local capture's System Extension isn't available.
+### System Proxy (The Alternative)
 
-**Important:** Always call `unconfigure_system_proxy` when you're done. If the server crashes or you forget, `proxy_status` will show the stale configuration, and `unconfigure_system_proxy` will restore your original settings (Quern snapshots them before configuring).
+If local capture isn't working (System Extension issues, corporate MDM blocking it), your agent can fall back to the system proxy. This routes *all* Mac traffic through mitmproxy — including your browser. It works, but it's messier.
 
-## Certificate Installation
+**Important:** The system proxy must be turned off when you're done. Your agent handles this, but if the server crashes or you kill it, your Mac's proxy settings may be left configured. Run `./quern stop` to clean up, or check System Settings > Network > your interface > Proxies.
 
-Even with local capture, the mitmproxy CA certificate must be installed on the simulator for HTTPS decryption. Without it, you'll see flows but the request/response bodies will be encrypted and unreadable.
+## Certificates
 
-```
-install_proxy_cert(udid="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX")
-```
+The proxy certificate needs to be installed on each simulator for HTTPS decryption to work. Without it, your agent can see that traffic is happening but can't read the request/response bodies.
 
-Under the hood, this runs `simctl keychain add-root-cert` to inject the cert into the simulator's trust store. It's a one-time operation per simulator — the cert persists across app installs and simulator reboots. It's only lost if you erase the simulator.
+Your agent installs this automatically when it sets up network capture. The cert persists across app installs and simulator reboots — it's only lost if you erase the simulator entirely.
 
-### Verification
+If you've recently erased a simulator or created a new one, your agent may need to reinstall the cert. It detects this automatically.
 
-```
-verify_proxy_setup(udid="...")
-```
+## Per-Simulator Traffic Isolation
 
-This does a ground-truth check: it queries the simulator's `TrustStore.sqlite3` database directly and verifies the cert fingerprint matches. It detects:
-- Cert never installed
-- Cert was installed but simulator was erased since then
-- Cert is current and valid
+This is where Quern really shines for testing. When traffic flows through the proxy, Quern traces each request back to the specific simulator that made it. This means:
 
-Results are cached for an hour, so repeated checks are fast.
+- Running the same app on three simulators? Traffic from each is labeled separately.
+- Your agent can show you "just the traffic from the iPhone 15 Pro simulator" even when multiple simulators are active.
+- Parallel test runners get isolated traffic views without any app-side changes.
 
-### Multiple Simulators
+This happens automatically — no configuration needed.
 
-Install the cert on each simulator you want to capture from. The cert is per-simulator — booting a new simulator means installing again.
+## What You Should Know
 
-```
-# For each simulator you're using:
-install_proxy_cert(udid="<sim1-udid>")
-install_proxy_cert(udid="<sim2-udid>")
-```
+### Certificate Pinning
 
-## Per-Simulator Flow Tagging
+If your app uses certificate pinning (common in banking, healthcare, and security-sensitive apps), the proxy won't be able to decrypt that traffic. Pinned apps explicitly reject mitmproxy's certificate.
 
-This is where local capture really shines. When a network request flows through the proxy, Quern traces the originating process back through its parent chain to find the `launchd_sim` process that owns it. Each `launchd_sim` instance corresponds to exactly one simulator, and its command line contains the simulator's UDID.
+**Solutions:**
+- Disable pinning in debug builds (most pinning libraries support this)
+- Use a build configuration that skips pinning for development
+- Accept that pinned traffic will appear as opaque HTTPS connections
 
-The result: every captured flow is automatically tagged with `simulator_udid`.
+### What Gets Captured
 
-### Filtering by Simulator
+Everything that goes through the network stack: REST API calls, GraphQL, WebSocket connections, image downloads, analytics pings, third-party SDK traffic. You'll often discover surprising things your app (or its dependencies) are doing.
 
-```
-# See traffic from just one simulator
-query_flows(simulator_udid="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX")
+### Performance Impact
 
-# Summary for a specific simulator
-get_flow_summary(simulator_udid="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX")
-```
-
-This is critical for parallel testing. If you have three simulators running the same app hitting the same API, you can isolate each simulator's traffic without any app-side changes.
-
-### How the Tagging Works
-
-1. mitmproxy's local redirector captures the source PID of each connection
-2. Quern walks the parent process chain (up to 10 levels) looking for a `launchd_sim` ancestor
-3. When found, it extracts the UDID from `launchd_sim`'s command line
-4. The UDID is cached, so subsequent flows from the same process resolve instantly
-
-This all happens server-side — the simulator and your app have no idea it's happening.
-
-## Quick Start
-
-The typical workflow for an AI agent:
-
-```
-1. proxy_status                          # Verify proxy is running
-2. install_proxy_cert(udid="...")        # Install cert (once per sim)
-3. verify_proxy_setup(udid="...")        # Confirm it worked
-4. set_local_capture(["MobileSafari"])   # Start capturing (if not already)
-5. launch_app(udid="...", bundle_id="com.example.app")
-6. # ... interact with the app ...
-7. get_flow_summary(simulator_udid="...")  # See what happened
-8. query_flows(simulator_udid="...", host="api.example.com")  # Drill down
-```
+Local capture adds minimal overhead — a few milliseconds per request for the TLS interception. You won't notice it during normal development. System proxy mode has similar overhead but affects all traffic.
 
 ## Troubleshooting
 
-**No flows appearing:**
-1. Is the proxy running? Check `proxy_status`.
-2. Is the cert installed? Run `verify_proxy_setup`.
-3. Is local capture active? Check `proxy_status` — the `local_capture` field should list your process names.
-4. Is the app using certificate pinning? Pinned apps reject mitmproxy's cert regardless of trust store status. You'll need to disable pinning in debug builds.
+**No traffic appearing:**
+- Ask your agent to check the proxy status and verify the cert is installed
+- Make sure local capture includes your app's process name (not just Safari)
+- Check if your app uses certificate pinning
 
-**Flows appear but bodies are encrypted:**
-- The cert isn't trusted. Run `install_proxy_cert` with `force: true` to reinstall.
+**Traffic appears but bodies are encrypted/empty:**
+- The cert isn't installed or trusted. Ask your agent to reinstall it.
 
 **System Extension prompt not appearing:**
-- macOS may block the prompt if System Preferences > Privacy & Security has pending approvals. Check there first.
-- On macOS Ventura+, the extension may need explicit approval in System Settings > Privacy & Security > Network Extensions.
-
-**Flows from wrong simulator:**
-- If `simulator_udid` is null on some flows, the process parent chain couldn't be resolved. This can happen with background daemon processes that aren't children of `launchd_sim`. App-initiated traffic should always resolve correctly.
+- On macOS Ventura+, check System Settings > Privacy & Security > Network Extensions
+- Corporate MDM policies may block System Extensions — fall back to system proxy mode

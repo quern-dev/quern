@@ -1,24 +1,24 @@
 # iOS Logging Best Practices
 
-Getting useful logs out of iOS apps and into Quern. This covers why os.log matters, how to redirect print() for legacy code, and how to filter effectively.
+The difference between a productive AI-assisted debugging session and a frustrating one often comes down to log quality. This guide covers how to make your app's logs actually useful when an AI agent is the one reading them.
 
 ## os.log vs print()
 
 ### The Problem with print()
 
-`print()` in Swift writes to stdout. On simulators, this shows up in Xcode's console. On physical devices, it goes... nowhere useful. It doesn't appear in the unified logging system, can't be filtered by level or subsystem, and isn't captured by `log stream` or any log collection tool.
+`print()` in Swift writes to stdout. On simulators, this shows up in Xcode's console. On physical devices, it goes nowhere useful — it doesn't appear in the unified logging system and can't be captured by any log collection tool.
 
 For an AI agent trying to debug your app, `print()` output is invisible on physical devices and noisy on simulators.
 
 ### Why os.log Wins
 
-`os.log` (via the `Logger` API in iOS 14+ or `os_log` in older code) writes to Apple's unified logging system. This means:
+`os.log` (via the `Logger` API in iOS 14+) writes to Apple's unified logging system:
 
 - **Structured metadata**: subsystem, category, level (debug/info/notice/error/fault)
 - **Captured everywhere**: simulators, physical devices, crash reports
-- **Filterable at source**: Quern can filter by process, subsystem, level — before the data even enters the ring buffer
-- **Performance**: os.log is designed to be always-on with minimal overhead. Debug-level messages are only materialized when someone is actually listening.
-- **Privacy**: os.log supports privacy annotations (`\(value, privacy: .private)`) that redact sensitive data in non-debug contexts
+- **Filterable at source**: Quern can filter by process, subsystem, level — before the data even enters its pipeline
+- **Performance**: Designed to be always-on with minimal overhead
+- **Privacy**: Supports `\(value, privacy: .private)` annotations that redact sensitive data
 
 ### The Logger API (iOS 14+)
 
@@ -37,26 +37,11 @@ Logger.networking.error("Request failed: \(error.localizedDescription)")
 Logger.auth.debug("Token refresh started")
 ```
 
-### Filtering in Quern
-
-With structured logs, Quern can do surgical filtering:
-
-```
-# Only your app's logs
-tail_logs(source="simulator", process="MyApp")
-
-# Only networking errors
-query_logs(process="MyApp", level="error", search="networking")
-
-# Everything from your app, no system noise
-start_simulator_logging(process="MyApp", preset="device-quiet")
-```
-
-Without os.log, you get a firehose of unstructured text. With it, you get exactly what you need.
+With this in place, you can tell your agent things like "show me just the networking errors" or "what happened in the auth flow?" and get precise answers.
 
 ## The print() Diverter Pattern
 
-You have a large codebase full of `print()` calls. Rewriting them all to use `Logger` isn't happening today. Here's a bridge:
+You have a large codebase full of `print()` calls. Rewriting them all isn't happening today. Here's a bridge:
 
 ```swift
 import os
@@ -76,138 +61,85 @@ public func print(_ items: Any..., separator: String = " ", terminator: String =
 #endif
 ```
 
-Put this in a file that's compiled in all targets. Now every `print()` call also emits an os.log entry at debug level, tagged with the "print" category. Quern captures it, you can filter on it, and physical device debugging works.
+Drop this in a file compiled in all targets. Now every `print()` also emits an os.log entry at debug level, tagged with the "print" category. Physical device debugging works, and your agent can see everything.
 
-**Caveats:**
-- This is a stopgap, not a long-term solution. Structured logs with proper levels and categories are always better.
-- The `@_transparent` attribute inlines the function so the overhead is minimal, but it's still an extra call per print.
-- In release builds, print() reverts to the standard behavior (which is still a no-op on devices, but at least you're not paying the os.log cost).
+This is a stopgap — structured logs with proper levels and categories are always better.
 
-## Log Filtering Strategies
+## How Filtering Works
+
+Understanding how Quern filters logs helps you guide your agent to the signal faster.
 
 ### Process-Level Filtering (Best Performance)
 
-When you start log capture with a `process` filter, Quern passes it to the underlying `log stream --process` command. This means the OS does the filtering — entries that don't match never enter Quern's pipeline.
+When your agent sets a process filter, Quern passes it directly to the underlying log capture command. The OS does the filtering — entries that don't match never enter Quern's pipeline. This is dramatically more efficient than capturing everything.
 
-```
-start_simulator_logging(process="MyApp")
-start_device_logging(udid="...", process="MyApp")
-```
-
-This is dramatically more efficient than capturing everything and filtering afterward.
+Tell your agent: **"Only capture logs from MyApp"** — this activates process-level filtering.
 
 ### Presets
 
-Presets bundle common exclusion rules so you don't have to build them from scratch.
+Quern has built-in presets that drop common noise:
 
-**`device-quiet`** — for physical devices. Drops noisy system daemons and frameworks:
-- Processes: `remotepairingdeviced`, `symptomsd`, `SymptomEvaluator`, `bluetoothd`, `wifid`, `signpost_reporter`, `kernel`
-- Subsystems: `CoreBrightness`, `ColourSensorFilterPlugin`, `com.apple.CFNetwork`, `com.apple.network`
+**`device-quiet`** (for physical devices) drops:
+- System daemons: `remotepairingdeviced`, `symptomsd`, `bluetoothd`, `wifid`, `signpost_reporter`, `kernel`
+- Noisy frameworks: `CoreBrightness`, `ColourSensorFilterPlugin`, `com.apple.CFNetwork`, `com.apple.network`
 
-**`simulator-quiet`** — for simulators. Drops simulator-specific noise:
-- Messages containing: `HangTracer`
-- Subsystems: `com.apple.CoreFoundation`
+**`simulator-quiet`** (for simulators) drops:
+- `HangTracer` messages (frequent, unhelpful)
+- `com.apple.CoreFoundation` subsystem noise
 
-Combine with process filtering for minimal noise:
-
-```
-start_device_logging(udid="...", process="MyApp", preset="device-quiet")
-```
+Your agent applies these automatically when appropriate, but you can ask for them explicitly: **"Filter out the system noise"**
 
 ### Ingestion vs Query-Time Filtering
 
-Quern filters at two levels, and the distinction matters for performance:
+There are two levels of filtering, and the distinction matters:
 
-**Ingestion filtering** (subprocess-level): When you set a `process` filter, Quern restarts the log subprocess with the filter baked into the command line. On simulators, this becomes `log stream --predicate 'process == "MyApp"'`. On physical devices, it becomes `pymobiledevice3 syslog live -pn MyApp`. The OS does the filtering — entries that don't match never enter Quern's pipeline. This is dramatically cheaper.
+**Ingestion filtering** happens at the source — the log capture subprocess only emits matching entries. This is fast and saves memory. Process filters work this way.
 
-**Query-time filtering**: Everything else (level, subsystem, exclude rules) is applied as entries flow through the ring buffer. Still fast, but the entries have already been parsed and stored.
+**Query-time filtering** happens when your agent searches the captured logs. Level, subsystem, text search — all applied at query time.
 
-**Rule of thumb:** Always set a process filter if you know which app you're debugging. Everything else is a bonus.
-
-### Runtime Filtering
-
-Use `set_log_filter` to change what's captured without manually restarting the log adapter:
-
-```
-set_log_filter(process="MyApp", level="warning")  # Only warnings and above
-set_log_filter(process="MyApp", subsystems=["com.example.myapp.networking"])
-```
-
-When you set a `process` filter, Quern automatically restarts running adapters with subprocess-level filtering. The response includes `adapter_restarted: true` to confirm.
+**Bottom line:** Always tell your agent which process to watch. Everything else is a bonus.
 
 ### Filter Scopes
 
-Filters operate at three scopes with clear precedence: **device > source > global**.
-
-A device-specific filter (tied to a UDID) overrides a source-level filter (tied to "simulator" or "device"), which overrides the global default. This lets you monitor one device at `error` level while watching another at `debug`.
-
-### Summary-First Approach
-
-Don't start by reading raw logs. Start with:
-
-```
-get_log_summary(window="5m")
-```
-
-This gives you a breakdown by level and source. Then drill down:
-
-```
-query_logs(level="error", limit=20)  # What's going wrong?
-query_logs(search="timeout", limit=20)  # Specific issue
-```
+Filters operate at three scopes: **device > source > global**. A filter set for a specific device overrides the source-level default, which overrides the global default. Your agent manages this for you, but it's useful to know if you're monitoring multiple devices simultaneously.
 
 ## Crash Reports
 
 ### Automatic Discovery
 
-Quern watches `~/Library/Logs/DiagnosticReports/` for new crash reports (polling every 10 seconds). When your app crashes on a simulator, the report appears within seconds. No configuration needed.
+Quern watches `~/Library/Logs/DiagnosticReports/` for new crash reports. When your app crashes on a simulator, the report appears within seconds. No configuration needed.
 
-For physical devices, crash reports are pulled via `idevicecrashreport` when you call `get_latest_crash(udid="...")`. This uses the libimobiledevice UDID — Quern handles the translation from CoreDevice UUIDs automatically for iOS 17+ devices.
+For physical devices, your agent pulls crash reports on demand. For iOS 17+ devices, this involves translating between identifier formats behind the scenes (see [Device Pool](device-pool.md)).
 
 ### What You Get
 
-Each crash report is parsed into structured data:
+Your agent parses crash reports into structured summaries. The key fields:
 
-```json
-{
-  "process": "MyApp",
-  "exception_type": "EXC_BAD_ACCESS",
-  "exception_codes": "KERN_INVALID_ADDRESS at 0x0000000000000000",
-  "signal": "SIGSEGV",
-  "timestamp": "2026-03-09T14:30:45Z",
-  "top_frames": [
-    "MyApp  0x1045a8f3c  -[UserManager loadProfile] + 124",
-    "MyApp  0x1045a8e10  -[HomeViewController viewDidLoad] + 88",
-    "UIKit  0x1a2b3c4d5  -[UIViewController _sendViewDidLoadWithAppearanceProxyObjectTaggingEnabled] + 100"
-  ]
-}
-```
-
-Quern handles both `.ips` (iOS 15+ JSON format) and `.crash` (older plaintext) files. For `.ips` files, it filters to `bug_type == "309"` (actual crashes) and ignores Jetsam terminations, background task kills, and analytics payloads.
-
-### Reading Crash Reports
-
-The key fields:
-
-| Field | What to look at |
+| Field | What it means |
 |---|---|
-| `exception_type` | **EXC_BAD_ACCESS** = memory issue (null pointer, dangling reference). **EXC_CRASH (SIGABRT)** = deliberate abort (assertion failure, uncaught exception). **EXC_BREAKPOINT (SIGTRAP)** = Swift runtime trap (force-unwrap nil, array bounds). |
-| `signal` | SIGSEGV = segfault. SIGABRT = abort. SIGTRAP = trap instruction. |
-| `top_frames` | The stack trace of the crashing thread. Your code is the frames with your app's name. Framework frames give context. |
+| **EXC_BAD_ACCESS** | Memory issue — null pointer, dangling reference, use-after-free |
+| **EXC_CRASH (SIGABRT)** | Deliberate abort — assertion failure, uncaught exception, `fatalError()` |
+| **EXC_BREAKPOINT (SIGTRAP)** | Swift runtime trap — force-unwrap nil, array out of bounds, precondition failure |
+
+The top stack frames show where the crash happened. Your agent can cross-reference the crash timestamp with logs and network traffic to build the full picture:
+
+1. What API calls happened just before the crash?
+2. Were there any error-level log entries leading up to it?
+3. Did a network response contain unexpected data?
 
 ### Crash Hooks
 
-Run a command whenever a crash is detected:
+You can run a command whenever a crash is detected:
 
 ```bash
-./quern start --on-crash 'cat > /tmp/last_crash.json'
+./quern start --on-crash 'curl -X POST https://your-webhook.example.com -d @-'
 ```
 
-The full crash report (as JSON) is piped to stdin. The hook runs in the background with a 60-second timeout. Use this to pipe crashes to Slack, a webhook, or a file for later analysis.
+The full crash report (JSON) is piped to stdin. The hook runs with a 60-second timeout.
 
 ### Suppressing the macOS Crash Dialog
 
-By default, macOS shows a crash dialog that blocks the simulator. Suppress it:
+Simulator crashes trigger a macOS crash dialog that blocks everything. Suppress it:
 
 ```bash
 defaults write com.apple.CrashReporter DialogType none
@@ -215,33 +147,18 @@ defaults write com.apple.CrashReporter DialogType none
 
 Quern's `setup` command offers to do this for you.
 
-### Cross-Referencing
-
-A crash report tells you *what* happened. Logs tell you *why*. Network flows tell you *what triggered it*. The debugging pattern:
-
-1. `get_latest_crash` — get the crash report
-2. Note the crash timestamp
-3. `query_logs(after=<timestamp - 10s>, before=<timestamp>)` — what was the app doing?
-4. `query_flows(after=<timestamp - 10s>, before=<timestamp>)` — any failed network requests?
-
-Crash entries also appear in the ring buffer as `FAULT`-level log entries, so `get_log_summary` and `get_errors` will surface them alongside your app's logs.
-
 ## Build Output
 
-Quern can capture Xcode build output and parse it into structured summaries:
+When your agent builds your project and something goes wrong, Quern can parse the Xcode build output into a structured summary: error count, warning count, failed targets, and specific error messages with file/line references. Much easier to work with than scrolling through pages of compiler output.
 
-- Error count, warning count
-- Failed targets
-- Specific error messages with file/line references
+## Tips for Better AI-Assisted Debugging
 
-Use `parse_build_output` after a build to get a structured summary instead of scrolling through pages of compiler output.
+- **Log at the boundaries.** Network request/response, view lifecycle (viewDidAppear/viewDidDisappear), user actions (button taps, form submissions). You don't need to log every internal function — just where your code meets the outside world.
 
-## Tips
+- **Use distinct subsystems and categories.** "com.example.myapp.networking" is infinitely more useful than just dumping everything into one stream. It lets your agent slice the logs precisely.
 
-- **Set accessibility identifiers on debug UI elements.** When an agent is debugging with logs AND UI automation simultaneously, having identifiable elements makes correlating "I tapped the refresh button" with "this log entry appeared" much easier.
+- **Include correlation IDs.** If your API returns a request ID, log it. When your agent sees a failed request in the network traffic and wants to find the corresponding log entries, a shared ID makes the connection instant.
 
-- **Log at the boundaries.** Network request/response, view lifecycle (viewDidAppear/viewDidDisappear), user actions (button taps, form submissions). You don't need to log every internal function call — just the edges where your code meets the outside world.
+- **Use fault level sparingly.** Fault-level entries persist across reboots and have higher overhead. Reserve them for truly unexpected conditions (impossible states, assertion failures), not ordinary errors.
 
-- **Use fault level sparingly.** os.log fault-level entries persist across reboots and have higher overhead. Reserve them for truly unexpected conditions (assertion failures, impossible states), not for ordinary errors.
-
-- **Include correlation IDs.** If your API returns a request ID, log it. When you see a failed request in Quern's flow view and want to find the corresponding log entries, a shared ID makes the connection trivial.
+- **Set accessibility identifiers on debug UI elements.** When your agent is debugging with logs AND UI automation simultaneously, identifiable elements make correlating "I tapped the refresh button" with "this log entry appeared" much easier.

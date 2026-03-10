@@ -1,210 +1,123 @@
 # Network Debugging Patterns
 
-Quern's proxy isn't just for watching traffic — it can mock responses, intercept and modify live requests, replay captured traffic, and give you structured summaries. These patterns work the same regardless of whether traffic comes from an iOS simulator, Android emulator, or physical device.
+Quern's proxy isn't just for watching traffic — it can fake API responses, pause requests mid-flight for inspection, and replay captured traffic. These patterns work the same regardless of whether traffic comes from an iOS simulator, Android emulator, or physical device.
+
+## Watching Traffic
+
+The most basic use case. Once proxy capture is set up (see the proxy setup guides for [iOS simulators](ios-proxy-simulators.md), [physical devices](ios-proxy-physical-devices.md), or [Android](android-proxy.md)):
+
+> "Show me what API calls my app is making"
+> "What network traffic happened in the last minute?"
+
+Your agent shows you a summary grouped by host, with success/error counts, slow requests, and error patterns. From there, drill down:
+
+> "Show me the failed requests"
+> "What's going to api.example.com?"
+> "Show me the full request/response for that 500 error"
+
+### Summary-First Approach
+
+Your agent starts with summaries, not raw traffic. This matters because a busy app generates hundreds of requests per minute, and raw flow-by-flow listing burns through context. Summaries give you the shape of the traffic; your agent drills in when something looks interesting.
+
+Summaries also support **cursors** — your agent can ask "what's new since last time?" and get only delta updates. This keeps long debugging sessions efficient.
 
 ## Mocking Responses
 
-Replace real API responses with synthetic ones. Useful for testing error states, empty data, slow responses, or APIs that don't exist yet.
+Replace real API responses with fakes. Useful for testing error states, empty data, or APIs that don't exist yet.
 
-### Basic Mock
+> "Mock the /users endpoint to return an empty list"
+> "Make the login API return a 500 error"
+> "Mock api.example.com/config to return this JSON: {...}"
 
-```
-set_mock(
-    pattern="~d api.example.com & ~u /users",
-    status_code=200,
-    body='{"users": []}',
-    headers={"Content-Type": "application/json"}
-)
-```
+Your agent sets up the mock, and every matching request gets the fake response immediately — the real server is never contacted.
 
-Every request matching the pattern gets the mock response immediately — the real server is never contacted.
+### What You Should Know
+
+- **Mocks persist until cleared.** If you set up a mock in one debugging session and forget about it, it's still active. Ask your agent to list or clear mocks if you're seeing unexpected behavior.
+- **Multiple mocks can coexist.** You can mock different endpoints simultaneously.
+- **Mocks take priority over intercepts.** If both match a request, the mock wins.
 
 ### Filter Syntax
 
-Mocks use mitmproxy's filter syntax. The most useful operators:
+Behind the scenes, mocks use mitmproxy's filter syntax. Your agent knows this, but it's useful to know the building blocks:
 
-| Operator | Meaning | Example |
+| What | Filter | Example |
 |---|---|---|
-| `~d` | Domain | `~d api.example.com` |
-| `~u` | URL (path + query) | `~u /api/v1/users` |
-| `~m` | HTTP method | `~m POST` |
-| `~c` | Status code | `~c 500` (for intercepts) |
-| `~b` | Body contains | `~b "error"` |
-| `&` | AND | `~d api.example.com & ~m POST` |
-| `\|` | OR | `~d api.example.com \| ~d api.backup.com` |
-| `!` | NOT | `!~d analytics.example.com` |
+| Domain | `~d` | `~d api.example.com` |
+| URL path | `~u` | `~u /api/v1/users` |
+| HTTP method | `~m` | `~m POST` |
+| Body contains | `~b` | `~b "error"` |
+| Combine (AND) | `&` | `~d api.example.com & ~m POST` |
 
-**Note:** `~p` (path) does not exist in mitmproxy's filter syntax, despite what you might expect. Use `~u` for path matching — it matches against the full URL path.
-
-### Managing Mocks
-
-```
-list_mocks          # See all active mocks
-update_mock(...)    # Modify an existing mock
-clear_mocks         # Remove all mocks
-```
-
-### Mock Priority
-
-When multiple mocks match a request, the most recently added mock wins. If a mock and an intercept both match, the mock takes priority — the request never reaches the intercept.
+**Note:** There's no path-only filter (`~p` doesn't exist in mitmproxy). Use `~u` for path matching.
 
 ## Intercepting Live Traffic
 
-Hold a request in-flight, inspect it, optionally modify it, then release it. This is the debugger breakpoint equivalent for network traffic.
+Pause a request in-flight, inspect it, optionally modify it, then let it continue. This is the network equivalent of a debugger breakpoint.
 
-### Setting Up an Intercept
+> "Intercept all POST requests to api.example.com"
 
-```
-set_intercept(pattern="~d api.example.com & ~m POST")
-```
+Now every matching request hangs until your agent releases it. You can:
 
-Now every POST to `api.example.com` will be held. The app's request hangs until you release it.
+> "Show me the intercepted request"
+> "Change the auth header to an expired token and release it"
+> "Just let it through unchanged"
 
-### Waiting for Intercepted Flows
+### Be Careful
 
-```
-list_held_flows(timeout=30)
-```
+Intercepted requests block the app. Don't set a broad intercept pattern and walk away — everything matching will hang. Flows are auto-released after 30 seconds as a safety net, but it's better to be specific:
 
-This long-polls until a matching flow is intercepted (or the timeout expires). Returns the full request details — method, URL, headers, body.
+> "Intercept just the next login request" (not "intercept everything")
 
-### Releasing a Flow
+When you're done:
 
-Release unchanged (pass through to server):
-```
-release_flow(flow_id="abc123")
-```
-
-Release with modifications:
-```
-release_flow(
-    flow_id="abc123",
-    modify_headers={"Authorization": "Bearer expired-token"},
-    modify_body='{"injected": true}'
-)
-```
-
-You can modify the method, URL, headers, and body before releasing. The modified request is what the server receives.
-
-### Auto-Release
-
-Held flows are automatically released after 30 seconds to prevent the app from hanging indefinitely. If you need more time, release and re-intercept.
-
-### Clearing Intercepts
-
-```
-clear_intercept
-```
-
-Removes the intercept pattern and releases any currently held flows.
+> "Clear the intercept"
 
 ## Replaying Requests
 
-Re-send a previously captured request, optionally with modifications.
+Re-send a previously captured request, optionally with modifications:
 
-```
-replay_flow(
-    flow_id="abc123",
-    modify_headers={"Cache-Control": "no-cache"}
-)
-```
+> "Replay that failed request"
+> "Replay it but with a fresh auth token"
 
-The replayed request goes through the proxy, so it appears in the flow list as a new entry. This is useful for:
+The replayed request goes through the proxy like a normal request, so it appears in the traffic list. Useful for:
 - Retrying a failed request after fixing the server
-- Testing idempotency (does the same POST produce the same result?)
+- Testing idempotency
 - Comparing responses over time
 
-## Flow Summaries
+## Common Debugging Workflows
 
-Don't read raw flows one by one. Start with the summary:
+### "My app shows an error but I don't know why"
 
-```
-get_flow_summary
-```
+1. Ask your agent to show recent network errors
+2. Look at the failing request's response body — what did the server actually say?
+3. Cross-reference with app logs around the same timestamp
 
-This returns a structured breakdown:
-- Flows grouped by host
-- Success/error counts per host
-- Slow requests (> 1 second)
-- Error patterns (`POST /api/users -> 500`)
-- Total traffic volume
+### "I want to test how my app handles a server error"
 
-### Cursor-Based Delta Updates
+1. Ask your agent to mock the relevant endpoint with a 500 response
+2. Trigger the flow in your app
+3. Watch logs for how your error handling behaves
+4. Clear the mock when done
 
-The summary includes a `cursor` (timestamp-based). Pass it back to get only new flows:
+### "The API response looks wrong"
 
-```
-get_flow_summary(cursor="2024-01-15T10:30:00.000Z")
-```
+1. Ask your agent for the full request/response detail
+2. Compare headers, body, status code with what you expect
+3. If needed, replay the request to see if it's consistent
+4. Or intercept the next request, modify it, and see how the server responds
 
-This is critical for AI agents working in loops — each iteration only processes new traffic, keeping token usage low.
+### "I need to test against a flaky API"
 
-### Filtering Summaries
+Mock it before you start. You'll get consistent, fast responses instead of waiting for timeouts and dealing with rate limits.
 
-```
-get_flow_summary(simulator_udid="...")       # One simulator's traffic
-get_flow_summary(host="api.example.com")     # One host
-get_flow_summary(client_ip="192.168.1.42")   # One physical device
-```
+### "Which simulator is making this request?"
 
-## Common Patterns
-
-### Testing Error Handling
-
-```
-# Mock a 500 error
-set_mock(pattern="~d api.example.com & ~u /login", status_code=500, body='{"error": "Internal Server Error"}')
-
-# Use the app, observe how it handles the error
-# Check logs for error handling behavior
-query_logs(search="login", level="error")
-
-# Clean up
-clear_mocks
-```
-
-### Simulating Slow Responses
-
-```
-# Intercept the request, wait, then release
-set_intercept(pattern="~d api.example.com & ~u /feed")
-
-# Wait for the request
-list_held_flows(timeout=30)
-# ... wait a few seconds ...
-release_flow(flow_id="...")
-
-# The app experienced the delay as a slow API response
-```
-
-### Debugging Authentication Flows
-
-```
-# Watch all auth-related traffic
-query_flows(host="auth.example.com")
-
-# Check for token refresh patterns
-query_flows(url_contains="/token/refresh")
-
-# If a request failed, replay it with a fresh token
-replay_flow(flow_id="...", modify_headers={"Authorization": "Bearer <new-token>"})
-```
-
-### Comparing Request/Response Pairs
-
-```
-# Get the flow summary to find interesting flows
-get_flow_summary(host="api.example.com")
-
-# Drill into specific flows
-get_flow_detail(flow_id="abc123")  # Full headers, body, timing
-get_flow_detail(flow_id="def456")  # Compare with another flow
-```
+If you're running multiple simulators, your agent can filter traffic by simulator. Each flow is automatically tagged with its originating simulator — no app-side changes needed.
 
 ## Tips
 
-- **Filter aggressively.** A busy app generates hundreds of flows per minute. Always filter by host, method, or status code.
-- **Use summaries first.** `get_flow_summary` gives you the shape of the traffic. `query_flows` and `get_flow_detail` are for drilling in.
-- **Mock early.** If you're testing against an API that's flaky or rate-limited, mock it before you start. You'll get consistent, fast responses.
-- **Don't forget cleanup.** Mocks persist until cleared. An old mock from a previous debugging session can cause confusing behavior. `list_mocks` to check, `clear_mocks` to reset.
-- **Intercepts block the app.** Don't set a broad intercept pattern and walk away. The app will hang on every matching request.
+- **Ask for summaries first, details second.** Summaries show the shape of traffic; raw flows are for drilling in.
+- **Filter aggressively.** A busy app generates a lot of traffic. Always narrow by host, method, or status when possible.
+- **Clear mocks when done.** Stale mocks from previous sessions cause confusing behavior.
+- **Intercepts block the app.** Be specific with intercept patterns and clear them when you're done investigating.

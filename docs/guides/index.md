@@ -1,43 +1,43 @@
-# Quern Developer Guides
+# Quern User Guides
 
-Practical knowledge for getting the most out of Quern. These guides cover the real-world details, gotchas, and patterns that go beyond the API reference.
+How to get the most out of AI-assisted mobile development and testing with Quern. These guides are for *you* — the human working with an AI agent. They cover what you need to know, what decisions require your input, and the practical details that help you guide your agent effectively.
 
-For AI agent workflows, see the [Agent Guide](../agent-guide.md). For installation and API reference, see the [README](../../README.md).
+For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For installation and API reference, see the [README](../../README.md).
 
 ---
 
 ## Getting Started
 
-- [Installation & Setup](getting-started.md) — Install, configure, connect your AI agent, server lifecycle
-- [Device Pool & Resolution](device-pool.md) — How Quern finds devices, UDID translation, iOS 17+ differences, Android in the pool
-- [Build & Install](build-and-install.md) — Architecture-aware builds, multi-device install, OS version checks
+- [Installation & Setup](getting-started.md) — Get Quern running and connected to your AI agent
+- [Device Pool & Resolution](device-pool.md) — How Quern manages devices, the iOS 17+ complexity it hides, and what you should know
+- [Build & Install](build-and-install.md) — Building and deploying to multiple devices at once
 
 ---
 
 ## iOS
 
 ### Network Proxy
-- [Simulator Proxy Setup](ios-proxy-simulators.md) — Local capture, certificates, per-simulator flow tagging
-- [Physical Device Proxy Setup](ios-proxy-physical-devices.md) — Wi-Fi proxy, split-tunnel VPN, multi-network tracking
+- [Simulator Proxy Setup](ios-proxy-simulators.md) — Capturing network traffic from simulators
+- [Physical Device Proxy Setup](ios-proxy-physical-devices.md) — Capturing traffic from real iPhones and iPads
 
 ### Logs and Diagnostics
-- [Logging Best Practices](ios-logging.md) — os.log vs print(), ingestion filters, presets, crash reports, build summaries
+- [Logging Best Practices](ios-logging.md) — Making your app's logs useful for AI-assisted debugging
 
 ### Physical Devices
-- [WebDriverAgent Guide](ios-wda.md) — Setup, element selectors, free vs paid accounts, designing apps for automation, limitations
-- [Live Video Preview](ios-preview.md) — CoreMediaIO screen capture, multi-device, orientation
+- [WebDriverAgent Guide](ios-wda.md) — What you need to know about physical device automation
+- [Live Video Preview](ios-preview.md) — Real-time screen mirroring over USB
 
 ---
 
 ## Android
 
-- [Getting Started with Android](android-getting-started.md) — What works, what doesn't yet, emulator image types
-- [Android Proxy Setup](android-proxy.md) — Cert installation options, networkSecurityConfig, emulator vs physical
-- [Logcat Integration](android-logging.md) — Format, filtering, level mapping
+- [Getting Started with Android](android-getting-started.md) — What's supported, emulator setup, image types
+- [Android Proxy Setup](android-proxy.md) — Network traffic capture on emulators and physical devices
+- [Logcat Integration](android-logging.md) — How Android logs flow into Quern
 
 ---
 
 ## Cross-Platform
 
-- [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, replaying, flow summaries
-- [App State Management](app-state.md) — Save/restore state, plist manipulation
+- [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, and replaying network traffic
+- [App State Management](app-state.md) — Saving and restoring app state for reproducible debugging

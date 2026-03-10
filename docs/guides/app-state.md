@@ -1,191 +1,85 @@
 # App State Management
 
-Save and restore complete snapshots of an iOS app's state on simulators. Think of it as checkpoints — save "logged in with test data", save "empty first launch", and switch between them instantly.
+Save and restore complete snapshots of your iOS app's state on simulators. Think of it as checkpoints — save "logged in with test data," save "empty first launch," and switch between them in seconds.
 
-## How It Works
+## How to Use It
 
-An iOS app's persistent state lives in its data container — a directory the OS assigns that holds `Documents/`, `Library/`, `tmp/`, and anything else the app writes to disk. Some apps also use app group containers for sharing data with extensions.
+Save a checkpoint:
 
-Quern copies these containers to a labeled checkpoint, and can restore them later by copying back.
+> "Save the current state of my app as 'logged-in-with-data'"
 
-### Save
+Restore later:
 
-```
-save_app_state(
-    udid="...",
-    bundle_id="com.example.myapp",
-    label="logged-in-with-data",
-    description="User logged in, 3 items in cart, notifications enabled"
-)
-```
+> "Restore my app to the 'logged-in-with-data' state"
 
-This:
-1. Terminates the app (can't snapshot while it's writing)
-2. Finds the data container via `simctl get_app_container`
-3. Discovers app group containers by scanning the shared container directory
-4. Copies everything to `~/.quern/app-states/com.example.myapp/logged-in-with-data/`
-5. Writes metadata (timestamp, paths, description)
+List saved checkpoints:
 
-### Restore
+> "What app states do I have saved?"
 
-```
-restore_app_state(
-    udid="...",
-    bundle_id="com.example.myapp",
-    label="logged-in-with-data"
-)
-```
+Your agent terminates the app before save/restore (to avoid corrupted state), then copies or restores the entire data container.
 
-This:
-1. Terminates the app
-2. Re-resolves live container paths (they may change after reinstall)
-3. Wipes the current containers
-4. Copies the checkpoint back
+## What Gets Saved
 
-Launch the app and it's in exactly the state it was when you saved.
+**Everything the app writes to disk:**
+- Documents, Library, tmp directories
+- UserDefaults (just a plist in the container)
+- Core Data stores (SQLite files)
+- Downloaded files, caches
+- App group containers (shared data with extensions/widgets)
 
-### List
-
-```
-list_app_states(bundle_id="com.example.myapp")
-```
-
-Returns all saved checkpoints with labels, descriptions, and timestamps.
-
-### Delete
-
-```
-delete_app_state(bundle_id="com.example.myapp", label="logged-in-with-data")
-```
+**What's NOT included:**
+- **Keychain items** — iOS Keychain is a system service, not part of the app container. Saved credentials, tokens stored in Keychain won't be captured.
+- **Push notification registration** — Server-side (APNs).
+- **System permissions** — Camera, location, etc. are managed by iOS, not the app. Use your agent to grant these separately.
 
 ## Plist Operations
 
-Many iOS apps store settings and feature flags in plist files inside their data container. Quern can read and modify these without launching the app.
+Many apps store settings and feature flags in plist files. Your agent can read and modify these without launching the app:
 
-### Reading
+> "Show me the app's preferences plist"
+> "Set the feature_flags.dark_mode key to true"
+> "Delete the cached_token key"
 
-```
-read_app_plist(
-    udid="...",
-    bundle_id="com.example.myapp",
-    path="Library/Preferences/com.example.myapp.plist"
-)
-```
+This is incredibly useful for:
+- **Toggling feature flags** without rebuilding
+- **Inspecting cached data** to understand app state
+- **Clearing specific values** without wiping everything
 
-Returns the plist contents as JSON. Handles both binary and XML plists transparently.
+If a plist is in an app group container (shared with an extension), tell your agent which group to target.
 
-### Writing
-
-```
-set_app_plist_value(
-    udid="...",
-    bundle_id="com.example.myapp",
-    path="Library/Preferences/com.example.myapp.plist",
-    key="feature_flags.new_onboarding",
-    value=true
-)
-```
-
-Type is inferred from the value: booleans, integers, floats, and strings are supported.
-
-### Deleting Keys
-
-```
-delete_app_plist_key(
-    udid="...",
-    bundle_id="com.example.myapp",
-    path="Library/Preferences/com.example.myapp.plist",
-    key="cached_token"
-)
-```
-
-### App Group Containers
-
-If the plist is in an app group container instead of the main data container, specify the group:
-
-```
-read_app_plist(
-    udid="...",
-    bundle_id="com.example.myapp",
-    container="group.com.example.shared",
-    path="Library/Preferences/group.com.example.shared.plist"
-)
-```
-
-## Use Cases
+## Useful Patterns
 
 ### Reproducible Bug Testing
 
-```
-# Save a known state that triggers the bug
-save_app_state(udid, bundle_id, label="bug-repro-state")
-
-# Test the fix
-# ... make code changes, rebuild, install ...
-
-# Restore and verify
-restore_app_state(udid, bundle_id, label="bug-repro-state")
-launch_app(udid, bundle_id)
-# Bug should be fixed now
-```
-
-### Testing State Transitions
-
-```
-# Save "before" state
-save_app_state(udid, bundle_id, label="before-migration")
-
-# Run the migration
-launch_app(udid, bundle_id)
-# ... app migrates data ...
-
-# Compare: restore and re-run
-restore_app_state(udid, bundle_id, label="before-migration")
-launch_app(udid, bundle_id)
-```
-
-### Feature Flag Testing
-
-```
-# Toggle a feature flag without rebuilding
-set_app_plist_value(udid, bundle_id,
-    path="Library/Preferences/com.example.myapp.plist",
-    key="feature_flags.dark_mode",
-    value=true
-)
-launch_app(udid, bundle_id)
-```
+1. Get the app into the state that triggers the bug
+2. **"Save this state as 'bug-repro'"**
+3. Make your fix, rebuild, install
+4. **"Restore to 'bug-repro'"** and verify the fix
+5. Repeat as needed — instant reproduction every time
 
 ### Clean Slate Testing
 
-```
-# Save the fresh state right after install
-install_app(udid, path="/path/to/MyApp.app")
-save_app_state(udid, bundle_id, label="fresh-install")
+1. Install the app fresh
+2. **"Save this state as 'fresh-install'"**
+3. Test various flows, accumulate state
+4. **"Restore to 'fresh-install'"** — back to zero instantly
 
-# ... test things, app accumulates state ...
+### Testing State Transitions
 
-# Reset to fresh
-restore_app_state(udid, bundle_id, label="fresh-install")
-```
+1. **"Save as 'before-migration'"**
+2. Update to the new version, launch (migration runs)
+3. Check results
+4. **"Restore to 'before-migration'"** — rerun the migration with different data
 
-## What's Included (and What's Not)
+### Feature Flag Testing
 
-**Included:**
-- Data container: `Documents/`, `Library/`, `tmp/`, everything the app writes
-- App group containers: Shared data with extensions and widgets
-- UserDefaults (they're just a plist in `Library/Preferences/`)
-- Core Data stores (SQLite files in the data container)
-- Downloaded files, caches, anything in the filesystem
+> "Set feature_flags.new_onboarding to true in the app's preferences, then launch the app"
 
-**Not included:**
-- **Keychain items**: The iOS Keychain is a system-level service, not a file in the app container. Quern can't snapshot or restore keychain entries.
-- **Push notification registration**: Stored server-side by APNs.
-- **System permissions**: Camera, location, etc. are managed by the OS and not part of the app container. Use `grant_permission` to set these separately.
+No rebuild needed. Flip flags, restart, see the difference.
 
 ## Limitations
 
 - **Simulator only.** Physical device app containers aren't accessible from the Mac.
-- **Container UUID rotation.** If you uninstall and reinstall the app, the container UUID changes. Restore handles this by re-resolving paths, but if the app stores absolute paths internally, they may break.
-- **Large containers.** Apps with large caches or downloaded content will produce large checkpoints. There's no selective backup — it's all or nothing.
-- **Running app conflict.** Always terminate the app before save/restore. Quern does this automatically, but if the app has background processes or extensions, they may write during the copy.
+- **Keychain not included.** If your app stores auth tokens in Keychain (which it should), they won't be part of the checkpoint. You may need to re-authenticate after restoring.
+- **Large containers = large checkpoints.** Apps with big caches or downloaded content produce big snapshots. There's no selective backup.
+- **Container UUID rotation.** If you uninstall and reinstall the app, the container gets a new UUID. Restore handles this by re-resolving paths, but if your app stores absolute paths internally, they may break.
