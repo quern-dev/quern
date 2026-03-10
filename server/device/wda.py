@@ -95,6 +95,18 @@ def save_wda_state(state: dict[str, Any]) -> None:
 # Signing identity discovery
 # ---------------------------------------------------------------------------
 
+# Xcode teamType values:
+#   "Individual" — paid Apple Developer Program (personal)
+#   "Organization" — paid Apple Developer Program (company/org)
+#   "InHouse" — Apple Developer Enterprise Program
+#   "Free" — free Apple ID (no paid enrollment)
+_FREE_TEAM_TYPES = {"Free"}
+
+
+def _is_free_account(team_type: str) -> bool:
+    """Check if a team type indicates a free (unpaid) Apple developer account."""
+    return team_type in _FREE_TEAM_TYPES
+
 
 def discover_signing_identities() -> list[dict[str, str]]:
     """Read provisioning teams from Xcode's account preferences.
@@ -518,6 +530,74 @@ def _find_xctestrun() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Runner log diagnostics
+# ---------------------------------------------------------------------------
+
+# Known failure patterns in xcodebuild test-without-building output.
+# Each tuple: (substring to match, user-facing diagnosis)
+_RUNNER_FAILURE_PATTERNS = [
+    (
+        "Supported platforms for the buildables in the current scheme is empty",
+        "The xctestrun file is invalid for this device. This usually means:\n"
+        "- The provisioning profile expired (free accounts = 7 days). Fix: re-run setup_wda with force:true.\n"
+        "- The device hasn't trusted the developer profile. Fix: Settings > General > VPN & Device Management.\n"
+        "- Xcode signing changed since the build. Fix: re-run setup_wda with force:true.",
+    ),
+    (
+        "The device is locked",
+        "The device screen is locked. Unlock the device and try again.",
+    ),
+    (
+        "Unable to launch",
+        "WDA failed to launch on the device. The app may need to be trusted:\n"
+        "Settings > General > VPN & Device Management > tap the developer profile > Trust.",
+    ),
+    (
+        "This application's application-identifier entitlement does not match",
+        "The provisioning profile doesn't match the installed WDA. Fix: re-run setup_wda with force:true.",
+    ),
+    (
+        "No signing certificate",
+        "No signing certificate found. Open Xcode > Settings > Accounts and ensure "
+        "a valid Apple Development certificate exists for this team.",
+    ),
+    (
+        "The maximum number of apps for free development profiles has been reached",
+        "Free Apple developer account limit reached (max 3 app IDs per 7 days). "
+        "Wait for old app IDs to expire, or use a paid developer account.",
+    ),
+    (
+        "Device is not available",
+        "The device disconnected or is not available. Reconnect the USB cable and try again.",
+    ),
+]
+
+
+def _diagnose_runner_failure(log_path: Path) -> str | None:
+    """Read the runner log and return a user-friendly diagnosis, or None."""
+    if not log_path.exists():
+        return "Runner log not found — xcodebuild may not have started."
+
+    try:
+        log_text = log_path.read_text(errors="replace")
+    except Exception:
+        return None
+
+    for pattern, diagnosis in _RUNNER_FAILURE_PATTERNS:
+        if pattern in log_text:
+            return diagnosis
+
+    # If the log is very short and empty-ish, xcodebuild crashed early
+    if len(log_text.strip()) < 50:
+        return (
+            "xcodebuild produced almost no output — it may have crashed on startup. "
+            f"Check the full log: {log_path}"
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Driver lifecycle (start / stop xcodebuild test-without-building)
 # ---------------------------------------------------------------------------
 
@@ -629,12 +709,21 @@ async def start_driver(udid: str, os_version: str) -> dict:
     if not ready:
         logger.warning("WDA did not become responsive within %ds for %s", DRIVER_START_TIMEOUT, udid[:8])
 
-    return {
+    result: dict[str, Any] = {
         "status": "started",
         "udid": udid,
         "pid": proc.pid,
         "ready": ready,
     }
+
+    # If WDA failed to become ready, diagnose from the runner log
+    if not ready:
+        diagnosis = _diagnose_runner_failure(log_path)
+        if diagnosis:
+            result["error"] = diagnosis
+        result["log_path"] = str(log_path)
+
+    return result
 
 
 async def stop_driver(udid: str) -> dict:
@@ -841,11 +930,29 @@ async def setup_wda(
     # Step 6: Install
     await install_wda(udid, os_version)
 
-    return {
+    # Look up team details for the response
+    team_info = next((i for i in identities if i["team_id"] == team_id), {})
+    team_type = team_info.get("team_type", "")
+
+    result: dict[str, Any] = {
         "status": "ok",
         "udid": udid,
         "team_id": team_id,
+        "team_type": team_type,
         "cloned": cloned,
         "built": built,
         "installed": True,
     }
+
+    # Surface warnings for free/personal developer accounts
+    if _is_free_account(team_type):
+        result["warnings"] = [
+            "Free Apple developer account detected. Limitations:",
+            "- Provisioning profiles expire after 7 days — re-run setup_wda with force:true weekly.",
+            "- WDA uses 2 of your ~3 App ID slots (driver + xctrunner), leaving only ~1 for your own app. "
+            "If you hit 'maximum number of apps for free development profiles', wait for old IDs to expire or use a paid account ($99/yr).",
+            "- The device must trust the developer profile: Settings > General > VPN & Device Management > tap your profile > Trust.",
+            "- If WDA fails to launch, check the runner log at ~/.quern/wda/runner-<udid>.log.",
+        ]
+
+    return result
