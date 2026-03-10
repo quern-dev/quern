@@ -199,6 +199,76 @@ For the best of both worlds:
 
 Your agent kicks off the test script, watches the output, and when a test fails, it digs in using Quern's tools to diagnose the issue. You get automated testing with intelligent failure analysis.
 
+## Advanced: Remote Test Farm
+
+Your test scripts talk to Quern over HTTP. That HTTP server doesn't have to be on your laptop.
+
+### The Setup
+
+Get a **Mac Mini M4 Pro** (or any Mac you can dedicate to this). The more RAM, the better — 32GB runs 6-8 simulators comfortably, 64GB can handle more. Install Quern on it, start the server, and you have a dedicated test machine.
+
+Your test scripts just need one change:
+
+```python
+# Instead of localhost...
+BASE = "http://mac-mini.local:9100/api/v1"
+```
+
+That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the Mac Mini. Your laptop stays free for development.
+
+### Parallel Test Execution
+
+This is where it gets exciting. A typical UI automation test suite that takes 2 hours running serially can finish in **20 minutes** spread across 6 simulators running in parallel.
+
+Your test script boots multiple simulators, partitions the test cases across them, and runs them concurrently:
+
+```python
+import concurrent.futures
+
+devices = ensure_devices(count=6, type="simulator")
+
+# Partition tests across devices
+test_groups = distribute_tests(all_tests, devices)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+    futures = {
+        pool.submit(run_test_group, device, tests): device
+        for device, tests in test_groups.items()
+    }
+    results = {device: f.result() for f, device in futures.items()}
+
+generate_report(results)
+```
+
+Each simulator gets its own slice of tests, its own proxy traffic (automatically tagged by simulator UDID), its own app state. No interference, no flaky shared state, no "works on device 3 but fails on device 5."
+
+### Why Not a Cloud CI Provider?
+
+Cloud-based iOS CI (Bitrise, CircleCI, Xcode Cloud, etc.) is great for builds. But for UI automation at scale:
+
+- **Parallelism is expensive.** Most providers charge per concurrent machine. Running 6 simulators in parallel means paying for 6 machines. On your own Mac Mini, it's free after the hardware cost.
+- **Test sharding is hard or impossible.** Most CI providers run your test suite serially on a single simulator. Some support Xcode's native test parallelism, but that's limited to XCTest and doesn't give you network mocking, state management, or custom UI flows.
+- **Network mocking isn't available.** Good luck setting up mitmproxy in a cloud CI environment. With Quern on your own hardware, proxy capture, mocking, and interception work out of the box.
+- **You own the environment.** No waiting for provider capacity. No mystery failures from a shared VM image. No "works on my machine but fails in CI." Your Mac Mini is your machine — you control the OS version, Xcode version, simulator runtimes, everything.
+
+### The Math
+
+A Mac Mini M4 Pro with 32GB RAM costs around $1,600 one-time. A cloud CI provider running 6 parallel macOS machines costs $300-600/month. The Mac Mini pays for itself in 3-5 months — and then it's free forever.
+
+And you get something no cloud provider offers: full network interception with mocking on every test run, app state checkpoints for instant test setup, and your AI agent on standby to investigate any failure.
+
+### Build It, Own It
+
+The complete pipeline:
+
+1. **Your agent** writes the test scripts (interactive → script generation)
+2. **Your Mac Mini** runs them in parallel across 6+ simulators
+3. **Quern** handles device management, proxy, mocking, state, and screenshots
+4. **Your CI system** (GitHub Actions, Jenkins, whatever) triggers the run and collects the report
+5. **Your agent** investigates failures on demand
+
+No vendor lock-in. No per-minute billing. No test sharding limitations. A dedicated test farm that you own, running scripts that your AI agent wrote, against infrastructure you control.
+
 ## Tips
 
 - **Start with the happy path.** Get one solid test working before adding error cases.
