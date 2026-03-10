@@ -43,3 +43,16 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 ## Cross-Platform
 
 - [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, and replaying network traffic
+
+---
+
+## Workflow Guides
+
+Real-world scenarios showing how the pieces fit together.
+
+- [Testing a New API Integration](workflow-api-testing.md) — Verify requests, mock error responses, sweep status codes
+- [Investigating a Crash](workflow-crash-investigation.md) — From crash report to root cause using logs, network, and reproduction
+- [Multi-Device Testing](workflow-multi-device.md) — Boot a fleet, build once, test across screen sizes and OS versions
+- [Physical Device Setup from Zero](workflow-physical-device-setup.md) — The complete first-time flow: trust, WDA, proxy, preview
+- [Onboarding onto a Project](workflow-onboarding.md) — From git clone to productive in an hour
+- [Agent-Generated Test Scripts](workflow-test-scripts.md) — Write once, run forever, bring the agent back only when things break
