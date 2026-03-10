@@ -98,20 +98,48 @@ This is dramatically more efficient than capturing everything and filtering afte
 
 ### Presets
 
-The `device-quiet` preset drops common system daemons that spam logs (locationd, symptomsd, etc.). Combine with process filtering for minimal noise:
+Presets bundle common exclusion rules so you don't have to build them from scratch.
+
+**`device-quiet`** — for physical devices. Drops noisy system daemons and frameworks:
+- Processes: `remotepairingdeviced`, `symptomsd`, `SymptomEvaluator`, `bluetoothd`, `wifid`, `signpost_reporter`, `kernel`
+- Subsystems: `CoreBrightness`, `ColourSensorFilterPlugin`, `com.apple.CFNetwork`, `com.apple.network`
+
+**`simulator-quiet`** — for simulators. Drops simulator-specific noise:
+- Messages containing: `HangTracer`
+- Subsystems: `com.apple.CoreFoundation`
+
+Combine with process filtering for minimal noise:
 
 ```
 start_device_logging(udid="...", process="MyApp", preset="device-quiet")
 ```
 
+### Ingestion vs Query-Time Filtering
+
+Quern filters at two levels, and the distinction matters for performance:
+
+**Ingestion filtering** (subprocess-level): When you set a `process` filter, Quern restarts the log subprocess with the filter baked into the command line. On simulators, this becomes `log stream --predicate 'process == "MyApp"'`. On physical devices, it becomes `pymobiledevice3 syslog live -pn MyApp`. The OS does the filtering — entries that don't match never enter Quern's pipeline. This is dramatically cheaper.
+
+**Query-time filtering**: Everything else (level, subsystem, exclude rules) is applied as entries flow through the ring buffer. Still fast, but the entries have already been parsed and stored.
+
+**Rule of thumb:** Always set a process filter if you know which app you're debugging. Everything else is a bonus.
+
 ### Runtime Filtering
 
-Use `set_log_filter` to change what's captured without restarting the log adapter:
+Use `set_log_filter` to change what's captured without manually restarting the log adapter:
 
 ```
 set_log_filter(process="MyApp", level="warning")  # Only warnings and above
 set_log_filter(process="MyApp", subsystems=["com.example.myapp.networking"])
 ```
+
+When you set a `process` filter, Quern automatically restarts running adapters with subprocess-level filtering. The response includes `adapter_restarted: true` to confirm.
+
+### Filter Scopes
+
+Filters operate at three scopes with clear precedence: **device > source > global**.
+
+A device-specific filter (tied to a UDID) overrides a source-level filter (tied to "simulator" or "device"), which overrides the global default. This lets you monitor one device at `error` level while watching another at `debug`.
 
 ### Summary-First Approach
 
@@ -132,9 +160,40 @@ query_logs(search="timeout", limit=20)  # Specific issue
 
 ### Automatic Discovery
 
-Quern watches `~/Library/Logs/DiagnosticReports/` for new crash reports. When your app crashes on a simulator, the report appears within seconds. No configuration needed.
+Quern watches `~/Library/Logs/DiagnosticReports/` for new crash reports (polling every 10 seconds). When your app crashes on a simulator, the report appears within seconds. No configuration needed.
 
-For physical devices, crash reports are pulled via devicectl when you call `get_latest_crash(udid="...")`.
+For physical devices, crash reports are pulled via `idevicecrashreport` when you call `get_latest_crash(udid="...")`. This uses the libimobiledevice UDID — Quern handles the translation from CoreDevice UUIDs automatically for iOS 17+ devices.
+
+### What You Get
+
+Each crash report is parsed into structured data:
+
+```json
+{
+  "process": "MyApp",
+  "exception_type": "EXC_BAD_ACCESS",
+  "exception_codes": "KERN_INVALID_ADDRESS at 0x0000000000000000",
+  "signal": "SIGSEGV",
+  "timestamp": "2026-03-09T14:30:45Z",
+  "top_frames": [
+    "MyApp  0x1045a8f3c  -[UserManager loadProfile] + 124",
+    "MyApp  0x1045a8e10  -[HomeViewController viewDidLoad] + 88",
+    "UIKit  0x1a2b3c4d5  -[UIViewController _sendViewDidLoadWithAppearanceProxyObjectTaggingEnabled] + 100"
+  ]
+}
+```
+
+Quern handles both `.ips` (iOS 15+ JSON format) and `.crash` (older plaintext) files. For `.ips` files, it filters to `bug_type == "309"` (actual crashes) and ignores Jetsam terminations, background task kills, and analytics payloads.
+
+### Reading Crash Reports
+
+The key fields:
+
+| Field | What to look at |
+|---|---|
+| `exception_type` | **EXC_BAD_ACCESS** = memory issue (null pointer, dangling reference). **EXC_CRASH (SIGABRT)** = deliberate abort (assertion failure, uncaught exception). **EXC_BREAKPOINT (SIGTRAP)** = Swift runtime trap (force-unwrap nil, array bounds). |
+| `signal` | SIGSEGV = segfault. SIGABRT = abort. SIGTRAP = trap instruction. |
+| `top_frames` | The stack trace of the crashing thread. Your code is the frames with your app's name. Framework frames give context. |
 
 ### Crash Hooks
 
@@ -144,7 +203,17 @@ Run a command whenever a crash is detected:
 ./quern start --on-crash 'cat > /tmp/last_crash.json'
 ```
 
-The full crash report (as JSON) is piped to stdin. The hook runs in the background with a 60-second timeout.
+The full crash report (as JSON) is piped to stdin. The hook runs in the background with a 60-second timeout. Use this to pipe crashes to Slack, a webhook, or a file for later analysis.
+
+### Suppressing the macOS Crash Dialog
+
+By default, macOS shows a crash dialog that blocks the simulator. Suppress it:
+
+```bash
+defaults write com.apple.CrashReporter DialogType none
+```
+
+Quern's `setup` command offers to do this for you.
 
 ### Cross-Referencing
 
@@ -154,6 +223,8 @@ A crash report tells you *what* happened. Logs tell you *why*. Network flows tel
 2. Note the crash timestamp
 3. `query_logs(after=<timestamp - 10s>, before=<timestamp>)` — what was the app doing?
 4. `query_flows(after=<timestamp - 10s>, before=<timestamp>)` — any failed network requests?
+
+Crash entries also appear in the ring buffer as `FAULT`-level log entries, so `get_log_summary` and `get_errors` will surface them alongside your app's logs.
 
 ## Build Output
 

@@ -132,6 +132,108 @@ When WDA fails to start, Quern parses the runner log and returns a diagnosis. He
 
 Runner logs are at `~/.quern/wda/runner-<udid-prefix>.log`.
 
+## Finding Elements
+
+WDA supports several strategies for locating UI elements. Understanding which to use makes automation faster and more reliable.
+
+### By Accessibility Identifier (Fastest)
+
+```
+tap_element(identifier="login-submit-button")
+get_element_state(identifier="email-field")
+```
+
+Direct lookup — no tree traversal needed. This is why setting `accessibilityIdentifier` in your code matters so much.
+
+### By Label (Most Common)
+
+```
+tap_element(label="Sign In")
+tap_element(label="Settings", element_type="Button")
+```
+
+Searches by the element's display text. Case-insensitive. If multiple elements share a label, add `element_type` to narrow it down.
+
+### By Element Type
+
+Common types you'll encounter:
+
+| Type | What |
+|---|---|
+| `Button` | UIButton, SwiftUI Button |
+| `TextField` | UITextField, SwiftUI TextField |
+| `SecureTextField` | Password fields |
+| `StaticText` | UILabel, SwiftUI Text |
+| `Switch` | UISwitch, SwiftUI Toggle |
+| `Cell` | UITableViewCell, list rows |
+| `NavigationBar` | Navigation bar container |
+| `TabBar` | Tab bar container |
+| `Alert` | System and custom alerts |
+| `ScrollView` | Scroll containers |
+| `Image` | UIImageView, SwiftUI Image |
+| `SearchField` | Search bars |
+
+### Predicate Strings (Advanced)
+
+For complex queries, use NSPredicate syntax:
+
+```
+# Find by partial label match
+tap_element(predicate="label CONTAINS 'Next'")
+
+# Combine conditions
+tap_element(predicate="name == 'btn' AND label ==[c] 'Submit' AND type == 'XCUIElementTypeButton'")
+```
+
+### Class Chain (Expert)
+
+XCTest class chain syntax for structural queries:
+
+```
+# Find the second button in a navigation bar
+tap_element(class_chain="**/XCUIElementTypeNavigationBar/XCUIElementTypeButton[2]")
+```
+
+### Strategy Priority
+
+When you provide multiple criteria, Quern builds the most efficient query:
+
+1. **Identifier only** → accessibility ID lookup (fastest)
+2. **Multiple criteria** (name + label + type) → NSPredicate string
+3. **Explicit predicate/class_chain** → passed through directly
+
+### Waiting for Elements
+
+Don't tap immediately after a navigation — wait for the target element to appear:
+
+```
+wait_for_element(label="Welcome", timeout=10)
+```
+
+This polls server-side (not client-side) with a configurable interval, so it's efficient and doesn't waste API calls.
+
+### Scoped Queries
+
+The ElementSelector DSL supports scoped child queries — find an element within a specific parent:
+
+```python
+# Python SDK example (not MCP — this is for custom integrations)
+selector = ElementSelector(backend, udid, type="Cell", label="John")
+child = selector.child(type="Button", label="Edit")
+await child.tap()
+```
+
+This first finds the "John" cell, then searches within it for the "Edit" button. Useful when multiple cells have identically-labeled sub-elements.
+
+### Skeleton Fallback
+
+On complex screens (MapKit, large collection views), the full accessibility tree query can time out. Quern falls back to a "skeleton" strategy:
+1. Query just the top-level containers (TabBar, NavigationBar, Toolbar, Alert, Sheet)
+2. Then query children of each container separately
+3. Assemble a partial tree that covers the interactive elements
+
+This is automatic — you'll get results even when the full tree is too slow.
+
 ## Known Limitations
 
 - **No side/power button.** Pressing the side button would kill the WDA process (it puts the app in background). WDA can't simulate it.
