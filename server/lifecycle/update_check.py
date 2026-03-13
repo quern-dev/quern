@@ -2,13 +2,15 @@
 
 On daemon start, hits https://quern.dev/api/check-update with the local HEAD SHA.
 Cloudflare analytics count the requests — no data is stored or logged server-side.
-Rate-limited to once per 24 hours. Never blocks or crashes the server.
+Rate-limited to once per 24 hours. Repeats periodically while the server is running
+so long-lived servers still check in. Never blocks or crashes the server.
 
 Opt out by setting "update_check": false in ~/.quern/config.json.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -99,3 +101,20 @@ def check_for_updates() -> str | None:
 
     except Exception:
         return None
+
+
+async def periodic_update_check() -> None:
+    """Run check_for_updates() every CHECK_INTERVAL seconds.
+
+    Designed to be launched as an asyncio task in the server lifespan.
+    The file-based rate limit in check_for_updates() is the real gate —
+    this loop just ensures it gets called regularly for long-lived servers.
+    """
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+        try:
+            msg = await asyncio.to_thread(check_for_updates)
+            if msg:
+                logger.info(msg)
+        except Exception:
+            pass

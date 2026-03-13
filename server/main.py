@@ -262,6 +262,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             proxy_watchdog(lambda: app.state.proxy_adapter)
         )
 
+    # Periodic update check (repeats every 24h for long-lived servers)
+    update_check_task = None
+    try:
+        from server.lifecycle.update_check import periodic_update_check
+        update_check_task = asyncio.create_task(periodic_update_check())
+    except Exception:
+        pass
+
     logger.info(
         "Server started on http://%s:%d — API key: %s...%s",
         config.host,
@@ -272,13 +280,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
-    # Shutdown: cancel watchdog, stop adapters, flush deduplicator
-    if watchdog_task and not watchdog_task.done():
-        watchdog_task.cancel()
-        try:
-            await watchdog_task
-        except asyncio.CancelledError:
-            pass
+    # Shutdown: cancel background tasks, stop adapters, flush deduplicator
+    for task in (watchdog_task, update_check_task):
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # Stop live preview if running
     if preview_manager:
