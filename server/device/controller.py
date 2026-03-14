@@ -427,6 +427,36 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.grant_permission(resolved, bundle_id, permission)
         return resolved
 
+    async def set_locale(
+        self, lang: str, country: str = "", udid: str | None = None,
+    ) -> str:
+        """Set the system locale. Android only. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        if not self._is_android(resolved):
+            raise DeviceError("set_locale is currently Android-only", tool="simctl")
+        await self.adb.set_locale(resolved, lang, country)
+        return resolved
+
+    async def set_font_scale(
+        self, scale: float, udid: str | None = None,
+    ) -> str:
+        """Set the font scale. Android only. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        if not self._is_android(resolved):
+            raise DeviceError("set_font_scale is currently Android-only", tool="simctl")
+        await self.adb.set_font_scale(resolved, scale)
+        return resolved
+
+    async def set_display_density(
+        self, dpi: int | None = None, udid: str | None = None,
+    ) -> str:
+        """Set display density override (or reset). Android only. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        if not self._is_android(resolved):
+            raise DeviceError("set_display_density is currently Android-only", tool="simctl")
+        await self.adb.set_display_density(resolved, dpi)
+        return resolved
+
     async def clear_app_data(self, bundle_id: str, udid: str | None = None) -> str:
         """Clear all app data for a simulator app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)

@@ -490,6 +490,96 @@ rm -rf /data/local/tmp/tmp-ca-copy
             serial, "shell", "pm", "grant", package, full_permission,
         )
 
+    async def set_locale(self, serial: str, lang: str, country: str = "") -> None:
+        """Set the system locale via the Quern Driver broadcast receiver.
+
+        On API ≤ 32 this works with just CHANGE_CONFIGURATION permission.
+        On API 33+ rootable emulators, falls back to setprop + restart.
+        On API 33+ non-rootable devices, may fail (WRITE_SETTINGS required).
+        """
+        # Ensure Quern Driver is installed and has permission
+        await self._ensure_quern_driver_permission(serial, "android.permission.CHANGE_CONFIGURATION")
+
+        # Try broadcast receiver first
+        args = ["--es", "lang", lang]
+        if country:
+            args.extend(["--es", "country", country])
+
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "am", "broadcast",
+            "-a", "com.github.uiautomator.SET_LOCALE",
+            "-n", "com.github.uiautomator/.LocaleReceiver",
+            *args,
+        )
+
+        # Check if broadcast succeeded by reading logcat
+        api_level = await self.get_api_level(serial)
+        if api_level >= 33:
+            # On API 33+, the broadcast may fail silently. Check logcat.
+            log_out, _ = await self._run_adb_for_device(
+                serial, "logcat", "-d", "-s", "QuernLocale", "-t", "5",
+            )
+            if "Locale changed successfully" in log_out:
+                return
+            if "Failed to set locale" in log_out:
+                # Try setprop fallback for rootable emulators
+                if await self.is_rootable(serial):
+                    locale_tag = f"{lang}-{country}" if country else lang
+                    await self._enable_root(serial)
+                    await self._run_adb_for_device(
+                        serial, "shell",
+                        f"setprop persist.sys.locale {locale_tag}; stop; sleep 3; start",
+                    )
+                    return
+                raise DeviceError(
+                    "Locale change failed on API 33+ non-rootable device. "
+                    "Use a Google APIs (dev-keys) emulator image instead.",
+                    tool="adb",
+                )
+
+    async def _ensure_quern_driver_permission(self, serial: str, permission: str) -> None:
+        """Grant a permission to the Quern Driver APK if installed."""
+        try:
+            await self._run_adb_for_device(
+                serial, "shell", "pm", "grant", "com.github.uiautomator", permission,
+            )
+        except DeviceError:
+            pass  # May already be granted or app not installed
+
+    async def set_font_scale(self, serial: str, scale: float) -> None:
+        """Set the font scale. 1.0 = default, 0.85 = small, 1.15 = large, 1.30 = largest."""
+        await self._run_adb_for_device(
+            serial, "shell", "settings", "put", "system", "font_scale", str(scale),
+        )
+
+    async def get_font_scale(self, serial: str) -> float:
+        """Get the current font scale."""
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "settings", "get", "system", "font_scale",
+        )
+        try:
+            return float(stdout.strip())
+        except (ValueError, TypeError):
+            return 1.0
+
+    async def set_display_density(self, serial: str, dpi: int | None = None) -> None:
+        """Set display density override, or reset to default if dpi is None."""
+        if dpi is None:
+            await self._run_adb_for_device(serial, "shell", "wm", "density", "reset")
+        else:
+            await self._run_adb_for_device(serial, "shell", "wm", "density", str(dpi))
+
+    async def get_display_density(self, serial: str) -> dict:
+        """Get current display density (physical and override)."""
+        stdout, _ = await self._run_adb_for_device(serial, "shell", "wm", "density")
+        result: dict = {}
+        for line in stdout.strip().splitlines():
+            if "Physical" in line:
+                result["physical"] = int(line.split(":")[-1].strip())
+            elif "Override" in line:
+                result["override"] = int(line.split(":")[-1].strip())
+        return result
+
     async def screenshot(self, serial: str) -> bytes:
         """Capture a screenshot as PNG bytes."""
         if not self._adb_path:

@@ -17,6 +17,9 @@ from server.models import (
     WdaKeyboardNotPresentError,
     GrantPermissionRequest,
     InstallAppRequest,
+    SetLocaleRequest,
+    SetFontScaleRequest,
+    SetDisplayDensityRequest,
     LaunchAppRequest,
     PreviewStartRequest,
     PreviewStopRequest,
@@ -318,6 +321,47 @@ async def grant_permission(request: Request, body: GrantPermissionRequest):
             "udid": udid,
             "bundle_id": body.bundle_id,
             "permission": body.permission,
+        }
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/locale")
+async def set_locale(request: Request, body: SetLocaleRequest):
+    """Set the system locale (Android only)."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.set_locale(
+            lang=body.lang, country=body.country, udid=body.udid,
+        )
+        locale_tag = f"{body.lang}-{body.country}" if body.country else body.lang
+        return {"status": "ok", "udid": udid, "locale": locale_tag}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/font-scale")
+async def set_font_scale(request: Request, body: SetFontScaleRequest):
+    """Set the font scale (Android only). 1.0 = default."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.set_font_scale(scale=body.scale, udid=body.udid)
+        return {"status": "ok", "udid": udid, "scale": body.scale}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/display-density")
+async def set_display_density(request: Request, body: SetDisplayDensityRequest):
+    """Set display density override (Android only). Omit dpi to reset."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.set_display_density(dpi=body.dpi, udid=body.udid)
+        return {
+            "status": "ok",
+            "udid": udid,
+            "dpi": body.dpi,
+            "reset": body.dpi is None,
         }
     except DeviceError as e:
         raise _handle_device_error(e)

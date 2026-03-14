@@ -713,6 +713,28 @@ class GrantPermissionRequest(BaseModel):
     udid: str | None = None
 
 
+class SetLocaleRequest(BaseModel):
+    """Request body for POST /device/locale."""
+
+    lang: str
+    country: str = ""
+    udid: str | None = None
+
+
+class SetFontScaleRequest(BaseModel):
+    """Request body for POST /device/font-scale."""
+
+    scale: float
+    udid: str | None = None
+
+
+class SetDisplayDensityRequest(BaseModel):
+    """Request body for POST /device/display-density."""
+
+    dpi: int | None = None  # None = reset to default
+    udid: str | None = None
+
+
 class WaitCondition(str, enum.Enum):
     """Condition to wait for when polling an element."""
 

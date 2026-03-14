@@ -596,6 +596,72 @@ NOTE: If you want to capture network traffic from this app:
     }
   });
 
+  server.registerTool("set_locale", {
+    description: `Set the system locale/language on an Android device or emulator. Changes take effect immediately on API ≤ 32. On API 33+ rootable emulators, falls back to setprop. May not work on non-rootable API 33+ devices.`,
+    inputSchema: strictParams({
+      lang: z.string().describe("Language code (e.g. 'en', 'ja', 'fr', 'de')"),
+      country: z.string().optional().describe("Country code (e.g. 'US', 'JP', 'FR', 'DE')"),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ lang, country, udid }) => {
+    try {
+      const body: Record<string, unknown> = { lang };
+      if (country) body.country = country;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/locale", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("set_font_scale", {
+    description: `Set the font scale on an Android device or emulator. Takes effect immediately. Standard values: 0.85 (small), 1.0 (default), 1.15 (large), 1.30 (largest). Any float value is accepted.`,
+    inputSchema: strictParams({
+      scale: z.coerce.number().describe("Font scale factor (1.0 = default)"),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ scale, udid }) => {
+    try {
+      const body: Record<string, unknown> = { scale };
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/font-scale", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("set_display_density", {
+    description: `Set the display density (DPI) on an Android device or emulator. Takes effect immediately. Common values: 160 (mdpi), 240 (hdpi), 320 (xhdpi), 480 (xxhdpi). Omit dpi to reset to the device's physical default.`,
+    inputSchema: strictParams({
+      dpi: z.coerce.number().optional().describe("Display density in DPI. Omit to reset to default."),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ dpi, udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (dpi !== undefined) body.dpi = dpi;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/display-density", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("preview_device", {
     description: `Open a live macOS preview window showing a physical iOS device's screen in real time over USB. Uses CoreMediaIO screen capture — only works for physical devices connected via USB (not simulators). Compiles the preview binary on first use (~5s). Device discovery takes ~3s on first launch (cached thereafter). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB devices.`,
     inputSchema: strictParams({
