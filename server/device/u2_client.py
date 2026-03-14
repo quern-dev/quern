@@ -5,11 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.u2")
+
+# Path to our forked Quern Driver APK (AdbKeyboard IME only, no launcher icon)
+_QUERN_DRIVER_APK = Path.home() / ".quern" / "bin" / "quern-driver.apk"
 
 # Android class → iOS-style type mapping
 _CLASS_MAP: dict[str, str] = {
@@ -165,6 +170,30 @@ def _nested_tree(node: ET.Element) -> dict:
     return normalized
 
 
+def _patch_ime_setup(device, apk_path: Path) -> None:
+    """Replace the device's _setup_ime to install our Quern Driver APK.
+
+    The upstream uiautomator2 library bundles an APK with a Chinese UI and
+    a launcher icon. Our fork (quern-android-driver) is stripped to just the
+    AdbKeyboard IME with no launcher presence.
+    """
+    ime_id = "com.github.uiautomator/.AdbKeyboard"
+
+    def _quern_setup_ime(self_device=device):
+        logger.info("Installing Quern Driver APK from %s", apk_path)
+        self_device.adb_device.install(str(apk_path), nolaunch=True, uninstall=True)
+        # Wait for IME to be registered (use -a to include disabled IMEs)
+        for _ in range(10):
+            ime_list = self_device.shell(["ime", "list", "-s", "-a"]).output.strip()
+            if ime_id in ime_list:
+                return
+            time.sleep(0.3)
+        raise DeviceError("Failed to register Quern Keyboard IME", tool="u2")
+
+    device._setup_ime = _quern_setup_ime
+    logger.debug("Patched _setup_ime to use Quern Driver APK")
+
+
 class U2Backend:
     """Manages Android UI automation via uiautomator2.
 
@@ -176,7 +205,12 @@ class U2Backend:
         self._devices: dict[str, object] = {}  # serial → u2.Device
 
     def _connect(self, serial: str):
-        """Lazy, cached connection to a device."""
+        """Lazy, cached connection to a device.
+
+        Patches the device's _setup_ime to install our Quern Driver APK
+        instead of the bundled openatx one (which has a Chinese UI and
+        a visible launcher icon).
+        """
         if serial in self._devices:
             return self._devices[serial]
 
@@ -190,6 +224,11 @@ class U2Backend:
 
         logger.info("Connecting to Android device %s via uiautomator2", serial)
         device = u2.connect(serial)
+
+        # Patch IME setup to use our Quern Driver APK
+        if _QUERN_DRIVER_APK.exists():
+            _patch_ime_setup(device, _QUERN_DRIVER_APK)
+
         self._devices[serial] = device
         return device
 
