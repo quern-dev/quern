@@ -12,6 +12,26 @@ from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceT
 
 logger = logging.getLogger("quern-debug-server.adb")
 
+# Short permission name → full Android permission string.
+# Matches the names used by iOS simctl where possible.
+_PERMISSION_MAP: dict[str, str] = {
+    "camera": "android.permission.CAMERA",
+    "location": "android.permission.ACCESS_FINE_LOCATION",
+    "location-always": "android.permission.ACCESS_BACKGROUND_LOCATION",
+    "coarse-location": "android.permission.ACCESS_COARSE_LOCATION",
+    "microphone": "android.permission.RECORD_AUDIO",
+    "contacts": "android.permission.READ_CONTACTS",
+    "calendar": "android.permission.READ_CALENDAR",
+    "photos": "android.permission.READ_MEDIA_IMAGES",
+    "storage": "android.permission.READ_EXTERNAL_STORAGE",
+    "phone": "android.permission.READ_PHONE_STATE",
+    "sms": "android.permission.READ_SMS",
+    "call-log": "android.permission.READ_CALL_LOG",
+    "body-sensors": "android.permission.BODY_SENSORS",
+    "nearby-devices": "android.permission.BLUETOOTH_CONNECT",
+    "notifications": "android.permission.POST_NOTIFICATIONS",
+}
+
 # Well-known Android SDK locations (macOS / Linux)
 _SDK_SEARCH_PATHS = [
     Path.home() / "Library" / "Android" / "sdk",   # Android Studio default (macOS)
@@ -441,6 +461,34 @@ rm -rf /data/local/tmp/tmp-ca-copy
             "http_proxy", f"{host}:{port}",
         )
         logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
+
+    async def set_location(self, serial: str, latitude: float, longitude: float) -> None:
+        """Set simulated GPS location on an emulator.
+
+        Runs: adb -s <serial> emu geo fix <longitude> <latitude>
+        Note: the emulator console takes longitude first, then latitude.
+        """
+        if not serial.startswith("emulator-"):
+            raise DeviceError(
+                "Location simulation is only supported on Android emulators",
+                tool="adb",
+            )
+        await self._run_adb_for_device(
+            serial, "emu", "geo", "fix",
+            str(longitude), str(latitude),
+        )
+
+    async def grant_permission(self, serial: str, package: str, permission: str) -> None:
+        """Grant a runtime permission to an app.
+
+        Runs: adb -s <serial> shell pm grant <package> <permission>
+        The permission can be a short name (e.g. "camera") which is mapped
+        to the full Android permission string, or a full permission string.
+        """
+        full_permission = _PERMISSION_MAP.get(permission.lower(), permission)
+        await self._run_adb_for_device(
+            serial, "shell", "pm", "grant", package, full_permission,
+        )
 
     async def screenshot(self, serial: str) -> bytes:
         """Capture a screenshot as PNG bytes."""

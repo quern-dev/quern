@@ -408,8 +408,11 @@ class DeviceController(DeviceControllerUI):
     ) -> str:
         """Set simulated GPS location. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        self._require_simulator(resolved, "Set location")
-        await self.simctl.set_location(resolved, latitude, longitude)
+        if self._is_android(resolved):
+            await self.adb.set_location(resolved, latitude, longitude)
+        else:
+            self._require_simulator(resolved, "Set location")
+            await self.simctl.set_location(resolved, latitude, longitude)
         return resolved
 
     async def grant_permission(
@@ -417,8 +420,11 @@ class DeviceController(DeviceControllerUI):
     ) -> str:
         """Grant an app permission. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
-        self._require_simulator(resolved, "Grant permission")
-        await self.simctl.grant_permission(resolved, bundle_id, permission)
+        if self._is_android(resolved):
+            await self.adb.grant_permission(resolved, bundle_id, permission)
+        else:
+            self._require_simulator(resolved, "Grant permission")
+            await self.simctl.grant_permission(resolved, bundle_id, permission)
         return resolved
 
     async def clear_app_data(self, bundle_id: str, udid: str | None = None) -> str:

@@ -121,7 +121,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("shutdown_device", {
-    description: `Shutdown an iOS simulator. Simulator only — not supported for physical devices.`,
+    description: `Shutdown an iOS simulator or Android emulator. Not supported for physical devices.`,
     inputSchema: strictParams({
       udid: z.string().describe("Device UDID to shutdown"),
     }),
@@ -513,7 +513,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("set_location", {
-    description: `Set the simulated GPS location on a simulator.`,
+    description: `Set the simulated GPS location on an iOS simulator or Android emulator.`,
     inputSchema: strictParams({
       latitude: z.coerce.number().describe("GPS latitude"),
       longitude: z.coerce.number().describe("GPS longitude"),
@@ -553,7 +553,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("grant_permission", {
-    description: `Grant an app permission on a simulator (e.g. photos, camera, location, contacts, calendar, microphone, notifications).`,
+    description: `Grant an app permission on an iOS simulator or Android device (emulator or physical). iOS permissions: photos, camera, location, contacts, calendar, microphone, notifications. Android also supports: storage, phone, sms, call-log, body-sensors, nearby-devices, or any full android.permission.* string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       permission: z
