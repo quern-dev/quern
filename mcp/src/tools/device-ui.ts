@@ -492,12 +492,12 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
   });
 
   server.registerTool("press_button", {
-    description: `Press a hardware button on the simulator (e.g. HOME, LOCK, SIRI, APPLE_PAY). Requires idb.`,
+    description: `Press a hardware button on the device. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu.`,
     inputSchema: strictParams({
       button: z
         .string()
         .describe(
-          "Button name (HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY)"
+          "Button name. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu"
         ),
       udid: z
         .string()

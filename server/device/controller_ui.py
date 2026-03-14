@@ -70,14 +70,11 @@ class DeviceControllerUI:
     def _ui_backend(self, udid: str):
         """Return the appropriate UI automation backend for a device.
 
-        Physical devices use WdaBackend; simulators use IdbBackend.
-        Android devices are not yet supported.
+        Android devices use U2Backend; iOS physical devices use WdaBackend;
+        iOS simulators use IdbBackend.
         """
         if self._is_android(udid):
-            raise DeviceError(
-                "UI automation not yet supported for Android devices",
-                tool="adb",
-            )
+            return self.u2
         if self._is_physical(udid):
             return self.wda_client
         return self.idb
@@ -1020,11 +1017,8 @@ class DeviceControllerUI:
         """
         resolved = await self.resolve_udid(udid)
         if self._is_android(resolved):
-            raise DeviceError(
-                "Annotated screenshots not yet supported for Android devices",
-                tool="adb",
-            )
-        if self._is_physical(resolved):
+            raw_png = await self.adb.screenshot(resolved)
+        elif self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)
         else:
             raw_png = await self.simctl.screenshot(resolved)

@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.27",
     "Pillow>=10.0",
     "fb-idb>=1.1.0",
+    "uiautomator2>=3.2",
 ]
 
 [project.optional-dependencies]

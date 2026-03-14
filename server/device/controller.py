@@ -7,6 +7,7 @@ import time
 
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
+from server.device.u2_client import U2Backend
 from server.device.devicectl import DevicectlBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
@@ -30,6 +31,7 @@ class DeviceController(DeviceControllerUI):
         self.usbmux = UsbmuxBackend()
         self.wda_client = WdaBackend()
         self.adb = AdbBackend()
+        self.u2 = U2Backend()
         self._active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
         # UI tree cache: {udid: (elements, timestamp)}

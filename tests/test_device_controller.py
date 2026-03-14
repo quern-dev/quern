@@ -1039,19 +1039,15 @@ class TestAndroidCheckTools:
         assert tools["adb"] is False
 
 
-class TestAndroidUIGuard:
-    async def test_ui_automation_raises_for_android(self):
+class TestAndroidUIBackendSelection:
+    def test_android_emulator_uses_u2_backend(self):
         ctrl = DeviceController()
-        ctrl._active_udid = "emulator-5554"
         ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        from server.device.u2_client import U2Backend
+        assert isinstance(ctrl._ui_backend("emulator-5554"), U2Backend)
 
-        with pytest.raises(DeviceError, match="UI automation not yet supported for Android"):
-            await ctrl.get_ui_elements()
-
-    async def test_annotated_screenshot_raises_for_android(self):
+    def test_android_physical_uses_u2_backend(self):
         ctrl = DeviceController()
-        ctrl._active_udid = "emulator-5554"
-        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
-
-        with pytest.raises(DeviceError, match="Annotated screenshots not yet supported for Android"):
-            await ctrl.screenshot_annotated()
+        ctrl._device_type_cache["ZY224H6L"] = DeviceType.ANDROID_DEVICE
+        from server.device.u2_client import U2Backend
+        assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)
