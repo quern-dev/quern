@@ -219,8 +219,7 @@ export function registerLogTools(server: McpServer): void {
           tail: true,
         })) as { entries: unknown[] };
 
-        // Reverse to show most recent first
-        const entries = [...(data.entries || [])].reverse();
+        const entries = data.entries || [];
 
         return {
           content: [
