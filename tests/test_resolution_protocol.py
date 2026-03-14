@@ -711,6 +711,8 @@ class TestControllerPoolFallback:
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux = AsyncMock()
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.adb = AsyncMock()
+        ctrl.adb.list_devices = AsyncMock(return_value=[])
         broken_pool = AsyncMock()
         broken_pool.resolve_device = AsyncMock(
             side_effect=Exception("pool broken")
