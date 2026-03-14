@@ -36,6 +36,8 @@ class DeviceControllerUI:
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
+    - self._is_simulator(udid) -> bool
+    - self._wake_and_unlock(udid) -> None
     """
 
     # Bottom safe area inset for devices with home indicator (Face ID / Dynamic Island)
@@ -414,6 +416,15 @@ class DeviceControllerUI:
         self._cache_misses += 1
 
         raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
+
+        # If the UI tree is empty on a non-simulator device, the screen may
+        # be off. Wake and retry once.
+        if not raw and not self._is_simulator(resolved):
+            import asyncio
+            logger.info("Empty UI tree from %s, waking screen and retrying", resolved[:8])
+            await self._wake_and_unlock(resolved)
+            await asyncio.sleep(1)
+            raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory

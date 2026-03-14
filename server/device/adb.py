@@ -462,6 +462,32 @@ rm -rf /data/local/tmp/tmp-ca-copy
         )
         logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
 
+    async def is_screen_on(self, serial: str) -> bool:
+        """Check if the device screen is on."""
+        try:
+            stdout, _ = await self._run_adb_for_device(serial, "shell", "dumpsys", "power")
+            # Different Android versions use different keys
+            for line in stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Display Power:"):
+                    return "ON" in stripped
+                if stripped.startswith("mScreenOn="):
+                    return "true" in stripped
+        except DeviceError:
+            pass
+        return True  # Assume on if we can't tell
+
+    async def wake_screen(self, serial: str) -> None:
+        """Wake the device screen and dismiss the lock screen (no passcode)."""
+        if await self.is_screen_on(serial):
+            return
+        # KEYCODE_WAKEUP (224) turns screen on without toggling
+        await self._run_adb_for_device(serial, "shell", "input", "keyevent", "224")
+        # Swipe up to dismiss lock screen (no passcode assumed)
+        await self._run_adb_for_device(
+            serial, "shell", "input", "swipe", "540", "1800", "540", "800", "300",
+        )
+
     async def set_location(self, serial: str, latitude: float, longitude: float) -> None:
         """Set simulated GPS location on an emulator.
 

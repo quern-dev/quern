@@ -979,7 +979,7 @@ class TestAndroidAppLifecycle:
         ctrl = DeviceController()
         ctrl._active_udid = "emulator-5554"
         ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
-        fake_png = b"\x89PNGfake"
+        fake_png = b"\x89PNG" + b"\x00" * 10000  # Must be >8KB to avoid blank detection
         ctrl.adb.screenshot = AsyncMock(return_value=fake_png)
         ctrl.simctl.screenshot = AsyncMock()
 

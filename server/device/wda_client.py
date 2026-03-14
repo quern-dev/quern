@@ -945,6 +945,23 @@ class WdaBackend:
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={"name": button})
 
+    async def is_locked(self, udid: str) -> bool:
+        """Check if the device screen is locked."""
+        try:
+            result = await self._request("get", udid, "/wda/locked",
+                                         use_session=False, timeout=WDA_TIMEOUT)
+            return result.get("value", False)
+        except Exception:
+            return False  # Assume unlocked if we can't tell
+
+    async def unlock(self, udid: str) -> None:
+        """Unlock the device screen (no passcode)."""
+        try:
+            await self._request("post", udid, "/wda/unlock",
+                                use_session=False, timeout=ACTION_TIMEOUT)
+        except Exception as e:
+            logger.debug("WDA unlock failed (may already be unlocked): %s", e)
+
     async def activate_app(self, udid: str, bundle_id: str) -> None:
         """Activate (bring to foreground) an app via WDA."""
         await self._request("post", udid, "/wda/apps/activate",

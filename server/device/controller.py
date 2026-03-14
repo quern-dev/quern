@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -68,6 +69,9 @@ class DeviceController(DeviceControllerUI):
 
     def _is_android(self, udid: str) -> bool:
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
+
+    def _is_simulator(self, udid: str) -> bool:
+        return self._device_type(udid) == DeviceType.SIMULATOR
 
     def _require_simulator(self, udid: str, operation: str) -> None:
         """Raise DeviceError if the device is physical (operation not supported)."""
@@ -386,6 +390,24 @@ class DeviceController(DeviceControllerUI):
             apps = await self.simctl.list_apps(resolved)
         return apps, resolved
 
+    async def _wake_and_unlock(self, udid: str) -> None:
+        """Wake the device screen and dismiss lock screen. No-op for simulators."""
+        if self._is_android(udid):
+            await self.adb.wake_screen(udid)
+        elif self._is_physical(udid):
+            if await self.wda_client.is_locked(udid):
+                logger.info("Device %s is locked, unlocking", udid[:8])
+                await self.wda_client.unlock(udid)
+
+    async def _take_raw_screenshot(self, resolved: str) -> bytes:
+        """Take a raw PNG screenshot from the appropriate backend."""
+        if self._is_android(resolved):
+            return await self.adb.screenshot(resolved)
+        elif self._is_physical(resolved):
+            return await self.pmd3.screenshot(resolved)
+        else:
+            return await self.simctl.screenshot(resolved)
+
     async def screenshot(
         self,
         udid: str | None = None,
@@ -393,15 +415,31 @@ class DeviceController(DeviceControllerUI):
         scale: float = 0.5,
         quality: int = 85,
     ) -> tuple[bytes, str]:
-        """Capture and process a screenshot. Returns (image_bytes, media_type)."""
+        """Capture and process a screenshot. Returns (image_bytes, media_type).
+
+        If the screenshot appears blank (screen off), automatically wakes
+        the device and retries once.
+        """
         resolved = await self.resolve_udid(udid)
-        if self._is_android(resolved):
-            raw_png = await self.adb.screenshot(resolved)
-        elif self._is_physical(resolved):
-            raw_png = await self.pmd3.screenshot(resolved)
-        else:
-            raw_png = await self.simctl.screenshot(resolved)
+        raw_png = await self._take_raw_screenshot(resolved)
+
+        if self._is_blank_screenshot(raw_png) and not self._is_simulator(resolved):
+            logger.info("Blank screenshot from %s, waking screen and retrying", resolved[:8])
+            await self._wake_and_unlock(resolved)
+            await asyncio.sleep(1)  # Give the screen time to render
+            raw_png = await self._take_raw_screenshot(resolved)
+
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
+
+    @staticmethod
+    def _is_blank_screenshot(raw_png: bytes) -> bool:
+        """Check if a screenshot is blank (all black or very small)."""
+        if len(raw_png) < 1000:
+            return True
+        # A blank/black screen compresses very small in PNG.
+        # Real screenshots of even simple UIs are typically >10KB.
+        # Black 1080x2400 PNG is ~5KB. Threshold at 8KB.
+        return len(raw_png) < 8000
 
     async def set_location(
         self, latitude: float, longitude: float, udid: str | None = None,
