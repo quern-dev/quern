@@ -218,16 +218,20 @@ class DevicePool:
     def _infer_device_family(
         name: str | None,
         device_family: str | None,
+        device_type: DeviceType | None = None,
     ) -> str | None:
         """Determine effective device_family filter for resolution.
 
         Priority:
         1. Explicit device_family from caller → use it
-        2. Name contains family hint (e.g. "iPad") → infer that family
-        3. Fall back to config default (usually "iPhone")
+        2. Android device_type → None (Android has no family subdivision)
+        3. Name contains family hint (e.g. "iPad") → infer that family
+        4. Fall back to config default (usually "iPhone")
         """
         if device_family is not None:
             return device_family
+        if device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+            return None
         if name:
             name_lower = name.lower()
             if "ipad" in name_lower:
@@ -380,10 +384,25 @@ class DevicePool:
         4. Shutdown + auto_boot → boot best match
         5. No matches → diagnostic error
         """
-        # Short-circuit: no criteria and active device already set
+        # Short-circuit: no criteria and active device already set.
+        # device_type is excluded from has_criteria because the API defaults
+        # it to "simulator" (never None). Instead, when we have an active
+        # device, we verify it matches the requested type before returning it.
         has_criteria = any([udid, name, os_version, device_family])
         if not has_criteria and self.controller._active_udid:
-            return self.controller._active_udid
+            if device_type is not None:
+                # Check the pool's own state for device type — it's always
+                # populated after refresh(), unlike the controller's cache
+                # which depends on list_devices() having been called.
+                await self.refresh()
+                pool_state = self._read_state()
+                entry = pool_state.devices.get(self.controller._active_udid)
+                if entry and entry.device_type != device_type:
+                    pass  # Type mismatch — fall through to re-resolve
+                else:
+                    return self.controller._active_udid
+            else:
+                return self.controller._active_udid
 
         await self.refresh()
 
@@ -395,7 +414,7 @@ class DevicePool:
             self.controller._active_udid = udid
             return udid
 
-        effective_family = self._infer_device_family(name, device_family)
+        effective_family = self._infer_device_family(name, device_family, device_type)
 
         state = self._read_state()
         all_devices = list(state.devices.values())
@@ -449,7 +468,7 @@ class DevicePool:
         """
         await self.refresh()
 
-        effective_family = self._infer_device_family(name, device_family)
+        effective_family = self._infer_device_family(name, device_family, device_type)
 
         state = self._read_state()
         all_devices = list(state.devices.values())
