@@ -70,9 +70,6 @@ class DeviceController(DeviceControllerUI):
     def _is_android(self, udid: str) -> bool:
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
-    def _is_simulator(self, udid: str) -> bool:
-        return self._device_type(udid) == DeviceType.SIMULATOR
-
     def _require_simulator(self, udid: str, operation: str) -> None:
         """Raise DeviceError if the device is physical (operation not supported)."""
         if self._is_physical(udid):
@@ -390,38 +387,9 @@ class DeviceController(DeviceControllerUI):
             apps = await self.simctl.list_apps(resolved)
         return apps, resolved
 
-    async def _wake_and_unlock(self, udid: str) -> None:
-        """Wake the device screen and dismiss lock screen. No-op for simulators.
-
-        For iOS physical devices, uses WDA unlock. If WDA isn't running yet,
-        the auto-start mechanism will kick in — this method waits for it.
-        """
-        if self._is_android(udid):
-            await self.adb.wake_screen(udid)
-        elif self._is_physical(udid):
-            try:
-                logger.info("Waking device %s via WDA unlock + swipe", udid[:8])
-                await self.wda_client.unlock(udid)
-                await asyncio.sleep(1)
-                # Swipe up to dismiss lock screen on Face ID devices.
-                # WDA unlock wakes the display but doesn't dismiss the
-                # lock screen (no home button to press).
-                try:
-                    await self.wda_client.swipe(udid, 200, 790, 200, 100, 0.3)
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.warning("WDA wake/unlock failed for %s: %s", udid[:8], e)
-
-    async def _take_raw_screenshot(self, resolved: str) -> bytes:
-        """Take a raw PNG screenshot from the appropriate backend."""
-        if self._is_android(resolved):
-            return await self.adb.screenshot(resolved)
-        elif self._is_physical(resolved):
-            return await self.pmd3.screenshot(resolved)
-        else:
-            return await self.simctl.screenshot(resolved)
+    async def _ensure_android_screen_on(self, udid: str) -> None:
+        """Wake an Android device screen if it's off."""
+        await self.adb.wake_screen(udid)
 
     async def screenshot(
         self,
@@ -430,50 +398,16 @@ class DeviceController(DeviceControllerUI):
         scale: float = 0.5,
         quality: int = 85,
     ) -> tuple[bytes, str]:
-        """Capture and process a screenshot. Returns (image_bytes, media_type).
-
-        If the screenshot appears blank (screen off), automatically wakes
-        the device and retries once.
-        """
+        """Capture and process a screenshot. Returns (image_bytes, media_type)."""
         resolved = await self.resolve_udid(udid)
-        raw_png = await self._take_raw_screenshot(resolved)
-
-        if self._is_blank_screenshot(raw_png) and not self._is_simulator(resolved):
-            logger.info("Blank screenshot from %s, waking screen and retrying", resolved[:8])
-            await self._wake_and_unlock(resolved)
-            await asyncio.sleep(2)  # Give the screen time to fully render
-            raw_png = await self._take_raw_screenshot(resolved)
-
+        if self._is_android(resolved):
+            await self._ensure_android_screen_on(resolved)
+            raw_png = await self.adb.screenshot(resolved)
+        elif self._is_physical(resolved):
+            raw_png = await self.pmd3.screenshot(resolved)
+        else:
+            raw_png = await self.simctl.screenshot(resolved)
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
-
-    @staticmethod
-    def _is_blank_screenshot(raw_png: bytes) -> bool:
-        """Check if a screenshot is blank (all black).
-
-        Uses Pillow to sample pixels rather than relying on file size,
-        since full-resolution black PNGs can still be 15-20KB.
-        Samples corners and center — if all are near-black, it's blank.
-        """
-        if len(raw_png) < 1000:
-            return True
-        try:
-            from PIL import Image
-            import io
-            img = Image.open(io.BytesIO(raw_png)).convert("RGB")
-            w, h = img.size
-            # Sample 5 points: corners + center
-            points = [
-                (10, 10), (w - 10, 10),
-                (w // 2, h // 2),
-                (10, h - 10), (w - 10, h - 10),
-            ]
-            for x, y in points:
-                r, g, b = img.getpixel((min(x, w - 1), min(y, h - 1)))
-                if r > 15 or g > 15 or b > 15:
-                    return False  # At least one non-black pixel
-            return True
-        except Exception:
-            return False  # Can't parse, assume not blank
 
     async def set_location(
         self, latitude: float, longitude: float, udid: str | None = None,
@@ -502,11 +436,39 @@ class DeviceController(DeviceControllerUI):
     async def set_locale(
         self, lang: str, country: str = "", udid: str | None = None,
     ) -> str:
-        """Set the system locale. Android only. Returns the resolved udid."""
+        """Set the system locale. Returns the resolved udid.
+
+        Android: via Quern Driver broadcast receiver or setprop fallback.
+        iOS physical (USB): via pymobiledevice3 lockdown language + locale.
+        iOS simulators: not yet supported.
+        """
         resolved = await self.resolve_udid(udid)
-        if not self._is_android(resolved):
-            raise DeviceError("set_locale is currently Android-only", tool="simctl")
-        await self.adb.set_locale(resolved, lang, country)
+        if self._is_android(resolved):
+            await self.adb.set_locale(resolved, lang, country)
+        elif self._is_physical(resolved):
+            hw_udid = await self.get_libimobiledevice_udid(resolved)
+            if not hw_udid:
+                raise DeviceError(
+                    "Locale change requires a USB connection (device not found via usbmux)",
+                    tool="pymobiledevice3",
+                )
+            # iOS Language key uses SupportedLanguages format: just the
+            # language code for most languages (e.g. "ja", "de", "fr"),
+            # or lang-region for regional variants (e.g. "en-US", "pt-BR",
+            # "zh-Hans"). Locale uses POSIX format (e.g. "ja_JP", "en_US").
+            language_tag = f"{lang}-{country}" if country else lang
+            locale_tag = f"{lang}_{country}" if country else lang
+            await self.pmd3.set_language(hw_udid, language_tag)
+            await self.pmd3.set_locale(hw_udid, locale_tag)
+            logger.info(
+                "iOS locale set: language=%s, locale=%s on %s (reboot may be needed)",
+                language_tag, locale_tag, resolved[:8],
+            )
+        else:
+            raise DeviceError(
+                "set_locale is not yet supported for iOS simulators",
+                tool="simctl",
+            )
         return resolved
 
     async def set_font_scale(

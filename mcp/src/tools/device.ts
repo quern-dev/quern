@@ -597,7 +597,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("set_locale", {
-    description: `Set the system locale/language on an Android device or emulator. Changes take effect immediately on API ≤ 32. On API 33+ rootable emulators, falls back to setprop. May not work on non-rootable API 33+ devices.`,
+    description: `Set the system locale/language. Android: changes take effect immediately (API ≤ 32) or via setprop (rootable API 33+). iOS physical: changes language and locale via USB (device will briefly restart SpringBoard). iOS simulators: not yet supported.`,
     inputSchema: strictParams({
       lang: z.string().describe("Language code (e.g. 'en', 'ja', 'fr', 'de')"),
       country: z.string().optional().describe("Country code (e.g. 'US', 'JP', 'FR', 'DE')"),
