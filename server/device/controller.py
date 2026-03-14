@@ -391,13 +391,28 @@ class DeviceController(DeviceControllerUI):
         return apps, resolved
 
     async def _wake_and_unlock(self, udid: str) -> None:
-        """Wake the device screen and dismiss lock screen. No-op for simulators."""
+        """Wake the device screen and dismiss lock screen. No-op for simulators.
+
+        For iOS physical devices, uses WDA unlock. If WDA isn't running yet,
+        the auto-start mechanism will kick in — this method waits for it.
+        """
         if self._is_android(udid):
             await self.adb.wake_screen(udid)
         elif self._is_physical(udid):
-            if await self.wda_client.is_locked(udid):
-                logger.info("Device %s is locked, unlocking", udid[:8])
+            try:
+                logger.info("Waking device %s via WDA unlock + swipe", udid[:8])
                 await self.wda_client.unlock(udid)
+                await asyncio.sleep(1)
+                # Swipe up to dismiss lock screen on Face ID devices.
+                # WDA unlock wakes the display but doesn't dismiss the
+                # lock screen (no home button to press).
+                try:
+                    await self.wda_client.swipe(udid, 200, 790, 200, 100, 0.3)
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning("WDA wake/unlock failed for %s: %s", udid[:8], e)
 
     async def _take_raw_screenshot(self, resolved: str) -> bytes:
         """Take a raw PNG screenshot from the appropriate backend."""
@@ -426,20 +441,39 @@ class DeviceController(DeviceControllerUI):
         if self._is_blank_screenshot(raw_png) and not self._is_simulator(resolved):
             logger.info("Blank screenshot from %s, waking screen and retrying", resolved[:8])
             await self._wake_and_unlock(resolved)
-            await asyncio.sleep(1)  # Give the screen time to render
+            await asyncio.sleep(2)  # Give the screen time to fully render
             raw_png = await self._take_raw_screenshot(resolved)
 
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
 
     @staticmethod
     def _is_blank_screenshot(raw_png: bytes) -> bool:
-        """Check if a screenshot is blank (all black or very small)."""
+        """Check if a screenshot is blank (all black).
+
+        Uses Pillow to sample pixels rather than relying on file size,
+        since full-resolution black PNGs can still be 15-20KB.
+        Samples corners and center — if all are near-black, it's blank.
+        """
         if len(raw_png) < 1000:
             return True
-        # A blank/black screen compresses very small in PNG.
-        # Real screenshots of even simple UIs are typically >10KB.
-        # Black 1080x2400 PNG is ~5KB. Threshold at 8KB.
-        return len(raw_png) < 8000
+        try:
+            from PIL import Image
+            import io
+            img = Image.open(io.BytesIO(raw_png)).convert("RGB")
+            w, h = img.size
+            # Sample 5 points: corners + center
+            points = [
+                (10, 10), (w - 10, 10),
+                (w // 2, h // 2),
+                (10, h - 10), (w - 10, h - 10),
+            ]
+            for x, y in points:
+                r, g, b = img.getpixel((min(x, w - 1), min(y, h - 1)))
+                if r > 15 or g > 15 or b > 15:
+                    return False  # At least one non-black pixel
+            return True
+        except Exception:
+            return False  # Can't parse, assume not blank
 
     async def set_location(
         self, latitude: float, longitude: float, udid: str | None = None,
