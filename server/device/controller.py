@@ -239,7 +239,7 @@ class DeviceController(DeviceControllerUI):
 
         return None
 
-    async def boot(self, udid: str | None = None, name: str | None = None) -> str:
+    async def boot(self, udid: str | None = None, name: str | None = None, headless: bool = False) -> str:
         """Boot a simulator or Android emulator by udid or name. Returns the udid that was booted."""
         if udid:
             if self._is_android(udid):
@@ -257,7 +257,7 @@ class DeviceController(DeviceControllerUI):
             if await self.adb.is_available():
                 avds = await self.adb.list_avds()
                 if name in avds:
-                    serial = await self.adb.boot_emulator(name)
+                    serial = await self.adb.boot_emulator(name, headless=headless)
                     self._active_udid = serial
                     return serial
 
@@ -399,7 +399,12 @@ class DeviceController(DeviceControllerUI):
         quality: int = 85,
     ) -> tuple[bytes, str]:
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
-        resolved = await self.resolve_udid(udid)
+        # Use resolve_udid for fallback logic but don't change the active device
+        if udid:
+            await self._ensure_device_type_cached(udid)
+            resolved = udid
+        else:
+            resolved = await self.resolve_udid(None)
         if self._is_android(resolved):
             # Only wake physical devices — emulator screencap works with screen off
             if not resolved.startswith("emulator-"):

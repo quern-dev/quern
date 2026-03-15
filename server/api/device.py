@@ -171,7 +171,7 @@ async def boot_device(request: Request, body: BootDeviceRequest):
 
     controller = _get_controller(request)
     try:
-        udid = await controller.boot(udid=body.udid, name=body.name)
+        udid = await controller.boot(udid=body.udid, name=body.name, headless=body.headless)
     except DeviceError as e:
         raise _handle_device_error(e)
 
@@ -195,6 +195,14 @@ async def shutdown_device(request: Request, body: ShutdownDeviceRequest):
         return {"status": "shutdown", "udid": body.udid}
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+@router.post("/active")
+async def set_active_device(request: Request, body: ShutdownDeviceRequest):
+    """Set the active device by UDID."""
+    controller = _get_controller(request)
+    controller._active_udid = body.udid
+    return {"active_udid": body.udid}
 
 
 # ---------------------------------------------------------------------------

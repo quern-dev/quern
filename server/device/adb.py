@@ -346,22 +346,28 @@ class AdbBackend:
         except Exception:
             return []
 
-    async def boot_emulator(self, avd_name: str, timeout: float = 60) -> str:
+    async def boot_emulator(
+        self, avd_name: str, timeout: float = 60, headless: bool = False,
+    ) -> str:
         """Boot an Android emulator by AVD name. Returns the adb serial.
 
         Launches the emulator process in the background and waits for it
         to appear as 'device' in ``adb devices``.
+
+        If headless=True, launches with -no-window (no GUI, adb still works).
         """
         if not self._emulator_path:
             raise DeviceError("emulator command not found", tool="emulator")
 
         self._booting_avds.add(avd_name)
         try:
-            return await self._boot_emulator_inner(avd_name, timeout)
+            return await self._boot_emulator_inner(avd_name, timeout, headless)
         finally:
             self._booting_avds.discard(avd_name)
 
-    async def _boot_emulator_inner(self, avd_name: str, timeout: float) -> str:
+    async def _boot_emulator_inner(
+        self, avd_name: str, timeout: float, headless: bool,
+    ) -> str:
         avds = await self.list_avds()
         if avd_name not in avds:
             raise DeviceError(
@@ -373,8 +379,11 @@ class AdbBackend:
         existing_serials = {d.udid for d in await self.list_devices() if d.udid.startswith("emulator-")}
 
         # Launch emulator in background (detached, no window block)
+        args = [self._emulator_path, "-avd", avd_name, "-no-snapshot-load"]
+        if headless:
+            args.append("-no-window")
         await asyncio.create_subprocess_exec(
-            self._emulator_path, "-avd", avd_name, "-no-snapshot-load",
+            *args,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

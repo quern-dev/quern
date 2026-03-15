@@ -590,6 +590,7 @@ class BootDeviceRequest(BaseModel):
 
     udid: str | None = None
     name: str | None = None
+    headless: bool = False
 
 
 class ShutdownDeviceRequest(BaseModel):
