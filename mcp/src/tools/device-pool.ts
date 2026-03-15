@@ -23,7 +23,7 @@ default without needing to pass udid.`,
         .optional()
         .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
       type: z
-        .enum(["simulator", "device"])
+        .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
         .default("simulator")
         .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
@@ -93,7 +93,7 @@ The first device becomes the active device for subsequent tool calls.`,
         .optional()
         .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
       type: z
-        .enum(["simulator", "device"])
+        .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
         .default("simulator")
         .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),

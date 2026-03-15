@@ -40,6 +40,12 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 
 ---
 
+## React Native
+
+- [React Native Logging](react-native-logging.md) — Route JS logs through os_log with `@quern/react-native-os-logger` for structured, filterable logs in Quern
+
+---
+
 ## Cross-Platform
 
 - [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, and replaying network traffic

@@ -98,6 +98,8 @@ def annotate_screenshot(
     # Detect Retina scale factor: accessibility frames are in points,
     # but the screenshot is in pixels (e.g. 3x on iPhone 16 Pro).
     # Find the full-screen element (Application) to determine point width.
+    # Android elements report in raw pixels, so retina_scale stays 1.0 but
+    # we still need readable font sizes based on actual screen resolution.
     point_width: float | None = None
     for el in elements:
         if el.type == "Application" and el.frame:
@@ -108,8 +110,13 @@ def annotate_screenshot(
     else:
         retina_scale = 1.0
 
-    font_size = max(12, int(14 * retina_scale))
-    line_width = max(2, int(2 * retina_scale))
+    # Scale font and line width relative to screen resolution.
+    # iOS at 3x retina: retina_scale ~3.0, font = 42px — readable.
+    # Android at 1x (raw pixels): retina_scale 1.0, but 1080px wide needs
+    # similar visual weight. Use screen width as a baseline.
+    display_scale = max(retina_scale, img.width / 400)
+    font_size = max(12, int(14 * display_scale))
+    line_width = max(2, int(2 * display_scale))
     try:
         font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
     except (OSError, IOError):
@@ -140,7 +147,7 @@ def annotate_screenshot(
             label_text += f": {el.label}"
 
         # Draw label background + text above the box
-        pad = int(4 * retina_scale)
+        pad = int(4 * display_scale)
         text_bbox = draw.textbbox((0, 0), label_text, font=font)
         text_w = text_bbox[2] - text_bbox[0]
         text_h = text_bbox[3] - text_bbox[1]

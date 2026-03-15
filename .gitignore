@@ -21,7 +21,8 @@ mcp/dist/
 
 # Project
 .quern/
-*.log 
+*.log
+tools/ios-preview
 
 # Session notes / investigation logs
 *.txt

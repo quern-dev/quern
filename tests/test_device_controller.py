@@ -59,6 +59,7 @@ class TestResolveUdid:
         ])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.adb.list_devices = AsyncMock(return_value=[])
         result = await ctrl.resolve_udid()
         assert result == "auto-udid"
         assert ctrl._active_udid == "auto-udid"
@@ -71,6 +72,7 @@ class TestResolveUdid:
         ])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.adb.list_devices = AsyncMock(return_value=[])
         with pytest.raises(DeviceError, match="No booted device"):
             await ctrl.resolve_udid()
 
@@ -83,6 +85,7 @@ class TestResolveUdid:
         ])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.adb.list_devices = AsyncMock(return_value=[])
         with pytest.raises(DeviceError, match="Multiple devices booted"):
             await ctrl.resolve_udid()
 
@@ -99,9 +102,10 @@ class TestCheckTools:
         ctrl.idb.is_available = AsyncMock(return_value=True)
         ctrl.devicectl.is_available = AsyncMock(return_value=True)
         ctrl.pmd3.is_available = AsyncMock(return_value=True)
+        ctrl.adb.is_available = AsyncMock(return_value=True)
         with patch("server.device.tunneld.is_tunneld_running", return_value=True):
             tools = await ctrl.check_tools()
-        assert tools == {"simctl": True, "idb": True, "devicectl": True, "pymobiledevice3": True, "tunneld": True}
+        assert tools == {"simctl": True, "idb": True, "devicectl": True, "pymobiledevice3": True, "tunneld": True, "adb": True}
 
     async def test_simctl_only(self):
         ctrl = DeviceController()
@@ -109,9 +113,10 @@ class TestCheckTools:
         ctrl.idb.is_available = AsyncMock(return_value=False)
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
+        ctrl.adb.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
-        assert tools == {"simctl": True, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False}
+        assert tools == {"simctl": True, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False, "adb": False}
 
     async def test_none_available(self):
         ctrl = DeviceController()
@@ -119,9 +124,10 @@ class TestCheckTools:
         ctrl.idb.is_available = AsyncMock(return_value=False)
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
+        ctrl.adb.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
-        assert tools == {"simctl": False, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False}
+        assert tools == {"simctl": False, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False, "adb": False}
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +146,7 @@ class TestBoot:
 
     async def test_boot_by_name(self):
         ctrl = DeviceController()
+        ctrl.adb.is_available = AsyncMock(return_value=False)
         ctrl.simctl.list_devices = AsyncMock(return_value=[
             _device(udid="found-udid", name="iPhone 16 Pro", state=DeviceState.SHUTDOWN),
         ])
@@ -151,7 +158,8 @@ class TestBoot:
     async def test_boot_by_name_not_found(self):
         ctrl = DeviceController()
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        with pytest.raises(DeviceError, match="No simulator found with name"):
+        ctrl.adb.is_available = AsyncMock(return_value=False)
+        with pytest.raises(DeviceError, match="No simulator or AVD found with name"):
             await ctrl.boot(name="Nonexistent")
 
     async def test_boot_no_args(self):
@@ -864,3 +872,182 @@ class TestUdidMapping:
         assert result == usbmux_udid
         # Should not need to refresh
         ctrl.simctl.list_devices.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Android device support
+# ---------------------------------------------------------------------------
+
+
+def _android_device(
+    udid: str = "emulator-5554",
+    name: str = "Pixel_7_API_34",
+    state: DeviceState = DeviceState.BOOTED,
+    device_type: DeviceType = DeviceType.ANDROID_EMULATOR,
+) -> DeviceInfo:
+    return DeviceInfo(
+        udid=udid,
+        name=name,
+        state=state,
+        device_type=device_type,
+        os_version="14",
+        runtime="API 34",
+        device_family="Android",
+    )
+
+
+class TestIsAndroid:
+    def test_android_emulator(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        assert ctrl._is_android("emulator-5554") is True
+
+    def test_android_device(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["R5CR10XXXXX"] = DeviceType.ANDROID_DEVICE
+        assert ctrl._is_android("R5CR10XXXXX") is True
+
+    def test_simulator_is_not_android(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        assert ctrl._is_android("AAAA-1111") is False
+
+    def test_physical_ios_is_not_android(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        assert ctrl._is_android("PHYS-0001") is False
+
+
+class TestAndroidAppLifecycle:
+    async def test_launch_android_uses_adb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "emulator-5554"
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.adb.launch_app = AsyncMock()
+        ctrl.simctl.launch_app = AsyncMock()
+
+        udid = await ctrl.launch_app("com.example.app")
+        ctrl.adb.launch_app.assert_called_once_with("emulator-5554", "com.example.app")
+        ctrl.simctl.launch_app.assert_not_called()
+        assert udid == "emulator-5554"
+
+    async def test_terminate_android_uses_adb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "emulator-5554"
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.adb.terminate_app = AsyncMock()
+        ctrl.simctl.terminate_app = AsyncMock()
+
+        udid = await ctrl.terminate_app("com.example.app")
+        ctrl.adb.terminate_app.assert_called_once_with("emulator-5554", "com.example.app")
+        ctrl.simctl.terminate_app.assert_not_called()
+
+    async def test_install_android_uses_adb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "emulator-5554"
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.adb.install_app = AsyncMock()
+        ctrl.simctl.install_app = AsyncMock()
+
+        udid = await ctrl.install_app("/path/to/app.apk")
+        ctrl.adb.install_app.assert_called_once_with("emulator-5554", "/path/to/app.apk")
+        ctrl.simctl.install_app.assert_not_called()
+
+    async def test_uninstall_android_uses_adb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "emulator-5554"
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.adb.uninstall_app = AsyncMock()
+        ctrl.simctl.uninstall_app = AsyncMock()
+
+        udid = await ctrl.uninstall_app("com.example.app")
+        ctrl.adb.uninstall_app.assert_called_once_with("emulator-5554", "com.example.app")
+        ctrl.simctl.uninstall_app.assert_not_called()
+
+    async def test_list_apps_android_uses_adb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "emulator-5554"
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.adb.list_apps = AsyncMock(return_value=[])
+        ctrl.simctl.list_apps = AsyncMock(return_value=[])
+
+        apps, udid = await ctrl.list_apps()
+        ctrl.adb.list_apps.assert_called_once_with("emulator-5554")
+        ctrl.simctl.list_apps.assert_not_called()
+
+    async def test_screenshot_android_uses_adb(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "emulator-5554"
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        fake_png = b"\x89PNG" + b"\x00" * 10000  # Must be >8KB to avoid blank detection
+        ctrl.adb.screenshot = AsyncMock(return_value=fake_png)
+        ctrl.simctl.screenshot = AsyncMock()
+
+        with patch("server.device.controller.process_screenshot") as mock_proc:
+            mock_proc.return_value = (b"processed", "image/png")
+            result_bytes, media_type = await ctrl.screenshot(format="png", scale=0.5)
+
+        ctrl.adb.screenshot.assert_called_once_with("emulator-5554")
+        ctrl.simctl.screenshot.assert_not_called()
+
+
+class TestAndroidListDevicesMerge:
+    async def test_list_devices_includes_android(self):
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[
+            _device(udid="SIM-1111", state=DeviceState.BOOTED),
+        ])
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.adb.list_devices = AsyncMock(return_value=[
+            _android_device(udid="emulator-5554"),
+        ])
+
+        devices = await ctrl.list_devices()
+        assert len(devices) == 2
+        udids = [d.udid for d in devices]
+        assert "SIM-1111" in udids
+        assert "emulator-5554" in udids
+
+        # Verify device type cache was populated
+        assert ctrl._device_type_cache["emulator-5554"] == DeviceType.ANDROID_EMULATOR
+
+
+class TestAndroidCheckTools:
+    async def test_check_tools_includes_adb(self):
+        ctrl = DeviceController()
+        ctrl.simctl.is_available = AsyncMock(return_value=True)
+        ctrl.idb.is_available = AsyncMock(return_value=True)
+        ctrl.devicectl.is_available = AsyncMock(return_value=True)
+        ctrl.pmd3.is_available = AsyncMock(return_value=True)
+        ctrl.adb.is_available = AsyncMock(return_value=True)
+        with patch("server.device.tunneld.is_tunneld_running", return_value=True):
+            tools = await ctrl.check_tools()
+        assert "adb" in tools
+        assert tools["adb"] is True
+
+    async def test_check_tools_adb_missing(self):
+        ctrl = DeviceController()
+        ctrl.simctl.is_available = AsyncMock(return_value=True)
+        ctrl.idb.is_available = AsyncMock(return_value=False)
+        ctrl.devicectl.is_available = AsyncMock(return_value=False)
+        ctrl.pmd3.is_available = AsyncMock(return_value=False)
+        ctrl.adb.is_available = AsyncMock(return_value=False)
+        with patch("server.device.tunneld.is_tunneld_running", return_value=False):
+            tools = await ctrl.check_tools()
+        assert tools["adb"] is False
+
+
+class TestAndroidUIBackendSelection:
+    def test_android_emulator_uses_u2_backend(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        from server.device.u2_client import U2Backend
+        assert isinstance(ctrl._ui_backend("emulator-5554"), U2Backend)
+
+    def test_android_physical_uses_u2_backend(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["ZY224H6L"] = DeviceType.ANDROID_DEVICE
+        from server.device.u2_client import U2Backend
+        assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)

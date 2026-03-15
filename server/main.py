@@ -230,6 +230,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "idb not available — UI automation (tap, swipe, accessibility tree) disabled. "
             "Install with: pip install fb-idb && brew install idb-companion"
         )
+    if not tools.get("adb"):
+        logger.info(
+            "adb not available — Android device management disabled. "
+            "Install Android Studio or the Android SDK platform-tools."
+        )
 
     # Preview manager (live device screen preview)
     from server.device.preview import PreviewManager
@@ -243,7 +248,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.device_pool = device_pool
 
     # Refresh pool state on startup
-    await device_pool.refresh_from_simctl()
+    await device_pool.refresh()
 
     # Warm device caches in the background (device type dispatch, WDA os_versions)
     async def _warmup_devices():

@@ -640,7 +640,7 @@ async def test_query_no_source_merges_both_buffers(app, auth_headers):
         data = resp.json()
         assert data["total"] == 3
         messages = [e["message"] for e in data["entries"]]
-        assert messages == ["device log 1", "server log", "device log 2"]
+        assert messages == ["device log 2", "server log", "device log 1"]
 
 
 @pytest.mark.asyncio

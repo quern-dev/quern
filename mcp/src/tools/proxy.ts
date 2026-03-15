@@ -356,15 +356,21 @@ IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s tot
   });
 
   server.registerTool("install_proxy_cert", {
-    description: `Install the mitmproxy CA certificate on simulator(s). Required for HTTPS traffic capture. Idempotent by default — skips simulators that already have the cert installed. Use force to reinstall.
+    description: `Install the mitmproxy CA certificate on iOS simulators and Android emulators. Required for HTTPS traffic capture. Idempotent by default — skips devices that already have the cert installed. Use force to reinstall.
 
-IMPORTANT: Prefer omitting udid to install on all booted simulators in a single call. Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips.`,
+iOS simulators: Always works (simctl keychain).
+
+Android emulators: Requires a rootable image (Google APIs, NOT Google Play). Google Play images have a locked system partition. If the user's emulator is a Google Play image, suggest creating a Google APIs AVD instead — it's identical for app development (apps are installed via adb, not Play Store). The tool will auto-detect and return a helpful error if the image isn't rootable.
+
+Also auto-configures the HTTP proxy on Android emulators (10.0.2.2:9101).
+
+IMPORTANT: Prefer omitting udid to install on all booted devices in a single call. Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips.`,
     inputSchema: strictParams({
       udid: z
         .string()
         .optional()
         .describe(
-          "Specific simulator UDID. If omitted, installs on all booted simulators."
+          "Specific device UDID. If omitted, installs on all booted simulators and rootable Android emulators."
         ),
       force: z
         .coerce.boolean()

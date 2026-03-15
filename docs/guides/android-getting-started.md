@@ -20,14 +20,29 @@ Behind the scenes, these use `adb` for device communication. Your agent handles 
 - **Emulator boot**: Your agent can boot AVDs by name from your Android Studio installations
 - **App lifecycle**: Install APKs, launch, terminate, uninstall, list installed apps
 - **Screenshots**: PNG capture from emulators and physical devices
+- **Annotated screenshots**: Screenshots with accessibility overlays (same as iOS)
 - **Logcat**: Real-time log capture with level mapping (see [Logcat Integration](android-logging.md))
+- **UI automation**: Full UI control via uiautomator2 — tap, swipe, type, read the screen, press buttons
+
+### UI Automation
+
+Tell your agent things like:
+
+> "What's on the screen?"
+> "Tap the Login button"
+> "Type my email into the text field"
+> "Swipe up to scroll"
+> "Press the back button"
+
+Behind the scenes, Quern uses [uiautomator2](https://github.com/openatx/uiautomator2) to read the accessibility tree and interact with the device. This works on both emulators and physical devices.
+
+Android button names for `press_button`: `home`, `back`, `recents`, `volumeUp`, `volumeDown`, `power`, `enter`, `delete`, `menu`.
 
 ### What's Not Yet Supported
 
-- **UI automation**: No tapping, swiping, or reading the screen's accessibility tree (would require uiautomator2 — planned for a future phase)
-- **Annotated screenshots**: iOS-only (depends on accessibility tree overlay)
-- **App state checkpoints**: iOS simulator–only feature (container access)
+- **App state checkpoints**: iOS simulator-only feature (container access)
 - **Build integration**: No Gradle build tooling yet
+- **Live preview**: Screen streaming (planned via scrcpy)
 
 ## Emulator Image Types
 

@@ -8,14 +8,14 @@ import { strictParams } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
-    description: `List available iOS simulators and physical devices, plus tool availability (simctl, idb, devicectl). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
+    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
     inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])
         .optional()
         .describe("Filter by device state"),
       type: z
-        .enum(["simulator", "device"])
+        .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
         .describe("Filter by device type"),
       name: z
@@ -121,7 +121,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("shutdown_device", {
-    description: `Shutdown an iOS simulator. Simulator only — not supported for physical devices.`,
+    description: `Shutdown an iOS simulator or Android emulator. Not supported for physical devices.`,
     inputSchema: strictParams({
       udid: z.string().describe("Device UDID to shutdown"),
     }),
@@ -153,9 +153,9 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("install_app", {
-    description: `Install an app (.app or .ipa) on a simulator or physical device.`,
+    description: `Install an app (.app, .ipa, or .apk) on an iOS or Android device.`,
     inputSchema: strictParams({
-      app_path: z.string().describe("Path to the .app or .ipa file"),
+      app_path: z.string().describe("Path to the .app, .ipa, or .apk file"),
       udid: z
         .string()
         .optional()
@@ -192,7 +192,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("launch_app", {
-    description: `Launch an app by bundle ID on a simulator or physical device.
+    description: `Launch an app by bundle ID (iOS) or package name (Android) on any device.
 
 NOTE: If you want to capture network traffic from this app:
 1. Ensure the proxy is running (start_proxy)
@@ -200,7 +200,7 @@ NOTE: If you want to capture network traffic from this app:
 3. Launch the app (this tool)
 4. When done, disable system proxy (unconfigure_system_proxy)`,
     inputSchema: strictParams({
-      bundle_id: z.string().describe("App bundle identifier (e.g. com.example.MyApp)"),
+      bundle_id: z.string().describe("App bundle ID (iOS) or package name (Android), e.g. com.example.MyApp"),
       udid: z
         .string()
         .optional()
@@ -237,9 +237,9 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("terminate_app", {
-    description: `Terminate a running app by bundle ID.`,
+    description: `Terminate a running app by bundle ID (iOS) or package name (Android).`,
     inputSchema: strictParams({
-      bundle_id: z.string().describe("App bundle identifier"),
+      bundle_id: z.string().describe("App bundle ID or package name"),
       udid: z
         .string()
         .optional()
@@ -276,9 +276,9 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("uninstall_app", {
-    description: `Uninstall an app from a simulator or physical device by bundle ID.`,
+    description: `Uninstall an app from an iOS or Android device by bundle ID or package name.`,
     inputSchema: strictParams({
-      bundle_id: z.string().describe("App bundle identifier"),
+      bundle_id: z.string().describe("App bundle ID or package name"),
       udid: z
         .string()
         .optional()
@@ -315,7 +315,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("list_apps", {
-    description: `List installed apps on a simulator or physical device.`,
+    description: `List installed apps on an iOS or Android device.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -513,7 +513,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("set_location", {
-    description: `Set the simulated GPS location on a simulator.`,
+    description: `Set the simulated GPS location on an iOS simulator or Android emulator.`,
     inputSchema: strictParams({
       latitude: z.coerce.number().describe("GPS latitude"),
       longitude: z.coerce.number().describe("GPS longitude"),
@@ -553,7 +553,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("grant_permission", {
-    description: `Grant an app permission on a simulator (e.g. photos, camera, location, contacts, calendar, microphone, notifications).`,
+    description: `Grant an app permission on an iOS simulator or Android device (emulator or physical). iOS permissions: photos, camera, location, contacts, calendar, microphone, notifications. Android also supports: storage, phone, sms, call-log, body-sensors, nearby-devices, or any full android.permission.* string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       permission: z
@@ -591,6 +591,72 @@ NOTE: If you want to capture network traffic from this app:
             text: `Error: ${e instanceof Error ? e.message : String(e)}`,
           },
         ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("set_locale", {
+    description: `Set the system locale/language. Android: changes take effect immediately (API ≤ 32) or via setprop (rootable API 33+). iOS physical: changes language and locale via USB (device will briefly restart SpringBoard). iOS simulators: not yet supported.`,
+    inputSchema: strictParams({
+      lang: z.string().describe("Language code (e.g. 'en', 'ja', 'fr', 'de')"),
+      country: z.string().optional().describe("Country code (e.g. 'US', 'JP', 'FR', 'DE')"),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ lang, country, udid }) => {
+    try {
+      const body: Record<string, unknown> = { lang };
+      if (country) body.country = country;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/locale", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("set_font_scale", {
+    description: `Set the font scale on an Android device or emulator. Takes effect immediately. Standard values: 0.85 (small), 1.0 (default), 1.15 (large), 1.30 (largest). Any float value is accepted.`,
+    inputSchema: strictParams({
+      scale: z.coerce.number().describe("Font scale factor (1.0 = default)"),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ scale, udid }) => {
+    try {
+      const body: Record<string, unknown> = { scale };
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/font-scale", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("set_display_density", {
+    description: `Set the display density (DPI) on an Android device or emulator. Takes effect immediately. Common values: 160 (mdpi), 240 (hdpi), 320 (xhdpi), 480 (xxhdpi). Omit dpi to reset to the device's physical default.`,
+    inputSchema: strictParams({
+      dpi: z.coerce.number().optional().describe("Display density in DPI. Omit to reset to default."),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ dpi, udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (dpi !== undefined) body.dpi = dpi;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/display-density", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
         isError: true,
       };
     }

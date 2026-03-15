@@ -37,6 +37,7 @@ class LogSource(str, enum.Enum):
     APP_DRAIN = "app_drain"
     SIMULATOR = "simulator"
     DEVICE = "device"
+    LOGCAT = "logcat"
     SERVER = "server"
 
 
@@ -516,10 +517,12 @@ class MockListResponse(BaseModel):
 
 
 class DeviceType(str, enum.Enum):
-    """Type of iOS device."""
+    """Type of device."""
 
     SIMULATOR = "simulator"
     DEVICE = "device"
+    ANDROID_EMULATOR = "android_emulator"
+    ANDROID_DEVICE = "android_device"
 
 
 class DeviceState(str, enum.Enum):
@@ -528,6 +531,7 @@ class DeviceState(str, enum.Enum):
     BOOTED = "booted"
     SHUTDOWN = "shutdown"
     BOOTING = "booting"
+    UNAUTHORIZED = "unauthorized"
 
 
 class DeviceInfo(BaseModel):
@@ -706,6 +710,28 @@ class GrantPermissionRequest(BaseModel):
 
     bundle_id: str
     permission: str
+    udid: str | None = None
+
+
+class SetLocaleRequest(BaseModel):
+    """Request body for POST /device/locale."""
+
+    lang: str
+    country: str = ""
+    udid: str | None = None
+
+
+class SetFontScaleRequest(BaseModel):
+    """Request body for POST /device/font-scale."""
+
+    scale: float
+    udid: str | None = None
+
+
+class SetDisplayDensityRequest(BaseModel):
+    """Request body for POST /device/display-density."""
+
+    dpi: int | None = None  # None = reset to default
     udid: str | None = None
 
 

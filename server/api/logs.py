@@ -212,6 +212,8 @@ async def query_logs(
         else:
             entries = all_entries[offset : offset + limit]
 
+    entries.reverse()
+
     return LogQueryResponse(
         entries=entries,
         total=total,

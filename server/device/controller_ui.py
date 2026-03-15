@@ -36,6 +36,8 @@ class DeviceControllerUI:
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
+    - self._is_android(udid) -> bool
+    - self._ensure_android_screen_on(udid) -> None
     """
 
     # Bottom safe area inset for devices with home indicator (Face ID / Dynamic Island)
@@ -70,8 +72,11 @@ class DeviceControllerUI:
     def _ui_backend(self, udid: str):
         """Return the appropriate UI automation backend for a device.
 
-        Physical devices use WdaBackend; simulators use IdbBackend.
+        Android devices use U2Backend; iOS physical devices use WdaBackend;
+        iOS simulators use IdbBackend.
         """
+        if self._is_android(udid):
+            return self.u2
         if self._is_physical(udid):
             return self.wda_client
         return self.idb
@@ -409,6 +414,10 @@ class DeviceControllerUI:
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
+
+        # Wake Android screen before fetching UI tree (reliable via ADB)
+        if self._is_android(resolved):
+            await self._ensure_android_screen_on(resolved)
 
         raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
 
@@ -1013,7 +1022,9 @@ class DeviceControllerUI:
         Returns (image_bytes, media_type).
         """
         resolved = await self.resolve_udid(udid)
-        if self._is_physical(resolved):
+        if self._is_android(resolved):
+            raw_png = await self.adb.screenshot(resolved)
+        elif self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)
         else:
             raw_png = await self.simctl.screenshot(resolved)

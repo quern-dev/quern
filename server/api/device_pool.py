@@ -42,7 +42,7 @@ async def refresh_pool(request: Request):
     """Refresh pool state from simctl (discover new devices)."""
     pool = _get_pool(request)
     try:
-        await pool.refresh_from_simctl()
+        await pool.refresh()
         devices = await pool.list_devices()
         return {
             "status": "refreshed",

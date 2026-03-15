@@ -5,20 +5,16 @@ import { strictParams } from "./helpers.js";
 
 export function registerDeviceLogTools(server: McpServer): void {
   server.registerTool("start_device_logging", {
-    description: `Start capturing logs from a physical device via pymobiledevice3 syslog.
+    description: `Start capturing logs from a physical iOS device or Android device/emulator.
 
-Captures os_log and Logger output. Logs appear in tail_logs/query_logs
-with source="device". Use process or match filters to limit noise — these
-are applied at the subprocess level (pymobiledevice3 -pn flag) for efficiency.
+iOS: Uses pymobiledevice3 syslog. Captures os_log/Logger output with source="device".
+Android: Uses adb logcat. Captures logcat output with source="logcat".
 
-Use the preset parameter to apply an ingestion filter at start time (e.g.
-"device-quiet" to exclude system daemons). For cleanest results, combine
-process filter with set_log_filter subsystems include after starting:
-  start_device_logging(process: "MyApp", preset: "device-quiet")
-  set_log_filter(source: "device", process: "MyApp", subsystems: ["MyApp.debug.dylib"])
+Use process or match filters to limit noise. Use the preset parameter to
+apply an ingestion filter at start time (e.g. "device-quiet" to exclude
+system daemons).
 
-NOTE: This does NOT capture print() output — print() writes to stdout, not
-the unified logging system. Use os.Logger in your app instead.`,
+NOTE (iOS): Does NOT capture print() — use os.Logger instead.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -71,7 +67,7 @@ the unified logging system. Use os.Logger in your app instead.`,
   });
 
   server.registerTool("stop_device_logging", {
-    description: `Stop capturing logs from a physical device.`,
+    description: `Stop capturing logs from a physical iOS or Android device.`,
     inputSchema: strictParams({
       udid: z
         .string()
