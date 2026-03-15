@@ -401,7 +401,9 @@ class DeviceController(DeviceControllerUI):
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
         resolved = await self.resolve_udid(udid)
         if self._is_android(resolved):
-            await self._ensure_android_screen_on(resolved)
+            # Only wake physical devices — emulator screencap works with screen off
+            if not resolved.startswith("emulator-"):
+                await self._ensure_android_screen_on(resolved)
             raw_png = await self.adb.screenshot(resolved)
         elif self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)

@@ -65,6 +65,7 @@ class AdbBackend:
     def __init__(self) -> None:
         self._adb_path: str | None = _find_sdk_tool("adb")
         self._emulator_path: str | None = _find_sdk_tool("emulator", "emulator")
+        self._booting_avds: set[str] = set()  # AVD names currently being booted
         if self._adb_path:
             logger.info("adb found at %s", self._adb_path)
         if self._emulator_path:
@@ -263,13 +264,16 @@ class AdbBackend:
             os_version = ""
             api_level = ""
 
+            # For emulators, always try to resolve the AVD name so we
+            # can suppress the duplicate shutdown AVD entry.
+            if is_emulator:
+                avd_name = await self._get_emulator_name(serial)
+                if avd_name and avd_name != serial:
+                    name = avd_name
+                    running_avd_names.add(avd_name)
+
             if is_available:
-                if is_emulator:
-                    avd_name = await self._get_emulator_name(serial)
-                    if avd_name and avd_name != serial:
-                        name = avd_name
-                        running_avd_names.add(avd_name)
-                elif not model:
+                if not is_emulator and not model:
                     model = await self._get_device_property(serial, "ro.product.model")
                     if model:
                         name = model
@@ -278,6 +282,13 @@ class AdbBackend:
                 api_level = await self._get_device_property(serial, "ro.build.version.sdk")
 
             runtime = f"API {api_level}" if api_level else ""
+
+            # For running emulators, enrich runtime with image type from AVD config
+            if is_emulator and api_level and name and name != serial:
+                _, avd_runtime = self._read_avd_version(name)
+                if avd_runtime and "·" in avd_runtime:
+                    tag_label = avd_runtime.split("·", 1)[1].strip()
+                    runtime = f"{runtime} · {tag_label}"
 
             devices.append(DeviceInfo(
                 udid=serial,
@@ -290,10 +301,10 @@ class AdbBackend:
                 device_family="Android",
             ))
 
-        # Add shutdown AVDs that aren't currently running
+        # Add shutdown AVDs that aren't currently running or booting
         avds = await self.list_avds()
         for avd_name in avds:
-            if avd_name not in running_avd_names:
+            if avd_name not in running_avd_names and avd_name not in self._booting_avds:
                 os_version, runtime = self._read_avd_version(avd_name)
                 devices.append(DeviceInfo(
                     udid=f"avd:{avd_name}",
@@ -332,6 +343,13 @@ class AdbBackend:
         if not self._emulator_path:
             raise DeviceError("emulator command not found", tool="emulator")
 
+        self._booting_avds.add(avd_name)
+        try:
+            return await self._boot_emulator_inner(avd_name, timeout)
+        finally:
+            self._booting_avds.discard(avd_name)
+
+    async def _boot_emulator_inner(self, avd_name: str, timeout: float) -> str:
         avds = await self.list_avds()
         if avd_name not in avds:
             raise DeviceError(
