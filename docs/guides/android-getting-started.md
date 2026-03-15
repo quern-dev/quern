@@ -42,7 +42,10 @@ Android button names for `press_button`: `home`, `back`, `recents`, `volumeUp`, 
 
 - **App state checkpoints**: iOS simulator-only feature (container access)
 - **Build integration**: No Gradle build tooling yet
-- **Live preview**: Screen streaming (planned via scrcpy)
+
+### Live Preview
+
+Live screen preview works for both emulators and physical devices via [scrcpy](https://github.com/Genymobile/scrcpy). Install it with `brew install scrcpy`, then use `preview_device` with your Android device's UDID.
 
 ## Emulator Image Types
 

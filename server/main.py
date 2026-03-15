@@ -241,6 +241,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     preview_manager = PreviewManager()
     app.state.preview_manager = preview_manager
 
+    # Scrcpy preview (Android live device screen preview)
+    from server.device.scrcpy_preview import ScrcpyPreview
+    scrcpy_preview = ScrcpyPreview()
+    app.state.scrcpy_preview = scrcpy_preview
+    if scrcpy_preview.is_available():
+        logger.info("scrcpy available — Android live preview enabled")
+    else:
+        logger.info("scrcpy not available — Android live preview disabled (install with: brew install scrcpy)")
+
     # Device pool (Phase 4b-alpha)
     from server.device.pool import DevicePool
     device_pool = DevicePool(device_controller)
@@ -294,9 +303,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except asyncio.CancelledError:
                 pass
 
-    # Stop live preview if running
+    # Stop live previews if running
     if preview_manager:
         await preview_manager.stop()
+    if scrcpy_preview:
+        await scrcpy_preview.stop()
 
     # Shutdown WDA client (cancels idle task, deletes sessions, kills port-forwards)
     # Note: does NOT kill xcodebuild processes — they persist across restarts
@@ -371,6 +382,7 @@ def create_app(
     app.state.device_controller = None
     app.state.device_pool = None
     app.state.preview_manager = None
+    app.state.scrcpy_preview = None
     app.state.sim_log_adapters = {}
     app.state.device_log_adapters = {}
 

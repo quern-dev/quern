@@ -663,7 +663,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("preview_device", {
-    description: `Open a live macOS preview window showing a physical iOS device's screen in real time over USB. Uses CoreMediaIO screen capture — only works for physical devices connected via USB (not simulators). Compiles the preview binary on first use (~5s). Device discovery takes ~3s on first launch (cached thereafter). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB devices.`,
+    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO (USB only, not simulators). Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices.`,
     inputSchema: strictParams({
       udid: z
         .string()

@@ -587,27 +587,62 @@ def _get_preview_manager(request: Request):
     return pm
 
 
+def _get_scrcpy_preview(request: Request):
+    """Get the ScrcpyPreview from app state."""
+    sp = getattr(request.app.state, "scrcpy_preview", None)
+    if sp is None:
+        raise HTTPException(status_code=503, detail="Scrcpy preview not initialized")
+    return sp
+
+
 @router.post("/preview/start")
 async def preview_start(request: Request, body: PreviewStartRequest):
-    """Start a live preview window for USB-connected physical iOS devices.
+    """Start a live preview window for a device.
 
-    Opens a macOS window showing the device screen in real time via CoreMediaIO.
-    Compiles the preview binary on first use (~5s). Device discovery takes ~3s
-    on first launch (cached thereafter).
+    - iOS physical devices: CoreMediaIO screen capture (USB only, not simulators)
+    - Android devices (emulator or physical): scrcpy (requires `brew install scrcpy`)
 
     If a UDID is provided, adds that single device. If omitted, adds all
-    available USB devices. Multiple devices can be previewed independently.
+    available USB iOS devices. Multiple devices can be previewed independently.
     """
     controller = _get_controller(request)
-    pm = _get_preview_manager(request)
 
     if body.udid:
-        # Resolve UDID and validate it's a physical device
+        # Resolve UDID and validate
         try:
             udid = await controller.resolve_udid(body.udid)
         except DeviceError as e:
             raise _handle_device_error(e)
 
+        # Android devices → scrcpy
+        if controller._is_android(udid):
+            sp = _get_scrcpy_preview(request)
+
+            device_name: str | None = None
+            try:
+                devices = await controller.list_devices()
+                for d in devices:
+                    if d.udid == udid:
+                        device_name = d.name
+                        break
+            except DeviceError:
+                pass
+
+            if not device_name:
+                device_name = udid
+
+            try:
+                session = await sp.add(udid, device_name)
+                return {
+                    "status": "added",
+                    "name": session.name,
+                    "serial": session.serial,
+                    "platform": "android",
+                }
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # iOS physical → CoreMediaIO
         if not controller._is_physical(udid):
             raise HTTPException(
                 status_code=400,
@@ -615,8 +650,10 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                        f"physical devices connected via USB.",
             )
 
+        pm = _get_preview_manager(request)
+
         # Get device name for the CoreMediaIO match
-        device_name: str | None = None
+        device_name = None
         try:
             devices = await controller.list_devices()
             for d in devices:
@@ -638,12 +675,14 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 "status": "added",
                 "name": preview.name,
                 "position": preview.position,
+                "platform": "ios",
             }
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
     else:
-        # No UDID — add all available devices
+        # No UDID — add all available iOS USB devices (existing behavior)
+        pm = _get_preview_manager(request)
         try:
             await pm._ensure_process()
         except RuntimeError as e:
@@ -668,11 +707,9 @@ async def preview_start(request: Request, body: PreviewStartRequest):
 async def preview_stop(request: Request, body: PreviewStopRequest):
     """Stop live preview.
 
-    If a UDID is provided, stops only that device's preview.
-    If omitted, stops all previews and kills the process.
+    If a UDID is provided, stops only that device's preview (routes to the
+    correct manager based on device type). If omitted, stops all previews.
     """
-    pm = _get_preview_manager(request)
-
     if body.udid:
         controller = _get_controller(request)
         try:
@@ -680,7 +717,14 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
         except DeviceError as e:
             raise _handle_device_error(e)
 
-        # Resolve UDID → name
+        # Android → scrcpy
+        if controller._is_android(udid):
+            sp = _get_scrcpy_preview(request)
+            await sp.remove(udid)
+            return {"status": "removed", "serial": udid}
+
+        # iOS → CoreMediaIO
+        pm = _get_preview_manager(request)
         device_name: str | None = None
         try:
             devices = await controller.list_devices()
@@ -700,6 +744,10 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
         await pm.remove(device_name)
         return {"status": "removed", "name": device_name}
 
+    # No UDID — stop all
+    pm = _get_preview_manager(request)
+    sp = _get_scrcpy_preview(request)
+    await sp.stop()
     return await pm.stop()
 
 
@@ -707,7 +755,13 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
 async def preview_status(request: Request):
     """Get the current preview state including per-device breakdown."""
     pm = _get_preview_manager(request)
-    return pm.status()
+    sp = _get_scrcpy_preview(request)
+    ios_status = pm.status()
+    android_status = sp.status()
+    return {
+        "ios": ios_status,
+        "android": android_status,
+    }
 
 
 @router.get("/preview/devices")

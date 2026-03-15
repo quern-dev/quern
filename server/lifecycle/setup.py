@@ -1378,6 +1378,39 @@ def run_setup() -> int:
             status=CheckStatus.OK,
             message=adb_version or "Available",
         ))
+
+        # scrcpy — optional, for live preview
+        scrcpy_result: CheckResult
+        if _which("scrcpy") is not None:
+            scrcpy_version = _get_version(["scrcpy", "--version"])
+            scrcpy_result = CheckResult(
+                name="Android (scrcpy)",
+                status=CheckStatus.OK,
+                message=scrcpy_version or "Available",
+            )
+        else:
+            scrcpy_result = CheckResult(
+                name="Android (scrcpy)",
+                status=CheckStatus.SKIPPED,
+                message="Not installed — live preview unavailable",
+                detail="Install with: brew install scrcpy",
+                fixable=True,
+            )
+            if _which("brew") and _prompt_yn("    scrcpy not found (needed for Android live preview). Install via Homebrew?"):
+                if _brew_install("scrcpy"):
+                    scrcpy_result = CheckResult(
+                        name="Android (scrcpy)",
+                        status=CheckStatus.OK,
+                        message=_get_version(["scrcpy", "--version"]) or "Installed",
+                    )
+                else:
+                    scrcpy_result = CheckResult(
+                        name="Android (scrcpy)",
+                        status=CheckStatus.WARNING,
+                        message="Homebrew install failed",
+                        detail="Try manually: brew install scrcpy",
+                    )
+        report.add(scrcpy_result)
     else:
         report.add(CheckResult(
             name="Android (adb)",
