@@ -1181,37 +1181,8 @@ def run_setup() -> int:
         message=sys.prefix,
     ))
 
-    # ── System dependencies (auto-install via Homebrew) ──
+    # ── Core dependencies ──
 
-    libimobile_result = check_libimobiledevice()
-    if libimobile_result.status == CheckStatus.MISSING:
-        if _prompt_yn("    libimobiledevice not found. Install via Homebrew?"):
-            if _brew_install("libimobiledevice"):
-                libimobile_result = check_libimobiledevice()  # re-check
-            else:
-                libimobile_result = CheckResult(
-                    name="libimobiledevice",
-                    status=CheckStatus.ERROR,
-                    message="Homebrew install failed",
-                    detail="Try manually: brew install libimobiledevice",
-                )
-    report.add(libimobile_result)
-
-    ideviceinstaller_result = check_ideviceinstaller()
-    if ideviceinstaller_result.status == CheckStatus.MISSING:
-        if _prompt_yn("    ideviceinstaller not found. Install via Homebrew?"):
-            if _brew_install("ideviceinstaller"):
-                ideviceinstaller_result = check_ideviceinstaller()  # re-check
-            else:
-                ideviceinstaller_result = CheckResult(
-                    name="ideviceinstaller",
-                    status=CheckStatus.ERROR,
-                    message="Homebrew install failed",
-                    detail="Try manually: brew install ideviceinstaller",
-                )
-    report.add(ideviceinstaller_result)
-
-    report.add(check_xcode_cli_tools())
     report.add(check_mitmdump())
 
     node_result = check_node()
@@ -1228,139 +1199,201 @@ def run_setup() -> int:
                 )
     report.add(node_result)
 
-    # ── idb (for simulator UI automation) ──
+    # ── iOS support (requires Xcode CLI Tools) ──
 
-    idb_companion_result = check_idb_companion()
-    if idb_companion_result.status == CheckStatus.MISSING:
-        if _prompt_yn("    idb_companion not found. Install via Homebrew?"):
-            # Try the tap first (facebook/fb), then the plain formula
-            success = _brew_install("facebook/fb/idb-companion")
-            if not success:
-                success = _brew_install("idb-companion")
-            if success:
-                idb_companion_result = check_idb_companion()  # re-check
-            else:
-                idb_companion_result = CheckResult(
-                    name="idb_companion",
-                    status=CheckStatus.WARNING,
-                    message="Not installed (UI automation unavailable)",
-                    detail="Try manually: brew tap facebook/fb && brew install idb-companion\n"
-                           "Or see https://fbidb.io for alternative install methods",
-                )
-    report.add(idb_companion_result)
+    xcode_result = check_xcode_cli_tools()
+    has_ios = xcode_result.status == CheckStatus.OK
+    report.add(xcode_result)
 
-    idb_result = check_idb()
-    if idb_result.status == CheckStatus.MISSING:
-        print("    idb CLI not found. This is the Python client for idb_companion.")
-        if _prompt_yn("    Install fb-idb via pip?"):
-            # Use the venv's pip if we're inside one, otherwise fall back to system
-            if sys.prefix != sys.base_prefix:
-                pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
-            else:
-                pip_cmd = "pip" if _which("pip") else "pip3"
-            print(f"    Installing fb-idb...")
-            try:
-                result = subprocess.run([pip_cmd, "install", "fb-idb"], stdin=subprocess.DEVNULL, timeout=120)
-                if result.returncode == 0:
-                    _record_install("pip", "fb-idb")
-                    # Rehash pyenv if it's being used
-                    if _which("pyenv"):
-                        subprocess.run(["pyenv", "rehash"], stdin=subprocess.DEVNULL, timeout=10)
-                    idb_result = check_idb()  # re-check
+    if has_ios:
+        # iOS tools — only check/install when Xcode is available
+
+        libimobile_result = check_libimobiledevice()
+        if libimobile_result.status == CheckStatus.MISSING:
+            if _prompt_yn("    libimobiledevice not found. Install via Homebrew?"):
+                if _brew_install("libimobiledevice"):
+                    libimobile_result = check_libimobiledevice()  # re-check
                 else:
+                    libimobile_result = CheckResult(
+                        name="libimobiledevice",
+                        status=CheckStatus.ERROR,
+                        message="Homebrew install failed",
+                        detail="Try manually: brew install libimobiledevice",
+                    )
+        report.add(libimobile_result)
+
+        ideviceinstaller_result = check_ideviceinstaller()
+        if ideviceinstaller_result.status == CheckStatus.MISSING:
+            if _prompt_yn("    ideviceinstaller not found. Install via Homebrew?"):
+                if _brew_install("ideviceinstaller"):
+                    ideviceinstaller_result = check_ideviceinstaller()  # re-check
+                else:
+                    ideviceinstaller_result = CheckResult(
+                        name="ideviceinstaller",
+                        status=CheckStatus.ERROR,
+                        message="Homebrew install failed",
+                        detail="Try manually: brew install ideviceinstaller",
+                    )
+        report.add(ideviceinstaller_result)
+
+        # idb (for simulator UI automation)
+
+        idb_companion_result = check_idb_companion()
+        if idb_companion_result.status == CheckStatus.MISSING:
+            if _prompt_yn("    idb_companion not found. Install via Homebrew?"):
+                success = _brew_install("facebook/fb/idb-companion")
+                if not success:
+                    success = _brew_install("idb-companion")
+                if success:
+                    idb_companion_result = check_idb_companion()  # re-check
+                else:
+                    idb_companion_result = CheckResult(
+                        name="idb_companion",
+                        status=CheckStatus.WARNING,
+                        message="Not installed (UI automation unavailable)",
+                        detail="Try manually: brew tap facebook/fb && brew install idb-companion\n"
+                               "Or see https://fbidb.io for alternative install methods",
+                    )
+        report.add(idb_companion_result)
+
+        idb_result = check_idb()
+        if idb_result.status == CheckStatus.MISSING:
+            print("    idb CLI not found. This is the Python client for idb_companion.")
+            if _prompt_yn("    Install fb-idb via pip?"):
+                if sys.prefix != sys.base_prefix:
+                    pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
+                else:
+                    pip_cmd = "pip" if _which("pip") else "pip3"
+                print(f"    Installing fb-idb...")
+                try:
+                    result = subprocess.run([pip_cmd, "install", "fb-idb"], stdin=subprocess.DEVNULL, timeout=120)
+                    if result.returncode == 0:
+                        _record_install("pip", "fb-idb")
+                        if _which("pyenv"):
+                            subprocess.run(["pyenv", "rehash"], stdin=subprocess.DEVNULL, timeout=10)
+                        idb_result = check_idb()  # re-check
+                    else:
+                        idb_result = CheckResult(
+                            name="idb (fb-idb)",
+                            status=CheckStatus.ERROR,
+                            message="pip install failed",
+                            detail="Try manually: pip install fb-idb",
+                        )
+                except (FileNotFoundError, subprocess.TimeoutExpired):
                     idb_result = CheckResult(
                         name="idb (fb-idb)",
                         status=CheckStatus.ERROR,
                         message="pip install failed",
                         detail="Try manually: pip install fb-idb",
                     )
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                idb_result = CheckResult(
-                    name="idb (fb-idb)",
-                    status=CheckStatus.ERROR,
-                    message="pip install failed",
-                    detail="Try manually: pip install fb-idb",
-                )
-    report.add(idb_result)
+        report.add(idb_result)
 
-    # ── Physical device support (pymobiledevice3 + tunneld) ──
+        # Physical device support (pymobiledevice3 + tunneld)
 
-    pmd3_result = check_pymobiledevice3()
-    if pmd3_result.status == CheckStatus.WARNING:
-        # Need pipx to install pymobiledevice3
-        if not _which("pipx"):
-            if _which("brew") and _prompt_yn("    pipx not found (needed for pymobiledevice3). Install via Homebrew?"):
-                if _brew_install("pipx"):
-                    pipx_bin = _find_brew_binary("pipx")
-                    if pipx_bin:
-                        try:
-                            subprocess.run([pipx_bin, "ensurepath"], stdin=subprocess.DEVNULL, timeout=30, capture_output=True)
-                        except (FileNotFoundError, subprocess.TimeoutExpired):
-                            pass  # non-critical
-        pipx_bin = _find_brew_binary("pipx")
-        if pipx_bin:
-            if _prompt_yn("    pymobiledevice3 not found. Install via pipx?"):
-                print("    Installing pymobiledevice3 via pipx...")
-                try:
-                    result = subprocess.run(
-                        [pipx_bin, "install", "pymobiledevice3"],
-                        stdin=subprocess.DEVNULL, timeout=300,
-                    )
-                    if result.returncode == 0:
-                        _record_install("pipx", "pymobiledevice3")
-                        pmd3_result = check_pymobiledevice3()  # re-check
-                    else:
+        pmd3_result = check_pymobiledevice3()
+        if pmd3_result.status == CheckStatus.WARNING:
+            if not _which("pipx"):
+                if _which("brew") and _prompt_yn("    pipx not found (needed for pymobiledevice3). Install via Homebrew?"):
+                    if _brew_install("pipx"):
+                        pipx_bin = _find_brew_binary("pipx")
+                        if pipx_bin:
+                            try:
+                                subprocess.run([pipx_bin, "ensurepath"], stdin=subprocess.DEVNULL, timeout=30, capture_output=True)
+                            except (FileNotFoundError, subprocess.TimeoutExpired):
+                                pass
+            pipx_bin = _find_brew_binary("pipx")
+            if pipx_bin:
+                if _prompt_yn("    pymobiledevice3 not found. Install via pipx?"):
+                    print("    Installing pymobiledevice3 via pipx...")
+                    try:
+                        result = subprocess.run(
+                            [pipx_bin, "install", "pymobiledevice3"],
+                            stdin=subprocess.DEVNULL, timeout=300,
+                        )
+                        if result.returncode == 0:
+                            _record_install("pipx", "pymobiledevice3")
+                            pmd3_result = check_pymobiledevice3()  # re-check
+                        else:
+                            pmd3_result = CheckResult(
+                                name="pymobiledevice3",
+                                status=CheckStatus.ERROR,
+                                message="pipx install failed",
+                                detail="Try manually: pipx install pymobiledevice3",
+                            )
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
                         pmd3_result = CheckResult(
                             name="pymobiledevice3",
                             status=CheckStatus.ERROR,
                             message="pipx install failed",
                             detail="Try manually: pipx install pymobiledevice3",
                         )
-                except (FileNotFoundError, subprocess.TimeoutExpired):
-                    pmd3_result = CheckResult(
-                        name="pymobiledevice3",
-                        status=CheckStatus.ERROR,
-                        message="pipx install failed",
-                        detail="Try manually: pipx install pymobiledevice3",
-                    )
-    report.add(pmd3_result)
+        report.add(pmd3_result)
 
-    # tunneld depends on pymobiledevice3 — only offer install if it's available
-    tunneld_result = check_tunneld()
-    if tunneld_result.status == CheckStatus.WARNING and "Not installed" in (tunneld_result.message or ""):
-        if pmd3_result.status == CheckStatus.OK:
-            if _prompt_yn("    tunneld not installed. Install LaunchDaemon now (requires sudo)?"):
-                from server.device.tunneld import install_daemon
-                if install_daemon() == 0:
-                    # Wait for the daemon to start (launchd RunAtLoad)
-                    print("    Waiting for tunneld to start...", end="", flush=True)
-                    from server.device.tunneld import TUNNELD_URL
-                    import urllib.request
-                    for _ in range(20):  # up to 10 seconds
-                        time.sleep(0.5)
-                        try:
-                            req = urllib.request.Request(TUNNELD_URL, method="GET")
-                            with urllib.request.urlopen(req, timeout=1):
-                                break
-                        except Exception:
-                            print(".", end="", flush=True)
-                    print()
-                    tunneld_result = check_tunneld()  # re-check
-                else:
-                    tunneld_result = CheckResult(
-                        name="tunneld",
-                        status=CheckStatus.ERROR,
-                        message="Installation failed",
-                        detail="Try manually: ./quern tunneld install",
-                    )
-        else:
-            tunneld_result = CheckResult(
-                name="tunneld",
-                status=CheckStatus.WARNING,
-                message="Not installed (install pymobiledevice3 first)",
-                detail="Install with: pipx install pymobiledevice3 && ./quern tunneld install",
-            )
-    report.add(tunneld_result)
+        tunneld_result = check_tunneld()
+        if tunneld_result.status == CheckStatus.WARNING and "Not installed" in (tunneld_result.message or ""):
+            if pmd3_result.status == CheckStatus.OK:
+                if _prompt_yn("    tunneld not installed. Install LaunchDaemon now (requires sudo)?"):
+                    from server.device.tunneld import install_daemon
+                    if install_daemon() == 0:
+                        print("    Waiting for tunneld to start...", end="", flush=True)
+                        from server.device.tunneld import TUNNELD_URL
+                        import urllib.request
+                        for _ in range(20):
+                            time.sleep(0.5)
+                            try:
+                                req = urllib.request.Request(TUNNELD_URL, method="GET")
+                                with urllib.request.urlopen(req, timeout=1):
+                                    break
+                            except Exception:
+                                print(".", end="", flush=True)
+                        print()
+                        tunneld_result = check_tunneld()  # re-check
+                    else:
+                        tunneld_result = CheckResult(
+                            name="tunneld",
+                            status=CheckStatus.ERROR,
+                            message="Installation failed",
+                            detail="Try manually: ./quern tunneld install",
+                        )
+            else:
+                tunneld_result = CheckResult(
+                    name="tunneld",
+                    status=CheckStatus.WARNING,
+                    message="Not installed (install pymobiledevice3 first)",
+                    detail="Install with: pipx install pymobiledevice3 && ./quern tunneld install",
+                )
+        report.add(tunneld_result)
+
+    else:
+        print("\n    Xcode CLI Tools not found — skipping iOS dependencies.")
+        print("    Install Xcode to enable iOS simulator and device support.\n")
+
+    # ── Android support ──
+
+    has_android = _which("adb") is not None
+    if has_android:
+        adb_version = _get_version(["adb", "--version"])
+        report.add(CheckResult(
+            name="Android (adb)",
+            status=CheckStatus.OK,
+            message=adb_version or "Available",
+        ))
+    else:
+        report.add(CheckResult(
+            name="Android (adb)",
+            status=CheckStatus.SKIPPED,
+            message="Not installed — Android support unavailable",
+            detail="Install Android Studio or: brew install android-platform-tools",
+        ))
+
+    if not has_ios and not has_android:
+        report.add(CheckResult(
+            name="Platform support",
+            status=CheckStatus.WARNING,
+            message="No iOS or Android tools found",
+            detail="Install Xcode CLI Tools for iOS, or Android Studio/adb for Android.\n"
+                   "At least one platform is needed for device management.",
+        ))
 
     # ── Proxy / network checks ──
 
@@ -1371,14 +1404,13 @@ def run_setup() -> int:
 
     report.add(configure_crash_reporter_dialog())
 
-    # ── Simulator cert setup ──
+    # ── Simulator cert setup (only if iOS available) ──
 
-    if platform.system() == "Darwin" and _which("xcrun"):
+    if has_ios:
         booted = check_booted_simulators()
         if booted:
             cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
             if cert_path.exists():
-                # Check which sims already have the cert vs which need it
                 needs_cert = []
                 for sim in booted:
                     installed = _is_cert_installed(sim["udid"])
