@@ -66,6 +66,7 @@ class AdbBackend:
         self._adb_path: str | None = _find_sdk_tool("adb")
         self._emulator_path: str | None = _find_sdk_tool("emulator", "emulator")
         self._booting_avds: set[str] = set()  # AVD names currently being booted
+        self._serial_to_avd: dict[str, str] = {}  # Cache: emulator serial → AVD name
         if self._adb_path:
             logger.info("adb found at %s", self._adb_path)
         if self._emulator_path:
@@ -270,7 +271,12 @@ class AdbBackend:
                 avd_name = await self._get_emulator_name(serial)
                 if avd_name and avd_name != serial:
                     name = avd_name
+                    self._serial_to_avd[serial] = avd_name
                     running_avd_names.add(avd_name)
+                elif serial in self._serial_to_avd:
+                    # Offline/shutting down — use cached AVD name
+                    name = self._serial_to_avd[serial]
+                    running_avd_names.add(name)
 
             if is_available:
                 if not is_emulator and not model:
@@ -300,6 +306,12 @@ class AdbBackend:
                 is_available=is_available,
                 device_family="Android",
             ))
+
+        # Clean up cache for serials no longer in adb devices
+        active_serials = {d.udid for d in devices}
+        for stale in list(self._serial_to_avd):
+            if stale not in active_serials:
+                del self._serial_to_avd[stale]
 
         # Add shutdown AVDs that aren't currently running or booting
         avds = await self.list_avds()
