@@ -29,6 +29,7 @@ from typing import AsyncGenerator
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from server.auth import APIKeyMiddleware
@@ -388,6 +389,15 @@ def create_app(
 
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
+
+    # CORS — allow local origins (Quern Helm, browser dev tools, etc.)
+    # Must be added after auth so it wraps auth (handles OPTIONS preflight first)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # Routes
     app.include_router(logs_router)
