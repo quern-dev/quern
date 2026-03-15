@@ -94,6 +94,93 @@ class AdbBackend:
         """Run an adb command targeting a specific device."""
         return await self._run_adb("-s", serial, *args)
 
+    # API level → Android version (major releases)
+    _API_TO_VERSION: dict[int, str] = {
+        21: "5.0", 22: "5.1", 23: "6.0", 24: "7.0", 25: "7.1",
+        26: "8.0", 27: "8.1", 28: "9", 29: "10", 30: "11",
+        31: "12", 32: "12L", 33: "13", 34: "14", 35: "15", 36: "16",
+    }
+
+    def _read_avd_version(self, avd_name: str) -> tuple[str, str]:
+        """Read OS version from an AVD's config. Returns (os_version, runtime)."""
+        avd_dir = Path.home() / ".android" / "avd"
+
+        # The AVD directory may not match the AVD name (e.g. "Medium_Phone_API_36.1"
+        # maps to "Medium_Phone.avd"). Check the .ini file for the real path.
+        config_path = None
+        ini_path = avd_dir / f"{avd_name}.ini"
+        if ini_path.exists():
+            try:
+                for line in ini_path.read_text().splitlines():
+                    if line.startswith("path="):
+                        real_dir = Path(line.split("=", 1)[1])
+                        candidate = real_dir / "config.ini"
+                        if candidate.exists():
+                            config_path = candidate
+                        break
+            except Exception:
+                pass
+
+        if config_path is None:
+            config_path = avd_dir / f"{avd_name}.avd" / "config.ini"
+
+        # Fall back to parsing target from .ini if no config.ini found
+        if not config_path.exists():
+            if ini_path.exists():
+                try:
+                    for line in ini_path.read_text().splitlines():
+                        if line.startswith("target=android-"):
+                            api_str = line.split("android-", 1)[1]
+                            return self._parse_api_string(api_str, "")
+                except Exception:
+                    pass
+            return "", ""
+
+        api_str = ""
+        tag_id = ""
+        try:
+            for line in config_path.read_text().splitlines():
+                if line.startswith("image.sysdir.1="):
+                    for part in line.split("/"):
+                        if part.startswith("android-"):
+                            api_str = part.removeprefix("android-")
+                elif line.startswith("tag.id="):
+                    tag_id = line.split("=", 1)[1].strip()
+        except Exception:
+            pass
+
+        if api_str:
+            return self._parse_api_string(api_str, tag_id)
+        return "", ""
+
+    # tag.id → human-readable label
+    _TAG_LABELS: dict[str, str] = {
+        "google_apis": "Google APIs",
+        "google_apis_playstore": "Google Play",
+        "default": "AOSP",
+    }
+
+    def _parse_api_string(self, api_str: str, tag_id: str = "") -> tuple[str, str]:
+        """Parse an API level string like '33' or '36.1' into (os_version, runtime)."""
+        tag_label = self._TAG_LABELS.get(tag_id, "")
+        try:
+            api = int(api_str)
+            version = self._API_TO_VERSION.get(api, api_str)
+            runtime = f"API {api}"
+            if tag_label:
+                runtime = f"{runtime} · {tag_label}"
+            return version, runtime
+        except ValueError:
+            try:
+                api = int(api_str.split(".")[0])
+                version = self._API_TO_VERSION.get(api, api_str)
+                runtime = f"API {api_str}"
+                if tag_label:
+                    runtime = f"{runtime} · {tag_label}"
+                return version, runtime
+            except ValueError:
+                return api_str, ""
+
     async def is_available(self) -> bool:
         """Check if adb is available."""
         return self._adb_path is not None
@@ -117,7 +204,12 @@ class AdbBackend:
             return serial
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List all Android devices by parsing `adb devices -l`."""
+        """List all Android devices and emulators.
+
+        Combines running devices from ``adb devices -l`` with shutdown
+        AVDs from ``emulator -list-avds`` so that unbooted emulators
+        appear in the device list.
+        """
         if not await self.is_available():
             return []
 
@@ -127,6 +219,8 @@ class AdbBackend:
             return []
 
         devices: list[DeviceInfo] = []
+        running_avd_names: set[str] = set()
+
         for line in stdout.strip().splitlines()[1:]:  # Skip header
             line = line.strip()
             if not line:
@@ -174,6 +268,7 @@ class AdbBackend:
                     avd_name = await self._get_emulator_name(serial)
                     if avd_name and avd_name != serial:
                         name = avd_name
+                        running_avd_names.add(avd_name)
                 elif not model:
                     model = await self._get_device_property(serial, "ro.product.model")
                     if model:
@@ -194,6 +289,22 @@ class AdbBackend:
                 is_available=is_available,
                 device_family="Android",
             ))
+
+        # Add shutdown AVDs that aren't currently running
+        avds = await self.list_avds()
+        for avd_name in avds:
+            if avd_name not in running_avd_names:
+                os_version, runtime = self._read_avd_version(avd_name)
+                devices.append(DeviceInfo(
+                    udid=f"avd:{avd_name}",
+                    name=avd_name,
+                    state=DeviceState.SHUTDOWN,
+                    device_type=DeviceType.ANDROID_EMULATOR,
+                    os_version=os_version,
+                    runtime=runtime,
+                    is_available=True,
+                    device_family="Android",
+                ))
 
         return devices
 
