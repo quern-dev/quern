@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
+from starlette.responses import StreamingResponse
 
 from server.models import (
     BootDeviceRequest,
@@ -291,6 +293,54 @@ async def take_screenshot(
         return Response(content=image_bytes, media_type=media_type)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+@router.get("/video")
+async def video_stream(
+    request: Request,
+    udid: str | None = Query(default=None),
+    fps: float = Query(default=2, ge=0.5, le=10),
+    scale: float = Query(default=0.5, ge=0.1, le=1.0),
+    quality: int = Query(default=70, ge=1, le=100),
+):
+    """Stream live MJPEG video from a device.
+
+    Returns a multipart/x-mixed-replace response with JPEG frames.
+    Works in any browser via <img src="...">, in VLC, or any MJPEG client.
+
+    FPS is limited by screenshot capture speed (~1-3 FPS depending on device).
+    The fps parameter sets the minimum interval between frames.
+    """
+    controller = _get_controller(request)
+    interval = 1.0 / fps
+
+    async def generate():
+        boundary = b"--frame\r\n"
+        while True:
+            t0 = asyncio.get_event_loop().time()
+            try:
+                image_bytes, _ = await controller.screenshot(
+                    udid=udid, format="jpeg", scale=scale, quality=quality,
+                )
+                yield (
+                    boundary
+                    + b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(image_bytes)}\r\n".encode()
+                    + b"\r\n"
+                    + image_bytes
+                    + b"\r\n"
+                )
+            except Exception:
+                pass
+            elapsed = asyncio.get_event_loop().time() - t0
+            remaining = interval - elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 # ---------------------------------------------------------------------------

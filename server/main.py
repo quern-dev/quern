@@ -418,6 +418,66 @@ def create_app(
         """Redirect root to API docs."""
         return RedirectResponse(url="/docs")
 
+    @app.get("/video-test")
+    async def video_test() -> Response:
+        """Simple test page for MJPEG video streaming."""
+        from fastapi.responses import HTMLResponse
+        html = """<!DOCTYPE html>
+<html><head><title>Quern Video Test</title></head>
+<body style="background:#111;color:#fff;font-family:sans-serif;padding:20px">
+<h2>Quern MJPEG Stream Test</h2>
+<div id="streams"></div>
+<script>
+async function startStream(udid, label) {
+  const container = document.getElementById('streams');
+  const div = document.createElement('div');
+  div.style.cssText = 'display:inline-block;margin:10px;text-align:center';
+  div.innerHTML = '<p>' + label + '</p>';
+  const img = document.createElement('img');
+  img.style.cssText = 'border:1px solid #333;max-height:500px';
+  div.appendChild(img);
+  container.appendChild(div);
+
+  const res = await fetch(
+    '/api/v1/device/video?udid=' + encodeURIComponent(udid) + '&fps=5&scale=0.5&quality=75',
+    { headers: { 'Authorization': 'Bearer """ + config.api_key + """' } }
+  );
+  const reader = res.body.getReader();
+  let buffer = new Uint8Array();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const tmp = new Uint8Array(buffer.length + value.length);
+    tmp.set(buffer); tmp.set(value, buffer.length); buffer = tmp;
+    let start = -1, end = -1;
+    for (let i = 0; i < buffer.length - 1; i++) {
+      if (buffer[i] === 0xFF && buffer[i+1] === 0xD8) start = i;
+      if (buffer[i] === 0xFF && buffer[i+1] === 0xD9 && start >= 0) { end = i + 2; break; }
+    }
+    if (start >= 0 && end > start) {
+      const blob = new Blob([buffer.slice(start, end)], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+      const prev = img.src;
+      img.src = url;
+      if (prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+      buffer = buffer.slice(end);
+    }
+  }
+}
+// Auto-detect booted devices
+fetch('/api/v1/device/list', {
+  headers: { 'Authorization': 'Bearer """ + config.api_key + """' }
+}).then(r => r.json()).then(data => {
+  const eligible = data.devices.filter(d => d.state === 'booted' && d.connection_type !== 'localNetwork');
+  if (eligible.length === 0) {
+    document.getElementById('streams').innerHTML = '<p>No booted USB/wired devices found</p>';
+    return;
+  }
+  eligible.forEach(d => startStream(d.udid, d.name));
+});
+</script></body></html>"""
+        return HTMLResponse(html)
+
     @app.get("/health")
     async def health() -> dict:
         """Health check with tool availability status and cache stats."""
