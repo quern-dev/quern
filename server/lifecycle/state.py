@@ -15,11 +15,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any, TypedDict
 
+import os
+
 from server.config import CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = CONFIG_DIR / "state.json"
+# Allow tests to override the state file path via env var to avoid
+# clobbering a running server's state.json.
+_state_dir = os.environ.get("QUERN_STATE_DIR")
+STATE_FILE = Path(_state_dir) / "state.json" if _state_dir else CONFIG_DIR / "state.json"
 
 
 class ServerState(TypedDict, total=False):

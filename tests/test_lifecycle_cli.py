@@ -17,6 +17,10 @@ from pathlib import Path
 
 import pytest
 
+# These tests spawn real server processes — they conflict with a running
+# server and should only be run explicitly with: pytest -m integration
+pytestmark = pytest.mark.integration
+
 # Use the same Python interpreter that runs the tests
 PYTHON = sys.executable
 STATE_FILE = Path.home() / ".quern" / "state.json"
