@@ -1,0 +1,8 @@
+--------- beginning of main
+03-08 14:22:45.123  1234  5678 D MyTag  : Debug message here
+03-08 14:22:45.456  1234  5678 I MyTag  : Info message here
+03-08 14:22:45.789  1234  5678 W MyTag  : Warning message here
+03-08 14:22:46.012  1234  5678 E MyTag  : Error message here
+03-08 14:22:46.345  1234  5678 F MyTag  : Fatal message here
+03-08 14:22:46.678  2345  6789 V SystemTag: Verbose system message
+03-08 14:22:47.001  2345  6789 I ActivityManager: Start proc 1234:com.example.app/u0a123 for activity com.example.app/.MainActivity

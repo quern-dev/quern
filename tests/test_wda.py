@@ -482,6 +482,7 @@ class TestInstallWda:
         with (
             patch("server.device.wda.WDA_APP", app),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch("server.device.wda.shutil.which", return_value="/usr/local/bin/ideviceinstaller"),
             patch("server.device.wda.read_wda_state", return_value={}),
             patch("server.device.wda.save_wda_state"),
         ):
@@ -498,6 +499,7 @@ class TestInstallWda:
         with (
             patch("server.device.wda.WDA_APP", app),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch("server.device.wda.shutil.which", return_value="/usr/local/bin/ideviceinstaller"),
             patch("server.device.wda.read_wda_state", return_value={}),
             patch("server.device.wda.save_wda_state"),
         ):

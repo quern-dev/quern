@@ -26,6 +26,7 @@ tools/ios-preview
 
 # Session notes / investigation logs
 *.txt
+!tests/fixtures/*.txt
 docs/bugs/
 docs/test-results/
 
