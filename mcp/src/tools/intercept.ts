@@ -122,7 +122,7 @@ export function registerInterceptTools(server: McpServer): void {
         modifications: z
           .object({
             headers: z
-              .record(z.string())
+              .record(z.string(), z.string())
               .optional()
               .describe("Headers to add/override"),
             body: z.string().optional().describe("New request body"),
@@ -168,7 +168,7 @@ export function registerInterceptTools(server: McpServer): void {
       inputSchema: strictParams({
         flow_id: z.string().describe("The captured flow ID to replay"),
         modify_headers: z
-          .record(z.string())
+          .record(z.string(), z.string())
           .optional()
           .describe("Headers to add/override on the replayed request"),
         modify_body: z
@@ -222,7 +222,7 @@ export function registerInterceptTools(server: McpServer): void {
           .default(200)
           .describe("HTTP status code for the mock response"),
         headers: z
-          .record(z.string())
+          .record(z.string(), z.string())
           .optional()
           .describe(
             'Response headers (default: {"content-type": "application/json"})'
@@ -315,7 +315,7 @@ export function registerInterceptTools(server: McpServer): void {
           .optional()
           .describe("New HTTP status code for the mock response"),
         headers: z
-          .record(z.string())
+          .record(z.string(), z.string())
           .optional()
           .describe("New response headers (replaces all headers)"),
         body: z
