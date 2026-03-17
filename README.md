@@ -76,17 +76,6 @@ curl -fsSL https://quern.dev/install.sh | bash
 
 This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, and adds `quern` to `~/.local/bin` on your PATH.
 
-<details>
-<summary>Manual install (for development)</summary>
-
-```bash
-git clone https://github.com/quern-dev/quern.git
-cd quern
-./quern setup                # creates venv, installs deps, checks tools, adds quern to ~/.local/bin
-./quern mcp-install          # builds MCP server, adds to ~/.claude.json
-```
-
-</details>
 
 ### Uninstall
 
@@ -375,6 +364,12 @@ tests/                 993 tests
 ## Development
 
 ```bash
+# Clone and set up for development
+git clone https://github.com/quern-dev/quern.git
+cd quern
+./quern setup                # creates venv, installs deps, checks tools, adds quern to ~/.local/bin
+./quern mcp-install          # builds MCP server, adds to ~/.claude.json
+
 # Run tests (venv auto-detected)
 .venv/bin/pytest tests/ -v
 
