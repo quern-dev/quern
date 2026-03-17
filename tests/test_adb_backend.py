@@ -51,6 +51,7 @@ class TestListDevices:
         backend._adb_path = "/usr/bin/adb"
         backend._get_device_property = AsyncMock(return_value="")
         backend._get_emulator_name = AsyncMock(return_value="Pixel_7_API_34")
+        backend.list_avds = AsyncMock(return_value=[])
 
         devices = await backend.list_devices()
 

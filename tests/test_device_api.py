@@ -150,7 +150,7 @@ class TestBootDevice:
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "booted"
-        mock_controller.boot.assert_called_once_with(udid="AAAA-1111", name=None)
+        mock_controller.boot.assert_called_once_with(udid="AAAA-1111", name=None, headless=False)
 
     async def test_boot_by_name(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
@@ -161,7 +161,7 @@ class TestBootDevice:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.boot.assert_called_once_with(udid=None, name="iPhone 16 Pro")
+        mock_controller.boot.assert_called_once_with(udid=None, name="iPhone 16 Pro", headless=False)
 
     async def test_boot_no_booted_device_error(self, app, auth_headers, mock_controller):
         mock_controller.boot = AsyncMock(
