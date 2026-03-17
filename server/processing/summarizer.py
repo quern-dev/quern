@@ -16,7 +16,7 @@ from __future__ import annotations
 import base64
 import struct
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from server.models import LogEntry, LogLevel, LogSummaryResponse, TopIssue
 from server.processing.classifier import detect_resolution, extract_pattern
@@ -48,7 +48,7 @@ def parse_cursor(cursor: str) -> datetime | None:
         b64 += "=" * (-len(b64) % 4)
         raw = base64.urlsafe_b64decode(b64)
         epoch_us = struct.unpack(">Q", raw)[0]
-        return datetime.fromtimestamp(epoch_us / 1_000_000, tz=timezone.utc)
+        return datetime.fromtimestamp(epoch_us / 1_000_000, tz=UTC)
     except Exception:
         return None
 
@@ -65,7 +65,7 @@ def generate_summary(
         window: The window label (e.g., "5m") for the response.
         process: If set, only summarize entries from this process.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Filter by process if requested
     if process:

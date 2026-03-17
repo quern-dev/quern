@@ -18,7 +18,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -117,7 +117,7 @@ class SyslogAdapter(BaseSourceAdapter):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         if self._read_task and not self._read_task.done():
@@ -177,13 +177,13 @@ class SyslogAdapter(BaseSourceAdapter):
         )
 
         # Parse the timestamp (idevicesyslog doesn't include year)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             # Handle optional fractional seconds (e.g. "14:23:01.123456")
             fmt = "%Y %b %d %H:%M:%S.%f" if "." in time_str else "%Y %b %d %H:%M:%S"
             ts = datetime.strptime(
                 f"{now.year} {date_str} {time_str}", fmt
-            ).replace(tzinfo=timezone.utc)
+            ).replace(tzinfo=UTC)
         except ValueError:
             ts = now
 

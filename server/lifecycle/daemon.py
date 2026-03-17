@@ -16,7 +16,7 @@ import sys
 import time
 
 from server.config import CONFIG_DIR
-from server.lifecycle.state import is_server_healthy, read_state, remove_state
+from server.lifecycle.state import is_server_healthy, read_state
 
 LOG_FILE = CONFIG_DIR / "server.log"
 
@@ -119,7 +119,7 @@ def _print_status(state: dict) -> None:
 
     key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
 
-    print(f"Quern Debug Server running")
+    print("Quern Debug Server running")
     print(f"  PID:        {pid}")
     print(f"  Server:     http://{local_ip}:{port}")
     if proxy_enabled:
@@ -130,9 +130,9 @@ def _print_status(state: dict) -> None:
             names = ", ".join(local_capture) if isinstance(local_capture, list) else "enabled"
             print(f"  Local capture: {names}")
         else:
-            print(f"  Local capture: disabled (run: quern enable-local-capture)")
+            print("  Local capture: disabled (run: quern enable-local-capture)")
     else:
-        print(f"  Proxy:      disabled")
+        print("  Proxy:      disabled")
     print(f"  API key:    {key_display}")
     print(f"  Log file:   {LOG_FILE}")
 

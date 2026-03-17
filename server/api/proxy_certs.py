@@ -5,12 +5,11 @@ from __future__ import annotations
 import logging
 import socket
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
-
 from pydantic import BaseModel
 
 from server.models import (
@@ -135,7 +134,6 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
     # Filter devices by state and device_type before determining UDIDs
     filtered_devices = all_devices
     if body.state:
-        from server.models import DeviceState as DS
         filtered_devices = [d for d in filtered_devices if d.state.value == body.state]
     if body.device_type:
         from server.models import DeviceType as DT
@@ -198,7 +196,7 @@ async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyRe
                     name=dev.name if dev else "Unknown Device",
                     cert_installed=False,
                     fingerprint=None,
-                    verified_at=datetime.now(timezone.utc).isoformat(),
+                    verified_at=datetime.now(UTC).isoformat(),
                     status="error",
                 )
             )
@@ -241,7 +239,7 @@ async def _verify_simulator(
         name=cert_state.name,
         cert_installed=cert_state.cert_installed,
         fingerprint=cert_state.fingerprint,
-        verified_at=cert_state.verified_at or datetime.now(timezone.utc).isoformat(),
+        verified_at=cert_state.verified_at or datetime.now(UTC).isoformat(),
         status=status,
     )
 
@@ -261,7 +259,7 @@ async def _verify_physical_device(
     from server.models import FlowQueryParams
     from server.proxy.cert_state import update_cert_state
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     cert_state = read_cert_state_for_device(udid) or {}
 
     wifi_configs: dict = cert_state.get("wifi_proxy_configs") or {}
@@ -435,7 +433,7 @@ async def record_device_proxy_config_endpoint(
     the device's client_ip. Falls back to detect_local_ip if client_ip is not
     provided. Call this after completing Wi-Fi proxy setup in device Settings.
     """
-    from server.lifecycle.state import detect_local_ip, detect_host_ip_for_subnet
+    from server.lifecycle.state import detect_host_ip_for_subnet, detect_local_ip
     from server.proxy.cert_state import record_device_proxy_config
 
     proxy_host = None

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def snapshot_system_proxy(interface: str) -> SystemProxySnapshot:
         https_proxy_enabled=https_enabled,
         https_proxy_server=https_server,
         https_proxy_port=https_port,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
     )
 
 

@@ -12,7 +12,7 @@ import json
 import logging
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger("quern-debug-server.preview")
@@ -71,7 +71,7 @@ class PreviewDeviceInfo:
 class ActivePreview:
     name: str
     position: int
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class PreviewManager:
@@ -186,7 +186,7 @@ class PreviewManager:
 
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("ios-preview --interactive did not become ready in 15s")
             await self._kill_process()
             raise RuntimeError("Preview process failed to start (timeout waiting for ready)")
@@ -199,7 +199,7 @@ class PreviewManager:
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
                 await self._process.wait()
         self._cleanup_state()
@@ -351,7 +351,7 @@ class PreviewManager:
 
             try:
                 await asyncio.wait_for(fut, timeout=10.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._pending.pop(name, None)
                 raise RuntimeError(f"Timeout adding preview for {name}")
 
@@ -381,7 +381,7 @@ class PreviewManager:
 
         try:
             await asyncio.wait_for(fut, timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(name, None)
             logger.warning("Timeout removing preview for %s", name)
 
@@ -399,7 +399,7 @@ class PreviewManager:
         try:
             await self._send({"cmd": "quit"})
             await asyncio.wait_for(self._process.wait(), timeout=5.0)
-        except (asyncio.TimeoutError, RuntimeError):
+        except (TimeoutError, RuntimeError):
             await self._kill_process()
 
         self._cleanup_state()

@@ -9,7 +9,6 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from server.models import (
-    FlowRecord,
     HeldFlow,
     InterceptSetRequest,
     InterceptStatusResponse,

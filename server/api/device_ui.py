@@ -7,6 +7,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server.api.device import _get_controller, _handle_device_error
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -17,8 +18,6 @@ from server.models import (
     TypeTextRequest,
     WaitForElementRequest,
 )
-
-from server.api.device import _get_controller, _handle_device_error
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger("quern-debug-server.api")

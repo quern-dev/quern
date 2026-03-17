@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -18,7 +17,6 @@ from server.device.plist import read_plist, remove_plist_key, set_plist_value
 from server.models import (
     DeleteAppPlistKeyRequest,
     DeviceError,
-    ReadAppPlistRequest,
     RestoreAppStateRequest,
     SaveAppStateRequest,
     SetAppPlistValueRequest,

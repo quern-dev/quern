@@ -18,7 +18,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -44,7 +44,7 @@ def parse_oslog_timestamp(ts_str: str) -> datetime:
     """Parse an OSLog timestamp string into a UTC datetime."""
     match = OSLOG_TIMESTAMP_RE.match(ts_str)
     if not match:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     date_part, time_part, tz_offset = match.groups()
     # Truncate microseconds to 6 digits if longer
@@ -54,9 +54,9 @@ def parse_oslog_timestamp(ts_str: str) -> datetime:
 
     iso_str = f"{date_part}T{time_part}{tz_offset[:3]}:{tz_offset[3:]}"
     try:
-        return datetime.fromisoformat(iso_str).astimezone(timezone.utc)
+        return datetime.fromisoformat(iso_str).astimezone(UTC)
     except ValueError:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def extract_process_name(image_path: str) -> str:
@@ -139,7 +139,7 @@ class OslogAdapter(BaseSourceAdapter):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         if self._read_task and not self._read_task.done():

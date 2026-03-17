@@ -6,7 +6,13 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
-from server.models import DeviceError, DeviceType, SetupWdaRequest, StartDriverRequest, StopDriverRequest
+from server.models import (
+    DeviceError,
+    DeviceType,
+    SetupWdaRequest,
+    StartDriverRequest,
+    StopDriverRequest,
+)
 
 router = APIRouter(prefix="/api/v1/device/wda", tags=["wda"])
 logger = logging.getLogger("quern-debug-server.api")

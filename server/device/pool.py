@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import get_default_device_family
@@ -73,7 +73,7 @@ class DevicePool:
         Use force=True to bypass the cache (e.g. after booting a device).
         """
         # Check cache
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if not force and self._last_refresh_at and (now - self._last_refresh_at).total_seconds() < REFRESH_CACHE_TTL_SECONDS:
             return
 
@@ -82,7 +82,7 @@ class DevicePool:
 
         with self._lock_pool_file():
             state = self._read_state()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             # Update or add devices
             for device_info in simctl_devices:
@@ -531,14 +531,14 @@ class DevicePool:
     def _read_state(self) -> DevicePoolState:
         """Read pool state from disk."""
         if not self._pool_file.exists():
-            return DevicePoolState(updated_at=datetime.now(timezone.utc), devices={})
+            return DevicePoolState(updated_at=datetime.now(UTC), devices={})
 
         try:
             data = json.loads(self._pool_file.read_text())
             return DevicePoolState.model_validate(data)
         except Exception as e:
             logger.error("Failed to parse pool state file: %s", e)
-            return DevicePoolState(updated_at=datetime.now(timezone.utc), devices={})
+            return DevicePoolState(updated_at=datetime.now(UTC), devices={})
 
     def _write_state(self, state: DevicePoolState) -> None:
         """Write pool state to disk."""
@@ -550,7 +550,7 @@ class DevicePool:
         lock_file = self._pool_file.parent / "device-pool.lock"
         lock_file.touch(exist_ok=True)
 
-        with open(lock_file, "r") as f:
+        with open(lock_file) as f:
             try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 yield

@@ -13,9 +13,9 @@ import logging
 import os
 import plistlib
 import re
-import signal
 import shutil
-from datetime import datetime, timezone
+import signal
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -178,7 +178,7 @@ async def clone_wda() -> bool:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=CLONE_TIMEOUT
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         raise RuntimeError(
             f"git clone timed out after {CLONE_TIMEOUT}s"
@@ -326,7 +326,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=BUILD_TIMEOUT
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         raise RuntimeError(
             f"xcodebuild timed out after {BUILD_TIMEOUT}s"
@@ -365,7 +365,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     _rename_xctestrun()
 
     # Update state
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     state = read_wda_state()
     state["cloned"] = True
     state["build_team_id"] = team_id
@@ -683,7 +683,7 @@ async def start_driver(udid: str, os_version: str) -> dict:
         "pid": proc.pid,
         "hw_udid": hw_udid,
         "log_path": str(log_path),
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
     }
     save_wda_state(state)
 
@@ -845,7 +845,7 @@ async def install_wda(udid: str, os_version: str) -> None:
         )
 
     # Record install in state
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     state = read_wda_state()
     state.setdefault("installs", {})[udid] = {"installed_at": now}
     save_wda_state(state)

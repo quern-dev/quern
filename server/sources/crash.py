@@ -16,7 +16,7 @@ import logging
 import re
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from server.models import CrashReport, LogEntry, LogLevel, LogSource
@@ -146,7 +146,7 @@ class CrashAdapter(BaseSourceAdapter):
                 stderr=asyncio.subprocess.PIPE,
             )
             await asyncio.wait_for(proc.wait(), timeout=PULL_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("idevicecrashreport timed out after %ds", PULL_TIMEOUT)
             if proc.returncode is None:
                 proc.kill()
@@ -218,7 +218,7 @@ class CrashAdapter(BaseSourceAdapter):
                     proc.communicate(input=report.model_dump_json().encode()),
                     timeout=60,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("on-crash hook timed out after 60s, killing")
                 proc.kill()
                 await proc.wait()
@@ -386,7 +386,7 @@ class CrashAdapter(BaseSourceAdapter):
     def _parse_timestamp(ts_str: str) -> datetime:
         """Best-effort timestamp parsing from crash report."""
         if not ts_str:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
 
         # ISO 8601
         for fmt in (
@@ -399,9 +399,9 @@ class CrashAdapter(BaseSourceAdapter):
             try:
                 dt = datetime.strptime(ts_str.strip(), fmt)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 return dt
             except ValueError:
                 continue
 
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

@@ -10,12 +10,11 @@ can replace this later without changing the API layer.
 from __future__ import annotations
 
 import asyncio
-import threading
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 
-from server.models import LogEntry, LogLevel, LogQueryParams, LogSource
+from server.models import LogEntry, LogLevel, LogQueryParams
 
 
 class RingBuffer:

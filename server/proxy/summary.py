@@ -8,7 +8,7 @@ prose summaries from captured HTTP flows — no LLM calls needed.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.models import (
     FlowErrorPattern,
@@ -39,7 +39,7 @@ def generate_flow_summary(
         simulator_udid: If set, only summarize flows from this simulator.
         client_ip: If set, only summarize flows from this client IP (physical device).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Filter by simulator_udid if requested
     if simulator_udid:

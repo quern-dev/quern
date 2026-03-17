@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server.lifecycle.state import update_state, detect_current_ssid, detect_host_ip_for_subnet
-
-_proxy_logger = logging.getLogger(__name__)
-
+from server.lifecycle.state import detect_current_ssid, detect_host_ip_for_subnet, update_state
 from server.models import (
     DeviceCertState,
-    WifiProxyNetworkConfig,
     FlowQueryParams,
     FlowQueryResponse,
     FlowRecord,
@@ -24,19 +20,17 @@ from server.models import (
     SystemProxyRestoreInfo,
     WaitForFlowRequest,
     WaitForFlowResponse,
+    WifiProxyNetworkConfig,
 )
 from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
 from server.proxy.summary import generate_flow_summary
 from server.proxy.system_proxy import (
     SystemProxySnapshot,
-    configure_system_proxy,
-    detect_active_interface,
     detect_and_configure,
-    get_default_route_device,
-    bsd_device_to_service_name,
     restore_system_proxy,
-    snapshot_system_proxy,
 )
+
+_proxy_logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
@@ -475,7 +469,7 @@ async def flow_summary(
     if flow_store is None:
         return generate_flow_summary([], window=window, host=host, simulator_udid=simulator_udid, client_ip=client_ip)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Determine time boundary from cursor or window
     if since_cursor:
@@ -500,7 +494,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
     flow_store = request.app.state.flow_store
 
     # Default since to now - 5s to catch flows that completed just before the call
-    effective_since = body.since or (datetime.now(timezone.utc) - timedelta(seconds=5))
+    effective_since = body.since or (datetime.now(UTC) - timedelta(seconds=5))
 
     start = time.monotonic()
     polls = 0

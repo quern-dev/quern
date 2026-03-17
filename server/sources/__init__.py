@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from server.models import LogEntry, SourceStatus
-
 
 # Type alias for the callback that source adapters use to emit log entries
 EntryCallback = Callable[[LogEntry], Coroutine[Any, Any, None]]
@@ -89,4 +88,4 @@ class BaseSourceAdapter(abc.ABC):
 
     @staticmethod
     def _now() -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

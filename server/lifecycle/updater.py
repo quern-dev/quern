@@ -13,13 +13,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-from server.lifecycle.update_check import ENDPOINT, TIMEOUT as CHECK_TIMEOUT
+from server.lifecycle.update_check import ENDPOINT
+from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
 GITHUB_REPO = "quern-dev/quern"
 
@@ -319,7 +319,7 @@ def _rebuild_and_restart(project_root: Path) -> None:
     run_setup()
 
     # Restart the server if it was running
-    from server.lifecycle.state import read_state, is_server_healthy
+    from server.lifecycle.state import is_server_healthy, read_state
 
     state = read_state()
     if state and is_server_healthy(state.get("server_port", 9100)):

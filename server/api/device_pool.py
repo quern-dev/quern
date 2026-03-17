@@ -3,6 +3,7 @@
 import time
 
 from fastapi import APIRouter, HTTPException, Request
+
 from server.models import DeviceError, DeviceType, EnsureDevicesRequest, ResolveDeviceRequest
 
 router = APIRouter(prefix="/api/v1/devices", tags=["device-pool"])

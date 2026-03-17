@@ -10,12 +10,11 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 import socket
 import urllib.request
 from pathlib import Path
 from typing import Any, TypedDict
-
-import os
 
 from server.config import CONFIG_DIR
 

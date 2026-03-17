@@ -8,12 +8,12 @@ import time
 
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.u2_client import U2Backend
 from server.device.devicectl import DevicectlBackend
+from server.device.idb import IdbBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
 from server.device.simctl import SimctlBackend
-from server.device.idb import IdbBackend
+from server.device.u2_client import U2Backend
 from server.device.usbmux import UsbmuxBackend
 from server.device.wda_client import WdaBackend
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
@@ -298,7 +298,6 @@ class DeviceController(DeviceControllerUI):
 
     async def _install_app_legacy(self, udid: str, app_path: str) -> None:
         """Install an app on a pre-iOS 17 device via ideviceinstaller / pymobiledevice3."""
-        import asyncio
         import shutil
 
         if shutil.which("ideviceinstaller"):

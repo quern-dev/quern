@@ -12,7 +12,7 @@ import hashlib
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from server.models import LogEntry
@@ -83,7 +83,7 @@ class Deduplicator:
         try:
             while True:
                 await asyncio.sleep(self._flush_interval)
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 await self._flush_expired(now)
         except asyncio.CancelledError:
             return

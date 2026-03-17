@@ -12,8 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
 from server.config import CONFIG_DIR
@@ -141,7 +140,7 @@ def record_device_proxy_config(
         "proxy_host": proxy_host,
         "proxy_port": port,
         "client_ip": client_ip,
-        "set_at": datetime.now(timezone.utc).isoformat(),
+        "set_at": datetime.now(UTC).isoformat(),
     }
     existing["wifi_proxy_configs"] = configs
     update_cert_state(udid, existing)

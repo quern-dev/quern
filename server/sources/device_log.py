@@ -21,7 +21,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.device.tunneld import find_pymobiledevice3_binary, resolve_tunnel_udid
 from server.models import LogEntry, LogLevel, LogSource
@@ -166,7 +166,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         if self._read_task and not self._read_task.done():
@@ -228,7 +228,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
         try:
             ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f").replace(
-                tzinfo=timezone.utc,
+                tzinfo=UTC,
             )
         except ValueError:
             ts = self._now()

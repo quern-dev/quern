@@ -17,25 +17,35 @@ import argparse
 import asyncio
 import logging
 import os
-import platform
 import signal
-import subprocess
 import sys
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncGenerator
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from server.api.app_state import router as app_state_router
+from server.api.build_app import router as build_app_router
+from server.api.builds import router as builds_router
+from server.api.crashes import router as crashes_router
+from server.api.device import router as device_router
+from server.api.device_pool import router as device_pool_router
+from server.api.device_ui import router as device_ui_router
+from server.api.logs import router as logs_router
+from server.api.proxy import router as proxy_router
+from server.api.proxy_certs import router as proxy_certs_router
+from server.api.proxy_intercept import router as proxy_intercept_router
+from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
-from server.device.controller import DeviceController
 from server.config import ServerConfig, get_local_capture_processes, set_local_capture_processes
-from server.lifecycle.daemon import LOG_FILE, daemonize, _print_status
+from server.device.controller import DeviceController
+from server.lifecycle.daemon import _print_status, daemonize
 from server.lifecycle.ports import (
     DEFAULT_PROXY_PORT,
     DEFAULT_SERVER_PORT,
@@ -56,24 +66,12 @@ from server.processing.ingestion_filter import IngestionFilter
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter
 from server.sources.build import BuildAdapter
-from server.sources.crash import CrashAdapter, DIAGNOSTIC_REPORTS_DIR
+from server.sources.crash import DIAGNOSTIC_REPORTS_DIR, CrashAdapter
 from server.sources.oslog import OslogAdapter
 from server.sources.proxy import ProxyAdapter
 from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
-from server.api.builds import router as builds_router
-from server.api.crashes import router as crashes_router
-from server.api.device import router as device_router
-from server.api.device_ui import router as device_ui_router
-from server.api.device_pool import router as device_pool_router
-from server.api.logs import router as logs_router
-from server.api.proxy import router as proxy_router
-from server.api.proxy_intercept import router as proxy_intercept_router
-from server.api.proxy_certs import router as proxy_certs_router
-from server.api.wda import router as wda_router
-from server.api.build_app import router as build_app_router
-from server.api.app_state import router as app_state_router
 
 logger = logging.getLogger("quern-debug-server")
 
@@ -165,11 +163,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         # Check if system proxy is already configured (from previous run or manual setup)
         try:
+            from server.lifecycle.state import read_state, update_state
             from server.proxy.system_proxy import (
                 detect_active_interface,
                 snapshot_system_proxy,
             )
-            from server.lifecycle.state import update_state, read_state
 
             state = read_state()
             already_tracked = state and state.get("system_proxy_configured")
@@ -209,10 +207,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.source_adapters = adapters
 
     # Simulator log adapters — managed on-demand via API
-    app.state.sim_log_adapters: dict[str, "SimulatorLogAdapter"] = {}
+    app.state.sim_log_adapters = {}
 
     # Physical device log adapters — managed on-demand via API
-    app.state.device_log_adapters: dict[str, "PhysicalDeviceLogAdapter"] = {}
+    app.state.device_log_adapters = {}
 
     # Device controller (Phase 3)
     device_controller = DeviceController()
@@ -268,7 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
 
-    warmup_task = asyncio.create_task(_warmup_devices())
+    app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
     # Launch proxy watchdog if proxy is enabled
     watchdog_task = None
@@ -687,16 +685,16 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "proxy_enabled": enable_proxy,
         "proxy_status": "starting" if enable_proxy else "disabled",
         "local_capture": local_capture_processes,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
         "active_devices": [],
     })
 
     if args.foreground:
-        print(f"Quern Debug Server v0.1.0")
+        print("Quern Debug Server v0.1.0")
         print(f"  http://{config.host}:{server_port}")
         print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
-        print(f"  API key file: ~/.quern/api-key")
+        print("  API key file: ~/.quern/api-key")
         if args.process:
             print(f"  Process filter: {args.process}")
         if enable_oslog:
@@ -714,9 +712,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
             if local_capture_processes:
                 print(f"  Local capture: {', '.join(local_capture_processes)}")
             else:
-                print(f"  Local capture: disabled")
-                print(f"    Capture simulator traffic without a system proxy:")
-                print(f"    Run: quern enable-local-capture [process ...]")
+                print("  Local capture: disabled")
+                print("    Capture simulator traffic without a system proxy:")
+                print("    Run: quern enable-local-capture [process ...]")
         if args.on_crash:
             print(f"  On-crash hook: {args.on_crash}")
         print()
@@ -837,7 +835,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
     port = state.get("server_port", 9100)
     if not is_server_healthy(port):
         print("Server state file exists but server is not responding")
-        print(f"  State file may be stale. Run 'quern-debug-server stop' to clean up.")
+        print("  State file may be stale. Run 'quern-debug-server stop' to clean up.")
         sys.exit(1)
 
     # Calculate uptime
@@ -845,7 +843,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
     if started:
         try:
             start_dt = datetime.fromisoformat(started)
-            uptime = datetime.now(timezone.utc) - start_dt
+            uptime = datetime.now(UTC) - start_dt
             hours, remainder = divmod(int(uptime.total_seconds()), 3600)
             minutes, seconds = divmod(remainder, 60)
             state["_uptime"] = f"{hours}h {minutes}m {seconds}s"

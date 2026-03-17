@@ -17,16 +17,15 @@ Android cert installation:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sqlite3
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from server.proxy.cert_state import read_cert_state, read_cert_state_for_device, update_cert_state
 from server.models import DeviceCertState, DeviceType
+from server.proxy.cert_state import read_cert_state_for_device, update_cert_state
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +194,7 @@ async def is_cert_installed(
     if not verify and cached and cached.get("verified_at"):
         try:
             verified_at = datetime.fromisoformat(cached["verified_at"])
-            age = datetime.now(timezone.utc) - verified_at
+            age = datetime.now(UTC) - verified_at
             if age.total_seconds() < CACHE_TTL_SECONDS:
                 logger.debug(f"Cache hit for {udid} (age: {age.total_seconds():.0f}s)")
                 return cached.get("cert_installed", False)
@@ -221,7 +220,7 @@ async def is_cert_installed(
         name=device_name,
         cert_installed=is_installed,
         fingerprint=expected_fingerprint if is_installed else None,
-        verified_at=datetime.now(timezone.utc).isoformat(),
+        verified_at=datetime.now(UTC).isoformat(),
     )
 
     update_cert_state(udid, cert_state.model_dump())
@@ -252,7 +251,7 @@ async def _is_cert_installed_android(
         name=device_name,
         cert_installed=is_installed,
         fingerprint=fingerprint,
-        verified_at=datetime.now(timezone.utc).isoformat(),
+        verified_at=datetime.now(UTC).isoformat(),
     )
     update_cert_state(udid, cert_state.model_dump())
 
@@ -305,7 +304,7 @@ async def install_cert(
     fingerprint = get_cert_fingerprint(cert_path)
     if device_name is None:
         device_name = await _get_device_name(controller, udid)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     cert_state = DeviceCertState(
         name=device_name,
@@ -360,14 +359,14 @@ async def _install_cert_android(
             name=device_name,
             cert_installed=True,
             fingerprint=fingerprint,
-            verified_at=datetime.now(timezone.utc).isoformat(),
+            verified_at=datetime.now(UTC).isoformat(),
         )
         update_cert_state(udid, cert_state.model_dump())
         return False
 
     # Install system cert
     try:
-        was_new = await adb.install_system_cert(udid, cert_path)
+        await adb.install_system_cert(udid, cert_path)
     except Exception as e:
         raise RuntimeError(f"Failed to install cert on Android device {udid}: {e}") from e
 
@@ -375,7 +374,7 @@ async def _install_cert_android(
     fingerprint = get_cert_fingerprint(cert_path)
     if device_name is None:
         device_name = await _get_device_name(controller, udid)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     cert_state = DeviceCertState(
         name=device_name,
@@ -422,7 +421,7 @@ async def get_device_cert_state(
             name=device_name,
             cert_installed=False,
             fingerprint=None,
-            verified_at=datetime.now(timezone.utc).isoformat(),
+            verified_at=datetime.now(UTC).isoformat(),
         )
 
     is_installed = await is_cert_installed(
@@ -438,7 +437,7 @@ async def get_device_cert_state(
         cert_installed=is_installed,
         fingerprint=fingerprint,
         installed_at=cached.get("installed_at"),
-        verified_at=datetime.now(timezone.utc).isoformat(),
+        verified_at=datetime.now(UTC).isoformat(),
     )
 
 

@@ -14,7 +14,7 @@ import re
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.models import (
     BuildDiagnostic,
@@ -273,7 +273,7 @@ class BuildAdapter(BaseSourceAdapter):
         self.latest_result = result
 
         # Emit log entries for errors and warnings
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for diag in errors:
             entry = LogEntry(
                 id=uuid.uuid4().hex[:8],

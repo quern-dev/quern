@@ -18,8 +18,8 @@ import json
 import logging
 import subprocess
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 from server.config import CONFIG_DIR, read_user_config

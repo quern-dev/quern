@@ -119,7 +119,7 @@ def annotate_screenshot(
     line_width = max(2, int(2 * display_scale))
     try:
         font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
-    except (OSError, IOError):
+    except OSError:
         font = ImageFont.load_default()
 
     for el in elements:

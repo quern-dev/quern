@@ -14,14 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from server.config import CONFIG_DIR
-from server.device.plist import read_plist, set_plist_value, remove_plist_key
 from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.app_state")
@@ -192,7 +189,7 @@ async def save_state(
             await _copy_container(group_path, dest)
 
     # Write metadata
-    captured_at = datetime.now(timezone.utc).isoformat()
+    captured_at = datetime.now(UTC).isoformat()
     meta = {
         "label": label,
         "description": description,

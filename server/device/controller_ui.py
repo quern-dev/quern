@@ -240,7 +240,7 @@ class DeviceControllerUI:
         # Get screen dimensions
         dimensions = await self._get_screen_dimensions(udid)
         if not dimensions:
-            logger.debug(f"[FAST PATH] Unknown screen dimensions for device, falling back to describe-all")
+            logger.debug("[FAST PATH] Unknown screen dimensions for device, falling back to describe-all")
             return (False, None)
 
         # Calculate coordinates based on anchor

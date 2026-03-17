@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mitmproxy import flowfilter
@@ -303,7 +303,7 @@ class ProxyAdapter(BaseSourceAdapter):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         for task in (self._read_task, getattr(self, "_stderr_task", None)):
@@ -416,7 +416,7 @@ class ProxyAdapter(BaseSourceAdapter):
 
     def get_held_flows(self) -> list[dict]:
         """Return held flows with computed age_seconds."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = []
         for flow_id, info in self._held_flows.items():
             held_at = info["held_at"]
@@ -439,7 +439,7 @@ class ProxyAdapter(BaseSourceAdapter):
         try:
             await asyncio.wait_for(self._intercept_event.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     # -------------------------------------------------------------------
@@ -532,7 +532,7 @@ class ProxyAdapter(BaseSourceAdapter):
         flow_id = data.get("id", "")
         req_data = data.get("request", {})
         ts = data.get("timestamp", 0)
-        held_at = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
+        held_at = datetime.fromtimestamp(ts, tz=UTC) if ts else datetime.now(UTC)
 
         self._held_flows[flow_id] = {
             "id": flow_id,
@@ -644,7 +644,7 @@ class ProxyAdapter(BaseSourceAdapter):
             )
 
             ts = data.get("timestamp", 0)
-            timestamp = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else self._now()
+            timestamp = datetime.fromtimestamp(ts, tz=UTC) if ts else self._now()
 
             return FlowRecord(
                 id=data.get("id", uuid.uuid4().hex[:12]),

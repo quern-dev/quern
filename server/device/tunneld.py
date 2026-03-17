@@ -17,7 +17,6 @@ import json
 import logging
 import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -97,8 +96,6 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
     devices = await get_tunneld_devices()
     if not devices:
         return None
-
-    tunnel_udids = list(devices.keys())
 
     # If the input is already a tunnel UDID, return it directly
     if coredevice_uuid in devices:
@@ -191,7 +188,7 @@ def install_daemon() -> int:
         tmp_path = tmp.name
 
     try:
-        print(f"Installing tunneld LaunchDaemon (requires sudo)...")
+        print("Installing tunneld LaunchDaemon (requires sudo)...")
         print(f"  Binary: {binary}")
         print(f"  Plist:  {PLIST_PATH}")
         print()

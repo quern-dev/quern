@@ -129,7 +129,7 @@ class SimulatorLogAdapter(BaseSourceAdapter):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         if self._read_task and not self._read_task.done():

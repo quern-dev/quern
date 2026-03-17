@@ -118,7 +118,7 @@ async def _build(
             stderr=asyncio.subprocess.STDOUT,
         )
         stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=BUILD_TIMEOUT)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         raise RuntimeError(f"Build timed out after {BUILD_TIMEOUT}s ({destination})")
     except FileNotFoundError:
         raise RuntimeError("xcodebuild not found — is Xcode installed?")

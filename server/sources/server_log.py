@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -55,7 +55,7 @@ class _BufferHandler(logging.Handler):
 
         entry = LogEntry(
             id=uuid.uuid4().hex,
-            timestamp=datetime.fromtimestamp(record.created, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(record.created, tz=UTC),
             device_id="server",
             process=record.name,
             level=_map_level(record.levelno),

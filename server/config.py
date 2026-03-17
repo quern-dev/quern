@@ -8,7 +8,6 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 logger = logging.getLogger("quern-debug-server.config")
 
 CONFIG_DIR = Path.home() / ".quern"

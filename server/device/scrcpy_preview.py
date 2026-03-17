@@ -6,7 +6,7 @@ import asyncio
 import logging
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger("quern-debug-server.scrcpy-preview")
 
@@ -16,7 +16,7 @@ class ScrcpySession:
     serial: str
     name: str
     process: asyncio.subprocess.Process
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class ScrcpyPreview:
@@ -104,7 +104,7 @@ class ScrcpyPreview:
             session.process.terminate()
             try:
                 await asyncio.wait_for(session.process.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 session.process.kill()
                 await session.process.wait()
 

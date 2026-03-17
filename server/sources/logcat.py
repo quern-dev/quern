@@ -16,7 +16,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -129,7 +129,7 @@ class LogcatAdapter(BaseSourceAdapter):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         if self._read_task and not self._read_task.done():
@@ -194,12 +194,12 @@ class LogcatAdapter(BaseSourceAdapter):
         date_str, time_str, pid_str, tid_str, level_char, tag, message = match.groups()
 
         # Parse timestamp — logcat doesn't include year, use current year
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             ts = datetime.strptime(
                 f"{now.year}-{date_str} {time_str}",
                 "%Y-%m-%d %H:%M:%S.%f",
-            ).replace(tzinfo=timezone.utc)
+            ).replace(tzinfo=UTC)
         except ValueError:
             ts = self._now()
 

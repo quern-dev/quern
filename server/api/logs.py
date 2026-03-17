@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
@@ -25,7 +25,6 @@ from server.processing.summarizer import (
     generate_summary,
     parse_cursor,
 )
-
 from server.storage.ring_buffer import RingBuffer
 
 router = APIRouter(prefix="/api/v1/logs", tags=["logs"])
@@ -146,11 +145,11 @@ async def stream_logs(
                             "event": "log",
                             "data": entry.model_dump_json(),
                         }
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield {
                         "event": "heartbeat",
                         "data": json.dumps({
-                            "time": datetime.now(timezone.utc).isoformat(),
+                            "time": datetime.now(UTC).isoformat(),
                             "buffer_size": buffers[0].size,
                         }),
                     }
@@ -251,7 +250,7 @@ async def get_summary(
                 all_entries.extend(await buf.get_recent(buf.max_size))
     else:
         duration = WINDOW_DURATIONS[window]
-        cutoff = datetime.now(timezone.utc) - duration
+        cutoff = datetime.now(UTC) - duration
         for buf in buffers:
             all_entries.extend(await buf.get_since(cutoff))
 
@@ -317,6 +316,7 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
     Filters can be scoped globally, per-source, or per-device.
     """
     from fastapi import HTTPException
+
     from server.processing.ingestion_filter import PRESETS, build_config
 
     ingestion_filter = request.app.state.ingestion_filter
@@ -349,7 +349,7 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
         except ValueError:
             raise HTTPException(
                 status_code=422,
-                detail=f"Unknown level: {filter_req.min_level!r}. Available: {[l.value for l in LogLevel]}",
+                detail=f"Unknown level: {filter_req.min_level!r}. Available: {[lv.value for lv in LogLevel]}",
             )
 
     # Build config from preset + overrides

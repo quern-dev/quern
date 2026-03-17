@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -210,7 +210,7 @@ class WdaBackend:
                 conn.forward_proc.terminate()
                 try:
                     await asyncio.wait_for(conn.forward_proc.wait(), timeout=3)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     conn.forward_proc.kill()
         self._connections.clear()
         self._last_interaction.clear()

@@ -17,7 +17,6 @@ import base64
 import ctypes
 import ctypes.util
 import json
-import os
 import re
 import subprocess
 import sys
@@ -26,10 +25,7 @@ import time
 import uuid
 from typing import Any
 
-from mitmproxy import http
-from mitmproxy import ctx
-from mitmproxy import flowfilter
-
+from mitmproxy import ctx, flowfilter, http
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: capture PID/process_name from mitmproxy_rs local redirector

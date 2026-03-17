@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-
 # ── Result types ──────────────────────────────────────────────────────────
 
 class CheckStatus(Enum):
@@ -236,7 +235,7 @@ def _add_to_path(shell_rc: Path, directory: Path) -> bool:
 
     Returns True if added, False if already present or error.
     """
-    path_export = f'export PATH="$HOME/.local/bin:$PATH"'
+    path_export = 'export PATH="$HOME/.local/bin:$PATH"'
 
     try:
         # Create parent directory if needed (e.g., ~/.config/fish)
@@ -372,7 +371,7 @@ exec "{venv_python}" -m server "$@"
             # Offer to add it automatically
             shell_rc = _detect_shell_rc()
             if shell_rc:
-                print(f"\n~/.local/bin is not in your PATH.")
+                print("\n~/.local/bin is not in your PATH.")
                 if _prompt_yn("Add it to your PATH automatically?", default=True):
                     if _add_to_path(shell_rc, local_bin):
                         return CheckResult(
@@ -399,9 +398,9 @@ exec "{venv_python}" -m server "$@"
                 status=CheckStatus.OK,
                 message=f"Installed to {wrapper_path}",
                 detail=(
-                    f"⚠ Add ~/.local/bin to PATH manually:\n"
-                    f"    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc\n"
-                    f"    source ~/.zshrc"
+                    "⚠ Add ~/.local/bin to PATH manually:\n"
+                    "    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc\n"
+                    "    source ~/.zshrc"
                 ),
             )
 
@@ -724,7 +723,7 @@ def check_idb_companion() -> CheckResult:
     """Check for idb_companion daemon (needed for idb CLI)."""
     tool = _which("idb_companion")
     if tool:
-        version = _get_version(["idb_companion", "--help"])
+        _get_version(["idb_companion", "--help"])
         msg = "installed"
         return CheckResult(
             name="idb_companion",
@@ -946,6 +945,7 @@ def check_booted_simulators() -> list[dict[str, str]]:
 def _is_cert_installed(udid: str) -> bool:
     """Check if mitmproxy CA cert is already installed on a simulator."""
     import asyncio
+
     from server.device.controller import DeviceController
     from server.proxy import cert_manager
 
@@ -968,6 +968,7 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
     This function is synchronous but calls async cert_manager functions internally.
     """
     import asyncio
+
     from server.device.controller import DeviceController
     from server.proxy import cert_manager
 
@@ -1264,7 +1265,7 @@ def run_setup() -> int:
                     pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
                 else:
                     pip_cmd = "pip" if _which("pip") else "pip3"
-                print(f"    Installing fb-idb...")
+                print("    Installing fb-idb...")
                 try:
                     result = subprocess.run([pip_cmd, "install", "fb-idb"], stdin=subprocess.DEVNULL, timeout=120)
                     if result.returncode == 0:
@@ -1336,8 +1337,9 @@ def run_setup() -> int:
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
-                        from server.device.tunneld import TUNNELD_URL
                         import urllib.request
+
+                        from server.device.tunneld import TUNNELD_URL
                         for _ in range(20):
                             time.sleep(0.5)
                             try:
@@ -1514,7 +1516,6 @@ def run_uninstall() -> int:
     project_root = _find_project_root()
     manifest = _read_manifest()
     brew_packages = manifest.get("brew", [])
-    pip_packages = manifest.get("pip", [])
     pipx_packages = manifest.get("pipx", [])
 
     # ── Confirmation ──
@@ -1538,7 +1539,7 @@ def run_uninstall() -> int:
 
     # ── Stop running server ──
 
-    from server.lifecycle.state import read_state, is_server_healthy
+    from server.lifecycle.state import is_server_healthy, read_state
     state = read_state()
     if state and is_server_healthy(state.get("server_port", 9100)):
         print()
