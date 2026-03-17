@@ -30,7 +30,7 @@ from typing import AsyncGenerator
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from server.auth import APIKeyMiddleware
 from server.device.controller import DeviceController
@@ -419,9 +419,8 @@ def create_app(
         return RedirectResponse(url="/docs")
 
     @app.get("/video-test")
-    async def video_test() -> Response:
+    async def video_test() -> HTMLResponse:
         """Simple test page for MJPEG video streaming."""
-        from fastapi.responses import HTMLResponse
         html = """<!DOCTYPE html>
 <html><head><title>Quern Video Test</title></head>
 <body style="background:#111;color:#fff;font-family:sans-serif;padding:20px">
