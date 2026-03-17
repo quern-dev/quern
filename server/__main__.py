@@ -318,8 +318,23 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _get_version() -> str:
+    """Read version from pyproject.toml (single source of truth)."""
+    project_root = _find_project_root()
+    if project_root:
+        for line in (project_root / "pyproject.toml").read_text().splitlines():
+            if line.startswith("version"):
+                return line.split('"')[1]
+    return "unknown"
+
+
 def main() -> None:
     _maybe_reexec_in_venv()
+
+    # Version flag — handle before anything else
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V", "version"):
+        print(f"quern {_get_version()}")
+        sys.exit(0)
 
     # Lightweight commands — handle without heavy imports
     if len(sys.argv) >= 2 and sys.argv[1] == "setup":
