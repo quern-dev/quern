@@ -74,7 +74,11 @@ class DevicePool:
         """
         # Check cache
         now = datetime.now(UTC)
-        if not force and self._last_refresh_at and (now - self._last_refresh_at).total_seconds() < REFRESH_CACHE_TTL_SECONDS:
+        cache_age = (
+            (now - self._last_refresh_at).total_seconds()
+            if self._last_refresh_at else float("inf")
+        )
+        if not force and self._last_refresh_at and cache_age < REFRESH_CACHE_TTL_SECONDS:
             return
 
         # Get current devices from simctl (~200-500ms, expensive)
@@ -255,7 +259,11 @@ class DevicePool:
         """Find candidates matching all criteria including name and device_family."""
         matched = [
             d for d in devices
-            if self._match_criteria(d, os_version=os_version, device_type=device_type, device_family=device_family)
+            if self._match_criteria(
+                d, os_version=os_version,
+                device_type=device_type,
+                device_family=device_family,
+            )
         ]
         return self._filter_by_name(matched, name)
 
@@ -312,7 +320,13 @@ class DevicePool:
         name_matched = self._filter_by_name(
             [d for d in all_devices if d.is_available], name,
         )
-        os_matched = [d for d in all_devices if d.is_available and (not os_version or self._os_version_matches(d.os_version, os_version))]
+        os_matched = [
+            d for d in all_devices
+            if d.is_available and (
+                not os_version
+                or self._os_version_matches(d.os_version, os_version)
+            )
+        ]
         both_matched = self._find_candidates(
             all_devices, name=name, os_version=os_version,
             device_type=device_type, device_family=device_family,
@@ -335,17 +349,25 @@ class DevicePool:
                 os_only = [d for d in os_matched if d not in name_matched]
                 if name_only:
                     versions = set(d.os_version for d in name_only)
-                    parts.append(f"{len(name_only)} matched name but were {', '.join(sorted(versions))}")
+                    parts.append(
+                        f"{len(name_only)} matched name but were "
+                        f"{', '.join(sorted(versions))}"
+                    )
                 if os_only:
                     names = set(d.name for d in os_only)
-                    parts.append(f"{len(os_only)} matched OS but were {', '.join(sorted(names))}")
+                    parts.append(
+                        f"{len(os_only)} matched OS but were "
+                        f"{', '.join(sorted(names))}"
+                    )
                 if not name_only and not os_only:
                     parts.append("No devices matched either criterion.")
             elif name and not name_matched:
                 available_names = sorted(set(d.name for d in all_devices if d.is_available))
                 parts.append(f"Available device names: {', '.join(available_names)}")
             elif os_version and not os_matched:
-                available_versions = sorted(set(d.os_version for d in all_devices if d.is_available))
+                available_versions = sorted(
+                    set(d.os_version for d in all_devices if d.is_available)
+                )
                 parts.append(f"Available OS versions: {', '.join(available_versions)}")
 
             parts.append(f"Pool has {len(all_devices)} total devices.")
@@ -497,7 +519,8 @@ class DevicePool:
                 criteria_parts.append(f"device_family='{effective_family}'")
             criteria_str = ", ".join(criteria_parts) if criteria_parts else "any"
             raise DeviceError(
-                f"Need {count} devices matching {criteria_str} but only {total_available} available "
+                f"Need {count} devices matching {criteria_str} "
+                f"but only {total_available} available "
                 f"({len(booted_available)} booted, {len(shutdown_available)} shutdown).",
                 tool="pool",
             )

@@ -302,7 +302,9 @@ def _cmd_mcp_install() -> int:
     dispatch = {
         "claude-code":    lambda: _install_json_mcpservers(Path.home() / ".claude.json", mcp_index),
         "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_index),
-        "cursor":         lambda: _install_json_mcpservers(Path.home() / ".cursor" / "mcp.json", mcp_index),
+        "cursor":         lambda: _install_json_mcpservers(
+            Path.home() / ".cursor" / "mcp.json", mcp_index,
+        ),
         "opencode":       lambda: _install_opencode(mcp_index),
         "codex":          lambda: _install_codex(mcp_index),
     }

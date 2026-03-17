@@ -78,7 +78,7 @@ class _BufferHandler(logging.Handler):
         task.add_done_callback(self._task_done)
 
     def _task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed task and log any errors to stderr (not logging, to avoid recursion)."""
+        """Clean up completed task and log errors to stderr (not logging, to avoid recursion)."""
         self._pending_tasks.discard(task)
         if not task.cancelled():
             exc = task.exception()

@@ -168,7 +168,10 @@ def _build_prose(
     parts = [f"{total} requests across {num_hosts} host(s) in the last {window}."]
 
     # Per-host error highlights (top 3)
-    error_hosts = [h for h in host_summaries if h.client_error + h.server_error + h.connection_errors > 0]
+    error_hosts = [
+        h for h in host_summaries
+        if h.client_error + h.server_error + h.connection_errors > 0
+    ]
     for h in error_hosts[:3]:
         err_total = h.client_error + h.server_error + h.connection_errors
         parts.append(f"{h.host}: {err_total} error(s)")

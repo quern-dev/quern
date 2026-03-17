@@ -467,7 +467,10 @@ async def flow_summary(
     """Get an LLM-optimized summary of recent HTTP traffic."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
-        return generate_flow_summary([], window=window, host=host, simulator_udid=simulator_udid, client_ip=client_ip)
+        return generate_flow_summary(
+            [], window=window, host=host,
+            simulator_udid=simulator_udid, client_ip=client_ip,
+        )
 
     now = datetime.now(UTC)
 
@@ -482,7 +485,10 @@ async def flow_summary(
         since_ts = now - duration
         flows = await flow_store.get_since(since_ts)
 
-    return generate_flow_summary(flows, window=window, host=host, simulator_udid=simulator_udid, client_ip=client_ip)
+    return generate_flow_summary(
+        flows, window=window, host=host,
+        simulator_udid=simulator_udid, client_ip=client_ip,
+    )
 
 
 @router.post("/flows/wait", response_model=WaitForFlowResponse)

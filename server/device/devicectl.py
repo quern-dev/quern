@@ -156,9 +156,13 @@ class DevicectlBackend:
             )
         except DeviceError as e:
             msg = str(e)
-            if "app not found" in msg.lower() or "no such" in msg.lower() or "unable to find" in msg.lower():
+            msg_lower = msg.lower()
+            if ("app not found" in msg_lower
+                    or "no such" in msg_lower
+                    or "unable to find" in msg_lower):
                 raise DeviceError(
-                    f"Failed to launch {bundle_id} on physical device {uuid[:8]}: app is not installed. "
+                    f"Failed to launch {bundle_id} on physical device "
+                    f"{uuid[:8]}: app is not installed. "
                     f"Install it first with install_app, or use device_type='simulator' in "
                     f"resolve_device/ensure_devices to target simulators instead.",
                     tool="devicectl",

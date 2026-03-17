@@ -134,7 +134,10 @@ class Pmd3Backend:
             )
         return str(binary)
 
-    async def _run_lockdown(self, binary: str, hw_udid: str, command: str, value: str | None = None) -> str:
+    async def _run_lockdown(
+        self, binary: str, hw_udid: str,
+        command: str, value: str | None = None,
+    ) -> str:
         """Run a pymobiledevice3 lockdown command via usbmux."""
         cmd = [binary, "lockdown", command, "--udid", hw_udid]
         if value is not None:

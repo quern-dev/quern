@@ -247,7 +247,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if scrcpy_preview.is_available():
         logger.info("scrcpy available — Android live preview enabled")
     else:
-        logger.info("scrcpy not available — Android live preview disabled (install with: brew install scrcpy)")
+        logger.info(
+            "scrcpy not available — Android live preview disabled "
+            "(install with: brew install scrcpy)"
+        )
 
     # Device pool (Phase 4b-alpha)
     from server.device.pool import DevicePool
@@ -465,7 +468,8 @@ async function startStream(udid, label) {
 fetch('/api/v1/device/list', {
   headers: { 'Authorization': 'Bearer """ + config.api_key + """' }
 }).then(r => r.json()).then(data => {
-  const eligible = data.devices.filter(d => d.state === 'booted' && d.connection_type !== 'localNetwork');
+  const eligible = data.devices.filter(
+    d => d.state === 'booted' && d.connection_type !== 'localNetwork');
   if (eligible.length === 0) {
     document.getElementById('streams').innerHTML = '<p>No booted USB/wired devices found</p>';
     return;
@@ -535,8 +539,12 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
         help="Directory to watch for crash reports (default: ~/.quern/crashes)",
     )
     parser.add_argument(
-        "--simulator-crashes", action=argparse.BooleanOptionalAction, default=True,
-        help="Watch ~/Library/Logs/DiagnosticReports/ for simulator crash reports (default: enabled)",
+        "--simulator-crashes",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=(
+            "Watch ~/Library/Logs/DiagnosticReports/ for simulator "
+            "crash reports (default: enabled)"
+        ),
     )
     parser.add_argument(
         "--crash-process-filter", default=None, type=str,

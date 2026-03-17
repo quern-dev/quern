@@ -539,9 +539,12 @@ _RUNNER_FAILURE_PATTERNS = [
     (
         "Supported platforms for the buildables in the current scheme is empty",
         "The xctestrun file is invalid for this device. This usually means:\n"
-        "- The provisioning profile expired (free accounts = 7 days). Fix: re-run setup_wda with force:true.\n"
-        "- The device hasn't trusted the developer profile. Fix: Settings > General > VPN & Device Management.\n"
-        "- Xcode signing changed since the build. Fix: re-run setup_wda with force:true.",
+        "- The provisioning profile expired (free accounts = 7 days). "
+        "Fix: re-run setup_wda with force:true.\n"
+        "- The device hasn't trusted the developer profile. "
+        "Fix: Settings > General > VPN & Device Management.\n"
+        "- Xcode signing changed since the build. "
+        "Fix: re-run setup_wda with force:true.",
     ),
     (
         "The device is locked",
@@ -553,8 +556,10 @@ _RUNNER_FAILURE_PATTERNS = [
         "Settings > General > VPN & Device Management > tap the developer profile > Trust.",
     ),
     (
-        "This application's application-identifier entitlement does not match",
-        "The provisioning profile doesn't match the installed WDA. Fix: re-run setup_wda with force:true.",
+        "This application's application-identifier entitlement "
+        "does not match",
+        "The provisioning profile doesn't match the installed WDA. "
+        "Fix: re-run setup_wda with force:true.",
     ),
     (
         "No signing certificate",
@@ -707,7 +712,10 @@ async def start_driver(udid: str, os_version: str) -> dict:
     ready = await _poll_wda_status(wda_url, timeout=DRIVER_START_TIMEOUT)
 
     if not ready:
-        logger.warning("WDA did not become responsive within %ds for %s", DRIVER_START_TIMEOUT, udid[:8])
+        logger.warning(
+            "WDA did not become responsive within %ds for %s",
+            DRIVER_START_TIMEOUT, udid[:8],
+        )
 
     result: dict[str, Any] = {
         "status": "started",
@@ -948,11 +956,18 @@ async def setup_wda(
     if _is_free_account(team_type):
         result["warnings"] = [
             "Free Apple developer account detected. Limitations:",
-            "- Provisioning profiles expire after 7 days — re-run setup_wda with force:true weekly.",
-            "- WDA uses 2 of your ~3 App ID slots (driver + xctrunner), leaving only ~1 for your own app. "
-            "If you hit 'maximum number of apps for free development profiles', wait for old IDs to expire or use a paid account ($99/yr).",
-            "- The device must trust the developer profile: Settings > General > VPN & Device Management > tap your profile > Trust.",
-            "- If WDA fails to launch, check the runner log at ~/.quern/wda/runner-<udid>.log.",
+            "- Provisioning profiles expire after 7 days "
+            "— re-run setup_wda with force:true weekly.",
+            "- WDA uses 2 of your ~3 App ID slots "
+            "(driver + xctrunner), leaving only ~1 for "
+            "your own app. If you hit 'maximum number of "
+            "apps for free development profiles', wait for "
+            "old IDs to expire or use a paid account ($99/yr).",
+            "- The device must trust the developer profile: "
+            "Settings > General > VPN & Device Management "
+            "> tap your profile > Trust.",
+            "- If WDA fails to launch, check the runner log "
+            "at ~/.quern/wda/runner-<udid>.log.",
         ]
 
     return result

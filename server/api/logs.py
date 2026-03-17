@@ -338,7 +338,10 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
         except ValueError:
             raise HTTPException(
                 status_code=422,
-                detail=f"Unknown source: {filter_req.source!r}. Available: {[s.value for s in LogSource]}",
+                detail=(
+                    f"Unknown source: {filter_req.source!r}. "
+                    f"Available: {[s.value for s in LogSource]}"
+                ),
             )
 
     # Validate min_level
@@ -349,7 +352,10 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
         except ValueError:
             raise HTTPException(
                 status_code=422,
-                detail=f"Unknown level: {filter_req.min_level!r}. Available: {[lv.value for lv in LogLevel]}",
+                detail=(
+                    f"Unknown level: {filter_req.min_level!r}. "
+                    f"Available: {[lv.value for lv in LogLevel]}"
+                ),
             )
 
     # Build config from preset + overrides

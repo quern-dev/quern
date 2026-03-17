@@ -47,7 +47,10 @@ class LogEntry(BaseModel):
 
     id: str = Field(description="Unique entry identifier")
     timestamp: datetime
-    device_id: str = Field(default="default", description="Device identifier (for future multi-device)")
+    device_id: str = Field(
+        default="default",
+        description="Device identifier (for future multi-device)",
+    )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")
     category: str = Field(default="", description="OSLog category (e.g., 'auth')")
@@ -75,7 +78,13 @@ class LogQueryParams(BaseModel):
     device_id: str | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
-    tail: bool = Field(default=False, description="If true, return the last N matching entries instead of paginating from offset")
+    tail: bool = Field(
+        default=False,
+        description=(
+            "If true, return the last N matching entries "
+            "instead of paginating from offset"
+        ),
+    )
 
 
 class LogStreamParams(BaseModel):
@@ -153,7 +162,10 @@ class CrashReport(BaseModel):
     exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
     exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
     signal: str = Field(default="", description="e.g. SIGSEGV")
-    top_frames: list[str] = Field(default_factory=list, description="Top stack frames from crashing thread")
+    top_frames: list[str] = Field(
+        default_factory=list,
+        description="Top stack frames from crashing thread",
+    )
     file_path: str = Field(default="", description="Path to the raw crash file on disk")
     raw_text: str = Field(default="", description="First portion of raw crash content")
 
@@ -273,10 +285,22 @@ class FlowRecord(BaseModel):
     tls: dict[str, str] | None = None
     error: str | None = None
     tags: list[str] = Field(default_factory=list)
-    source_process: str | None = Field(default=None, description="Process that originated the request (e.g. nsurlsessiond)")
-    source_pid: int | None = Field(default=None, description="PID of the originating process")
-    simulator_udid: str | None = Field(default=None, description="Simulator UDID if traffic came from a simulator")
-    client_ip: str | None = Field(default=None, description="Client IP address (for physical device identification)")
+    source_process: str | None = Field(
+        default=None,
+        description="Process that originated the request (e.g. nsurlsessiond)",
+    )
+    source_pid: int | None = Field(
+        default=None,
+        description="PID of the originating process",
+    )
+    simulator_udid: str | None = Field(
+        default=None,
+        description="Simulator UDID if traffic came from a simulator",
+    )
+    client_ip: str | None = Field(
+        default=None,
+        description="Client IP address (for physical device identification)",
+    )
 
 
 class FlowQueryParams(BaseModel):
@@ -546,7 +570,9 @@ class DeviceInfo(BaseModel):
     is_available: bool = True
     connection_type: str = ""  # "usb", "wifi", or "" for simulators
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
-    is_connected: bool = True  # True for simulators; physical devices: True when reachable (tunnel not "unavailable")
+    # True for simulators; physical devices: True when
+    # reachable (tunnel not "unavailable")
+    is_connected: bool = True
 
 
 class AppInfo(BaseModel):

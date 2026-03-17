@@ -19,7 +19,10 @@ async def get_latest_crashes(
     request: Request,
     limit: int = Query(default=10, ge=1, le=100),
     since: datetime | None = None,
-    udid: str | None = Query(default=None, description="Device UDID to pull crashes from before returning"),
+    udid: str | None = Query(
+        default=None,
+        description="Device UDID to pull crashes from before returning",
+    ),
 ) -> CrashLatestResponse:
     """Return recent crash reports.
 

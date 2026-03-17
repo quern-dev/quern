@@ -48,7 +48,7 @@ _INFO_PLIST = """\
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSCameraUsageDescription</key>
-    <string>Quern Preview uses camera access to display live iOS device screens connected via USB.</string>
+    <string>Quern Preview uses camera access to display live iOS device screens via USB.</string>
 </dict>
 </plist>
 """

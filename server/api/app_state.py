@@ -136,7 +136,10 @@ async def read_app_plist(
         if key is not None:
             if key not in data:
                 raise HTTPException(status_code=404, detail=f"Key {key!r} not found in plist")
-            return {"key": key, "value": data[key], "plist_path": plist_path, "container": container}
+            return {
+                "key": key, "value": data[key],
+                "plist_path": plist_path, "container": container,
+            }
         return {"data": data, "plist_path": plist_path, "container": container}
     except HTTPException:
         raise

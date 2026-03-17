@@ -37,7 +37,10 @@ NOISE_PATTERNS: list[re.Pattern[str]] = [
 # Order matters — UUIDs before plain hex to avoid partial matches
 _TEMPLATE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     # UUIDs: 8-4-4-4-12 hex
-    (re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"), "<UUID>"),
+    (re.compile(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    ), "<UUID>"),
     # Hex addresses: 0x1a2b3c
     (re.compile(r"0x[0-9a-fA-F]+"), "<HEX>"),
     # IP:port

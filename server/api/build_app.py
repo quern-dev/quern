@@ -244,7 +244,10 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
 
     # 4. Partition by architecture
     physical_udids = [u for u in resolved_udids if controller._device_type(u) == DeviceType.DEVICE]
-    simulator_udids = [u for u in resolved_udids if controller._device_type(u) == DeviceType.SIMULATOR]
+    simulator_udids = [
+        u for u in resolved_udids
+        if controller._device_type(u) == DeviceType.SIMULATOR
+    ]
 
     derived = Path.home() / ".quern" / "builds" / body.scheme
     derived.mkdir(parents=True, exist_ok=True)
@@ -314,7 +317,10 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
                 err_str = str(e)
                 # "Unable to boot device in current state: Booted" is not an error
                 if "current state: Booted" not in err_str:
-                    return DeviceInstallResult(udid=udid, installed=False, error=f"Boot failed: {err_str}")
+                    return DeviceInstallResult(
+                        udid=udid, installed=False,
+                        error=f"Boot failed: {err_str}",
+                    )
 
         try:
             await controller.install_app(str(app_path), udid)

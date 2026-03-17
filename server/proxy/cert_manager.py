@@ -183,7 +183,9 @@ async def is_cert_installed(
 
     # Android: check system cert store via adb
     if controller._is_android(udid):
-        return await _is_cert_installed_android(controller, udid, cert_path, device_name=device_name)
+        return await _is_cert_installed_android(
+            controller, udid, cert_path, device_name=device_name,
+        )
 
     expected_fingerprint = get_cert_fingerprint(cert_path)
 
@@ -285,7 +287,10 @@ async def install_cert(
         raise RuntimeError(f"Cert file does not exist: {cert_path}")
 
     if controller._is_android(udid):
-        return await _install_cert_android(controller, udid, cert_path, force, device_name=device_name)
+        return await _install_cert_android(
+            controller, udid, cert_path, force,
+            device_name=device_name,
+        )
 
     # Check if already installed (unless force=True)
     if not force and await is_cert_installed(
@@ -339,7 +344,9 @@ async def _install_cert_android(
             "1. Create a rootable emulator (Google APIs image, not Google Play) — "
             "identical for app development since apps install via adb:\n"
             '   sdkmanager "system-images;android-34;google_apis;arm64-v8a"\n'
-            '   avdmanager create avd -n <name> -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_6\n'
+            "   avdmanager create avd -n <name> "
+            '-k "system-images;android-34;google_apis;arm64-v8a" '
+            "-d pixel_6\n"
             "2. Or install the cert manually as a user certificate and add "
             "networkSecurityConfig with <certificates src=\"user\" /> to your "
             "app's debug build."

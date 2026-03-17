@@ -1267,11 +1267,17 @@ def run_setup() -> int:
                     pip_cmd = "pip" if _which("pip") else "pip3"
                 print("    Installing fb-idb...")
                 try:
-                    result = subprocess.run([pip_cmd, "install", "fb-idb"], stdin=subprocess.DEVNULL, timeout=120)
+                    result = subprocess.run(
+                        [pip_cmd, "install", "fb-idb"],
+                        stdin=subprocess.DEVNULL, timeout=120,
+                    )
                     if result.returncode == 0:
                         _record_install("pip", "fb-idb")
                         if _which("pyenv"):
-                            subprocess.run(["pyenv", "rehash"], stdin=subprocess.DEVNULL, timeout=10)
+                            subprocess.run(
+                                ["pyenv", "rehash"],
+                                stdin=subprocess.DEVNULL, timeout=10,
+                            )
                         idb_result = check_idb()  # re-check
                     else:
                         idb_result = CheckResult(
@@ -1294,12 +1300,19 @@ def run_setup() -> int:
         pmd3_result = check_pymobiledevice3()
         if pmd3_result.status == CheckStatus.WARNING:
             if not _which("pipx"):
-                if _which("brew") and _prompt_yn("    pipx not found (needed for pymobiledevice3). Install via Homebrew?"):
+                if _which("brew") and _prompt_yn(
+                    "    pipx not found (needed for pymobiledevice3). "
+                    "Install via Homebrew?",
+                ):
                     if _brew_install("pipx"):
                         pipx_bin = _find_brew_binary("pipx")
                         if pipx_bin:
                             try:
-                                subprocess.run([pipx_bin, "ensurepath"], stdin=subprocess.DEVNULL, timeout=30, capture_output=True)
+                                subprocess.run(
+                                    [pipx_bin, "ensurepath"],
+                                    stdin=subprocess.DEVNULL,
+                                    timeout=30, capture_output=True,
+                                )
                             except (FileNotFoundError, subprocess.TimeoutExpired):
                                 pass
             pipx_bin = _find_brew_binary("pipx")
@@ -1331,9 +1344,13 @@ def run_setup() -> int:
         report.add(pmd3_result)
 
         tunneld_result = check_tunneld()
-        if tunneld_result.status == CheckStatus.WARNING and "Not installed" in (tunneld_result.message or ""):
+        if (tunneld_result.status == CheckStatus.WARNING
+                and "Not installed" in (tunneld_result.message or "")):
             if pmd3_result.status == CheckStatus.OK:
-                if _prompt_yn("    tunneld not installed. Install LaunchDaemon now (requires sudo)?"):
+                if _prompt_yn(
+                    "    tunneld not installed. Install LaunchDaemon "
+                    "now (requires sudo)?",
+                ):
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
@@ -1398,7 +1415,10 @@ def run_setup() -> int:
                 detail="Install with: brew install scrcpy",
                 fixable=True,
             )
-            if _which("brew") and _prompt_yn("    scrcpy not found (needed for Android live preview). Install via Homebrew?"):
+            if _which("brew") and _prompt_yn(
+                "    scrcpy not found (needed for Android live preview). "
+                "Install via Homebrew?",
+            ):
                 if _brew_install("scrcpy"):
                     scrcpy_result = CheckResult(
                         name="Android (scrcpy)",
@@ -1567,7 +1587,10 @@ def run_uninstall() -> int:
         for pkg in pipx_packages:
             print(f"  Removing {pkg} (pipx)...")
             try:
-                result = subprocess.run(["pipx", "uninstall", pkg], stdin=subprocess.DEVNULL, timeout=60)
+                result = subprocess.run(
+                    ["pipx", "uninstall", pkg],
+                    stdin=subprocess.DEVNULL, timeout=60,
+                )
                 if result.returncode != 0:
                     print(f"    Warning: failed to uninstall {pkg}")
                     errors += 1
@@ -1658,7 +1681,8 @@ def _remove_mcp_registrations() -> None:
         ("claude-code", Path.home() / ".claude.json", "mcpServers", "quern-debug"),
         (
             "claude-desktop",
-            Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+            Path.home() / "Library" / "Application Support"
+            / "Claude" / "claude_desktop_config.json",
             "mcpServers",
             "quern-debug",
         ),
@@ -1695,7 +1719,11 @@ def _remove_mcp_registrations() -> None:
                         continue
                     if skip and line.strip().startswith("["):
                         skip = False
-                    if skip and (line.strip().startswith(("command", "args", "enabled")) or not line.strip()):
+                    stripped = line.strip()
+                    if skip and (
+                        stripped.startswith(("command", "args", "enabled"))
+                        or not stripped
+                    ):
                         continue
                     new_lines.append(line)
                 codex_path.write_text("".join(new_lines))

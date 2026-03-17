@@ -154,7 +154,8 @@ def _flatten_tree(node: ET.Element) -> list[dict]:
     result: list[dict] = []
     normalized = _normalize_node(node)
     # Skip invisible/zero-size nodes
-    if normalized["frame"] and (normalized["frame"]["width"] > 0 or normalized["frame"]["height"] > 0):
+    frame = normalized["frame"]
+    if frame and (frame["width"] > 0 or frame["height"] > 0):
         result.append(normalized)
     for child in node:
         result.extend(_flatten_tree(child))
@@ -350,7 +351,8 @@ class U2Backend:
         key = _BUTTON_MAP.get(button)
         if not key:
             raise DeviceError(
-                f"Unknown button '{button}'. Supported: {', '.join(sorted(set(_BUTTON_MAP.values())))}",
+                f"Unknown button '{button}'. Supported: "
+                f"{', '.join(sorted(set(_BUTTON_MAP.values())))}",
                 tool="u2",
             )
 

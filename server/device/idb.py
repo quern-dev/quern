@@ -82,10 +82,17 @@ class IdbBackend:
         t3 = time.perf_counter()
         stdout, stderr = await proc.communicate()
         t4 = time.perf_counter()
-        logger.info(f"[PERF IDB] subprocess communicate: {(t4-t3)*1000:.1f}ms, stdout={len(stdout)} bytes")
+        logger.info(
+            f"[PERF IDB] subprocess communicate: "
+            f"{(t4-t3)*1000:.1f}ms, stdout={len(stdout)} bytes"
+        )
 
         end = time.perf_counter()
-        logger.info(f"[PERF IDB] subprocess COMPLETE: total={( end-start)*1000:.1f}ms, returncode={proc.returncode}")
+        logger.info(
+            f"[PERF IDB] subprocess COMPLETE: "
+            f"total={(end-start)*1000:.1f}ms, "
+            f"returncode={proc.returncode}"
+        )
 
         if proc.returncode != 0:
             cmd = args[0] if args else "unknown"
@@ -95,7 +102,11 @@ class IdbBackend:
             )
         return stdout.decode(), stderr.decode()
 
-    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None, source_timeout: float | None = None) -> list[dict]:
+    async def describe_all(
+        self, udid: str, *,
+        snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
+    ) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
         Args:
@@ -132,7 +143,11 @@ class IdbBackend:
                 tool="idb",
             )
         t4 = time.perf_counter()
-        logger.info(f"[PERF] idb.describe_all: JSON parsed {len(data) if isinstance(data, list) else '?'} items (+{(t4-t3)*1000:.1f}ms)")
+        item_count = len(data) if isinstance(data, list) else '?'
+        logger.info(
+            f"[PERF] idb.describe_all: JSON parsed {item_count} "
+            f"items (+{(t4-t3)*1000:.1f}ms)"
+        )
 
         if not isinstance(data, list):
             raise DeviceError(
@@ -147,19 +162,30 @@ class IdbBackend:
         t5 = time.perf_counter()
         flat = self._flatten_nested(data)
         t6 = time.perf_counter()
-        logger.info(f"[PERF] idb.describe_all: flattened to {len(flat)} elements (+{(t6-t5)*1000:.1f}ms)")
+        logger.info(
+            f"[PERF] idb.describe_all: flattened to "
+            f"{len(flat)} elements (+{(t6-t5)*1000:.1f}ms)"
+        )
 
         # Probe empty containers concurrently to discover hidden children
         if empty_containers:
             t7 = time.perf_counter()
-            logger.info(f"[PERF] idb.describe_all: probing {len(empty_containers)} containers (+{(t7-t6)*1000:.1f}ms)")
+            logger.info(
+                f"[PERF] idb.describe_all: probing "
+                f"{len(empty_containers)} containers "
+                f"(+{(t7-t6)*1000:.1f}ms)"
+            )
 
             probe_tasks = [self._probe_container(udid, c) for c in empty_containers]
             probe_results = await asyncio.gather(*probe_tasks)
             probed_elements = [el for batch in probe_results for el in batch]
 
             t8 = time.perf_counter()
-            logger.info(f"[PERF] idb.describe_all: probing complete, found {len(probed_elements)} elements (+{(t8-t7)*1000:.1f}ms)")
+            logger.info(
+                f"[PERF] idb.describe_all: probing complete, "
+                f"found {len(probed_elements)} elements "
+                f"(+{(t8-t7)*1000:.1f}ms)"
+            )
 
             # Merge probed elements, deduplicating against existing
             if probed_elements:
@@ -183,11 +209,16 @@ class IdbBackend:
                             existing_frames.add(key)
 
         end = time.perf_counter()
-        logger.info(f"[PERF] idb.describe_all COMPLETE: total={( end-start)*1000:.1f}ms, elements={len(flat)}")
+        logger.info(
+            f"[PERF] idb.describe_all COMPLETE: "
+            f"total={(end-start)*1000:.1f}ms, elements={len(flat)}"
+        )
 
         return flat
 
-    async def describe_all_nested(self, udid: str, *, snapshot_depth: int | None = None) -> list[dict]:
+    async def describe_all_nested(
+        self, udid: str, *, snapshot_depth: int | None = None,
+    ) -> list[dict]:
         """Get all UI accessibility elements with hierarchy preserved.
 
         Same subprocess call as describe_all (--nested), but skips flattening
@@ -345,7 +376,10 @@ class IdbBackend:
         start = time.perf_counter()
         logger.info(f"[PERF] idb.tap START ({int(round(x))},{int(round(y))})")
 
-        await self._run("ui", "tap", str(int(round(x))), str(int(round(y))), "--duration", "0.05", "--udid", udid)
+        await self._run(
+            "ui", "tap", str(int(round(x))), str(int(round(y))),
+            "--duration", "0.05", "--udid", udid,
+        )
 
         end = time.perf_counter()
         logger.info(f"[PERF] idb.tap COMPLETE: {(end-start)*1000:.1f}ms")

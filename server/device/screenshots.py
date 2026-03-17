@@ -156,7 +156,10 @@ def annotate_screenshot(
             [x, label_y, x + text_w + pad, label_y + text_h + pad],
             fill=(255, 0, 0, 180),
         )
-        draw.text((x + pad // 2, label_y + pad // 2), label_text, fill=(255, 255, 255, 255), font=font)
+        draw.text(
+            (x + pad // 2, label_y + pad // 2), label_text,
+            fill=(255, 255, 255, 255), font=font,
+        )
 
     # Composite overlay onto original
     img = Image.alpha_composite(img, overlay)

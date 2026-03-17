@@ -40,7 +40,11 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
     """
     start = time.perf_counter()
     has_filters = filter_label or filter_identifier or filter_type
-    logger.info(f"[PERF] parse_elements START: {len(raw)} raw items, filters={'yes' if has_filters else 'no'}")
+    has_f = 'yes' if has_filters else 'no'
+    logger.info(
+        f"[PERF] parse_elements START: {len(raw)} raw items, "
+        f"filters={has_f}"
+    )
 
     elements: list[UIElement] = []
     parsed_count = 0
@@ -114,7 +118,11 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
         parsed_count += 1
 
     end = time.perf_counter()
-    logger.info(f"[PERF] parse_elements COMPLETE: {(end-start)*1000:.1f}ms, parsed={parsed_count}, skipped={skipped_count}")
+    logger.info(
+        f"[PERF] parse_elements COMPLETE: "
+        f"{(end-start)*1000:.1f}ms, parsed={parsed_count}, "
+        f"skipped={skipped_count}"
+    )
 
     return elements
 

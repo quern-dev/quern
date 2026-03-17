@@ -371,12 +371,21 @@ class ProxyAdapter(BaseSourceAdapter):
         self._held_flows.clear()
         await self.send_command({"action": "release_all"})
 
-    async def set_mock(self, pattern: str, response: dict, rule_id: str | None = None) -> str:
-        """Add a mock response rule. Returns the rule_id. Raises ValueError if pattern is invalid."""
+    async def set_mock(
+        self, pattern: str, response: dict,
+        rule_id: str | None = None,
+    ) -> str:
+        """Add a mock response rule. Returns the rule_id.
+
+        Raises ValueError if pattern is invalid.
+        """
         validate_filter_pattern(pattern)
         if rule_id is None:
             rule_id = f"mock_{uuid.uuid4().hex[:8]}"
-        self._mock_rules.append({"rule_id": rule_id, "pattern": pattern, "response": response})
+        self._mock_rules.append({
+            "rule_id": rule_id, "pattern": pattern,
+            "response": response,
+        })
         await self.send_command({
             "action": "set_mock",
             "rule_id": rule_id,
@@ -385,8 +394,14 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return rule_id
 
-    async def update_mock(self, rule_id: str, pattern: str | None = None, response: dict | None = None) -> dict:
-        """Update an existing mock rule. Returns the updated rule. Raises ValueError if not found or pattern invalid."""
+    async def update_mock(
+        self, rule_id: str, pattern: str | None = None,
+        response: dict | None = None,
+    ) -> dict:
+        """Update an existing mock rule. Returns the updated rule.
+
+        Raises ValueError if not found or pattern invalid.
+        """
         rule = next((r for r in self._mock_rules if r["rule_id"] == rule_id), None)
         if rule is None:
             raise ValueError(f"Mock rule not found: {rule_id}")

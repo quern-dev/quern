@@ -376,7 +376,10 @@ class AdbBackend:
             )
 
         # Collect existing emulator serials so we can detect the new one
-        existing_serials = {d.udid for d in await self.list_devices() if d.udid.startswith("emulator-")}
+        existing_serials = {
+            d.udid for d in await self.list_devices()
+            if d.udid.startswith("emulator-")
+        }
 
         # Launch emulator in background (detached, no window block)
         args = [self._emulator_path, "-avd", avd_name, "-no-snapshot-load"]
@@ -674,7 +677,9 @@ rm -rf /data/local/tmp/tmp-ca-copy
         On API 33+ non-rootable devices, may fail (WRITE_SETTINGS required).
         """
         # Ensure Quern Driver is installed and has permission
-        await self._ensure_quern_driver_permission(serial, "android.permission.CHANGE_CONFIGURATION")
+        await self._ensure_quern_driver_permission(
+            serial, "android.permission.CHANGE_CONFIGURATION",
+        )
 
         # Try broadcast receiver first
         args = ["--es", "lang", lang]

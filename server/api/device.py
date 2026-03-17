@@ -84,7 +84,10 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 async def list_devices(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
-    device_type: str | None = Query(default=None, pattern="^(simulator|device|android_emulator|android_device)$"),
+    device_type: str | None = Query(
+        default=None,
+        pattern="^(simulator|device|android_emulator|android_device)$",
+    ),
     name: str | None = Query(default=None),
     os_version: str | None = Query(default=None),
     device_family: str | None = Query(default=None),
@@ -451,7 +454,10 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     # Check if already running for this UDID
     sim_adapters: dict = request.app.state.sim_log_adapters
     if udid in sim_adapters and sim_adapters[udid].is_running:
-        return {"status": "already_running", "udid": udid, "adapter_id": sim_adapters[udid].adapter_id}
+        return {
+            "status": "already_running", "udid": udid,
+            "adapter_id": sim_adapters[udid].adapter_id,
+        }
 
     # Get the deduplicator as the entry callback (same pipeline as other adapters)
     dedup = request.app.state.deduplicator
@@ -491,7 +497,11 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
-    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id, "preset_applied": preset_applied}
+    return {
+        "status": "started", "udid": udid,
+        "adapter_id": adapter.adapter_id,
+        "preset_applied": preset_applied,
+    }
 
 
 @router.post("/logging/stop")
@@ -558,7 +568,10 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     # Check if already running for this UDID
     dev_adapters: dict = request.app.state.device_log_adapters
     if udid in dev_adapters and dev_adapters[udid].is_running:
-        return {"status": "already_running", "udid": udid, "adapter_id": dev_adapters[udid].adapter_id}
+        return {
+            "status": "already_running", "udid": udid,
+            "adapter_id": dev_adapters[udid].adapter_id,
+        }
 
     # Get the deduplicator as the entry callback (same pipeline as other adapters)
     dedup = request.app.state.deduplicator
@@ -604,7 +617,11 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
-    return {"status": "started", "udid": udid, "adapter_id": adapter.adapter_id, "preset_applied": preset_applied}
+    return {
+        "status": "started", "udid": udid,
+        "adapter_id": adapter.adapter_id,
+        "preset_applied": preset_applied,
+    }
 
 
 @router.post("/logging/device/stop")
@@ -754,7 +771,11 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 continue
             try:
                 preview = await pm.add(dev.name)
-                added.append({"name": preview.name, "position": preview.position, "status": "added"})
+                added.append({
+                    "name": preview.name,
+                    "position": preview.position,
+                    "status": "added",
+                })
             except RuntimeError as e:
                 errors.append({"name": dev.name, "error": str(e)})
 

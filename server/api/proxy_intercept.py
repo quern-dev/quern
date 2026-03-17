@@ -231,7 +231,10 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
     """Update an existing mock rule's pattern and/or response."""
     adapter = _require_running_proxy(request)
     if body.pattern is None and body.response is None:
-        raise HTTPException(status_code=400, detail="Must provide at least one of 'pattern' or 'response'")
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide at least one of 'pattern' or 'response'",
+        )
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,
@@ -242,7 +245,10 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         detail = str(e)
         status = 404 if "not found" in detail else 400
         raise HTTPException(status_code=status, detail=detail)
-    return {"status": "updated", "rule_id": rule_id, "pattern": rule["pattern"], "response": rule["response"]}
+    return {
+        "status": "updated", "rule_id": rule_id,
+        "pattern": rule["pattern"], "response": rule["response"],
+    }
 
 
 @router.delete("/mocks/{rule_id}")

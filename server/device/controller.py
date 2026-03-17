@@ -239,8 +239,14 @@ class DeviceController(DeviceControllerUI):
 
         return None
 
-    async def boot(self, udid: str | None = None, name: str | None = None, headless: bool = False) -> str:
-        """Boot a simulator or Android emulator by udid or name. Returns the udid that was booted."""
+    async def boot(
+        self, udid: str | None = None,
+        name: str | None = None, headless: bool = False,
+    ) -> str:
+        """Boot a simulator or Android emulator by udid or name.
+
+        Returns the udid that was booted.
+        """
         if udid:
             if self._is_android(udid):
                 raise DeviceError(

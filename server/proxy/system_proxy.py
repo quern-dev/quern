@@ -259,7 +259,9 @@ def _sanitize_stale_snapshot(snap: SystemProxySnapshot, proxy_port: int) -> Syst
     return snap
 
 
-def detect_and_configure(proxy_port: int, interface: str | None = None) -> SystemProxySnapshot | None:
+def detect_and_configure(
+    proxy_port: int, interface: str | None = None,
+) -> SystemProxySnapshot | None:
     """Detect interface, snapshot, configure.  Returns None on detection failure."""
     iface = interface or detect_active_interface()
     if not iface:

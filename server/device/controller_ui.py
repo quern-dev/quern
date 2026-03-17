@@ -171,7 +171,9 @@ class DeviceControllerUI:
             # Swipe up (start lower, end higher)
             swipe_start_y = screen_height * 0.7
             swipe_end_y = swipe_start_y - scroll_amount
-            await self._ui_backend(resolved).swipe(resolved, mid_x, swipe_start_y, mid_x, swipe_end_y, 0.3)
+            await self._ui_backend(resolved).swipe(
+                resolved, mid_x, swipe_start_y, mid_x, swipe_end_y, 0.3,
+            )
             self._invalidate_ui_cache(resolved)
 
             # Re-fetch and check
@@ -240,7 +242,10 @@ class DeviceControllerUI:
         # Get screen dimensions
         dimensions = await self._get_screen_dimensions(udid)
         if not dimensions:
-            logger.debug("[FAST PATH] Unknown screen dimensions for device, falling back to describe-all")
+            logger.debug(
+                "[FAST PATH] Unknown screen dimensions for device, "
+                "falling back to describe-all"
+            )
             return (False, None)
 
         # Calculate coordinates based on anchor
@@ -271,7 +276,10 @@ class DeviceControllerUI:
                 logger.info(f"[FAST PATH] ✓ Found {identifier} at ({x}, {y})")
                 return (True, element)
             else:
-                logger.debug(f"[FAST PATH] Element at ({x}, {y}) is '{found_identifier}', not '{identifier}'")
+                logger.debug(
+                    f"[FAST PATH] Element at ({x}, {y}) is "
+                    f"'{found_identifier}', not '{identifier}'"
+                )
                 return (True, None)  # Fast path succeeded, wrong element
 
         except Exception as e:
@@ -330,13 +338,20 @@ class DeviceControllerUI:
         # If accessibility id returned nothing, retry with predicate string —
         # but only if the first query was fast (<2s). On dense screens, WDA
         # queries are uniformly slow so retrying just wastes time.
-        if not elements and using == "accessibility id" and identifier and elapsed < 2.0:
+        if (not elements and using == "accessibility id"
+                and identifier and elapsed < 2.0):
             pred_value = f"name == '{_escape(identifier)}'"
-            logger.info("[WDA DIRECT] retrying with predicate string=%s on %s", pred_value, udid[:8])
+            logger.info(
+                "[WDA DIRECT] retrying with predicate string=%s on %s",
+                pred_value, udid[:8],
+            )
             raw = await self.wda_client.find_elements_by_query(udid, "predicate string", pred_value)
             elements = parse_elements(raw)
         elif not elements and elapsed >= 2.0:
-            logger.info("[WDA DIRECT] skipping predicate retry (first query took %.1fs) on %s", elapsed, udid[:8])
+            logger.info(
+                "[WDA DIRECT] skipping predicate retry "
+                "(first query took %.1fs) on %s", elapsed, udid[:8],
+            )
 
         return elements, elapsed
 
@@ -397,7 +412,9 @@ class DeviceControllerUI:
 
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and self._is_physical(resolved):
-            elements, query_elapsed = await self._wda_direct_query(resolved, filter_label, filter_identifier, filter_type)
+            elements, query_elapsed = await self._wda_direct_query(
+                resolved, filter_label, filter_identifier, filter_type,
+            )
             if elements:
                 return elements, resolved
             # Direct query found nothing. If the query was slow (>3s), the screen
@@ -405,12 +422,16 @@ class DeviceControllerUI:
             # 30s+ cascade of timeouts and WDA restarts.
             if query_elapsed > 3.0:
                 logger.warning(
-                    "[WDA DIRECT] query took %.1fs with 0 results on %s — skipping /source fallback",
+                    "[WDA DIRECT] query took %.1fs with 0 results "
+                    "on %s — skipping /source fallback",
                     query_elapsed, resolved[:8],
                 )
                 return [], resolved
-            logger.info("[WDA DIRECT FALLBACK] No results for id=%s label=%s, trying /source",
-                        filter_identifier, filter_label)
+            logger.info(
+                "[WDA DIRECT FALLBACK] No results for id=%s "
+                "label=%s, trying /source",
+                filter_identifier, filter_label,
+            )
 
         # Cache miss or bypassed - fetch from idb
         self._cache_misses += 1
@@ -419,7 +440,10 @@ class DeviceControllerUI:
         if self._is_android(resolved):
             await self._ensure_android_screen_on(resolved)
 
-        raw = await self._ui_backend(resolved).describe_all(resolved, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
+        raw = await self._ui_backend(resolved).describe_all(
+            resolved, snapshot_depth=snapshot_depth,
+            source_timeout=source_timeout,
+        )
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -455,8 +479,13 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
-        nested = await self._ui_backend(resolved).describe_all_nested(resolved, snapshot_depth=snapshot_depth)
-        child_dicts = find_children_of(nested, parent_identifier=children_of, parent_label=children_of)
+        nested = await self._ui_backend(resolved).describe_all_nested(
+            resolved, snapshot_depth=snapshot_depth,
+        )
+        child_dicts = find_children_of(
+            nested, parent_identifier=children_of,
+            parent_label=children_of,
+        )
         elements = parse_elements(child_dicts)
         return elements, resolved
 
@@ -482,10 +511,16 @@ class DeviceControllerUI:
             )
 
         elements, resolved = await self.get_ui_elements(udid)
-        matches = find_element(elements, label=label, identifier=identifier, element_type=element_type)
+        matches = find_element(
+            elements, label=label, identifier=identifier,
+            element_type=element_type,
+        )
 
         if len(matches) == 0:
-            search_desc = f"label='{label}'" if label else f"identifier='{identifier}'"
+            search_desc = (
+                f"label='{label}'" if label
+                else f"identifier='{identifier}'"
+            )
             if element_type:
                 search_desc += f", type='{element_type}'"
             raise DeviceError(
@@ -708,7 +743,10 @@ class DeviceControllerUI:
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)
         else:
-            elements, resolved = await self.get_ui_elements(udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
+            elements, resolved = await self.get_ui_elements(
+                udid, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout,
+            )
         return generate_screen_summary(elements, max_elements=max_elements), resolved
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
@@ -766,11 +804,18 @@ class DeviceControllerUI:
                     x = dimensions["width"] - x_offset
                     y = y_offset
                 else:
-                    logger.warning(f"[FAST PATH TAP] Unknown anchor '{anchor}' for {identifier}, falling back")
+                    logger.warning(
+                        f"[FAST PATH TAP] Unknown anchor '{anchor}' "
+                        f"for {identifier}, falling back"
+                    )
                     # Fall through to traditional path
 
                 if anchor in ("bottom-left", "top-right"):
-                    logger.info(f"[FAST PATH TAP] Tapping {identifier} at calculated coordinates ({x}, {y}) [anchor={anchor}]")
+                    logger.info(
+                        f"[FAST PATH TAP] Tapping {identifier} at "
+                        f"calculated coordinates ({x}, {y}) "
+                        f"[anchor={anchor}]"
+                    )
 
                     # Tap directly without fetching UI tree
                     await self._ui_backend(resolved).tap(resolved, x, y)
@@ -795,10 +840,16 @@ class DeviceControllerUI:
         )
 
         # Use shared search helper
-        matches = find_element(elements, label=label, identifier=identifier, element_type=element_type)
+        matches = find_element(
+            elements, label=label, identifier=identifier,
+            element_type=element_type,
+        )
 
         if len(matches) == 0:
-            search_desc = f"label='{label}'" if label else f"identifier='{identifier}'"
+            search_desc = (
+                f"label='{label}'" if label
+                else f"identifier='{identifier}'"
+            )
             if element_type:
                 search_desc += f", type='{element_type}'"
             raise DeviceError(
@@ -859,7 +910,11 @@ class DeviceControllerUI:
                     filter_type=element_type,
                 )
 
-                matches_check = find_element(elements_check, label=label, identifier=identifier, element_type=element_type)
+                matches_check = find_element(
+                    elements_check, label=label,
+                    identifier=identifier,
+                    element_type=element_type,
+                )
 
                 if matches_check:
                     # Check if position changed (element is animating)
@@ -883,7 +938,11 @@ class DeviceControllerUI:
                             filter_type=element_type,
                         )
 
-                        matches_final = find_element(elements_final, label=label, identifier=identifier, element_type=element_type)
+                        matches_final = find_element(
+                            elements_final, label=label,
+                            identifier=identifier,
+                            element_type=element_type,
+                        )
                         if matches_final:
                             cx, cy = get_tap_point(matches_final[0])
 
@@ -894,7 +953,10 @@ class DeviceControllerUI:
             # if verify_disappears:
             #     await asyncio.sleep(0.2)
             #     elements_verify, _ = await self.get_ui_elements(resolved)
-            #     matches_verify = find_element(elements_verify, label=label, identifier=identifier, element_type=element_type)
+            #     matches_verify = find_element(
+            #         elements_verify, label=label,
+            #         identifier=identifier, element_type=element_type,
+            #     )
             #     if matches_verify:
             #         logger.warning("Element still present after tap, may have failed")
             #         # Could retry here if retry_attempts > 1
@@ -994,7 +1056,10 @@ class DeviceControllerUI:
             target = text_fields[0]
 
         if target is None or target.frame is None:
-            raise DeviceError("No text field found to clear", tool="wda" if self._is_physical(resolved) else "idb")
+            tool = "wda" if self._is_physical(resolved) else "idb"
+            raise DeviceError(
+                "No text field found to clear", tool=tool,
+            )
 
         cx = target.frame["x"] + target.frame["width"] / 2
         cy = target.frame["y"] + target.frame["height"] / 2

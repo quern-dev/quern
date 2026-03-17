@@ -298,9 +298,18 @@ def _compute_timing(flow: http.HTTPFlow) -> dict[str, float | None]:
         "dns_ms": _delta("dns_setup", "dns_complete") if hasattr(ts, "dns_setup") else None,
         "connect_ms": _delta("tcp_setup", "tcp_complete") if hasattr(ts, "tcp_setup") else None,
         "tls_ms": _delta("tls_setup", "tls_complete") if hasattr(ts, "tls_setup") else None,
-        "request_ms": _delta("request_start", "request_complete") if hasattr(ts, "request_start") else None,
-        "response_ms": _delta("response_start", "response_complete") if hasattr(ts, "response_start") else None,
-        "total_ms": _delta("request_start", "response_complete") if hasattr(ts, "request_start") else None,
+        "request_ms": (
+            _delta("request_start", "request_complete")
+            if hasattr(ts, "request_start") else None
+        ),
+        "response_ms": (
+            _delta("response_start", "response_complete")
+            if hasattr(ts, "response_start") else None
+        ),
+        "total_ms": (
+            _delta("request_start", "response_complete")
+            if hasattr(ts, "request_start") else None
+        ),
     }
 
 

@@ -32,10 +32,28 @@ logger = logging.getLogger("quern-debug-server.api")
 async def get_ui_elements(
     request: Request,
     udid: str | None = Query(default=None),
-    children_of: str | None = Query(default=None, description="Only return children of the element with this identifier or label"),
-    snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
-    strategy: str | None = Query(default=None, description="Use 'skeleton' to skip /source timeout on complex screens. Physical devices only."),
-    source_timeout: float | None = Query(default=None, ge=1, le=60, description="Override WDA /source timeout in seconds. Physical devices only."),
+    children_of: str | None = Query(
+        default=None,
+        description="Only return children of the element with this identifier or label",
+    ),
+    snapshot_depth: int | None = Query(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA accessibility tree depth (1-50, default 10). "
+            "Only affects physical devices."
+        ),
+    ),
+    strategy: str | None = Query(
+        default=None,
+        description=(
+            "Use 'skeleton' to skip /source timeout on "
+            "complex screens. Physical devices only."
+        ),
+    ),
+    source_timeout: float | None = Query(
+        default=None, ge=1, le=60,
+        description="Override WDA /source timeout in seconds. Physical devices only.",
+    ),
 ):
     """Get all UI accessibility elements from the current screen.
 
@@ -53,13 +71,19 @@ async def get_ui_elements(
                 from server.device.ui_elements import parse_elements
                 elements = parse_elements(raw)
             else:
-                elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
+                elements, resolved_udid = await controller.get_ui_elements(
+                    udid=udid, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout,
+                )
         elif children_of:
             elements, resolved_udid = await controller.get_ui_elements_children_of(
                 children_of=children_of, udid=udid, snapshot_depth=snapshot_depth,
             )
         else:
-            elements, resolved_udid = await controller.get_ui_elements(udid=udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout)
+            elements, resolved_udid = await controller.get_ui_elements(
+                udid=udid, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout,
+            )
 
         end = time.perf_counter()
         logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
@@ -131,7 +155,10 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
     - polls: int - number of polls performed
     """
     start = time.perf_counter()
-    logger.info(f"[PERF] API /ui/wait-for-element START: condition={body.condition}, timeout={body.timeout}s")
+    logger.info(
+        f"[PERF] API /ui/wait-for-element START: "
+        f"condition={body.condition}, timeout={body.timeout}s"
+    )
 
     controller = _get_controller(request)
 
@@ -159,11 +186,17 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
         result["udid"] = resolved_udid
 
         end = time.perf_counter()
-        logger.info(f"[PERF] API /ui/wait-for-element SUCCESS: {(end-start)*1000:.1f}ms, matched={result.get('matched')}")
+        logger.info(
+            f"[PERF] API /ui/wait-for-element SUCCESS: "
+            f"{(end-start)*1000:.1f}ms, matched={result.get('matched')}"
+        )
         return result
     except DeviceError as e:
         end = time.perf_counter()
-        logger.error(f"[PERF] API /ui/wait-for-element ERROR: {(end-start)*1000:.1f}ms, error={e}")
+        logger.error(
+            f"[PERF] API /ui/wait-for-element ERROR: "
+            f"{(end-start)*1000:.1f}ms, error={e}"
+        )
         raise _handle_device_error(e)
 
 
@@ -172,16 +205,35 @@ async def get_screen_summary(
     request: Request,
     max_elements: int = Query(default=20, ge=0, le=500),
     udid: str | None = Query(default=None),
-    snapshot_depth: int | None = Query(default=None, ge=1, le=50, description="WDA accessibility tree depth (1-50, default 10). Only affects physical devices."),
-    strategy: str | None = Query(default=None, description="Use 'skeleton' to skip /source timeout on complex screens. Physical devices only."),
-    source_timeout: float | None = Query(default=None, ge=1, le=60, description="Override WDA /source timeout in seconds. Use for slow screens on older devices. Physical devices only."),
+    snapshot_depth: int | None = Query(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA accessibility tree depth (1-50, default 10). "
+            "Only affects physical devices."
+        ),
+    ),
+    strategy: str | None = Query(
+        default=None,
+        description=(
+            "Use 'skeleton' to skip /source timeout on "
+            "complex screens. Physical devices only."
+        ),
+    ),
+    source_timeout: float | None = Query(
+        default=None, ge=1, le=60,
+        description=(
+            "Override WDA /source timeout in seconds. "
+            "Use for slow screens on older devices. Physical devices only."
+        ),
+    ),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
     Query params:
     - max_elements: Maximum interactive elements to include (0 = unlimited, default 20)
     - udid: Device UDID (auto-resolves if omitted)
-    - snapshot_depth: WDA accessibility tree depth (1-50, default 10). Only affects physical devices.
+    - snapshot_depth: WDA accessibility tree depth (1-50, default 10).
+      Only affects physical devices.
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
     - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
 

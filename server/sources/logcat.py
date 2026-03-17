@@ -164,7 +164,8 @@ class LogcatAdapter(BaseSourceAdapter):
                 entry = self._parse_line(line)
                 if entry is not None:
                     # Apply process filter (logcat doesn't support process filtering natively)
-                    if self.process_filter and self.process_filter.lower() not in entry.process.lower():
+                    if (self.process_filter
+                            and self.process_filter.lower() not in entry.process.lower()):
                         continue
                     await self.emit(entry)
         except asyncio.CancelledError:

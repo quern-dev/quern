@@ -34,10 +34,14 @@ logger = logging.getLogger("quern-debug-server.wda-client")
 
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
-ACTION_TIMEOUT = 25.0  # seconds for tap/swipe/type — WDA serializes requests, so actions queue behind slow queries
+# seconds for tap/swipe/type — WDA serializes requests,
+# so actions queue behind slow queries
+ACTION_TIMEOUT = 25.0
 SOURCE_TIMEOUT = 3.0  # seconds — most screens return /source in <2s
 SOURCE_TIMEOUT_SLOW = 6.0  # seconds — for A13 and older devices
-SNAPSHOT_MAX_DEPTH = 25  # WDA default is 50 — 25 resolves most screens; skeleton fallback handles dense maps
+# WDA default is 50 — 25 resolves most screens;
+# skeleton fallback handles dense maps
+SNAPSHOT_MAX_DEPTH = 25
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
 IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
@@ -530,7 +534,10 @@ class WdaBackend:
                     if now - last > IDLE_TIMEOUT
                 ]
                 for udid in idle_udids:
-                    logger.info("WDA idle timeout for %s — deleting session (driver stays running)", udid[:8])
+                    logger.info(
+                        "WDA idle timeout for %s — deleting session "
+                        "(driver stays running)", udid[:8],
+                    )
                     try:
                         await self.delete_session(udid)
                     except Exception:
@@ -700,7 +707,8 @@ class WdaBackend:
         elements = resp.json().get("value", [])
         results: list[dict] = []
         for el in elements:
-            # Determine type: prefer element's own 'type' field (available with compact responses off)
+            # Determine type: prefer element's own 'type' field
+            # (available with compact responses off)
             raw_type = el.get("type", "") or value
             # Class chain values like "**/XCUIElementTypeTabBar" — extract just the type
             el_type = raw_type.rsplit("/", 1)[-1] if "/" in raw_type else raw_type
@@ -803,7 +811,11 @@ class WdaBackend:
         )
         return flat
 
-    async def describe_all(self, udid: str, *, snapshot_depth: int | None = None, source_timeout: float | None = None) -> list[dict]:
+    async def describe_all(
+        self, udid: str, *,
+        snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
+    ) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
 
         Fetches WDA's /source?format=json, flattens the nested tree,
@@ -821,7 +833,10 @@ class WdaBackend:
         target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
         await self._set_snapshot_depth(udid, target_depth)
 
-        effective_timeout = source_timeout if source_timeout is not None else self._source_timeout(udid)
+        effective_timeout = (
+            source_timeout if source_timeout is not None
+            else self._source_timeout(udid)
+        )
         start = time.perf_counter()
         try:
             resp = await self._request(
@@ -854,7 +869,11 @@ class WdaBackend:
         )
         return flat
 
-    async def describe_all_nested(self, udid: str, *, snapshot_depth: int | None = None, source_timeout: float | None = None) -> list[dict]:
+    async def describe_all_nested(
+        self, udid: str, *,
+        snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
+    ) -> list[dict]:
         """Get UI elements with hierarchy preserved, in idb-compatible format.
 
         Falls back to flat element queries if /source times out.
@@ -867,7 +886,10 @@ class WdaBackend:
         target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
         await self._set_snapshot_depth(udid, target_depth)
 
-        effective_timeout = source_timeout if source_timeout is not None else self._source_timeout(udid)
+        effective_timeout = (
+            source_timeout if source_timeout is not None
+            else self._source_timeout(udid)
+        )
         start = time.perf_counter()
         try:
             resp = await self._request(
@@ -877,7 +899,8 @@ class WdaBackend:
         except httpx.TimeoutException:
             elapsed = (time.perf_counter() - start) * 1000
             logger.warning(
-                "[PERF] wda /source timed out after %.0fms on %s (nested) — falling back to element queries",
+                "[PERF] wda /source timed out after %.0fms on %s "
+                "(nested) — falling back to element queries",
                 elapsed, udid[:8],
             )
 

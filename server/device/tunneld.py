@@ -44,7 +44,10 @@ def find_pymobiledevice3_binary() -> Path | None:
         return Path(path).resolve()
 
     # Check common pipx location
-    pipx_path = Path.home() / ".local" / "pipx" / "venvs" / "pymobiledevice3" / "bin" / "pymobiledevice3"
+    pipx_path = (
+        Path.home() / ".local" / "pipx" / "venvs"
+        / "pymobiledevice3" / "bin" / "pymobiledevice3"
+    )
     if pipx_path.exists():
         return pipx_path.resolve()
 
