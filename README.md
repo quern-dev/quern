@@ -76,6 +76,21 @@ curl -fsSL https://quern.dev/install.sh | bash
 
 This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, and adds `quern` to `~/.local/bin` on your PATH.
 
+<details>
+<summary>Manual install</summary>
+
+Download the latest release tarball from [GitHub Releases](https://github.com/quern-dev/quern/releases/latest), then:
+
+```bash
+mkdir -p ~/.local/share
+tar -xzf quern-*.tar.gz -C ~/.local/share
+mv ~/.local/share/quern-* ~/.local/share/quern
+cd ~/.local/share/quern
+python3 -m server setup
+.venv/bin/python -m server mcp-install
+```
+
+</details>
 
 ### Uninstall
 
