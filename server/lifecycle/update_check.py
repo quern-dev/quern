@@ -1,9 +1,12 @@
 """Non-blocking update check via quern.dev endpoint.
 
-On daemon start, hits https://quern.dev/api/check-update with the local HEAD SHA.
-Cloudflare analytics count the requests — no data is stored or logged server-side.
-Rate-limited to once per 24 hours. Repeats periodically while the server is running
-so long-lived servers still check in. Never blocks or crashes the server.
+On daemon start, hits https://quern.dev/api/check-update with the local
+version (and HEAD SHA for git installs). Cloudflare analytics count the
+requests — no data is stored or logged server-side.
+
+Rate-limited to once per 24 hours. Repeats periodically while the server
+is running so long-lived servers still check in. Never blocks or crashes
+the server.
 
 Opt out by setting "update_check": false in ~/.quern/config.json.
 """
@@ -42,8 +45,22 @@ def _find_project_root() -> Path | None:
     return None
 
 
+def _get_local_version() -> str | None:
+    """Read version from pyproject.toml."""
+    project_root = _find_project_root()
+    if project_root is None:
+        return None
+    pyproject = project_root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    for line in pyproject.read_text().splitlines():
+        if line.startswith("version"):
+            return line.split('"')[1]
+    return None
+
+
 def _get_head_sha() -> str | None:
-    """Get the local HEAD commit SHA."""
+    """Get the local HEAD commit SHA (git installs only)."""
     project_root = _find_project_root()
     if project_root is None or not (project_root / ".git").exists():
         return None
@@ -85,12 +102,21 @@ def check_for_updates() -> str | None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         LAST_CHECK_FILE.touch()
 
+        version = _get_local_version()
         head_sha = _get_head_sha()
-        if not head_sha:
+
+        if not version and not head_sha:
             return None
 
+        # Build query params — send version and optionally SHA
+        params = []
+        if head_sha:
+            params.append(f"sha={head_sha}")
+        if version:
+            params.append(f"version={version}")
+
         # Hit the endpoint
-        url = f"{ENDPOINT}?sha={head_sha}"
+        url = f"{ENDPOINT}?{'&'.join(params)}"
         req = urllib.request.Request(url, headers={"User-Agent": "quern-update-check/1.0"})
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
