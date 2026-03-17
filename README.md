@@ -6,7 +6,7 @@ Quern is a local debug server that lets AI coding agents — Claude Code, Cursor
 
 No cloud. No telemetry. Just a daemon on your Mac that bridges the gap between "build succeeded" and "it actually works."
 
-> Supports iOS Simulators and physical iOS devices (via WebDriverAgent). Android emulator and device support is on the roadmap.
+> Supports iOS simulators, physical iOS devices (via WebDriverAgent), Android emulators, and physical Android devices.
 
 ```
 Simulator / Device
@@ -62,9 +62,11 @@ Other things you can ask:
 
 ### Prerequisites
 
-- macOS with Xcode and Command Line Tools
+- macOS
 - Python 3.11+
 - Node.js 18+
+- For iOS: Xcode and Command Line Tools
+- For Android: Android Studio or `adb` via Homebrew
 
 ### Install
 
@@ -72,10 +74,10 @@ Other things you can ask:
 curl -fsSL https://quern.dev/install.sh | bash
 ```
 
-This clones Quern to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, and adds `quern` to your PATH.
+This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, and adds `quern` to `~/.local/bin` on your PATH.
 
 <details>
-<summary>Manual install</summary>
+<summary>Manual install (for development)</summary>
 
 ```bash
 git clone https://github.com/quern-dev/quern.git
@@ -101,7 +103,7 @@ quern start                # start as a background daemon
 quern start -f             # run in the foreground (Ctrl-C to stop)
 quern status               # check status
 quern stop                 # stop
-quern update               # pull latest changes and rebuild
+quern update               # update to latest release and rebuild
 quern uninstall            # remove Quern and its dependencies
 ```
 
@@ -148,7 +150,7 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 ## Update Checks
 
-When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version's commit SHA — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored. To disable, add `"update_check": false` to `~/.quern/config.json`.
+When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored. To disable, add `"update_check": false` to `~/.quern/config.json`.
 
 ## What Quern Does
 
@@ -230,7 +232,7 @@ quern start -f               # Foreground
 quern stop                   # Graceful shutdown
 quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime
-quern update                 # Pull latest changes, reinstall deps, rebuild MCP
+quern update                 # Update to latest release and rebuild
 quern uninstall              # Remove Quern and dependencies installed by setup
 quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
