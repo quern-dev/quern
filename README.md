@@ -64,7 +64,7 @@ Other things you can ask:
 
 - macOS
 - Python 3.11+
-- Node.js 18+
+- Node.js 22+
 - For iOS: Xcode and Command Line Tools
 - For Android: Android Studio or `adb` via Homebrew
 
