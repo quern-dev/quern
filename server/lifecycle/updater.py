@@ -162,7 +162,7 @@ def _update_via_git(project_root: Path) -> int:
 
     if update_available is False:
         print("Already up to date.")
-        return 0
+        return 2  # No update needed
 
     # quern.dev said yes or was unreachable — need git fetch either way for the pull
     git_check = _check_via_git(project_root)
@@ -172,7 +172,7 @@ def _update_via_git(project_root: Path) -> int:
     has_updates, branch, behind_count = git_check
     if not has_updates:
         print("Already up to date.")
-        return 0
+        return 2  # No update needed
 
     print(f"{behind_count} new commit{'s' if behind_count != 1 else ''} available.")
 
@@ -225,7 +225,7 @@ def _update_via_tarball(project_root: Path) -> int:
 
     if current_version == latest_version:
         print(f"Already up to date (v{current_version}).")
-        return 0
+        return 2  # No update needed
 
     print(f"Updating v{current_version or 'unknown'} → v{latest_version}...")
 
@@ -349,8 +349,10 @@ def run_update() -> int:
     else:
         rc = _update_via_tarball(project_root)
 
-    if rc != 0:
-        return rc
+    if rc == 1:
+        return 1  # Error
+    if rc == 2:
+        return 0  # Already up to date — nothing to rebuild
 
     _rebuild_and_restart(project_root)
     return 0
