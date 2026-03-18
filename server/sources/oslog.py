@@ -1,14 +1,13 @@
 """Source adapter for macOS `log stream` (OSLog / Unified Logging).
 
-Spawns `log stream --style json` as a subprocess and parses JSON output
-line-by-line into structured LogEntry objects.
+Spawns `log stream --style ndjson` as a subprocess and parses one JSON
+object per line into structured LogEntry objects.
 
 OSLog messageType mapping:
     Default → INFO, Info → INFO, Debug → DEBUG, Error → ERROR, Fault → FAULT
 
 Dependencies:
     - macOS only (the `log` command is not available on Linux)
-    - A USB-connected iOS device (or simulator)
 """
 
 from __future__ import annotations
@@ -68,7 +67,7 @@ def extract_process_name(image_path: str) -> str:
 
 
 class OslogAdapter(BaseSourceAdapter):
-    """Captures logs from macOS `log stream --style json` subprocess."""
+    """Captures logs from macOS `log stream --style ndjson` subprocess."""
 
     def __init__(
         self,
@@ -90,7 +89,7 @@ class OslogAdapter(BaseSourceAdapter):
 
     def _build_command(self) -> list[str]:
         """Build the log stream command with appropriate filters."""
-        cmd = ["log", "stream", "--style", "json"]
+        cmd = ["log", "stream", "--style", "ndjson"]
 
         predicates: list[str] = []
         if self.subsystem_filter:
@@ -104,7 +103,7 @@ class OslogAdapter(BaseSourceAdapter):
         return cmd
 
     async def start(self) -> None:
-        """Spawn `log stream` and begin reading its JSON output."""
+        """Spawn `log stream --style ndjson` and begin reading output."""
         cmd = self._build_command()
 
         try:
@@ -154,7 +153,11 @@ class OslogAdapter(BaseSourceAdapter):
         logger.info("OSLog adapter stopped")
 
     async def _read_loop(self) -> None:
-        """Read lines from log stream stdout and parse JSON objects."""
+        """Read ndjson lines from log stream stdout.
+
+        With --style ndjson, each log entry is a single line of compact JSON.
+        No buffering issues — ndjson flushes per line even when piped.
+        """
         assert self._process is not None
         assert self._process.stdout is not None
 
@@ -164,10 +167,10 @@ class OslogAdapter(BaseSourceAdapter):
                     break
 
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
-                if not line:
+                if not line or not line.startswith("{"):
                     continue
 
-                entry = self._parse_json_line(line)
+                entry = self._parse_ndjson_line(line)
                 if entry is not None:
                     await self.emit(entry)
         except asyncio.CancelledError:
@@ -179,19 +182,10 @@ class OslogAdapter(BaseSourceAdapter):
         finally:
             self._running = False
 
-    def _parse_json_line(self, line: str) -> LogEntry | None:
-        """Parse a single JSON line from `log stream --style json` output.
-
-        Lines that aren't valid JSON (e.g., the opening/closing brackets of
-        the JSON array, or comma separators) are silently skipped.
-        """
-        # log stream wraps output in a JSON array — strip leading commas/brackets
-        stripped = line.strip().strip(",").strip("[").strip("]").strip(",")
-        if not stripped or stripped in ("{", "}"):
-            return None
-
+    def _parse_ndjson_line(self, line: str) -> LogEntry | None:
+        """Parse a single ndjson line into a LogEntry."""
         try:
-            data = json.loads(stripped)
+            data = json.loads(line)
         except json.JSONDecodeError:
             return None
 

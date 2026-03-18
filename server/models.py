@@ -950,6 +950,18 @@ class StopDeviceLogRequest(BaseModel):
     udid: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Host oslog streaming models
+# ---------------------------------------------------------------------------
+
+
+class StartOslogRequest(BaseModel):
+    """Request body for POST /api/v1/logs/oslog/start."""
+
+    subsystem: str | None = None
+    process: str | None = None
+
+
 class PreviewStartRequest(BaseModel):
     """Request body for POST /api/v1/device/preview/start."""
 

@@ -169,7 +169,7 @@ Captures from multiple sources simultaneously, deduplicates, and stores in a rin
 | Crash reports | `idevicecrashreport` | Parsed crash reports with stack traces | Always on |
 | Build output | `xcodebuild` | Errors, warnings, test results | Always on |
 | Device syslog (legacy) | `idevicesyslog` | Unfiltered system + app log messages | Opt-in (`--syslog`) |
-| macOS unified log | `log stream` | Structured OS log entries | Opt-in (`--oslog`) |
+| macOS unified log | `log stream` | os_log from any host Mac process | On-demand (`start_oslog_streaming`) |
 
 ### Network Proxy
 
@@ -248,12 +248,12 @@ quern disable-local-capture  # Disable local capture
 
 ## MCP Tools
 
-76 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use. 
+78 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use. 
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging` |
+| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
 | Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `set_local_capture` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `clear_mocks` |

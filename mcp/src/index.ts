@@ -24,6 +24,7 @@ import { registerDeviceLogTools } from "./tools/device-log.js";
 import { registerWdaTools } from "./tools/wda.js";
 import { registerBuildTools } from "./tools/build.js";
 import { registerAppStateTools } from "./tools/app-state.js";
+import { registerOslogTools } from "./tools/oslog.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -83,6 +84,7 @@ registerDeviceLogTools(server);
 registerWdaTools(server);
 registerBuildTools(server);
 registerAppStateTools(server);
+registerOslogTools(server);
 
 // ---------------------------------------------------------------------------
 // Resources

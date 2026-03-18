@@ -326,6 +326,8 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `stop_simulator_logging`  | POST   | `/api/v1/device/logging/stop`          |
 | `start_device_logging`    | POST   | `/api/v1/device/logging/device/start`  |
 | `stop_device_logging`     | POST   | `/api/v1/device/logging/device/stop`   |
+| `start_oslog_streaming`   | POST   | `/api/v1/logs/oslog/start`             |
+| `stop_oslog_streaming`    | POST   | `/api/v1/logs/oslog/stop`              |
 | `preview_device`     | POST        | `/api/v1/device/preview/start`         |
 | `stop_preview`       | POST        | `/api/v1/device/preview/stop`          |
 | `preview_status`     | GET         | `/api/v1/device/preview/status`        |
@@ -395,7 +397,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **Confusing `tail_logs` and `query_logs`** — Use `tail_logs` for "show me recent stuff" (defaults to 50, newest first). Use `query_logs` for searching with filters and time ranges.
 
-**Ignoring log source names** — `device` = physical device logs (on-demand, via `start_device_logging`), `simulator` = simulator unified logging (on-demand, via `start_simulator_logging`), `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic. Legacy: `syslog` = idevicesyslog (disabled by default, opt-in with `--syslog`), `oslog` = macOS unified log (disabled by default, opt-in with `--oslog`).
+**Ignoring log source names** — `device` = physical device logs (on-demand, via `start_device_logging`), `simulator` = simulator unified logging (on-demand, via `start_simulator_logging`), `oslog` = host Mac unified logging (on-demand, via `start_oslog_streaming` — useful for capturing dev tool logs like Vite or webpack that write to os_log), `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic. Legacy: `syslog` = idevicesyslog (disabled by default, opt-in with `--syslog`).
 
 **Using mock when you need intercept (or vice versa)** — Mocks return instant synthetic responses for stable test fixtures. Intercept pauses real requests for ad-hoc inspection and modification. Mock rules take priority over intercept.
 

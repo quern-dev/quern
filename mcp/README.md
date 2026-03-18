@@ -68,7 +68,8 @@ src/
     ├── device.ts         Simulator control + UI interaction
     ├── device-pool.ts    Device pool resolve/ensure
     ├── simulator-log.ts  Simulator log capture
-    └── device-log.ts     Physical device log capture
+    ├── device-log.ts     Physical device log capture
+    └── oslog.ts          Host Mac oslog streaming
 ```
 
 ## Tools
@@ -162,6 +163,13 @@ src/
 |---|---|
 | `start_device_logging` | Capture os_log/Logger/NSLog from a physical device |
 | `stop_device_logging` | Stop physical device log capture |
+
+### Host OSLog Streaming (2 tools)
+
+| Tool | Description |
+|---|---|
+| `start_oslog_streaming` | Stream os_log from the host Mac (filter by subsystem/process) |
+| `stop_oslog_streaming` | Stop host oslog streaming |
 
 ## Resources
 

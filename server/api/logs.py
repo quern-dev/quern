@@ -19,6 +19,7 @@ from server.models import (
     LogSource,
     LogStreamParams,
     LogSummaryResponse,
+    StartOslogRequest,
 )
 from server.processing.summarizer import (
     WINDOW_DURATIONS,
@@ -421,3 +422,68 @@ async def get_filter(request: Request) -> dict:
         raise HTTPException(status_code=503, detail="Server not fully started")
 
     return ingestion_filter.get_all_configs()
+
+
+# ---------------------------------------------------------------------------
+# Host OSLog streaming (on-demand)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/oslog/start")
+async def start_oslog_streaming(request: Request, body: StartOslogRequest):
+    """Start streaming logs from the host Mac's unified logging system.
+
+    Creates an on-demand oslog adapter filtered by subsystem and/or process.
+    Logs appear in tail_logs/query_logs with source="oslog".
+    """
+    from fastapi import HTTPException
+
+    from server.sources.oslog import OslogAdapter
+
+    # Check if already running
+    existing = getattr(request.app.state, "oslog_adapter", None)
+    if existing is not None and existing.is_running:
+        return {
+            "status": "already_running",
+            "adapter_id": existing.adapter_id,
+        }
+
+    dedup = request.app.state.deduplicator
+
+    adapter = OslogAdapter(
+        on_entry=dedup.process,
+        subsystem_filter=body.subsystem,
+        process_filter=body.process,
+    )
+
+    await adapter.start()
+
+    if adapter._error:
+        raise HTTPException(status_code=500, detail=adapter._error)
+
+    # Register so it appears in list_log_sources
+    request.app.state.oslog_adapter = adapter
+    request.app.state.source_adapters[adapter.adapter_id] = adapter
+
+    return {
+        "status": "started",
+        "adapter_id": adapter.adapter_id,
+    }
+
+
+@router.post("/oslog/stop")
+async def stop_oslog_streaming(request: Request):
+    """Stop the on-demand host oslog streaming adapter."""
+    from fastapi import HTTPException
+
+    adapter = getattr(request.app.state, "oslog_adapter", None)
+    if adapter is None or not adapter.is_running:
+        raise HTTPException(status_code=404, detail="No oslog streaming active")
+
+    await adapter.stop()
+
+    # Remove from registries
+    request.app.state.source_adapters.pop(adapter.adapter_id, None)
+    request.app.state.oslog_adapter = None
+
+    return {"status": "stopped"}
