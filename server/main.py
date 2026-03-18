@@ -822,6 +822,13 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     # Re-read state since server may have partially updated it
     state = read_state() or state
     _restore_system_proxy_if_needed(state)
+
+    # Clean up orphaned proxy subprocess (SIGKILL doesn't propagate
+    # to children, so mitmdump may still be holding the proxy port)
+    proxy_port = state.get("proxy_port")
+    if proxy_port:
+        reclaim_port(proxy_port)
+
     remove_state()
     print("Server killed")
 

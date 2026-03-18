@@ -59,6 +59,7 @@ def _is_quern_process(pid: int) -> bool:
             "server.main" in args
             or "uvicorn" in args
             or "-m server" in args
+            or "proxy/addon.py" in args  # orphaned mitmdump
         )
     except Exception:
         return False
