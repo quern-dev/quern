@@ -21,7 +21,7 @@ def sample_lines() -> list[str]:
 
 def test_parse_default_message_type(adapter: OslogAdapter, sample_lines: list[str]):
     """Default messageType should map to INFO."""
-    entry = adapter._parse_json_line(sample_lines[0])
+    entry = adapter._parse_ndjson_line(sample_lines[0])
 
     assert entry is not None
     assert entry.level == LogLevel.INFO
@@ -36,7 +36,7 @@ def test_parse_default_message_type(adapter: OslogAdapter, sample_lines: list[st
 
 def test_parse_error_message_type(adapter: OslogAdapter, sample_lines: list[str]):
     """Error messageType should map to ERROR."""
-    entry = adapter._parse_json_line(sample_lines[1])
+    entry = adapter._parse_ndjson_line(sample_lines[1])
 
     assert entry is not None
     assert entry.level == LogLevel.ERROR
@@ -46,7 +46,7 @@ def test_parse_error_message_type(adapter: OslogAdapter, sample_lines: list[str]
 
 def test_parse_info_message_type(adapter: OslogAdapter, sample_lines: list[str]):
     """Info messageType should map to INFO."""
-    entry = adapter._parse_json_line(sample_lines[2])
+    entry = adapter._parse_ndjson_line(sample_lines[2])
 
     assert entry is not None
     assert entry.level == LogLevel.INFO
@@ -55,7 +55,7 @@ def test_parse_info_message_type(adapter: OslogAdapter, sample_lines: list[str])
 
 def test_parse_fault_message_type(adapter: OslogAdapter, sample_lines: list[str]):
     """Fault messageType should map to FAULT."""
-    entry = adapter._parse_json_line(sample_lines[3])
+    entry = adapter._parse_ndjson_line(sample_lines[3])
 
     assert entry is not None
     assert entry.level == LogLevel.FAULT
@@ -64,7 +64,7 @@ def test_parse_fault_message_type(adapter: OslogAdapter, sample_lines: list[str]
 
 def test_parse_debug_message_type(adapter: OslogAdapter, sample_lines: list[str]):
     """Debug messageType should map to DEBUG."""
-    entry = adapter._parse_json_line(sample_lines[4])
+    entry = adapter._parse_ndjson_line(sample_lines[4])
 
     assert entry is not None
     assert entry.level == LogLevel.DEBUG
@@ -74,18 +74,17 @@ def test_parse_debug_message_type(adapter: OslogAdapter, sample_lines: list[str]
 
 def test_parse_non_json_lines(adapter: OslogAdapter):
     """Non-JSON lines (array brackets, commas) should return None."""
-    assert adapter._parse_json_line("[") is None
-    assert adapter._parse_json_line("]") is None
-    assert adapter._parse_json_line(",") is None
-    assert adapter._parse_json_line("") is None
-    assert adapter._parse_json_line("not json at all") is None
+    assert adapter._parse_ndjson_line("[") is None
+    assert adapter._parse_ndjson_line("]") is None
+    assert adapter._parse_ndjson_line(",") is None
+    assert adapter._parse_ndjson_line("") is None
+    assert adapter._parse_ndjson_line("not json at all") is None
 
 
-def test_parse_json_with_leading_comma(adapter: OslogAdapter, sample_lines: list[str]):
-    """Lines with leading commas (from JSON array format) should still parse."""
-    entry = adapter._parse_json_line("," + sample_lines[0])
-    assert entry is not None
-    assert entry.message == "Request completed in 234ms"
+def test_parse_ndjson_rejects_leading_comma(adapter: OslogAdapter, sample_lines: list[str]):
+    """ndjson lines with leading commas are invalid and should return None."""
+    entry = adapter._parse_ndjson_line("," + sample_lines[0])
+    assert entry is None
 
 
 def test_timestamp_parsing():
@@ -111,7 +110,7 @@ def test_process_name_extraction():
 def test_build_command_no_filters(adapter: OslogAdapter):
     """Command without filters should be basic log stream."""
     cmd = adapter._build_command()
-    assert cmd == ["log", "stream", "--style", "json"]
+    assert cmd == ["log", "stream", "--style", "ndjson"]
 
 
 def test_build_command_with_subsystem():

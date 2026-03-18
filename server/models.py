@@ -437,6 +437,52 @@ class FlowSummaryResponse(BaseModel):
     slow_requests: list[SlowRequest]
 
 
+class FlowEvent(BaseModel):
+    """Lightweight flow event for SSE streaming.
+
+    Contains enough to render a list item in a UI. Clients fetch
+    full details via GET /proxy/flows/{id} when needed.
+    """
+
+    id: str
+    timestamp: datetime
+    method: str
+    url: str
+    host: str
+    path: str
+    status_code: int | None = None
+    error: str | None = None
+    duration_ms: float | None = None
+    request_size: int = 0
+    response_size: int = 0
+    device_id: str = "default"
+    simulator_udid: str | None = None
+    source_process: str | None = None
+
+    @classmethod
+    def from_flow(cls, flow: FlowRecord) -> FlowEvent:
+        return cls(
+            id=flow.id,
+            timestamp=flow.timestamp,
+            method=flow.request.method,
+            url=flow.request.url,
+            host=flow.request.host,
+            path=flow.request.path,
+            status_code=(
+                flow.response.status_code if flow.response else None
+            ),
+            error=flow.error,
+            duration_ms=flow.timing.total_ms,
+            request_size=flow.request.body_size,
+            response_size=(
+                flow.response.body_size if flow.response else 0
+            ),
+            device_id=flow.device_id,
+            simulator_udid=flow.simulator_udid,
+            source_process=flow.source_process,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Intercept models (Phase 2c)
 # ---------------------------------------------------------------------------

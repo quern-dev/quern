@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import subprocess
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from sse_starlette.sse import EventSourceResponse
 
 from server.lifecycle.state import detect_current_ssid, detect_host_ip_for_subnet, update_state
 from server.models import (
     DeviceCertState,
+    FlowEvent,
     FlowQueryParams,
     FlowQueryResponse,
     FlowRecord,
@@ -489,6 +493,69 @@ async def flow_summary(
         flows, window=window, host=host,
         simulator_udid=simulator_udid, client_ip=client_ip,
     )
+
+
+@router.get("/flows/stream")
+async def stream_flows(
+    request: Request,
+    host: str | None = None,
+    method: str | None = None,
+    device_id: str | None = None,
+    simulator_udid: str | None = None,
+) -> EventSourceResponse:
+    """Stream flow events in real time via Server-Sent Events.
+
+    Emits lightweight FlowEvent payloads (no headers or bodies).
+    Use GET /proxy/flows/{id} to fetch full details for a flow.
+    """
+    flow_store = request.app.state.flow_store
+
+    def matches_filter(flow: FlowRecord) -> bool:
+        if host and flow.request.host != host:
+            return False
+        if method and flow.request.method.upper() != method.upper():
+            return False
+        if device_id and flow.device_id != device_id:
+            return False
+        if simulator_udid and flow.simulator_udid != simulator_udid:
+            return False
+        return True
+
+    async def event_generator():
+        if flow_store is None:
+            yield {
+                "event": "error",
+                "data": json.dumps({"message": "Proxy not running"}),
+            }
+            return
+
+        queue = flow_store.subscribe()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    flow = await asyncio.wait_for(
+                        queue.get(), timeout=15.0,
+                    )
+                    if matches_filter(flow):
+                        event = FlowEvent.from_flow(flow)
+                        yield {
+                            "event": "flow",
+                            "data": event.model_dump_json(),
+                        }
+                except TimeoutError:
+                    yield {
+                        "event": "heartbeat",
+                        "data": json.dumps({
+                            "time": datetime.now(UTC).isoformat(),
+                            "store_size": flow_store.size,
+                        }),
+                    }
+        finally:
+            flow_store.unsubscribe(queue)
+
+    return EventSourceResponse(event_generator())
 
 
 @router.post("/flows/wait", response_model=WaitForFlowResponse)

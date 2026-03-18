@@ -20,6 +20,7 @@ class FlowStore:
         self._flows: OrderedDict[str, FlowRecord] = OrderedDict()
         self._max_size = max_size
         self._lock = asyncio.Lock()
+        self._subscribers: list[asyncio.Queue[FlowRecord]] = []
 
     @property
     def size(self) -> int:
@@ -39,6 +40,16 @@ class FlowStore:
                 # Evict oldest
                 self._flows.popitem(last=False)
             self._flows[flow.id] = flow
+
+        # Notify subscribers (outside lock to avoid deadlock)
+        dead_subs: list[asyncio.Queue[FlowRecord]] = []
+        for queue in self._subscribers:
+            try:
+                queue.put_nowait(flow)
+            except asyncio.QueueFull:
+                dead_subs.append(queue)
+        for dead in dead_subs:
+            self._subscribers.remove(dead)
 
     async def get(self, flow_id: str) -> FlowRecord | None:
         """Look up a flow by ID."""
@@ -67,6 +78,23 @@ class FlowStore:
         """Return all flows (snapshot under lock)."""
         async with self._lock:
             return list(self._flows.values())
+
+    def subscribe(self) -> asyncio.Queue[FlowRecord]:
+        """Create a subscription queue for real-time SSE streaming.
+
+        Returns a queue that will receive new flows as they arrive.
+        Caller must call unsubscribe() when done.
+        """
+        queue: asyncio.Queue[FlowRecord] = asyncio.Queue(maxsize=1000)
+        self._subscribers.append(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[FlowRecord]) -> None:
+        """Remove a subscription queue."""
+        try:
+            self._subscribers.remove(queue)
+        except ValueError:
+            pass
 
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
         """Apply query filters. Returns newest-first. Must be called under lock."""
