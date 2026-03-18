@@ -266,3 +266,58 @@ async def delete_all_mocks(request: Request) -> dict:
     count = len(adapter._mock_rules)
     await adapter.clear_mock()
     return {"status": "deleted", "count": count}
+
+
+# ---------------------------------------------------------------------------
+# Bypass (domain allowlist)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/bypass")
+async def get_bypass(request: Request) -> dict:
+    """List current bypass patterns."""
+    adapter = _require_running_proxy(request)
+    patterns = adapter.get_bypass_patterns()
+    return {"patterns": patterns, "total": len(patterns)}
+
+
+@router.post("/bypass")
+async def set_bypass(request: Request, body: dict) -> dict:
+    """Add bypass patterns. Flows matching these hosts are not captured.
+
+    Body: {"patterns": ["*.apple.com", "*.icloud.com"]}
+    Supports glob patterns (fnmatch).
+    """
+    patterns = body.get("patterns", [])
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not patterns:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide 'patterns' list",
+        )
+    adapter = _require_running_proxy(request)
+    current = await adapter.set_bypass(patterns)
+    return {"status": "updated", "patterns": current}
+
+
+@router.delete("/bypass")
+async def clear_bypass(
+    request: Request,
+    patterns: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated patterns to remove. "
+            "Omit to clear all."
+        ),
+    ),
+) -> dict:
+    """Remove bypass patterns, or clear all if no patterns specified."""
+    adapter = _require_running_proxy(request)
+    if patterns:
+        to_remove = [p.strip() for p in patterns.split(",")]
+        remaining = await adapter.remove_bypass(to_remove)
+        return {"status": "updated", "patterns": remaining}
+    else:
+        await adapter.clear_bypass()
+        return {"status": "cleared", "patterns": []}

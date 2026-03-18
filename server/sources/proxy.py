@@ -134,6 +134,9 @@ class ProxyAdapter(BaseSourceAdapter):
         # Mock state (server-side mirror)
         self._mock_rules: list[dict] = []  # [{rule_id, pattern}]
 
+        # Bypass state (server-side mirror)
+        self._bypass_patterns: list[str] = []
+
     @property
     def local_capture(self) -> bool:
         """Whether local capture is enabled (any processes configured)."""
@@ -318,10 +321,11 @@ class ProxyAdapter(BaseSourceAdapter):
         self._read_task = None
         self._stderr_task = None
 
-        # Clear intercept/mock state
+        # Clear intercept/mock/bypass state
         self._intercept_pattern = None
         self._held_flows.clear()
         self._mock_rules.clear()
+        self._bypass_patterns.clear()
 
         logger.info("Proxy adapter stopped")
 
@@ -428,6 +432,42 @@ class ProxyAdapter(BaseSourceAdapter):
         else:
             self._mock_rules.clear()
         await self.send_command({"action": "clear_mock", "rule_id": rule_id})
+
+    # -------------------------------------------------------------------
+    # Bypass convenience methods
+    # -------------------------------------------------------------------
+
+    async def set_bypass(self, patterns: list[str]) -> list[str]:
+        """Add bypass patterns. Returns the full list after update."""
+        for p in patterns:
+            if p not in self._bypass_patterns:
+                self._bypass_patterns.append(p)
+        await self.send_command({
+            "action": "set_bypass",
+            "patterns": patterns,
+        })
+        return list(self._bypass_patterns)
+
+    async def remove_bypass(self, patterns: list[str]) -> list[str]:
+        """Remove specific bypass patterns. Returns the remaining list."""
+        self._bypass_patterns = [
+            p for p in self._bypass_patterns
+            if p not in patterns
+        ]
+        await self.send_command({
+            "action": "remove_bypass",
+            "patterns": patterns,
+        })
+        return list(self._bypass_patterns)
+
+    async def clear_bypass(self) -> None:
+        """Remove all bypass patterns."""
+        self._bypass_patterns.clear()
+        await self.send_command({"action": "clear_bypass"})
+
+    def get_bypass_patterns(self) -> list[str]:
+        """Return current bypass patterns."""
+        return list(self._bypass_patterns)
 
     def get_held_flows(self) -> list[dict]:
         """Return held flows with computed age_seconds."""

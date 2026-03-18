@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import ctypes.util
+import fnmatch
 import json
 import re
 import subprocess
@@ -339,6 +340,10 @@ class IOSDebugAddon:
     def __init__(self) -> None:
         self._host_filter: str | None = None
 
+        # Bypass patterns — hosts matching these are silently passed through
+        self._bypass_patterns: list[str] = []
+        self._bypass_lock = threading.Lock()
+
         # Intercept state — protected by _held_lock
         self._intercept_pattern: str | None = None
         self._intercept_compiled: Any | None = None  # flowfilter result, callable
@@ -384,10 +389,34 @@ class IOSDebugAddon:
             self._held_flows.clear()
         _write_json({"type": "status", "event": "stopped", "timestamp": time.time()})
 
+    def _is_bypassed(self, host: str) -> bool:
+        """Check if a host matches any bypass pattern."""
+        with self._bypass_lock:
+            for pattern in self._bypass_patterns:
+                if fnmatch.fnmatch(host, pattern):
+                    return True
+        return False
+
+    def tls_clienthello(self, data: Any) -> None:
+        """Skip TLS interception for bypassed hosts.
+
+        This is called before mitmproxy terminates TLS, so bypassed
+        hosts get true passthrough — no cert replacement, no MITM.
+        Essential for cert-pinned services like Apple's device
+        verification endpoints.
+        """
+        sni = data.context.client.sni
+        if sni and self._is_bypassed(sni):
+            data.ignore_connection = True
+
     def request(self, flow: http.HTTPFlow) -> None:
         """Called when a request is received. Check mocks first, then intercept."""
         # Apply host filter
         if self._host_filter and flow.request.pretty_host != self._host_filter:
+            return
+
+        # Skip bypassed hosts
+        if self._is_bypassed(flow.request.pretty_host):
             return
 
         # 1. Check mock rules first (mock takes priority over intercept)
@@ -438,12 +467,16 @@ class IOSDebugAddon:
         """Called when a complete response has been received."""
         if self._host_filter and flow.request.pretty_host != self._host_filter:
             return
+        if self._is_bypassed(flow.request.pretty_host):
+            return
 
         _write_json(self._serialize_flow(flow))
 
     def error(self, flow: http.HTTPFlow) -> None:
         """Called when a flow errors (connection refused, timeout, etc.)."""
         if self._host_filter and flow.request.pretty_host != self._host_filter:
+            return
+        if self._is_bypassed(flow.request.pretty_host):
             return
 
         _write_json(self._serialize_flow(flow))
@@ -557,6 +590,12 @@ class IOSDebugAddon:
                     self._handle_set_mock(cmd)
                 elif action == "clear_mock":
                     self._handle_clear_mock(cmd)
+                elif action == "set_bypass":
+                    self._handle_set_bypass(cmd)
+                elif action == "remove_bypass":
+                    self._handle_remove_bypass(cmd)
+                elif action == "clear_bypass":
+                    self._handle_clear_bypass()
 
                 if not self._running:
                     break
@@ -746,6 +785,55 @@ class IOSDebugAddon:
             "type": "status",
             "event": "mocks_cleared",
             "rule_id": rule_id,
+            "timestamp": time.time(),
+        })
+
+
+    def _handle_set_bypass(self, cmd: dict) -> None:
+        """Add bypass patterns."""
+        patterns = cmd.get("patterns", [])
+        if isinstance(patterns, str):
+            patterns = [patterns]
+
+        with self._bypass_lock:
+            for p in patterns:
+                if p not in self._bypass_patterns:
+                    self._bypass_patterns.append(p)
+
+        _write_json({
+            "type": "status",
+            "event": "bypass_updated",
+            "patterns": list(self._bypass_patterns),
+            "timestamp": time.time(),
+        })
+
+    def _handle_remove_bypass(self, cmd: dict) -> None:
+        """Remove specific bypass patterns."""
+        patterns = cmd.get("patterns", [])
+        if isinstance(patterns, str):
+            patterns = [patterns]
+
+        with self._bypass_lock:
+            self._bypass_patterns = [
+                p for p in self._bypass_patterns
+                if p not in patterns
+            ]
+
+        _write_json({
+            "type": "status",
+            "event": "bypass_updated",
+            "patterns": list(self._bypass_patterns),
+            "timestamp": time.time(),
+        })
+
+    def _handle_clear_bypass(self) -> None:
+        """Remove all bypass patterns."""
+        with self._bypass_lock:
+            self._bypass_patterns.clear()
+
+        _write_json({
+            "type": "status",
+            "event": "bypass_cleared",
             "timestamp": time.time(),
         })
 

@@ -371,6 +371,7 @@ class ProxyStatusResponse(BaseModel):
     active_intercept: str | None = None
     held_flows_count: int = 0
     mock_rules_count: int = 0
+    bypass_patterns: list[str] = Field(default_factory=list)
     error: str | None = None
     local_capture: list[str] = Field(default_factory=list)
     local_ip: str | None = None
