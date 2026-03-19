@@ -717,6 +717,88 @@ the background and can be re-enabled with configure_system_proxy.`,
     }
   });
 
+  server.registerTool("set_bypass", {
+    description: `Add domain patterns to the proxy bypass allowlist. Traffic to bypassed domains gets true TLS passthrough — no certificate replacement, no interception, no capture. Uses glob/fnmatch patterns.
+
+Essential for cert-pinned services (e.g. *.apple.com during app installation) that reject mitmproxy's CA certificate. Bypass patterns persist until cleared or the proxy is restarted.
+
+The bypass_patterns field in proxy_status shows the current list.`,
+    inputSchema: strictParams({
+      patterns: z
+        .array(z.string())
+        .describe(
+          'Domain patterns to bypass (e.g. ["*.apple.com", "*.icloud.com"]). ' +
+          'Supports glob syntax: * matches any characters.'
+        ),
+    }),
+  }, async ({ patterns }) => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/proxy/bypass",
+        undefined,
+        { patterns }
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("clear_bypass", {
+    description: `Remove domain patterns from the proxy bypass allowlist, or clear all patterns. After clearing, traffic to those domains will be intercepted and captured normally.`,
+    inputSchema: strictParams({
+      patterns: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Specific patterns to remove. Omit to clear all bypass patterns."
+        ),
+    }),
+  }, async ({ patterns }) => {
+    try {
+      let data;
+      if (patterns && patterns.length > 0) {
+        data = await apiRequest(
+          "DELETE",
+          "/api/v1/proxy/bypass",
+          { patterns: patterns.join(",") }
+        );
+      } else {
+        data = await apiRequest("DELETE", "/api/v1/proxy/bypass");
+      }
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("set_local_capture", {
     description: `Set the list of process names for local capture mode. Uses mitmproxy's
 macOS System Extension to transparently capture traffic from specific processes
