@@ -31,9 +31,12 @@ tags: []
 
 ## Key Elements
 
-| Element Type | Label | Notes |
-|---|---|---|
-| | | |
+<!-- Record both the visible label and the accessibility identifier.
+     Flag mismatches or shared identifiers in Notes — see "Identifier Reliability" in the guide. -->
+
+| Element Type | Label | Identifier | Notes |
+|---|---|---|---|
+| | | | |
 
 ## States
 

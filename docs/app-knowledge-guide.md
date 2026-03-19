@@ -39,6 +39,20 @@ Start from the app's entry point and work outward:
 7. **Deep links** — Ask the user: "Are there deep links or URL schemes I should know about?" Document each one, verify it works by launching with `launch_app url=...`.
 8. **Quirks** — As you encounter anything unexpected, document it immediately. Also ask: "Are there any known quirks or device-specific issues with this screen?"
 
+### Common iOS Element Types
+
+When exploring with `get_ui_tree`, you'll encounter these element types. Knowing what to expect saves trial-and-error:
+
+- **Navigation**: `navigationBar`, `tabBar`, `toolbar`
+- **Tab bar items**: Often `button` or `radioButton` (not `tabBarButton` — the actual tappable items inside a tab bar are frequently `radioButton` type). Tab items may use identifiers like `_TabName button` with a leading underscore.
+- **Buttons**: `button`, `link` (for hyperlink-style buttons)
+- **Text**: `staticText`, `textField`, `secureTextField`, `textView`
+- **Containers**: `scrollView`, `table`, `collectionView`, `cell`
+- **Toggles**: `switch`, `segmentedControl`
+- **Indicators**: `activityIndicator`, `progressIndicator`, `image`
+
+Element types and identifier patterns vary by app framework (UIKit vs SwiftUI) and how the developer set up accessibility. Don't assume — verify with `get_ui_tree` on each screen.
+
 ### What to Capture Per Screen
 
 Use `get_screen_summary` for a quick overview, then `get_ui_tree` for the full element list. For each screen:
@@ -96,8 +110,26 @@ Copy `screens/_template.md` and fill it in. Key principles:
 
 - **`identify_by` is the most important field.** An agent lost in the app will check this to figure out where it is. Use the most unique, stable signals.
 - **Include actual quern tool calls.** Don't write "tap the login button" — write `tap_element label="Sign In" element_type="button"`. The agent will copy-paste these.
-- **Be precise about element types.** Use the exact types from `get_ui_tree`: `button`, `staticText`, `textField`, `secureTextField`, `tabBarButton`, `navigationBar`, etc.
+- **Be precise about element types.** Use the exact types from `get_ui_tree` — don't guess. See "Common iOS Element Types" above.
 - **Document failure modes.** What alerts, errors, or unexpected states can occur? How should the agent recover?
+
+### Identifier Reliability
+
+Accessibility identifiers in real apps are frequently misleading, reused, or missing. This is the biggest source of silent agent failures. Be defensive:
+
+**Misleading identifiers.** An element's accessibility identifier may not match its visible label or purpose. For example, a "Quick Guide" button might have identifier `BackButton`, or a "Help Center" link might have identifier `Drafts`. When you document an element, always record the *visible label* alongside the identifier. If they differ significantly, flag it explicitly in the Notes column — a future agent trusting the identifier alone will tap the wrong thing.
+
+**Shared identifiers.** Multiple elements on the same screen may share an identifier. For example, both "Go Premium" and "Redeem Code" might use `_Upgrade button`. When you discover shared identifiers:
+
+1. Note it in both elements' documentation.
+2. In tool calls, prefer `tap_element` with `label` (the visible text) rather than relying on the identifier.
+3. If neither label nor identifier uniquely identifies the element, document the position or use a combination: element_type + label + parent context via `children_of`.
+
+**Missing identifiers.** Some elements have no identifier at all. Use `label` (visible text) + `element_type` as the primary selector. Document this so agents don't waste time searching for an identifier that doesn't exist.
+
+**Quick wins for the dev team.** Misleading, shared, and missing identifiers are among the easiest things to fix in the app code — usually a single line setting `accessibilityIdentifier`. When you discover these during the tour, call them out to the user as quick-win fixes. A short list of "these 5 identifiers need fixing" is high-value, low-effort work that immediately improves both agent reliability and general accessibility/testability. Consider collecting these in a quirk doc (e.g., `quirks/identifier-issues.md`) so they can be tracked and fixed as a batch.
+
+**General rule:** When writing `tap_element` commands in screen docs, use the most reliable selector you found during the tour — usually `label` for visible text. Add a comment if the identifier is known to be misleading or shared. The Key Elements table should capture both label and identifier so future agents can choose the right approach.
 
 ### Writing Flow Documents
 
