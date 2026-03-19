@@ -139,5 +139,58 @@ function summarizeKnowledgeBase(dir: string): string {
   sections.push(`- alerts/: ${alertCount} documented`);
   sections.push(`- quirks/: ${quirkCount} documented`);
 
+  // Find screens referenced in leads_to edges but with no file
+  const missingScreens = findMissingScreens(dir, new Set([
+    ...screens.documented,
+    ...screens.stubs,
+  ]));
+  if (missingScreens.length > 0) {
+    sections.push("");
+    sections.push(`Undocumented screens (referenced in leads_to but no file):`);
+    for (const { name, referencedBy } of missingScreens) {
+      sections.push(`  - ${name} (referenced by: ${referencedBy.join(", ")})`);
+    }
+  }
+
   return sections.join("\n");
+}
+
+function findMissingScreens(
+  dir: string,
+  existingScreens: Set<string>,
+): Array<{ name: string; referencedBy: string[] }> {
+  const screensDir = join(dir, "screens");
+  if (!existsSync(screensDir)) return [];
+
+  // Also check app.md for leads_to references
+  const filesToScan: Array<{ path: string; name: string }> = [];
+
+  for (const f of readdirSync(screensDir)) {
+    if (!f.endsWith(".md") || f.startsWith("_")) continue;
+    filesToScan.push({ path: join(screensDir, f), name: f.replace(/\.md$/, "") });
+  }
+
+  const appMd = join(dir, "app.md");
+  if (existsSync(appMd)) {
+    filesToScan.push({ path: appMd, name: "app" });
+  }
+
+  // Match [[screens/name]] patterns in leads_to sections
+  const references = new Map<string, string[]>();
+  const screenLinkPattern = /\[\[screens\/([^\]]+)\]\]/g;
+
+  for (const { path, name } of filesToScan) {
+    const content = readFileSync(path, "utf-8");
+    for (const match of content.matchAll(screenLinkPattern)) {
+      const target = match[1];
+      if (!existingScreens.has(target)) {
+        if (!references.has(target)) references.set(target, []);
+        references.get(target)!.push(name);
+      }
+    }
+  }
+
+  return Array.from(references.entries())
+    .map(([name, referencedBy]) => ({ name, referencedBy }))
+    .sort((a, b) => b.referencedBy.length - a.referencedBy.length);
 }
