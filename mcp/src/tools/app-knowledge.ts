@@ -84,6 +84,23 @@ function summarizeKnowledgeBase(dir: string): string {
     ).length;
   };
 
+  const countScreensByStatus = (subdir: string): { documented: number; stubs: number } => {
+    const fullPath = join(dir, subdir);
+    if (!existsSync(fullPath)) return { documented: 0, stubs: 0 };
+    let documented = 0;
+    let stubs = 0;
+    for (const f of readdirSync(fullPath)) {
+      if (!f.endsWith(".md") || f.startsWith("_")) continue;
+      const content = readFileSync(join(fullPath, f), "utf-8");
+      if (content.includes("status: stub")) {
+        stubs++;
+      } else {
+        documented++;
+      }
+    }
+    return { documented, stubs };
+  };
+
   // Check app.md
   const appMd = join(dir, "app.md");
   if (existsSync(appMd)) {
@@ -92,12 +109,14 @@ function summarizeKnowledgeBase(dir: string): string {
     sections.push(`- app.md: ${hasContent ? "configured" : "template (needs setup)"}`);
   }
 
-  const screenCount = countFiles("screens");
+  const screens = countScreensByStatus("screens");
   const flowCount = countFiles("flows");
   const deepLinkCount = countFiles("deep-links");
   const quirkCount = countFiles("quirks");
 
-  sections.push(`- screens/: ${screenCount} documented`);
+  const screenParts = [`${screens.documented} documented`];
+  if (screens.stubs > 0) screenParts.push(`${screens.stubs} stubs`);
+  sections.push(`- screens/: ${screenParts.join(", ")}`);
   sections.push(`- flows/: ${flowCount} documented`);
   sections.push(`- deep-links/: ${deepLinkCount} documented`);
   sections.push(`- quirks/: ${quirkCount} documented`);
