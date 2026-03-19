@@ -25,6 +25,7 @@ import { registerWdaTools } from "./tools/wda.js";
 import { registerBuildTools } from "./tools/build.js";
 import { registerAppStateTools } from "./tools/app-state.js";
 import { registerOslogTools } from "./tools/oslog.js";
+import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -85,6 +86,7 @@ registerWdaTools(server);
 registerBuildTools(server);
 registerAppStateTools(server);
 registerOslogTools(server);
+registerAppKnowledgeTools(server);
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -113,6 +115,25 @@ server.resource(
         uri: "quern://guide",
         mimeType: "text/markdown",
         text: readResourceFile("agent-guide.md"),
+      },
+    ],
+  })
+);
+
+server.resource(
+  "app-knowledge-guide",
+  "quern://app-knowledge-guide",
+  {
+    description:
+      "Guide for building an app knowledge base: how to conduct a guided tour, document screens, flows, deep links, and quirks",
+    mimeType: "text/markdown",
+  },
+  async () => ({
+    contents: [
+      {
+        uri: "quern://app-knowledge-guide",
+        mimeType: "text/markdown",
+        text: readResourceFile("app-knowledge-guide.md"),
       },
     ],
   })
