@@ -49,6 +49,13 @@ tags: []
      describe what the items are, what they represent in the app's domain,
      and what tapping them leads to. -->
 
+## Overlay Panels
+
+<!-- Persistent overlays on this screen (map pin cards, bottom sheets, floating panels).
+     Not alerts (those are transient). For each panel: trigger, identify_by, key elements,
+     navigation edges, and how to dismiss.
+     Delete this section if the screen has no overlays. -->
+
 ## Quirks
 
 <!-- Link to any quirk documents, or note minor quirks inline. -->

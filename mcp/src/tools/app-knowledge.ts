@@ -84,18 +84,19 @@ function summarizeKnowledgeBase(dir: string): string {
     ).length;
   };
 
-  const countScreensByStatus = (subdir: string): { documented: number; stubs: number } => {
+  const countScreensByStatus = (subdir: string): { documented: string[]; stubs: string[] } => {
     const fullPath = join(dir, subdir);
-    if (!existsSync(fullPath)) return { documented: 0, stubs: 0 };
-    let documented = 0;
-    let stubs = 0;
+    if (!existsSync(fullPath)) return { documented: [], stubs: [] };
+    const documented: string[] = [];
+    const stubs: string[] = [];
     for (const f of readdirSync(fullPath)) {
       if (!f.endsWith(".md") || f.startsWith("_")) continue;
       const content = readFileSync(join(fullPath, f), "utf-8");
+      const name = f.replace(/\.md$/, "");
       if (content.includes("status: stub")) {
-        stubs++;
+        stubs.push(name);
       } else {
-        documented++;
+        documented.push(name);
       }
     }
     return { documented, stubs };
@@ -125,9 +126,14 @@ function summarizeKnowledgeBase(dir: string): string {
   const alertCount = countFiles("alerts");
   const quirkCount = countFiles("quirks");
 
-  const screenParts = [`${screens.documented} documented`];
-  if (screens.stubs > 0) screenParts.push(`${screens.stubs} stubs`);
+  const screenParts = [`${screens.documented.length} documented`];
+  if (screens.stubs.length > 0) {
+    screenParts.push(`${screens.stubs.length} stubs`);
+  }
   sections.push(`- screens/: ${screenParts.join(", ")}`);
+  if (screens.stubs.length > 0) {
+    sections.push(`  Stubs needing visit: ${screens.stubs.join(", ")}`);
+  }
   sections.push(`- flows/: ${flowCount} documented`);
   sections.push(`- deep-links/: ${deepLinkCount} documented`);
   sections.push(`- alerts/: ${alertCount} documented`);

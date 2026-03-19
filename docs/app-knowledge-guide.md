@@ -22,9 +22,11 @@ The guided tour is a collaborative process with the user. You explore the app to
 ### How It Works
 
 1. **You drive the device.** Use quern tools to navigate the app — `get_screen_summary`, `tap_element`, `swipe`, etc.
-2. **You describe what you see.** After each screen, summarize the key elements, navigation edges, and states you can identify.
-3. **The user fills in the gaps.** They tell you the domain meaning, known quirks, edge cases, deep links, and things that aren't visible from the UI alone.
-4. **You write the document.** Create or update the screen/flow/quirk file using the templates in `app-knowledge/`.
+2. **You document what you see.** Observe the screen, capture elements, edges, and states. Write the document based on what you can determine yourself.
+3. **You present a summary and invite corrections.** After writing the doc, share a brief summary with the user: "Here's what I documented for this screen — anything I got wrong, missed, or that you'd add?" The user's context comes in bursts, not per-question — let them correct and add rather than answering a checklist.
+4. **You incorporate their input.** Update the doc with domain knowledge, quirks, and context the user provides.
+
+Avoid asking a long list of questions at every screen. The user knows the app — present what you found and let them fill gaps naturally. Save specific questions for things you genuinely can't determine from the UI (deep links, suppression flags, internal terminology).
 
 ### Tour Order
 
@@ -33,7 +35,7 @@ Start from the app's entry point and work outward:
 1. **Launch screen** — What does the user see on cold launch? Document it.
 2. **Primary navigation** — Tab bar? Sidebar? Document `app.md`'s global navigation table.
 3. **States and environments** — Before going deep, ask the user about app-wide states (auth, subscription, onboarding) and available environments (staging, production). Fill in `states.md` and `environments.md`. This shapes the rest of the tour.
-4. **Each top-level screen** — Visit each tab/section. Document screens as you go. Create stubs for screens you discover but don't visit yet.
+4. **Each top-level screen** — Visit each tab/section. Document screens as you go. Create stubs for screens you discover but don't visit yet. As you encounter domain-specific terms (codes, ratings, feature names, acronyms), add them to `glossary.md` — don't wait until the end.
 5. **Alerts** — As you encounter any dialog, popup, permission prompt, or coaching overlay, document it in `alerts/` immediately. Also ask: "Are there other popups I should know about on this screen?"
 6. **Key flows** — After screens are documented, trace the most important user flows (login, core feature, settings changes) and document them.
 7. **Deep links** — Ask the user: "Are there deep links or URL schemes I should know about?" Document each one, verify it works by launching with `launch_app url=...`.
@@ -66,15 +68,13 @@ Use `get_screen_summary` for a quick overview, then `get_ui_tree` for the full e
 
 ### What to Ask the User
 
-At each screen, consider asking:
+Don't run through a checklist at every screen. Instead, present your documentation and let the user react. Reserve questions for things you genuinely can't determine from the UI:
 
-- "What is this screen called internally? Any domain-specific terminology?"
-- "Are there states I can't easily trigger right now?" (e.g., error states, empty states, permission prompts)
-- "Are there deep links that reach this screen directly?"
-- "Are there any popups, tooltips, or coaching overlays that can appear here?"
-- "Does this screen behave differently for different user states?" (free vs premium, new vs returning, etc.)
-- "Any known quirks — layout issues on small devices, timing problems, undocumented behaviors?"
-- "What's the most important thing to test on this screen?"
+- Deep links or URL schemes that reach this screen directly
+- Internal terminology or domain-specific names (add these to `glossary.md`)
+- States you can't easily trigger (error conditions, empty states, edge cases)
+- Suppression behavior for popups ("does this appear every time or just once?")
+- Known quirks the UI doesn't reveal (timing issues, device-specific problems)
 
 ### Stubs: Tracking Undiscovered Screens
 
@@ -130,6 +130,33 @@ Accessibility identifiers in real apps are frequently misleading, reused, or mis
 **Quick wins for the dev team.** Misleading, shared, and missing identifiers are among the easiest things to fix in the app code — usually a single line setting `accessibilityIdentifier`. When you discover these during the tour, call them out to the user as quick-win fixes. A short list of "these 5 identifiers need fixing" is high-value, low-effort work that immediately improves both agent reliability and general accessibility/testability. Consider collecting these in a quirk doc (e.g., `quirks/identifier-issues.md`) so they can be tracked and fixed as a batch.
 
 **General rule:** When writing `tap_element` commands in screen docs, use the most reliable selector you found during the tour — usually `label` for visible text. Add a comment if the identifier is known to be misleading or shared. The Key Elements table should capture both label and identifier so future agents can choose the right approach.
+
+### Dynamic and Long Labels
+
+Some elements have labels that include dynamic, variable-length content. For example, an attributes row might have a label like `"Attributes, Not recommended for kids, Stroller accessible, Dogs allowed, Available 24/7, Takes less than one hour, Park and grab, Parking nearby, Stealth required"` — a comma-separated list that changes per item.
+
+This is a separate issue from identifier reliability. The label is *correct*, but it's not stable across instances.
+
+**How to handle dynamic labels:**
+
+- **Document the stable prefix.** If the label always starts with a fixed string (e.g., `"Attributes, "`), record that prefix and note that the rest varies.
+- **Use partial matching.** In `tap_element`, use the stable portion of the label. If quern's `tap_element` requires an exact match, note in the doc that the agent should use `get_ui_tree` to find the element by prefix, then tap by coordinates or identifier instead.
+- **In the Key Elements table**, write the stable portion followed by `...` and explain the dynamic part in Notes. Example: `Attributes, ...` with note "Comma-separated list of cache attributes, varies per cache."
+- **Prefer identifier over label** for dynamic-label elements — this is the one case where identifiers are more reliable than labels, if one exists.
+
+### Overlay Panels
+
+Some UI doesn't fit neatly into "screen" or "alert" categories: map pin summary cards, bottom sheets, floating panels, and similar overlays that are persistent (not transient like alerts), interactive (they have navigation edges), but not full screens (no navigation bar, they overlay the parent screen).
+
+**Document these inside the parent screen's doc** under a dedicated `## Overlay Panels` section. For each panel:
+
+- How to trigger it (e.g., "tap a map pin")
+- How to identify it (`identify_by` elements)
+- Key elements within the panel
+- Navigation edges (e.g., "tapping the panel title navigates to [[screens/cache-detail]]")
+- How to dismiss it (swipe down, tap outside, back button)
+
+This keeps them associated with the screen they overlay, while giving them enough structure that an agent can interact with them reliably. If an overlay is complex enough to warrant its own file (many elements, multiple states), promote it to a screen doc with a note that it's an overlay of the parent.
 
 ### Writing Flow Documents
 
