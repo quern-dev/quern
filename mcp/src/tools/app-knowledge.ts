@@ -109,9 +109,20 @@ function summarizeKnowledgeBase(dir: string): string {
     sections.push(`- app.md: ${hasContent ? "configured" : "template (needs setup)"}`);
   }
 
+  // Check states.md and environments.md
+  for (const file of ["states.md", "environments.md"]) {
+    const filePath = join(dir, file);
+    if (existsSync(filePath)) {
+      const content = readFileSync(filePath, "utf-8");
+      const hasContent = !content.includes("<!-- ") || content.replace(/<!--[\s\S]*?-->/g, "").trim().split("\n").length > 10;
+      sections.push(`- ${file}: ${hasContent ? "configured" : "template (needs setup)"}`);
+    }
+  }
+
   const screens = countScreensByStatus("screens");
   const flowCount = countFiles("flows");
   const deepLinkCount = countFiles("deep-links");
+  const alertCount = countFiles("alerts");
   const quirkCount = countFiles("quirks");
 
   const screenParts = [`${screens.documented} documented`];
@@ -119,6 +130,7 @@ function summarizeKnowledgeBase(dir: string): string {
   sections.push(`- screens/: ${screenParts.join(", ")}`);
   sections.push(`- flows/: ${flowCount} documented`);
   sections.push(`- deep-links/: ${deepLinkCount} documented`);
+  sections.push(`- alerts/: ${alertCount} documented`);
   sections.push(`- quirks/: ${quirkCount} documented`);
 
   return sections.join("\n");

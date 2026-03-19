@@ -9,7 +9,10 @@ using quern tools to navigate, test, and debug the app.
 - `screens/` — One file per distinct screen. Identification, elements, states, navigation edges.
 - `flows/` — Multi-step sequences that accomplish a goal. References screens by link.
 - `deep-links/` — URL schemes and universal links that jump directly into app sections.
+- `alerts/` — Dialogs, popups, permission prompts, and transient UI that can appear across screens.
 - `quirks/` — Non-obvious behaviors, timing issues, device-specific workarounds.
+- `states.md` — App-wide states (auth, subscription tier, onboarding, connectivity) that affect what the agent sees and can do.
+- `environments.md` — Server environments (production, staging), how to switch, and behavioral differences.
 - `glossary.md` — App-specific terminology and domain concepts.
 
 ## Conventions
