@@ -507,27 +507,32 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         pw_config = get_plist_watch_config()
         watchers: dict = request.app.state.plist_watchers
 
-        for bundle_id, cfg in pw_config.items():
-            watch_key = f"{udid}:{cfg['container']}:{cfg['plist_path']}"
-            if watch_key in watchers and watchers[watch_key].is_running:
-                plist_watchers_already_running.append(bundle_id)
-                continue
+        for bundle_id, bundle_cfg in pw_config.items():
+            for watch in bundle_cfg.get("watches", []):
+                container = watch["container"]
+                plist_path = watch["plist_path"]
+                watch_key = f"{udid}:{container}:{plist_path}"
+                watch_label = f"{container}:{plist_path}"
 
-            pw_adapter = PlistWatcherAdapter(
-                udid=udid,
-                bundle_id=bundle_id,
-                container=cfg["container"],
-                plist_path=cfg["plist_path"],
-                ignore_prefixes=cfg.get("ignore_prefixes", []),
-                on_entry=dedup.process,
-            )
-            await pw_adapter.start()
-            if not pw_adapter._error:
-                watchers[watch_key] = pw_adapter
-                request.app.state.source_adapters[pw_adapter.adapter_id] = pw_adapter
-                plist_watchers_started.append(bundle_id)
-            else:
-                logger.warning("Auto-start plist watch failed for %s: %s", bundle_id, pw_adapter._error)
+                if watch_key in watchers and watchers[watch_key].is_running:
+                    plist_watchers_already_running.append(watch_label)
+                    continue
+
+                pw_adapter = PlistWatcherAdapter(
+                    udid=udid,
+                    bundle_id=bundle_id,
+                    container=container,
+                    plist_path=plist_path,
+                    ignore_prefixes=watch.get("ignore_prefixes", []),
+                    on_entry=dedup.process,
+                )
+                await pw_adapter.start()
+                if not pw_adapter._error:
+                    watchers[watch_key] = pw_adapter
+                    request.app.state.source_adapters[pw_adapter.adapter_id] = pw_adapter
+                    plist_watchers_started.append(watch_label)
+                else:
+                    logger.warning("Auto-start plist watch failed for %s: %s", watch_label, pw_adapter._error)
     except Exception as e:
         logger.warning("Failed to auto-start plist watchers: %s", e)
 
