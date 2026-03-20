@@ -22,6 +22,8 @@ from server.models import (
     SaveAppStateRequest,
     SetAppPlistValueRequest,
     SetAppPlistValuesRequest,
+    StartPlistWatchRequest,
+    StopPlistWatchRequest,
 )
 
 router = APIRouter(prefix="/api/v1/device/app/state", tags=["app-state"])
@@ -274,3 +276,88 @@ async def delete_app_plist_key(request: Request, body: DeleteAppPlistKeyRequest)
         raise
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Plist watch endpoints
+# ---------------------------------------------------------------------------
+
+
+def _watch_key(udid: str, container: str, plist_path: str) -> str:
+    return f"{udid}:{container}:{plist_path}"
+
+
+@router.post("/plist/watch/start")
+async def start_plist_watch(request: Request, body: StartPlistWatchRequest):
+    """Start polling a plist file and emitting changes as log entries."""
+    from server.sources.plist_watcher import PlistWatcherAdapter
+
+    controller = _get_controller(request)
+    try:
+        udid = await controller.resolve_udid(body.udid)
+        controller._require_simulator(udid, "start_plist_watch")
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+    watchers: dict = request.app.state.plist_watchers
+    key = _watch_key(udid, body.container, body.plist_path)
+
+    if key in watchers and watchers[key].is_running:
+        return {
+            "status": "already_running", "udid": udid,
+            "adapter_id": watchers[key].adapter_id,
+        }
+
+    dedup = request.app.state.deduplicator
+
+    adapter = PlistWatcherAdapter(
+        udid=udid,
+        bundle_id=body.bundle_id,
+        container=body.container,
+        plist_path=body.plist_path,
+        poll_interval=body.poll_interval,
+        on_entry=dedup.process,
+    )
+
+    await adapter.start()
+
+    if adapter._error:
+        raise HTTPException(status_code=500, detail=adapter._error)
+
+    watchers[key] = adapter
+    request.app.state.source_adapters[adapter.adapter_id] = adapter
+
+    return {
+        "status": "started", "udid": udid,
+        "adapter_id": adapter.adapter_id,
+        "container": body.container,
+        "plist_path": body.plist_path,
+        "poll_interval": body.poll_interval,
+    }
+
+
+@router.post("/plist/watch/stop")
+async def stop_plist_watch(request: Request, body: StopPlistWatchRequest):
+    """Stop polling a plist file."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.resolve_udid(body.udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+    watchers: dict = request.app.state.plist_watchers
+    key = _watch_key(udid, body.container, body.plist_path)
+
+    adapter = watchers.get(key)
+    if not adapter:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No plist watch active for {body.container}:{body.plist_path} on {udid}",
+        )
+
+    await adapter.stop()
+
+    del watchers[key]
+    request.app.state.source_adapters.pop(adapter.adapter_id, None)
+
+    return {"status": "stopped", "udid": udid}

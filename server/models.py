@@ -38,6 +38,7 @@ class LogSource(str, enum.Enum):
     SIMULATOR = "simulator"
     DEVICE = "device"
     LOGCAT = "logcat"
+    PLIST_WATCHER = "plist_watcher"
     SERVER = "server"
 
 
@@ -1109,6 +1110,25 @@ class SetAppPlistValuesRequest(BaseModel):
     container: str
     plist_path: str
     values: dict[str, object]  # key → value mapping
+    udid: str | None = None
+
+
+class StartPlistWatchRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/watch/start."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    udid: str | None = None
+    poll_interval: float = Field(default=1.0, ge=0.2, le=30.0)
+
+
+class StopPlistWatchRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/watch/stop."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
     udid: str | None = None
 
 

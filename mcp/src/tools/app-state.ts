@@ -223,4 +223,51 @@ Type inference per value: boolean → -bool, integer → -integer, float → -fl
       };
     }
   });
+
+  server.registerTool("start_plist_watch", {
+    description: `Start watching a plist file for changes. Polls the file on an interval and emits per-key changes as log entries into the same pipeline as app logs and proxy flows — visible in query_logs, tail_logs, and get_log_summary with source "plist_watcher".
+
+Logs an initial snapshot of all keys when the watch starts. Then emits one log entry per added, removed, or changed key as mutations happen. Simulator only.`,
+    inputSchema: strictParams({
+      bundle_id: z.string().describe("App bundle identifier"),
+      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      plist_path: z.string().describe("Relative path to the plist within the container"),
+      poll_interval: z.coerce.number().default(1.0).describe("Poll interval in seconds (default 1.0)"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
+    }),
+  }, async ({ bundle_id, container, plist_path, poll_interval, udid }) => {
+    try {
+      const body: Record<string, unknown> = { bundle_id, container, plist_path, poll_interval };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/app/state/plist/watch/start", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("stop_plist_watch", {
+    description: `Stop watching a plist file for changes.`,
+    inputSchema: strictParams({
+      bundle_id: z.string().describe("App bundle identifier"),
+      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      plist_path: z.string().describe("Relative path to the plist within the container"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
+    }),
+  }, async ({ bundle_id, container, plist_path, udid }) => {
+    try {
+      const body: Record<string, unknown> = { bundle_id, container, plist_path };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/app/state/plist/watch/stop", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
 }
