@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.device.plist import read_plist, remove_plist_key, set_plist_value
+from server.device.plist import diff_plists, read_plist, remove_plist_key, set_plist_value
 from server.models import DeviceError
 
 
@@ -101,3 +101,52 @@ class TestRemovePlistKey:
         ):
             with pytest.raises(DeviceError, match="plutil remove failed"):
                 await remove_plist_key(tmp_path / "test.plist", "missingKey")
+
+
+class TestDiffPlists:
+    def test_no_changes(self):
+        d = {"a": 1, "b": "hello"}
+        result = diff_plists(d, d.copy())
+        assert result == {"added": {}, "removed": {}, "changed": {}}
+
+    def test_added_keys(self):
+        old = {"a": 1}
+        new = {"a": 1, "b": 2, "c": 3}
+        result = diff_plists(old, new)
+        assert result["added"] == {"b": 2, "c": 3}
+        assert result["removed"] == {}
+        assert result["changed"] == {}
+
+    def test_removed_keys(self):
+        old = {"a": 1, "b": 2, "c": 3}
+        new = {"a": 1}
+        result = diff_plists(old, new)
+        assert result["added"] == {}
+        assert result["removed"] == {"b": 2, "c": 3}
+        assert result["changed"] == {}
+
+    def test_changed_keys(self):
+        old = {"a": 1, "b": "hello"}
+        new = {"a": 1, "b": "world"}
+        result = diff_plists(old, new)
+        assert result["added"] == {}
+        assert result["removed"] == {}
+        assert result["changed"] == {"b": {"old": "hello", "new": "world"}}
+
+    def test_mixed_changes(self):
+        old = {"a": 1, "b": "hello", "c": True}
+        new = {"b": "world", "c": True, "d": 42}
+        result = diff_plists(old, new)
+        assert result["added"] == {"d": 42}
+        assert result["removed"] == {"a": 1}
+        assert result["changed"] == {"b": {"old": "hello", "new": "world"}}
+
+    def test_empty_to_populated(self):
+        result = diff_plists({}, {"a": 1, "b": 2})
+        assert result["added"] == {"a": 1, "b": 2}
+        assert result["removed"] == {}
+
+    def test_populated_to_empty(self):
+        result = diff_plists({"a": 1, "b": 2}, {})
+        assert result["removed"] == {"a": 1, "b": 2}
+        assert result["added"] == {}

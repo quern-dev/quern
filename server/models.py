@@ -38,6 +38,7 @@ class LogSource(str, enum.Enum):
     SIMULATOR = "simulator"
     DEVICE = "device"
     LOGCAT = "logcat"
+    PLIST_WATCHER = "plist_watcher"
     SERVER = "server"
 
 
@@ -743,7 +744,10 @@ class TapElementRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
-        label_params = [p for p in (self.label, self.label_contains, self.label_prefix) if p is not None]
+        label_params = [
+            p for p in (self.label, self.label_contains, self.label_prefix)
+            if p is not None
+        ]
         if len(label_params) > 1:
             raise ValueError("Only one of label, label_contains, or label_prefix may be provided")
         return self
@@ -846,7 +850,10 @@ class WaitForElementRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
-        label_params = [p for p in (self.label, self.label_contains, self.label_prefix) if p is not None]
+        label_params = [
+            p for p in (self.label, self.label_contains, self.label_prefix)
+            if p is not None
+        ]
         if len(label_params) > 1:
             raise ValueError("Only one of label, label_contains, or label_prefix may be provided")
         return self
@@ -1100,6 +1107,57 @@ class SetAppPlistValueRequest(BaseModel):
     key: str
     value: object
     udid: str | None = None
+
+
+class SetAppPlistValuesRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/batch."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    values: dict[str, object]  # key → value mapping
+    udid: str | None = None
+
+
+class StartPlistWatchRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/watch/start."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    udid: str | None = None
+    poll_interval: float = Field(default=1.0, ge=0.2, le=30.0)
+    ignore_prefixes: list[str] = Field(default_factory=list)
+
+
+class StopPlistWatchRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/watch/stop."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    udid: str | None = None
+
+
+class PlistWatchTarget(BaseModel):
+    """A single plist to watch."""
+
+    container: str
+    plist_path: str
+    ignore_prefixes: list[str] = Field(default_factory=list)
+
+
+class ConfigurePlistWatchRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/watch/configure."""
+
+    bundle_id: str
+    watches: list[PlistWatchTarget]
+
+
+class ClearPlistWatchConfigRequest(BaseModel):
+    """Request body for DELETE /api/v1/device/app/state/plist/watch/configure."""
+
+    bundle_id: str
 
 
 class DeleteAppPlistKeyRequest(BaseModel):

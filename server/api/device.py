@@ -497,11 +497,58 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
-    return {
+    # Auto-start plist watchers from persistent config
+    plist_watchers_started = []
+    plist_watchers_already_running = []
+    try:
+        from server.config import get_plist_watch_config
+        from server.sources.plist_watcher import PlistWatcherAdapter
+
+        pw_config = get_plist_watch_config()
+        watchers: dict = request.app.state.plist_watchers
+
+        for bundle_id, bundle_cfg in pw_config.items():
+            for watch in bundle_cfg.get("watches", []):
+                container = watch["container"]
+                plist_path = watch["plist_path"]
+                watch_key = f"{udid}:{container}:{plist_path}"
+                watch_label = f"{container}:{plist_path}"
+
+                if watch_key in watchers and watchers[watch_key].is_running:
+                    plist_watchers_already_running.append(watch_label)
+                    continue
+
+                pw_adapter = PlistWatcherAdapter(
+                    udid=udid,
+                    bundle_id=bundle_id,
+                    container=container,
+                    plist_path=plist_path,
+                    ignore_prefixes=watch.get("ignore_prefixes", []),
+                    on_entry=dedup.process,
+                )
+                await pw_adapter.start()
+                if not pw_adapter._error:
+                    watchers[watch_key] = pw_adapter
+                    request.app.state.source_adapters[pw_adapter.adapter_id] = pw_adapter
+                    plist_watchers_started.append(watch_label)
+                else:
+                    logger.warning(
+                        "Auto-start plist watch failed for %s: %s",
+                        watch_label, pw_adapter._error,
+                    )
+    except Exception as e:
+        logger.warning("Failed to auto-start plist watchers: %s", e)
+
+    result = {
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
     }
+    if plist_watchers_started:
+        result["plist_watchers_started"] = plist_watchers_started
+    if plist_watchers_already_running:
+        result["plist_watchers_already_running"] = plist_watchers_already_running
+    return result
 
 
 @router.post("/logging/stop")
@@ -526,7 +573,20 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     del sim_adapters[udid]
     request.app.state.source_adapters.pop(adapter.adapter_id, None)
 
-    return {"status": "stopped", "udid": udid}
+    # Auto-stop any plist watchers for this UDID
+    plist_watchers_stopped = []
+    watchers: dict = request.app.state.plist_watchers
+    to_remove = [k for k in watchers if k.startswith(f"{udid}:")]
+    for key in to_remove:
+        pw = watchers.pop(key)
+        await pw.stop()
+        request.app.state.source_adapters.pop(pw.adapter_id, None)
+        plist_watchers_stopped.append(key.split(":", 1)[1])
+
+    result = {"status": "stopped", "udid": udid}
+    if plist_watchers_stopped:
+        result["plist_watchers_stopped"] = plist_watchers_stopped
+    return result
 
 
 # ---------------------------------------------------------------------------
