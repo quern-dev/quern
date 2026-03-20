@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import uuid
@@ -15,6 +16,9 @@ from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter
 
 logger = logging.getLogger("quern-debug-server.plist-watcher")
+
+# Values longer than this are truncated in log messages
+_MAX_VALUE_LEN = 120
 
 
 class PlistWatcherAdapter(BaseSourceAdapter):
@@ -71,13 +75,20 @@ class PlistWatcherAdapter(BaseSourceAdapter):
                 self._error = f"Plist not found: {self._resolved_path}"
                 return
 
-            # Read and emit initial snapshot
+            # Read initial snapshot
             self._previous = await read_plist(self._resolved_path)
-            snapshot_msg = (
-                f"Watching {self._subsystem()} — {len(self._previous)} keys\n"
-                f"{json.dumps(self._previous, indent=2, default=str)}"
-            )
-            await self.emit(self._make_entry(snapshot_msg, LogLevel.DEBUG))
+
+            # Emit concise summary at INFO (visible in tail_logs level=info)
+            summary = _summarize_keys(self._previous)
+            await self.emit(self._make_entry(
+                f"Watching {self._subsystem()} — {len(self._previous)} keys ({summary})",
+            ))
+
+            # Emit full snapshot at DEBUG (visible with level=debug)
+            await self.emit(self._make_entry(
+                f"Full snapshot:\n{json.dumps(self._previous, indent=2, default=str)}",
+                LogLevel.DEBUG,
+            ))
 
             self._running = True
             self.started_at = self._now()
@@ -91,6 +102,13 @@ class PlistWatcherAdapter(BaseSourceAdapter):
             logger.error("Failed to start plist watch: %s", e)
 
     async def stop(self) -> None:
+        # Final diff before stopping — catches writes during app termination
+        if self._running:
+            try:
+                await self._check_for_changes()
+            except Exception:
+                pass
+
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -140,7 +158,40 @@ class PlistWatcherAdapter(BaseSourceAdapter):
 
 
 def _fmt(value: object) -> str:
-    """Format a plist value for log display."""
+    """Format a plist value for log display, truncating large blobs."""
     if isinstance(value, str):
+        if len(value) > _MAX_VALUE_LEN:
+            return f"({len(value)} chars)"
         return repr(value)
-    return str(value)
+    s = str(value)
+    if len(s) > _MAX_VALUE_LEN:
+        return f"({len(s)} chars)"
+    return s
+
+
+def _summarize_keys(data: dict) -> str:
+    """Summarize keys by common prefix for the initial snapshot log entry."""
+    prefixes: dict[str, int] = collections.Counter()
+    for key in data:
+        # Find a meaningful prefix: up to the first uppercase transition or underscore boundary
+        # e.g., "kHasSeenTip1" → "kHasSeen", "INTERNAL_ENV" → "INTERNAL_"
+        prefix = key
+        for i, ch in enumerate(key):
+            if i > 2 and (ch.isupper() or ch == "_"):
+                candidate = key[: i + 1] if ch == "_" else key[:i]
+                if len(candidate) >= 3:
+                    prefix = candidate + "*"
+                    break
+        prefixes[prefix] += 1
+
+    # Show prefixes with >1 key, plus count of unique keys
+    groups = sorted(
+        ((p, c) for p, c in prefixes.items() if c > 1),
+        key=lambda x: -x[1],
+    )[:5]
+    unique = sum(1 for c in prefixes.values() if c == 1)
+
+    parts = [f"{count} {prefix}" for prefix, count in groups]
+    if unique:
+        parts.append(f"{unique} other")
+    return ", ".join(parts)
