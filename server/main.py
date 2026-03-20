@@ -212,6 +212,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Physical device log adapters — managed on-demand via API
     app.state.device_log_adapters = {}
 
+    # Plist watcher adapters — managed on-demand via API
+    app.state.plist_watchers = {}
+
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
@@ -322,6 +325,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await sim_adapter.stop()
     for dev_adapter in app.state.device_log_adapters.values():
         await dev_adapter.stop()
+    for plist_watcher in app.state.plist_watchers.values():
+        await plist_watcher.stop()
     await dedup.stop()
 
     # Restore system proxy if we configured it

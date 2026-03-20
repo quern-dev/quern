@@ -303,6 +303,45 @@ def list_states(bundle_id: str) -> list[dict]:
     return results
 
 
+def get_checkpoint_plist_path(
+    bundle_id: str,
+    label: str,
+    container: str,
+    plist_path: str,
+) -> Path:
+    """Resolve the path to a plist file inside a saved checkpoint.
+
+    container: "data" for the data container, or a group ID like "group.com.example"
+    plist_path: relative path within the container (e.g. "Library/Preferences/com.example.plist")
+    """
+    checkpoint = _checkpoint_dir(bundle_id, label)
+    if not checkpoint.exists():
+        raise DeviceError(
+            f"Checkpoint {label!r} not found for {bundle_id}",
+            tool="simctl",
+        )
+
+    if container == "data":
+        base = checkpoint / "data-container"
+    else:
+        base = checkpoint / "app-group" / container
+
+    if not base.exists():
+        raise DeviceError(
+            f"Container {container!r} not found in checkpoint {label!r}",
+            tool="simctl",
+        )
+
+    full = base / plist_path
+    if not full.exists():
+        raise DeviceError(
+            f"Plist {plist_path!r} not found in checkpoint {label!r} container {container!r}",
+            tool="simctl",
+        )
+
+    return full
+
+
 def delete_state(bundle_id: str, label: str) -> None:
     """Delete a named checkpoint."""
     checkpoint = _checkpoint_dir(bundle_id, label)

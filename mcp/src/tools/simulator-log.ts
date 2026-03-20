@@ -16,7 +16,9 @@ Use the preset parameter to apply an ingestion filter at start time (e.g.
   start_simulator_logging(process: "MyApp", subsystem: "com.myapp", preset: "simulator-quiet")
 
 NOTE: This does NOT capture print() output — print() writes to stdout, not
-the unified logging system. Use os.Logger in your app instead.`,
+the unified logging system. Use os.Logger in your app instead.
+
+If plist watch is configured (via configure_plist_watch), watchers auto-start alongside simulator logging and auto-stop when logging stops.`,
     inputSchema: strictParams({
       udid: z
         .string()
