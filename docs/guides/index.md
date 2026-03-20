@@ -49,6 +49,7 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 ## Cross-Platform
 
 - [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, and replaying network traffic
+- [App Knowledge Base](app-knowledge.md) — Give your agent a pre-built map of your app: screens, navigation, alerts, state flags
 
 ---
 
@@ -63,3 +64,4 @@ Real-world scenarios showing how the pieces fit together.
 - [Onboarding onto a Project](workflow-onboarding.md) — From git clone to productive in an hour
 - [Location Simulation](workflow-location-testing.md) — GPS routes, geofences, and multi-device coordination (rideshare, delivery)
 - [Agent-Generated Test Scripts](workflow-test-scripts.md) — Write once, run forever, bring the agent back only when things break
+- [Building an App Knowledge Base](workflow-app-knowledge.md) — The complete guided tour: from first launch to saved checkpoints and executable test flows
