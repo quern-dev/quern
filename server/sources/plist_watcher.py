@@ -82,10 +82,15 @@ class PlistWatcherAdapter(BaseSourceAdapter):
 
             # Emit concise summary at INFO (visible in tail_logs level=info)
             summary = _summarize_keys(self._previous)
-            ignore_note = f", ignoring {len(self.ignore_prefixes)} prefixes" if self.ignore_prefixes else ""
-            await self.emit(self._make_entry(
-                f"Watching {self._subsystem()} — {len(self._previous)} keys ({summary}){ignore_note}",
-            ))
+            if self.ignore_prefixes:
+                ignore_note = f", ignoring {len(self.ignore_prefixes)} prefixes"
+            else:
+                ignore_note = ""
+            msg = (
+                f"Watching {self._subsystem()} — "
+                f"{len(self._previous)} keys ({summary}){ignore_note}"
+            )
+            await self.emit(self._make_entry(msg))
 
             # Emit full snapshot at DEBUG (visible with level=debug)
             await self.emit(self._make_entry(

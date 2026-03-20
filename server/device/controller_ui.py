@@ -15,6 +15,7 @@ from server.device.ui_elements import (
     get_tap_point,
     parse_elements,
 )
+from server.models import DeviceError, UIElement, WaitCondition
 
 
 def _effective_filter_label(
@@ -29,7 +30,6 @@ def _effective_filter_label(
     since the filter is applied post-parse by find_element.
     """
     return label
-from server.models import DeviceError, UIElement, WaitCondition
 
 logger = logging.getLogger("quern-debug-server.device")
 
@@ -825,7 +825,8 @@ class DeviceControllerUI:
         any_label = label or label_contains or label_prefix
         if not any_label and not identifier:
             raise DeviceError(
-                "Either label/label_contains/label_prefix or identifier is required for tap-element",
+                "Either label/label_contains/label_prefix or identifier "
+                "is required for tap-element",
                 tool="idb",
             )
 

@@ -744,7 +744,10 @@ class TapElementRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
-        label_params = [p for p in (self.label, self.label_contains, self.label_prefix) if p is not None]
+        label_params = [
+            p for p in (self.label, self.label_contains, self.label_prefix)
+            if p is not None
+        ]
         if len(label_params) > 1:
             raise ValueError("Only one of label, label_contains, or label_prefix may be provided")
         return self
@@ -847,7 +850,10 @@ class WaitForElementRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
-        label_params = [p for p in (self.label, self.label_contains, self.label_prefix) if p is not None]
+        label_params = [
+            p for p in (self.label, self.label_contains, self.label_prefix)
+            if p is not None
+        ]
         if len(label_params) > 1:
             raise ValueError("Only one of label, label_contains, or label_prefix may be provided")
         return self

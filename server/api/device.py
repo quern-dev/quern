@@ -532,7 +532,10 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
                     request.app.state.source_adapters[pw_adapter.adapter_id] = pw_adapter
                     plist_watchers_started.append(watch_label)
                 else:
-                    logger.warning("Auto-start plist watch failed for %s: %s", watch_label, pw_adapter._error)
+                    logger.warning(
+                        "Auto-start plist watch failed for %s: %s",
+                        watch_label, pw_adapter._error,
+                    )
     except Exception as e:
         logger.warning("Failed to auto-start plist watchers: %s", e)
 
