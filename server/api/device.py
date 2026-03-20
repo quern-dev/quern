@@ -499,6 +499,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     # Auto-start plist watchers from persistent config
     plist_watchers_started = []
+    plist_watchers_already_running = []
     try:
         from server.config import get_plist_watch_config
         from server.sources.plist_watcher import PlistWatcherAdapter
@@ -509,6 +510,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         for bundle_id, cfg in pw_config.items():
             watch_key = f"{udid}:{cfg['container']}:{cfg['plist_path']}"
             if watch_key in watchers and watchers[watch_key].is_running:
+                plist_watchers_already_running.append(bundle_id)
                 continue
 
             pw_adapter = PlistWatcherAdapter(
@@ -536,6 +538,8 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     }
     if plist_watchers_started:
         result["plist_watchers_started"] = plist_watchers_started
+    if plist_watchers_already_running:
+        result["plist_watchers_already_running"] = plist_watchers_already_running
     return result
 
 
