@@ -16,6 +16,8 @@ from server.device.app_state import (
 )
 from server.device.plist import diff_plists, read_plist, remove_plist_key, set_plist_value
 from server.models import (
+    ClearPlistWatchConfigRequest,
+    ConfigurePlistWatchRequest,
     DeleteAppPlistKeyRequest,
     DeviceError,
     RestoreAppStateRequest,
@@ -316,6 +318,7 @@ async def start_plist_watch(request: Request, body: StartPlistWatchRequest):
         container=body.container,
         plist_path=body.plist_path,
         poll_interval=body.poll_interval,
+        ignore_prefixes=body.ignore_prefixes,
         on_entry=dedup.process,
     )
 
@@ -361,3 +364,49 @@ async def stop_plist_watch(request: Request, body: StopPlistWatchRequest):
     request.app.state.source_adapters.pop(adapter.adapter_id, None)
 
     return {"status": "stopped", "udid": udid}
+
+
+@router.get("/plist/watch/config")
+async def get_plist_watch_config_endpoint():
+    """Return the persistent plist watch configuration."""
+    from server.config import get_plist_watch_config
+
+    return {"plist_watch": get_plist_watch_config()}
+
+
+@router.post("/plist/watch/configure")
+async def configure_plist_watch(body: ConfigurePlistWatchRequest):
+    """Save persistent plist watch config for a bundle_id.
+
+    When start_simulator_logging runs, it checks this config and
+    auto-starts plist watchers for configured bundles.
+    """
+    from server.config import set_plist_watch_config
+
+    set_plist_watch_config(
+        bundle_id=body.bundle_id,
+        container=body.container,
+        plist_path=body.plist_path,
+        ignore_prefixes=body.ignore_prefixes,
+    )
+    return {
+        "status": "configured",
+        "bundle_id": body.bundle_id,
+        "container": body.container,
+        "plist_path": body.plist_path,
+        "ignore_prefixes": body.ignore_prefixes,
+    }
+
+
+@router.delete("/plist/watch/configure")
+async def clear_plist_watch_config_endpoint(body: ClearPlistWatchConfigRequest):
+    """Remove persistent plist watch config for a bundle_id."""
+    from server.config import clear_plist_watch_config
+
+    existed = clear_plist_watch_config(body.bundle_id)
+    if not existed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No plist watch config for {body.bundle_id}",
+        )
+    return {"status": "cleared", "bundle_id": body.bundle_id}

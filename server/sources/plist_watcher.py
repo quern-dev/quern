@@ -31,6 +31,7 @@ class PlistWatcherAdapter(BaseSourceAdapter):
         container: str,
         plist_path: str,
         poll_interval: float = 1.0,
+        ignore_prefixes: list[str] | None = None,
         on_entry=None,
     ) -> None:
         adapter_id = f"plist-watch-{uuid.uuid4().hex[:8]}"
@@ -45,6 +46,7 @@ class PlistWatcherAdapter(BaseSourceAdapter):
         self.container = container
         self.plist_path = plist_path
         self.poll_interval = poll_interval
+        self.ignore_prefixes = ignore_prefixes or []
         self._task: asyncio.Task | None = None
         self._previous: dict | None = None
         self._resolved_path: Path | None = None
@@ -80,8 +82,9 @@ class PlistWatcherAdapter(BaseSourceAdapter):
 
             # Emit concise summary at INFO (visible in tail_logs level=info)
             summary = _summarize_keys(self._previous)
+            ignore_note = f", ignoring {len(self.ignore_prefixes)} prefixes" if self.ignore_prefixes else ""
             await self.emit(self._make_entry(
-                f"Watching {self._subsystem()} — {len(self._previous)} keys ({summary})",
+                f"Watching {self._subsystem()} — {len(self._previous)} keys ({summary}){ignore_note}",
             ))
 
             # Emit full snapshot at DEBUG (visible with level=debug)
@@ -132,6 +135,9 @@ class PlistWatcherAdapter(BaseSourceAdapter):
                 logger.error("Plist watch poll error: %s", e)
                 self._error = str(e)
 
+    def _is_ignored(self, key: str) -> bool:
+        return any(key.startswith(p) for p in self.ignore_prefixes)
+
     async def _check_for_changes(self) -> None:
         if self._resolved_path is None or not self._resolved_path.exists():
             return
@@ -144,15 +150,18 @@ class PlistWatcherAdapter(BaseSourceAdapter):
         diff = diff_plists(self._previous, current)
 
         for key, value in diff["added"].items():
-            await self.emit(self._make_entry(f"+ {key} = {_fmt(value)}"))
+            if not self._is_ignored(key):
+                await self.emit(self._make_entry(f"+ {key} = {_fmt(value)}"))
 
         for key, value in diff["removed"].items():
-            await self.emit(self._make_entry(f"- {key} (was: {_fmt(value)})"))
+            if not self._is_ignored(key):
+                await self.emit(self._make_entry(f"- {key} (was: {_fmt(value)})"))
 
         for key, change in diff["changed"].items():
-            await self.emit(self._make_entry(
-                f"{key}: {_fmt(change['old'])} → {_fmt(change['new'])}"
-            ))
+            if not self._is_ignored(key):
+                await self.emit(self._make_entry(
+                    f"{key}: {_fmt(change['old'])} → {_fmt(change['new'])}"
+                ))
 
         self._previous = current
 

@@ -96,3 +96,43 @@ def set_local_capture_processes(processes: list[str]) -> None:
     config = read_user_config()
     config["local_capture"] = processes
     USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Plist watch config
+# ---------------------------------------------------------------------------
+
+
+def get_plist_watch_config() -> dict[str, dict]:
+    """Return plist_watch config keyed by bundle_id. Empty dict if not configured."""
+    return read_user_config().get("plist_watch", {})
+
+
+def set_plist_watch_config(
+    bundle_id: str,
+    container: str,
+    plist_path: str,
+    ignore_prefixes: list[str] | None = None,
+) -> None:
+    """Save plist watch config for a bundle_id."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = read_user_config()
+    pw = config.setdefault("plist_watch", {})
+    pw[bundle_id] = {
+        "container": container,
+        "plist_path": plist_path,
+        "ignore_prefixes": ignore_prefixes or [],
+    }
+    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def clear_plist_watch_config(bundle_id: str) -> bool:
+    """Remove plist watch config for a bundle_id. Returns True if it existed."""
+    config = read_user_config()
+    pw = config.get("plist_watch", {})
+    if bundle_id not in pw:
+        return False
+    del pw[bundle_id]
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    return True
