@@ -10,7 +10,10 @@ import pytest
 from server.device.ui_elements import (
     find_by_identifier,
     find_by_label,
+    find_by_label_contains,
+    find_by_label_prefix,
     find_by_type,
+    find_element,
     generate_screen_summary,
     get_center,
     get_tap_point,
@@ -144,6 +147,83 @@ class TestFindByLabel:
         partial to confirm no substring matching occurs."""
         results = find_by_label(elements, "Sear")
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# find_by_label_contains
+# ---------------------------------------------------------------------------
+
+
+class TestFindByLabelContains:
+    def test_substring_match(self, elements):
+        results = find_by_label_contains(elements, "Map")
+        assert any(r.label == "Maps" for r in results)
+
+    def test_case_insensitive(self, elements):
+        results = find_by_label_contains(elements, "map")
+        assert any(r.label == "Maps" for r in results)
+
+    def test_no_match(self, elements):
+        results = find_by_label_contains(elements, "Nonexistent")
+        assert results == []
+
+    def test_matches_middle_of_label(self, elements):
+        results = find_by_label_contains(elements, "alendar")
+        assert len(results) == 2
+
+
+# ---------------------------------------------------------------------------
+# find_by_label_prefix
+# ---------------------------------------------------------------------------
+
+
+class TestFindByLabelPrefix:
+    def test_prefix_match(self, elements):
+        results = find_by_label_prefix(elements, "Map")
+        assert any(r.label == "Maps" for r in results)
+
+    def test_case_insensitive(self, elements):
+        results = find_by_label_prefix(elements, "map")
+        assert any(r.label == "Maps" for r in results)
+
+    def test_no_match(self, elements):
+        results = find_by_label_prefix(elements, "Nonexistent")
+        assert results == []
+
+    def test_does_not_match_middle(self, elements):
+        results = find_by_label_prefix(elements, "alendar")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# find_element with label_contains / label_prefix
+# ---------------------------------------------------------------------------
+
+
+class TestFindElementLabelModes:
+    def test_exact_label(self, elements):
+        results = find_element(elements, label="Maps")
+        assert len(results) == 1
+
+    def test_label_contains(self, elements):
+        results = find_element(elements, label_contains="Map")
+        assert any(r.label == "Maps" for r in results)
+
+    def test_label_prefix(self, elements):
+        results = find_element(elements, label_prefix="Map")
+        assert any(r.label == "Maps" for r in results)
+
+    def test_label_contains_with_type_filter(self, elements):
+        results = find_element(
+            elements, label_contains="Calendar", element_type="Button",
+        )
+        assert all(r.type == "Button" for r in results)
+
+    def test_label_prefix_with_type_filter(self, elements):
+        results = find_element(
+            elements, label_prefix="Cal", element_type="Button",
+        )
+        assert all(r.type == "Button" for r in results)
 
 
 # ---------------------------------------------------------------------------

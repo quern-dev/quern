@@ -240,7 +240,9 @@ async def diff_app_plist(
         live_data = await read_plist(live_path)
 
         # Read checkpoint plist
-        checkpoint_path = get_checkpoint_plist_path(bundle_id, checkpoint_label, container, plist_path)
+        checkpoint_path = get_checkpoint_plist_path(
+            bundle_id, checkpoint_label, container, plist_path,
+        )
         checkpoint_data = await read_plist(checkpoint_path)
 
         diff = diff_plists(checkpoint_data, live_data)
