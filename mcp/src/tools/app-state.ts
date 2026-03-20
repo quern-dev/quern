@@ -311,4 +311,22 @@ Set once per app. Config persists in ~/.quern/config.json across server restarts
       };
     }
   });
+
+  server.registerTool("unconfigure_plist_watch", {
+    description: `Remove persistent plist watch config for an app. After this, start_simulator_logging will no longer auto-start a plist watcher for this bundle.`,
+    inputSchema: strictParams({
+      bundle_id: z.string().describe("App bundle identifier to remove config for"),
+    }),
+  }, async ({ bundle_id }) => {
+    try {
+      const body: Record<string, unknown> = { bundle_id };
+      const data = await apiRequest("DELETE", "/api/v1/device/app/state/plist/watch/configure", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
 }
