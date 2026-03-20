@@ -66,7 +66,15 @@ export function registerDeviceUITools(server: McpServer): void {
       label: z
         .string()
         .optional()
-        .describe("Element label (case-insensitive)"),
+        .describe("Element label — exact match (case-insensitive). Mutually exclusive with label_contains and label_prefix."),
+      label_contains: z
+        .string()
+        .optional()
+        .describe("Substring to search for in element labels (case-insensitive). Mutually exclusive with label and label_prefix."),
+      label_prefix: z
+        .string()
+        .optional()
+        .describe("Prefix to match at the start of element labels (case-insensitive). Mutually exclusive with label and label_contains."),
       identifier: z
         .string()
         .optional()
@@ -80,10 +88,12 @@ export function registerDeviceUITools(server: McpServer): void {
         .optional()
         .describe("Target device UDID (defaults to active device)"),
     }),
-  }, async ({ label, identifier, element_type, udid }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/ui/element", {
         label,
+        label_contains,
+        label_prefix,
         identifier,
         type: element_type,
         udid,
@@ -113,7 +123,15 @@ export function registerDeviceUITools(server: McpServer): void {
       label: z
         .string()
         .optional()
-        .describe("Element label (case-insensitive)"),
+        .describe("Element label — exact match (case-insensitive). Mutually exclusive with label_contains and label_prefix."),
+      label_contains: z
+        .string()
+        .optional()
+        .describe("Substring to search for in element labels (case-insensitive). Mutually exclusive with label and label_prefix."),
+      label_prefix: z
+        .string()
+        .optional()
+        .describe("Prefix to match at the start of element labels (case-insensitive). Mutually exclusive with label and label_contains."),
       identifier: z
         .string()
         .optional()
@@ -152,6 +170,8 @@ export function registerDeviceUITools(server: McpServer): void {
     }),
   }, async ({
     label,
+    label_contains,
+    label_prefix,
     identifier,
     element_type,
     condition,
@@ -168,6 +188,8 @@ export function registerDeviceUITools(server: McpServer): void {
       };
 
       if (label !== undefined) body.label = label;
+      if (label_contains !== undefined) body.label_contains = label_contains;
+      if (label_prefix !== undefined) body.label_prefix = label_prefix;
       if (identifier !== undefined) body.identifier = identifier;
       if (element_type !== undefined) body.type = element_type;
       if (value !== undefined) body.value = value;
@@ -303,12 +325,25 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
   server.registerTool("tap_element", {
     description: `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results. Requires idb.
 
-This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.`,
+This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.
+
+Label matching modes (mutually exclusive — use only one):
+- label: exact match (case-insensitive)
+- label_contains: substring match (case-insensitive) — useful for elements with long, dynamic labels
+- label_prefix: prefix match (case-insensitive) — useful when the label starts with a stable string but has variable content after`,
     inputSchema: strictParams({
       label: z
         .string()
         .optional()
-        .describe("Element label text to search for"),
+        .describe("Element label text — exact match (case-insensitive). Mutually exclusive with label_contains and label_prefix."),
+      label_contains: z
+        .string()
+        .optional()
+        .describe("Substring to search for in element labels (case-insensitive). Mutually exclusive with label and label_prefix."),
+      label_prefix: z
+        .string()
+        .optional()
+        .describe("Prefix to match at the start of element labels (case-insensitive). Mutually exclusive with label and label_contains."),
       identifier: z
         .string()
         .optional()
@@ -328,10 +363,12 @@ This is the PREFERRED way to tap UI elements. Use get_screen_summary first to di
         .optional()
         .describe("Override WDA /source timeout in seconds. Use 10-15 for slow screens on older devices. Physical devices only."),
     }),
-  }, async ({ label, identifier, element_type, udid, source_timeout }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
+      if (label_contains) body.label_contains = label_contains;
+      if (label_prefix) body.label_prefix = label_prefix;
       if (identifier) body.identifier = identifier;
       if (element_type) body.element_type = element_type;
       if (udid) body.udid = udid;

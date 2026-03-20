@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class LogLevel(str, enum.Enum):
@@ -733,11 +733,20 @@ class TapElementRequest(BaseModel):
     """Request body for POST /device/ui/tap-element."""
 
     label: str | None = None
+    label_contains: str | None = None
+    label_prefix: str | None = None
     identifier: str | None = None
     element_type: str | None = None
     udid: str | None = None
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
+
+    @model_validator(mode="after")
+    def check_label_exclusivity(self):
+        label_params = [p for p in (self.label, self.label_contains, self.label_prefix) if p is not None]
+        if len(label_params) > 1:
+            raise ValueError("Only one of label, label_contains, or label_prefix may be provided")
+        return self
 
 
 class SwipeRequest(BaseModel):
@@ -825,6 +834,8 @@ class WaitForElementRequest(BaseModel):
     """Request body for POST /device/ui/wait-for-element."""
 
     label: str | None = None
+    label_contains: str | None = None
+    label_prefix: str | None = None
     identifier: str | None = None
     element_type: str | None = Field(default=None, alias="type")
     condition: WaitCondition
@@ -832,6 +843,13 @@ class WaitForElementRequest(BaseModel):
     timeout: float = Field(default=10, ge=0, le=60)  # ge=0 allows instant checks
     interval: float = Field(default=0.5, ge=0.1, le=5)
     udid: str | None = None
+
+    @model_validator(mode="after")
+    def check_label_exclusivity(self):
+        label_params = [p for p in (self.label, self.label_contains, self.label_prefix) if p is not None]
+        if len(label_params) > 1:
+            raise ValueError("Only one of label, label_contains, or label_prefix may be provided")
+        return self
 
 
 # ---------------------------------------------------------------------------

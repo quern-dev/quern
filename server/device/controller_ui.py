@@ -15,6 +15,20 @@ from server.device.ui_elements import (
     get_tap_point,
     parse_elements,
 )
+
+
+def _effective_filter_label(
+    label: str | None,
+    label_contains: str | None,
+    label_prefix: str | None,
+) -> str | None:
+    """Return the label value to use for get_ui_elements filter_label.
+
+    get_ui_elements uses filter_label for exact match optimization during
+    parsing. For contains/prefix, we skip that optimization (return None)
+    since the filter is applied post-parse by find_element.
+    """
+    return label
 from server.models import DeviceError, UIElement, WaitCondition
 
 logger = logging.getLogger("quern-debug-server.device")
@@ -130,6 +144,8 @@ class DeviceControllerUI:
         self,
         resolved: str,
         label: str | None,
+        label_contains: str | None,
+        label_prefix: str | None,
         identifier: str | None,
         element_type: str | None,
         screen_height: float,
@@ -146,16 +162,19 @@ class DeviceControllerUI:
         scroll_amount = 100  # points to scroll per attempt
         mid_x = screen_width / 2
 
+        filter_lbl = _effective_filter_label(label, label_contains, label_prefix)
+
         for attempt in range(self._MAX_SCROLL_ATTEMPTS):
             # Get element position before scroll
             elements_before, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
-                filter_label=label, filter_identifier=identifier,
+                filter_label=filter_lbl, filter_identifier=identifier,
                 filter_type=element_type,
             )
 
             matches_before = find_element(
                 elements_before, label=label,
+                label_contains=label_contains, label_prefix=label_prefix,
                 identifier=identifier, element_type=element_type,
             )
             if not matches_before:
@@ -179,12 +198,13 @@ class DeviceControllerUI:
             # Re-fetch and check
             elements_after, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
-                filter_label=label, filter_identifier=identifier,
+                filter_label=filter_lbl, filter_identifier=identifier,
                 filter_type=element_type,
             )
 
             matches_after = find_element(
                 elements_after, label=label,
+                label_contains=label_contains, label_prefix=label_prefix,
                 identifier=identifier, element_type=element_type,
             )
             if not matches_after:
@@ -290,6 +310,8 @@ class DeviceControllerUI:
         self,
         udid: str,
         label: str | None = None,
+        label_contains: str | None = None,
+        label_prefix: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
     ) -> tuple[list[UIElement], float]:
@@ -298,6 +320,8 @@ class DeviceControllerUI:
         Translates label/identifier/type into WDA locator strategies:
         - identifier only → 'accessibility id' (fastest, exact match)
         - label only → 'predicate string' with label ==[c] (case-insensitive)
+        - label_contains → 'predicate string' with label CONTAINS[c]
+        - label_prefix → 'predicate string' with label BEGINSWITH[c]
         - combined filters → 'predicate string' with AND clauses
 
         Returns (parsed UIElement objects, elapsed seconds). Empty list on no match or error.
@@ -308,8 +332,10 @@ class DeviceControllerUI:
 
         xcui_type = f"XCUIElementType{element_type}" if element_type else None
 
+        any_label = label or label_contains or label_prefix
+
         # Choose the most efficient WDA locator strategy
-        if identifier and not label and not xcui_type:
+        if identifier and not any_label and not xcui_type:
             # Fastest: direct accessibility id lookup
             using = "accessibility id"
             value = identifier
@@ -320,6 +346,10 @@ class DeviceControllerUI:
                 clauses.append(f"name == '{_escape(identifier)}'")
             if label:
                 clauses.append(f"label ==[c] '{_escape(label)}'")
+            elif label_contains:
+                clauses.append(f"label CONTAINS[c] '{_escape(label_contains)}'")
+            elif label_prefix:
+                clauses.append(f"label BEGINSWITH[c] '{_escape(label_prefix)}'")
             if xcui_type:
                 clauses.append(f"type == '{xcui_type}'")
 
@@ -492,6 +522,8 @@ class DeviceControllerUI:
     async def get_element(
         self,
         label: str | None = None,
+        label_contains: str | None = None,
+        label_prefix: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
         udid: str | None = None,
@@ -504,7 +536,8 @@ class DeviceControllerUI:
         Raises:
             DeviceError if no matches or validation fails.
         """
-        if not label and not identifier and not element_type:
+        any_label = label or label_contains or label_prefix
+        if not any_label and not identifier and not element_type:
             raise DeviceError(
                 "At least one of label, identifier, or element_type is required",
                 tool="idb",
@@ -512,13 +545,16 @@ class DeviceControllerUI:
 
         elements, resolved = await self.get_ui_elements(udid)
         matches = find_element(
-            elements, label=label, identifier=identifier,
+            elements, label=label, label_contains=label_contains,
+            label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
 
         if len(matches) == 0:
             search_desc = (
                 f"label='{label}'" if label
+                else f"label_contains='{label_contains}'" if label_contains
+                else f"label_prefix='{label_prefix}'" if label_prefix
                 else f"identifier='{identifier}'"
             )
             if element_type:
@@ -540,6 +576,8 @@ class DeviceControllerUI:
         self,
         condition: WaitCondition,
         label: str | None = None,
+        label_contains: str | None = None,
+        label_prefix: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
         value: str | None = None,
@@ -560,7 +598,8 @@ class DeviceControllerUI:
         Raises:
             DeviceError if validation fails or timeout > 60s.
         """
-        if not label and not identifier and not element_type:
+        any_label = label or label_contains or label_prefix
+        if not any_label and not identifier and not element_type:
             raise DeviceError(
                 "At least one of label, identifier, or element_type is required",
                 tool="idb",
@@ -682,9 +721,10 @@ class DeviceControllerUI:
 
             # Fast path not applicable or failed - use traditional describe-all
             # Fetch UI elements with filtering for performance
+            filter_label = _effective_filter_label(label, label_contains, label_prefix)
             elements, _ = await self.get_ui_elements(
                 resolved,
-                filter_label=label,
+                filter_label=filter_label,
                 filter_identifier=identifier,
                 filter_type=element_type,
             )
@@ -692,6 +732,8 @@ class DeviceControllerUI:
             matches = find_element(
                 elements,
                 label=label,
+                label_contains=label_contains,
+                label_prefix=label_prefix,
                 identifier=identifier,
                 element_type=element_type,
             )
@@ -759,6 +801,8 @@ class DeviceControllerUI:
     async def tap_element(
         self,
         label: str | None = None,
+        label_contains: str | None = None,
+        label_prefix: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
         udid: str | None = None,
@@ -777,15 +821,11 @@ class DeviceControllerUI:
             {"status": "ambiguous", "matches": [...], "message": "..."} for multiple
         Raises:
             DeviceError for 0 matches
-
-        Future enhancement ideas:
-        1. Post-tap verification - Verify expected outcome (e.g., element disappears)
-        2. Retry logic - If tap doesn't work, retry with fresh coordinates
-        3. Configurable stability timing - Allow tuning the stability check interval
         """
-        if not label and not identifier:
+        any_label = label or label_contains or label_prefix
+        if not any_label and not identifier:
             raise DeviceError(
-                "Either label or identifier is required for tap-element",
+                "Either label/label_contains/label_prefix or identifier is required for tap-element",
                 tool="idb",
             )
 
@@ -831,9 +871,10 @@ class DeviceControllerUI:
                     }
 
         # Traditional path: fetch full UI tree
+        filter_label = _effective_filter_label(label, label_contains, label_prefix)
         elements, resolved = await self.get_ui_elements(
             udid,
-            filter_label=label,
+            filter_label=filter_label,
             filter_identifier=identifier,
             filter_type=element_type,
             source_timeout=source_timeout,
@@ -841,13 +882,16 @@ class DeviceControllerUI:
 
         # Use shared search helper
         matches = find_element(
-            elements, label=label, identifier=identifier,
+            elements, label=label, label_contains=label_contains,
+            label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
 
         if len(matches) == 0:
             search_desc = (
                 f"label='{label}'" if label
+                else f"label_contains='{label_contains}'" if label_contains
+                else f"label_prefix='{label_prefix}'" if label_prefix
                 else f"identifier='{identifier}'"
             )
             if element_type:
@@ -880,7 +924,8 @@ class DeviceControllerUI:
                     el.label or el.identifier,
                 )
                 scrolled_el = await self._scroll_element_into_view(
-                    resolved, label, identifier, element_type,
+                    resolved, label, label_contains, label_prefix,
+                    identifier, element_type,
                     screen_height, screen_width,
                 )
                 if scrolled_el is not None:
@@ -905,13 +950,15 @@ class DeviceControllerUI:
                 elements_check, _ = await self.get_ui_elements(
                     resolved,
                     use_cache=False,
-                    filter_label=label,
+                    filter_label=filter_label,
                     filter_identifier=identifier,
                     filter_type=element_type,
                 )
 
                 matches_check = find_element(
                     elements_check, label=label,
+                    label_contains=label_contains,
+                    label_prefix=label_prefix,
                     identifier=identifier,
                     element_type=element_type,
                 )
@@ -933,13 +980,15 @@ class DeviceControllerUI:
                         elements_final, _ = await self.get_ui_elements(
                             resolved,
                             use_cache=False,
-                            filter_label=label,
+                            filter_label=filter_label,
                             filter_identifier=identifier,
                             filter_type=element_type,
                         )
 
                         matches_final = find_element(
                             elements_final, label=label,
+                            label_contains=label_contains,
+                            label_prefix=label_prefix,
                             identifier=identifier,
                             element_type=element_type,
                         )

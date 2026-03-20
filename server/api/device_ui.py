@@ -102,6 +102,8 @@ async def get_ui_elements(
 async def get_element(
     request: Request,
     label: str | None = Query(default=None),
+    label_contains: str | None = Query(default=None),
+    label_prefix: str | None = Query(default=None),
     identifier: str | None = Query(default=None),
     element_type: str | None = Query(default=None, alias="type"),
     udid: str | None = Query(default=None),
@@ -109,19 +111,32 @@ async def get_element(
     """Get a single element's state without fetching the entire UI tree.
 
     Query params:
-    - label: Element label (case-insensitive)
+    - label: Element label (case-insensitive exact match)
+    - label_contains: Substring match on label (case-insensitive)
+    - label_prefix: Prefix match on label (case-insensitive)
     - identifier: Element identifier (case-sensitive)
     - type: Element type to narrow results (optional)
     - udid: Device UDID (auto-resolves if omitted)
+
+    Only one of label, label_contains, or label_prefix may be provided.
 
     Returns:
     - 200 with element dict (includes match_count if ambiguous)
     - 404 if no element found
     """
+    label_params = [p for p in (label, label_contains, label_prefix) if p is not None]
+    if len(label_params) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Only one of label, label_contains, or label_prefix may be provided",
+        )
+
     controller = _get_controller(request)
     try:
         element, resolved_udid = await controller.get_element(
             label=label,
+            label_contains=label_contains,
+            label_prefix=label_prefix,
             identifier=identifier,
             element_type=element_type,
             udid=udid,
@@ -176,6 +191,8 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
         result, resolved_udid = await controller.wait_for_element(
             condition=body.condition,
             label=body.label,
+            label_contains=body.label_contains,
+            label_prefix=body.label_prefix,
             identifier=body.identifier,
             element_type=body.element_type,
             value=body.value,
@@ -289,6 +306,8 @@ async def tap_element(request: Request, body: TapElementRequest):
     try:
         result = await controller.tap_element(
             label=body.label,
+            label_contains=body.label_contains,
+            label_prefix=body.label_prefix,
             identifier=body.identifier,
             element_type=body.element_type,
             udid=body.udid,

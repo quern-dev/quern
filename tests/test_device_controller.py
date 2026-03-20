@@ -414,7 +414,7 @@ class TestTapElement:
 
     async def test_no_label_or_identifier_raises(self):
         ctrl = DeviceController()
-        with pytest.raises(DeviceError, match="Either label or identifier is required"):
+        with pytest.raises(DeviceError, match="Either label/label_contains/label_prefix or identifier is required"):
             await ctrl.tap_element()
 
     async def test_by_identifier(self):
