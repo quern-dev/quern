@@ -233,11 +233,13 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       poll_interval: z.coerce.number().default(1.0).describe("Poll interval in seconds (default 1.0)"),
+      ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore (e.g. ["kGSPSearchFilter", "LaunchDarkly"]). Changes to keys starting with these prefixes are silently dropped.'),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
-  }, async ({ bundle_id, container, plist_path, poll_interval, udid }) => {
+  }, async ({ bundle_id, container, plist_path, poll_interval, ignore_prefixes, udid }) => {
     try {
       const body: Record<string, unknown> = { bundle_id, container, plist_path, poll_interval };
+      if (ignore_prefixes) body.ignore_prefixes = ignore_prefixes;
       if (udid) body.udid = udid;
       const data = await apiRequest("POST", "/api/v1/device/app/state/plist/watch/start", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -262,6 +264,45 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
       const body: Record<string, unknown> = { bundle_id, container, plist_path };
       if (udid) body.udid = udid;
       const data = await apiRequest("POST", "/api/v1/device/app/state/plist/watch/stop", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("configure_plist_watch", {
+    description: `Save persistent plist watch config for an app. When start_simulator_logging runs, it automatically starts plist watchers for all configured bundles — no manual start_plist_watch needed.
+
+Set once per app. Config persists in ~/.quern/config.json across server restarts.`,
+    inputSchema: strictParams({
+      bundle_id: z.string().describe("App bundle identifier"),
+      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      plist_path: z.string().describe("Relative path to the plist within the container"),
+      ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore (e.g. ["kGSPSearchFilter", "LaunchDarkly"])'),
+    }),
+  }, async ({ bundle_id, container, plist_path, ignore_prefixes }) => {
+    try {
+      const body: Record<string, unknown> = { bundle_id, container, plist_path };
+      if (ignore_prefixes) body.ignore_prefixes = ignore_prefixes;
+      const data = await apiRequest("POST", "/api/v1/device/app/state/plist/watch/configure", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("get_plist_watch_config", {
+    description: `Read the persistent plist watch configuration. Shows which apps have auto-start plist watching configured and their ignore prefixes.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/app/state/plist/watch/config");
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {

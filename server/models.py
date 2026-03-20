@@ -1121,6 +1121,7 @@ class StartPlistWatchRequest(BaseModel):
     plist_path: str
     udid: str | None = None
     poll_interval: float = Field(default=1.0, ge=0.2, le=30.0)
+    ignore_prefixes: list[str] = Field(default_factory=list)
 
 
 class StopPlistWatchRequest(BaseModel):
@@ -1130,6 +1131,21 @@ class StopPlistWatchRequest(BaseModel):
     container: str
     plist_path: str
     udid: str | None = None
+
+
+class ConfigurePlistWatchRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/watch/configure."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    ignore_prefixes: list[str] = Field(default_factory=list)
+
+
+class ClearPlistWatchConfigRequest(BaseModel):
+    """Request body for DELETE /api/v1/device/app/state/plist/watch/configure."""
+
+    bundle_id: str
 
 
 class DeleteAppPlistKeyRequest(BaseModel):
