@@ -136,6 +136,18 @@ def find_by_label(elements: list[UIElement], label: str) -> list[UIElement]:
     return [e for e in elements if e.label.lower() == lower]
 
 
+def find_by_label_contains(elements: list[UIElement], substring: str) -> list[UIElement]:
+    """Find elements whose label contains a substring (case-insensitive)."""
+    lower = substring.lower()
+    return [e for e in elements if lower in e.label.lower()]
+
+
+def find_by_label_prefix(elements: list[UIElement], prefix: str) -> list[UIElement]:
+    """Find elements whose label starts with a prefix (case-insensitive)."""
+    lower = prefix.lower()
+    return [e for e in elements if e.label.lower().startswith(lower)]
+
+
 def find_by_identifier(elements: list[UIElement], identifier: str) -> list[UIElement]:
     """Find elements by exact identifier match (case-sensitive)."""
     return [e for e in elements if e.identifier == identifier]
@@ -150,17 +162,22 @@ def find_by_type(elements: list[UIElement], element_type: str) -> list[UIElement
 def find_element(
     elements: list[UIElement],
     label: str | None = None,
+    label_contains: str | None = None,
+    label_prefix: str | None = None,
     identifier: str | None = None,
     element_type: str | None = None,
 ) -> list[UIElement]:
     """Find elements matching label/identifier/type filters.
 
-    Combines filters with AND logic. At least one of label, identifier, or
-    element_type is required. Returns list of matching elements (may be empty).
+    Combines filters with AND logic. At least one of label, label_contains,
+    label_prefix, identifier, or element_type is required. Only one label
+    matching mode may be used at a time.
 
     Args:
         elements: List of UI elements to search
         label: Exact case-insensitive label match
+        label_contains: Case-insensitive substring match on label
+        label_prefix: Case-insensitive prefix match on label
         identifier: Exact case-sensitive identifier match
         element_type: Exact case-insensitive type match (narrows results)
 
@@ -170,6 +187,10 @@ def find_element(
     # Start with label or identifier search, then narrow by type
     if label:
         matches = find_by_label(elements, label)
+    elif label_contains:
+        matches = find_by_label_contains(elements, label_contains)
+    elif label_prefix:
+        matches = find_by_label_prefix(elements, label_prefix)
     elif identifier:
         matches = find_by_identifier(elements, identifier)
     elif element_type:

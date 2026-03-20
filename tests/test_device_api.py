@@ -455,7 +455,8 @@ class TestTapElement:
         assert data["status"] == "ok"
         assert data["tapped"]["label"] == "Settings"
         mock_controller.tap_element.assert_called_once_with(
-            label="Settings", identifier=None, element_type=None, udid=None,
+            label="Settings", label_contains=None, label_prefix=None,
+            identifier=None, element_type=None, udid=None,
             skip_stability_check=False, source_timeout=None,
         )
 
@@ -469,7 +470,8 @@ class TestTapElement:
             )
         assert resp.status_code == 200
         mock_controller.tap_element.assert_called_once_with(
-            label=None, identifier="Settings", element_type=None, udid=None,
+            label=None, label_contains=None, label_prefix=None,
+            identifier="Settings", element_type=None, udid=None,
             skip_stability_check=False, source_timeout=None,
         )
 
@@ -483,7 +485,8 @@ class TestTapElement:
             )
         assert resp.status_code == 200
         mock_controller.tap_element.assert_called_once_with(
-            label="Calendar", identifier=None, element_type="Button", udid=None,
+            label="Calendar", label_contains=None, label_prefix=None,
+            identifier=None, element_type="Button", udid=None,
             skip_stability_check=False, source_timeout=None,
         )
 
