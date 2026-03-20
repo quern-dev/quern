@@ -1102,6 +1102,16 @@ class SetAppPlistValueRequest(BaseModel):
     udid: str | None = None
 
 
+class SetAppPlistValuesRequest(BaseModel):
+    """Request body for POST /api/v1/device/app/state/plist/batch."""
+
+    bundle_id: str
+    container: str
+    plist_path: str
+    values: dict[str, object]  # key → value mapping
+    udid: str | None = None
+
+
 class DeleteAppPlistKeyRequest(BaseModel):
     """Request body for DELETE /api/v1/device/app/state/plist/key."""
 

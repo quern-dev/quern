@@ -82,6 +82,25 @@ async def set_plist_value(path: Path, key: str, value: Any) -> None:
         )
 
 
+def diff_plists(old: dict, new: dict) -> dict:
+    """Compare two plist dicts and return added/removed/changed keys.
+
+    Returns {"added": {...}, "removed": {...}, "changed": {...}}.
+    Changed entries have the form {key: {"old": ..., "new": ...}}.
+    """
+    old_keys = set(old.keys())
+    new_keys = set(new.keys())
+
+    added = {k: new[k] for k in sorted(new_keys - old_keys)}
+    removed = {k: old[k] for k in sorted(old_keys - new_keys)}
+    changed = {}
+    for k in sorted(old_keys & new_keys):
+        if old[k] != new[k]:
+            changed[k] = {"old": old[k], "new": new[k]}
+
+    return {"added": added, "removed": removed, "changed": changed}
+
+
 async def remove_plist_key(path: Path, key: str) -> None:
     """Remove a key from a plist file using plutil.
 

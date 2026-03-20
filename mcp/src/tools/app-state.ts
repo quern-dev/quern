@@ -151,6 +151,56 @@ Type inference: boolean values set -bool, integers set -integer, floats set -flo
     }
   });
 
+  server.registerTool("set_app_plist_values", {
+    description: `Set multiple keys in a plist file in one call. More efficient than calling set_app_plist_value repeatedly — set all coaching flags, feature flags, or preferences at once. Simulator only.
+
+Type inference per value: boolean → -bool, integer → -integer, float → -float, everything else → -string.`,
+    inputSchema: strictParams({
+      bundle_id: z.string().describe("App bundle identifier"),
+      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      plist_path: z.string().describe("Relative path to the plist within the container"),
+      values: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).describe("Object mapping plist keys to values (e.g. {\"flag1\": true, \"flag2\": false, \"count\": 42})"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
+    }),
+  }, async ({ bundle_id, container, plist_path, values, udid }) => {
+    try {
+      const body: Record<string, unknown> = { bundle_id, container, plist_path, values };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/app/state/plist/batch", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("diff_app_plist", {
+    description: `Compare a live plist against a saved checkpoint to see what changed. Returns added, removed, and changed keys. Useful for discovering new flags after app updates or verifying that a state restore worked correctly. Simulator only.`,
+    inputSchema: strictParams({
+      bundle_id: z.string().describe("App bundle identifier"),
+      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      plist_path: z.string().describe("Relative path to the plist within the container"),
+      checkpoint_label: z.string().describe("Name of the saved checkpoint to compare against"),
+      udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
+    }),
+  }, async ({ bundle_id, container, plist_path, checkpoint_label, udid }) => {
+    try {
+      const params: Record<string, string | undefined> = {
+        bundle_id, container, plist_path, checkpoint_label,
+      };
+      if (udid) params.udid = udid;
+      const data = await apiRequest("GET", "/api/v1/device/app/state/plist/diff", params);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("delete_app_plist_key", {
     description: `Remove a key from a plist file inside a simulator app's container. Useful for simulating missing/unset state (e.g. remove a flag to trigger first-launch flow). Simulator only.`,
     inputSchema: strictParams({

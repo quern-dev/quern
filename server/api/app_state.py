@@ -8,18 +8,20 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from server.device.app_state import (
     delete_state,
+    get_checkpoint_plist_path,
     list_states,
     resolve_container,
     restore_state,
     save_state,
 )
-from server.device.plist import read_plist, remove_plist_key, set_plist_value
+from server.device.plist import diff_plists, read_plist, remove_plist_key, set_plist_value
 from server.models import (
     DeleteAppPlistKeyRequest,
     DeviceError,
     RestoreAppStateRequest,
     SaveAppStateRequest,
     SetAppPlistValueRequest,
+    SetAppPlistValuesRequest,
 )
 
 router = APIRouter(prefix="/api/v1/device/app/state", tags=["app-state"])
@@ -165,6 +167,84 @@ async def set_app_plist_value(request: Request, body: SetAppPlistValueRequest):
             "value": body.value,
             "plist_path": body.plist_path,
             "container": body.container,
+        }
+    except HTTPException:
+        raise
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/plist/batch")
+async def set_app_plist_values(request: Request, body: SetAppPlistValuesRequest):
+    """Set multiple plist keys in one call."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.resolve_udid(body.udid)
+        controller._require_simulator(udid, "set_app_plist_values")
+        container_path = await resolve_container(udid, body.bundle_id, body.container)
+        full_path = container_path / body.plist_path
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail=f"Plist not found: {body.plist_path}")
+
+        errors = []
+        keys_set = 0
+        for key, value in body.values.items():
+            try:
+                await set_plist_value(full_path, key, value)
+                keys_set += 1
+            except DeviceError as e:
+                errors.append({"key": key, "error": str(e)})
+
+        result = {
+            "status": "ok" if not errors else "partial",
+            "keys_set": keys_set,
+            "plist_path": body.plist_path,
+            "container": body.container,
+        }
+        if errors:
+            result["errors"] = errors
+        return result
+    except HTTPException:
+        raise
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.get("/plist/diff")
+async def diff_app_plist(
+    request: Request,
+    bundle_id: str = Query(...),
+    container: str = Query(..., description='"data" or a group ID'),
+    plist_path: str = Query(..., description="Relative path to the plist"),
+    checkpoint_label: str = Query(..., description="Saved checkpoint to compare against"),
+    udid: str | None = Query(default=None),
+):
+    """Compare a live plist against a saved checkpoint.
+
+    Returns added, removed, and changed keys.
+    """
+    controller = _get_controller(request)
+    try:
+        udid_resolved = await controller.resolve_udid(udid)
+        controller._require_simulator(udid_resolved, "diff_app_plist")
+
+        # Read live plist
+        container_path = await resolve_container(udid_resolved, bundle_id, container)
+        live_path = container_path / plist_path
+        if not live_path.exists():
+            raise HTTPException(status_code=404, detail=f"Live plist not found: {plist_path}")
+        live_data = await read_plist(live_path)
+
+        # Read checkpoint plist
+        checkpoint_path = get_checkpoint_plist_path(bundle_id, checkpoint_label, container, plist_path)
+        checkpoint_data = await read_plist(checkpoint_path)
+
+        diff = diff_plists(checkpoint_data, live_data)
+        return {
+            "checkpoint_label": checkpoint_label,
+            "plist_path": plist_path,
+            "container": container,
+            **diff,
         }
     except HTTPException:
         raise
