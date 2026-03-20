@@ -274,19 +274,20 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
   });
 
   server.registerTool("configure_plist_watch", {
-    description: `Save persistent plist watch config for an app. When start_simulator_logging runs, it automatically starts plist watchers for all configured bundles — no manual start_plist_watch needed.
+    description: `Save persistent plist watch config for an app. Supports multiple plists per bundle — e.g., app group plist for coaching flags + main container plist for SDK config, each with its own ignore list.
 
-Set once per app. Config persists in ~/.quern/config.json across server restarts.`,
+When start_simulator_logging runs, it automatically starts watchers for ALL configured targets. Config persists in ~/.quern/config.json across server restarts.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
-      plist_path: z.string().describe("Relative path to the plist within the container"),
-      ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore (e.g. ["kGSPSearchFilter", "LaunchDarkly"])'),
+      watches: z.array(z.object({
+        container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+        plist_path: z.string().describe("Relative path to the plist within the container"),
+        ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore in this plist'),
+      })).describe("List of plist targets to watch for this bundle"),
     }),
-  }, async ({ bundle_id, container, plist_path, ignore_prefixes }) => {
+  }, async ({ bundle_id, watches }) => {
     try {
-      const body: Record<string, unknown> = { bundle_id, container, plist_path };
-      if (ignore_prefixes) body.ignore_prefixes = ignore_prefixes;
+      const body: Record<string, unknown> = { bundle_id, watches };
       const data = await apiRequest("POST", "/api/v1/device/app/state/plist/watch/configure", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {

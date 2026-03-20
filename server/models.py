@@ -1133,13 +1133,19 @@ class StopPlistWatchRequest(BaseModel):
     udid: str | None = None
 
 
+class PlistWatchTarget(BaseModel):
+    """A single plist to watch."""
+
+    container: str
+    plist_path: str
+    ignore_prefixes: list[str] = Field(default_factory=list)
+
+
 class ConfigurePlistWatchRequest(BaseModel):
     """Request body for POST /api/v1/device/app/state/plist/watch/configure."""
 
     bundle_id: str
-    container: str
-    plist_path: str
-    ignore_prefixes: list[str] = Field(default_factory=list)
+    watches: list[PlistWatchTarget]
 
 
 class ClearPlistWatchConfigRequest(BaseModel):

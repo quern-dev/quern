@@ -104,25 +104,25 @@ def set_local_capture_processes(processes: list[str]) -> None:
 
 
 def get_plist_watch_config() -> dict[str, dict]:
-    """Return plist_watch config keyed by bundle_id. Empty dict if not configured."""
+    """Return plist_watch config keyed by bundle_id.
+
+    Each value has a "watches" list of {container, plist_path, ignore_prefixes} dicts.
+    """
     return read_user_config().get("plist_watch", {})
 
 
 def set_plist_watch_config(
     bundle_id: str,
-    container: str,
-    plist_path: str,
-    ignore_prefixes: list[str] | None = None,
+    watches: list[dict],
 ) -> None:
-    """Save plist watch config for a bundle_id."""
+    """Save plist watch config for a bundle_id.
+
+    watches: list of {container, plist_path, ignore_prefixes} dicts.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = read_user_config()
     pw = config.setdefault("plist_watch", {})
-    pw[bundle_id] = {
-        "container": container,
-        "plist_path": plist_path,
-        "ignore_prefixes": ignore_prefixes or [],
-    }
+    pw[bundle_id] = {"watches": watches}
     USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
 
 

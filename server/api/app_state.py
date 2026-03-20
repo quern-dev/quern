@@ -379,22 +379,18 @@ async def configure_plist_watch(body: ConfigurePlistWatchRequest):
     """Save persistent plist watch config for a bundle_id.
 
     When start_simulator_logging runs, it checks this config and
-    auto-starts plist watchers for configured bundles.
+    auto-starts plist watchers for all configured targets.
     """
     from server.config import set_plist_watch_config
 
     set_plist_watch_config(
         bundle_id=body.bundle_id,
-        container=body.container,
-        plist_path=body.plist_path,
-        ignore_prefixes=body.ignore_prefixes,
+        watches=[w.model_dump() for w in body.watches],
     )
     return {
         "status": "configured",
         "bundle_id": body.bundle_id,
-        "container": body.container,
-        "plist_path": body.plist_path,
-        "ignore_prefixes": body.ignore_prefixes,
+        "watches": [w.model_dump() for w in body.watches],
     }
 
 
