@@ -1,14 +1,14 @@
 """Tests for the ingestion filter."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.processing.ingestion_filter import (
+    PRESETS,
     FilterConfig,
     IngestionFilter,
-    PRESETS,
     build_config,
 )
 
@@ -23,7 +23,7 @@ def _make_entry(
 ) -> LogEntry:
     return LogEntry(
         id="test",
-        timestamp=datetime(2026, 3, 7, 12, 0, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 3, 7, 12, 0, 0, tzinfo=UTC),
         process=process,
         subsystem=subsystem,
         level=level,
@@ -93,10 +93,12 @@ class TestFilterConfig:
     def test_include_and_behavior(self):
         """Must match ALL specified includes."""
         f = IngestionFilter()
-        f.update_filter(FilterConfig(
-            process="MyApp",
-            subsystems=["com.myapp"],
-        ))
+        f.update_filter(
+            FilterConfig(
+                process="MyApp",
+                subsystems=["com.myapp"],
+            )
+        )
         # Matches both
         assert f.should_admit(_make_entry(process="MyApp", subsystem="com.myapp")) is True
         # Wrong process
@@ -107,10 +109,12 @@ class TestFilterConfig:
     def test_exclude_or_behavior(self):
         """Any exclude match drops the entry."""
         f = IngestionFilter()
-        f.update_filter(FilterConfig(
-            exclude_processes=["noisyd"],
-            exclude_subsystems=["CoreBrightness"],
-        ))
+        f.update_filter(
+            FilterConfig(
+                exclude_processes=["noisyd"],
+                exclude_subsystems=["CoreBrightness"],
+            )
+        )
         # Matches process exclude
         assert f.should_admit(_make_entry(process="noisyd", subsystem="com.myapp")) is False
         # Matches subsystem exclude
@@ -238,7 +242,7 @@ class TestAdapterRestart:
     @pytest.mark.asyncio
     async def test_set_filter_reconfigures_running_sim_adapter(self):
         """Setting a process filter reconfigures running simulator adapters."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock
 
         from server.sources.simulator_log import SimulatorLogAdapter
 
@@ -318,11 +322,13 @@ class TestPipelineIntegration:
         # Fill buffer with noise (no filter active)
         for proc in ["bluetoothd", "wifid", "kernel", "MyApp"]:
             for i in range(10):
-                await buf.append(_make_entry(
-                    process=proc,
-                    message=f"{proc} msg {i}",
-                    source=LogSource.DEVICE,
-                ))
+                await buf.append(
+                    _make_entry(
+                        process=proc,
+                        message=f"{proc} msg {i}",
+                        source=LogSource.DEVICE,
+                    )
+                )
 
         assert buf.size == 40
 
@@ -338,6 +344,7 @@ class TestPipelineIntegration:
 
         # All remaining entries should be MyApp
         from server.models import LogQueryParams
+
         results, total = await buf.query(LogQueryParams(limit=100))
         assert total == 10
         assert all(e.process == "MyApp" for e in results)

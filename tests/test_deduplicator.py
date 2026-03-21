@@ -1,6 +1,6 @@
 """Tests for the log entry deduplicator."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,7 +10,7 @@ from server.processing.deduplicator import Deduplicator
 
 def _ts(offset_seconds: float = 0) -> datetime:
     """Create a UTC timestamp with an offset from a fixed base time."""
-    base = datetime(2026, 2, 7, 14, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 2, 7, 14, 0, 0, tzinfo=UTC)
     return base + timedelta(seconds=offset_seconds)
 
 

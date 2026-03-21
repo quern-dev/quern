@@ -1,6 +1,6 @@
 """Tests for the in-memory FlowStore."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -20,7 +20,7 @@ def _make_flow(
 ) -> FlowRecord:
     return FlowRecord(
         id=flow_id,
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         request=FlowRequest(
             method=method,
             url=f"https://{host}{path}",
@@ -30,7 +30,9 @@ def _make_flow(
         response=FlowResponse(
             status_code=status_code,
             reason=reason,
-        ) if error is None else None,
+        )
+        if error is None
+        else None,
         timing=FlowTiming(total_ms=100.0),
         error=error,
     )
@@ -152,7 +154,7 @@ async def test_query_filter_has_error():
 @pytest.mark.asyncio
 async def test_query_filter_time_range():
     store = FlowStore()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await store.add(_make_flow(flow_id="f_1", timestamp=now - timedelta(minutes=10)))
     await store.add(_make_flow(flow_id="f_2", timestamp=now - timedelta(minutes=5)))
     await store.add(_make_flow(flow_id="f_3", timestamp=now))

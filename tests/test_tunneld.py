@@ -7,11 +7,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
 
 from server.device.tunneld import (
     TUNNELD_LABEL,
-    TUNNELD_URL,
     _tunnel_udid_cache,
     cli_tunneld,
     find_pymobiledevice3_binary,
@@ -20,7 +18,6 @@ from server.device.tunneld import (
     is_tunneld_running,
     resolve_tunnel_udid,
 )
-
 
 # ---------------------------------------------------------------------------
 # find_pymobiledevice3_binary
@@ -152,8 +149,10 @@ class TestResolveTunnelUdid:
             Path(json_path).write_text(json.dumps(devicectl_output))
             return mock_proc
 
-        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices), \
-             patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess):
+        with (
+            patch("server.device.tunneld.get_tunneld_devices", return_value=devices),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess),
+        ):
             result = await resolve_tunnel_udid("53DA57AA-1234")
             assert result == "00008130-AAAA"
             assert _tunnel_udid_cache["53DA57AA-1234"] == "00008130-AAAA"
@@ -194,8 +193,10 @@ class TestResolveTunnelUdid:
             Path(json_path).write_text(json.dumps(devicectl_output))
             return mock_proc
 
-        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices), \
-             patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess):
+        with (
+            patch("server.device.tunneld.get_tunneld_devices", return_value=devices),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess),
+        ):
             result = await resolve_tunnel_udid("53DA57AA-1111")
             assert result == "00008130-AAAA1111"
             assert _tunnel_udid_cache["53DA57AA-1111"] == "00008130-AAAA1111"
@@ -212,8 +213,10 @@ class TestResolveTunnelUdid:
         mock_proc.communicate = AsyncMock(return_value=(b"", b"error"))
         mock_proc.returncode = 1
 
-        with patch("server.device.tunneld.get_tunneld_devices", return_value=devices), \
-             patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        with (
+            patch("server.device.tunneld.get_tunneld_devices", return_value=devices),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
             result = await resolve_tunnel_udid("53DA57AA-1111")
             assert result is None
 
@@ -261,8 +264,10 @@ class TestCliTunneld:
         assert "Unknown command" in captured.out
 
     def test_status_command(self):
-        with patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=None), \
-             patch("server.device.tunneld.PLIST_PATH") as mock_plist:
+        with (
+            patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=None),
+            patch("server.device.tunneld.PLIST_PATH") as mock_plist,
+        ):
             mock_plist.exists.return_value = False
             with patch("urllib.request.urlopen", side_effect=Exception("refused")):
                 result = cli_tunneld(["status"])

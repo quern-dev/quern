@@ -9,7 +9,6 @@ from PIL import Image
 from server.device.screenshots import annotate_screenshot
 from server.models import UIElement
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,8 +55,12 @@ class TestAnnotateScreenshot:
     def test_skips_non_interactive_types(self):
         raw = _make_test_png()
         elements = [
-            UIElement(type="StaticText", label="Hello", frame={"x": 0, "y": 0, "width": 100, "height": 20}),
-            UIElement(type="Application", label="App", frame={"x": 0, "y": 0, "width": 400, "height": 800}),
+            UIElement(
+                type="StaticText", label="Hello", frame={"x": 0, "y": 0, "width": 100, "height": 20}
+            ),
+            UIElement(
+                type="Application", label="App", frame={"x": 0, "y": 0, "width": 400, "height": 800}
+            ),
         ]
         # Should not raise — just produces unmodified (scaled) image
         result, media_type = annotate_screenshot(raw, elements, scale=1.0)
@@ -75,7 +78,11 @@ class TestAnnotateScreenshot:
         elements = [
             _button("Save", 50, 100),
             _button("Cancel", 200, 100),
-            UIElement(type="TextField", label="Name", frame={"x": 50, "y": 200, "width": 300, "height": 40}),
+            UIElement(
+                type="TextField",
+                label="Name",
+                frame={"x": 50, "y": 200, "width": 300, "height": 40},
+            ),
         ]
         result, _ = annotate_screenshot(raw, elements, scale=1.0)
         img = Image.open(io.BytesIO(result))

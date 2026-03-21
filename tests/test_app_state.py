@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import server.device.app_state as app_state_module
 from server.device.app_state import (
-    delete_state,
     get_app_groups,
     list_states,
-    resolve_container,
     restore_state,
     save_state,
 )
 from server.models import DeviceError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,8 +38,16 @@ class TestGetAppGroups:
     async def test_finds_matching_group(self, tmp_path, monkeypatch):
         # Build a fake AppGroup directory structure
         app_group_root = (
-            tmp_path / "Library" / "Developer" / "CoreSimulator"
-            / "Devices" / "TEST-UDID" / "data" / "Containers" / "Shared" / "AppGroup"
+            tmp_path
+            / "Library"
+            / "Developer"
+            / "CoreSimulator"
+            / "Devices"
+            / "TEST-UDID"
+            / "data"
+            / "Containers"
+            / "Shared"
+            / "AppGroup"
         )
         container = app_group_root / "ABCD-1234"
         container.mkdir(parents=True)
@@ -71,8 +75,16 @@ class TestGetAppGroups:
 
     async def test_skips_non_group_identifiers(self, tmp_path, monkeypatch):
         app_group_root = (
-            tmp_path / "Library" / "Developer" / "CoreSimulator"
-            / "Devices" / "TEST-UDID" / "data" / "Containers" / "Shared" / "AppGroup"
+            tmp_path
+            / "Library"
+            / "Developer"
+            / "CoreSimulator"
+            / "Devices"
+            / "TEST-UDID"
+            / "data"
+            / "Containers"
+            / "Shared"
+            / "AppGroup"
         )
         container = app_group_root / "WXYZ-5678"
         container.mkdir(parents=True)
@@ -236,7 +248,10 @@ class TestListStates:
 
         try:
             bundle_dir = app_state_module.APP_STATES_DIR / "com.example.App"
-            for label, ts in [("alpha", "2026-01-01T00:00:00+00:00"), ("beta", "2026-02-01T00:00:00+00:00")]:
+            for label, ts in [
+                ("alpha", "2026-01-01T00:00:00+00:00"),
+                ("beta", "2026-02-01T00:00:00+00:00"),
+            ]:
                 d = bundle_dir / label
                 d.mkdir(parents=True)
                 meta = {"label": label, "bundle_id": "com.example.App", "captured_at": ts}

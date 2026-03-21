@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from server.lifecycle.state import (
+    is_server_healthy,
     read_state,
-    write_state,
     remove_state,
     update_state,
-    is_server_healthy,
-    STATE_FILE,
+    write_state,
 )
 
 
@@ -141,8 +138,10 @@ def test_write_creates_config_dir(tmp_path):
     nested = tmp_path / "sub" / "dir"
     state_file = nested / "state.json"
 
-    with patch("server.lifecycle.state.CONFIG_DIR", nested), \
-         patch("server.lifecycle.state.STATE_FILE", state_file):
+    with (
+        patch("server.lifecycle.state.CONFIG_DIR", nested),
+        patch("server.lifecycle.state.STATE_FILE", state_file),
+    ):
         write_state({"pid": 1, "server_port": 9100})
 
     assert nested.exists()

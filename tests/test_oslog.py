@@ -100,9 +100,9 @@ def test_timestamp_parsing():
 
 def test_process_name_extraction():
     """Process name should be extracted from the image path."""
-    assert extract_process_name(
-        "/private/var/containers/Bundle/Application/ABC123/MyApp"
-    ) == "MyApp"
+    assert (
+        extract_process_name("/private/var/containers/Bundle/Application/ABC123/MyApp") == "MyApp"
+    )
     assert extract_process_name("") == ""
     assert extract_process_name("/usr/bin/logd") == "logd"
 

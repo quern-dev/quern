@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from server.device.usbmux import UsbmuxBackend
 from server.models import DeviceState, DeviceType
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -71,21 +70,44 @@ class TestParseDevices:
 
     def test_all_ios17_plus_filtered(self):
         raw = [
-            {"UniqueDeviceID": "aaa", "ProductVersion": "17.0", "DeviceName": "A", "DeviceClass": "iPhone", "ConnectionType": "USB"},
-            {"UniqueDeviceID": "bbb", "ProductVersion": "18.1", "DeviceName": "B", "DeviceClass": "iPad", "ConnectionType": "USB"},
+            {
+                "UniqueDeviceID": "aaa",
+                "ProductVersion": "17.0",
+                "DeviceName": "A",
+                "DeviceClass": "iPhone",
+                "ConnectionType": "USB",
+            },
+            {
+                "UniqueDeviceID": "bbb",
+                "ProductVersion": "18.1",
+                "DeviceName": "B",
+                "DeviceClass": "iPad",
+                "ConnectionType": "USB",
+            },
         ]
         assert UsbmuxBackend._parse_devices(raw) == []
 
     def test_connection_type_lowercased(self):
         raw = [
-            {"UniqueDeviceID": "aaa", "ProductVersion": "16.0", "DeviceName": "A", "DeviceClass": "iPhone", "ConnectionType": "WiFi"},
+            {
+                "UniqueDeviceID": "aaa",
+                "ProductVersion": "16.0",
+                "DeviceName": "A",
+                "DeviceClass": "iPhone",
+                "ConnectionType": "WiFi",
+            },
         ]
         devices = UsbmuxBackend._parse_devices(raw)
         assert devices[0].connection_type == "wifi"
 
     def test_missing_connection_type_defaults_to_usb(self):
         raw = [
-            {"UniqueDeviceID": "aaa", "ProductVersion": "16.0", "DeviceName": "A", "DeviceClass": "iPhone"},
+            {
+                "UniqueDeviceID": "aaa",
+                "ProductVersion": "16.0",
+                "DeviceName": "A",
+                "DeviceClass": "iPhone",
+            },
         ]
         devices = UsbmuxBackend._parse_devices(raw)
         assert devices[0].connection_type == "usb"
@@ -185,11 +207,13 @@ class TestGetUsbUdidMap:
         assert result == {}
 
     async def test_skips_entries_without_name_or_udid(self, backend):
-        raw = json.dumps([
-            {"UniqueDeviceID": "aaa", "DeviceName": ""},
-            {"UniqueDeviceID": "", "DeviceName": "Test"},
-            {"UniqueDeviceID": "bbb", "DeviceName": "Good Device"},
-        ]).encode()
+        raw = json.dumps(
+            [
+                {"UniqueDeviceID": "aaa", "DeviceName": ""},
+                {"UniqueDeviceID": "", "DeviceName": "Test"},
+                {"UniqueDeviceID": "bbb", "DeviceName": "Good Device"},
+            ]
+        ).encode()
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(raw, b""))
         mock_proc.returncode = 0

@@ -9,7 +9,6 @@ import pytest
 from server.models import LogLevel, LogSource
 from server.sources.build import BuildAdapter
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 
 

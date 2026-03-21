@@ -11,7 +11,7 @@ Mark with @pytest.mark.integration to skip in CI.
 import asyncio
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -37,7 +37,8 @@ def get_booted_simulator() -> str | None:
             if "(Booted)" in line and "(" in line:
                 # Extract UDID from between first and second parentheses
                 import re
-                match = re.search(r'\(([A-F0-9-]{36})\)', line)
+
+                match = re.search(r"\(([A-F0-9-]{36})\)", line)
                 if match:
                     return match.group(1)
         return None
@@ -116,9 +117,7 @@ class TestCertInstallationIntegration:
         print(f"Verified cert state (SQLite): {verified_state}")
 
         # Step 3: Attempt installation (might already be installed)
-        was_installed = await cert_manager.install_cert(
-            controller, booted_simulator, force=False
-        )
+        was_installed = await cert_manager.install_cert(controller, booted_simulator, force=False)
         print(f"Install result: {'newly installed' if was_installed else 'already installed'}")
 
         # Step 4: Verify it's now installed
@@ -140,14 +139,10 @@ class TestCertInstallationIntegration:
     async def test_install_idempotency(self, controller, booted_simulator):
         """Test that install_cert is idempotent."""
         # Install once
-        first_install = await cert_manager.install_cert(
-            controller, booted_simulator, force=False
-        )
+        await cert_manager.install_cert(controller, booted_simulator, force=False)
 
         # Install again (should be no-op)
-        second_install = await cert_manager.install_cert(
-            controller, booted_simulator, force=False
-        )
+        second_install = await cert_manager.install_cert(controller, booted_simulator, force=False)
 
         # Second install should return False (already installed)
         assert second_install is False, "Second install should return False (already installed)"
@@ -159,9 +154,7 @@ class TestCertInstallationIntegration:
         await cert_manager.install_cert(controller, booted_simulator, force=False)
 
         # Force reinstall
-        was_reinstalled = await cert_manager.install_cert(
-            controller, booted_simulator, force=True
-        )
+        was_reinstalled = await cert_manager.install_cert(controller, booted_simulator, force=True)
 
         # force=True should always install (return True)
         assert was_reinstalled is True, "force=True should always install"
@@ -175,9 +168,9 @@ class TestCertInstallationIntegration:
     @pytest.mark.asyncio
     async def test_cache_ttl_behavior(self, controller, booted_simulator):
         """Test that cache is used within TTL window."""
-        from datetime import datetime, timedelta, timezone
         from unittest.mock import patch
-        from server.lifecycle.state import STATE_FILE, read_state, write_state
+
+        from server.lifecycle.state import STATE_FILE, write_state
 
         # Ensure state.json exists so update_state can persist the cache
         if not STATE_FILE.exists():
@@ -213,9 +206,7 @@ class TestCertInstallationIntegration:
         # Verify cert on all booted devices
         results = []
         for device in booted_devices[:2]:  # Test with first 2
-            state = await cert_manager.get_device_cert_state(
-                controller, device.udid, verify=True
-            )
+            state = await cert_manager.get_device_cert_state(controller, device.udid, verify=True)
             results.append((device.name, state.cert_installed))
 
         print(f"\nMulti-device cert status: {results}")

@@ -185,8 +185,12 @@ class TestEnsureEndpoint:
             if call_count[0] > 2:
                 return [
                     DeviceInfo(
-                        udid="CCCC-3333", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                        os_version="iOS 18.2", runtime="...", is_available=True,
+                        udid="CCCC-3333",
+                        name="iPhone 16 Pro",
+                        state=DeviceState.BOOTED,
+                        os_version="iOS 18.2",
+                        runtime="...",
+                        is_available=True,
                         device_family="iPhone",
                     ),
                 ]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,9 +33,7 @@ async def test_healthy_proxy_keeps_running():
     adapter = FakeAdapter(running=True, process=proc)
 
     # Run watchdog for a few cycles, then cancel
-    task = asyncio.create_task(
-        proxy_watchdog(lambda: adapter, check_interval=0.01)
-    )
+    task = asyncio.create_task(proxy_watchdog(lambda: adapter, check_interval=0.01))
     await asyncio.sleep(0.05)  # Let it loop a few times
     task.cancel()
     try:
@@ -55,9 +53,7 @@ async def test_detects_crash():
     adapter = FakeAdapter(running=True, process=proc)
 
     with patch("server.lifecycle.watchdog.update_state") as mock_update:
-        task = asyncio.create_task(
-            proxy_watchdog(lambda: adapter, check_interval=0.01)
-        )
+        task = asyncio.create_task(proxy_watchdog(lambda: adapter, check_interval=0.01))
 
         # Simulate crash after a short delay
         await asyncio.sleep(0.03)
@@ -76,9 +72,7 @@ async def test_skips_when_not_running():
     """Watchdog should skip checks when adapter is not running."""
     adapter = FakeAdapter(running=False, process=None)
 
-    task = asyncio.create_task(
-        proxy_watchdog(lambda: adapter, check_interval=0.01)
-    )
+    task = asyncio.create_task(proxy_watchdog(lambda: adapter, check_interval=0.01))
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -92,9 +86,7 @@ async def test_skips_when_not_running():
 @pytest.mark.asyncio
 async def test_skips_when_adapter_is_none():
     """Watchdog should handle None adapter gracefully."""
-    task = asyncio.create_task(
-        proxy_watchdog(lambda: None, check_interval=0.01)
-    )
+    task = asyncio.create_task(proxy_watchdog(lambda: None, check_interval=0.01))
     await asyncio.sleep(0.05)
     task.cancel()
     try:

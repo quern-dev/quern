@@ -424,7 +424,7 @@ class AdbBackend:
             package,
         )
         # Output is two lines: priority/preferred line, then component (package/activity)
-        lines = [l.strip() for l in stdout.strip().splitlines() if "/" in l]
+        lines = [ln.strip() for ln in stdout.strip().splitlines() if "/" in ln]
         if lines:
             component = lines[-1]
             await self._run_adb_for_device(

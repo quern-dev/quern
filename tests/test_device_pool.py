@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -133,6 +133,6 @@ class TestRefreshCaching:
         assert mock_controller.list_devices.call_count == first_call_count
 
         # After 2.1 seconds, should refresh again
-        pool._last_refresh_at = datetime.now(timezone.utc) - timedelta(seconds=2.1)
+        pool._last_refresh_at = datetime.now(UTC) - timedelta(seconds=2.1)
         await pool.refresh()
         assert mock_controller.list_devices.call_count == first_call_count + 1

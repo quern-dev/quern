@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
+import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from server.device.u2_client import (
     U2Backend,
@@ -12,8 +14,6 @@ from server.device.u2_client import (
     _normalize_node,
     _parse_bounds,
 )
-import xml.etree.ElementTree as ET
-
 
 # ---------------------------------------------------------------------------
 # Unit tests: normalization helpers
@@ -52,7 +52,10 @@ class TestMapClass:
         assert _map_class("android.view.ViewGroup") == "Group"
 
     def test_material_classes(self):
-        assert _map_class("com.google.android.material.floatingactionbutton.FloatingActionButton") == "Button"
+        assert (
+            _map_class("com.google.android.material.floatingactionbutton.FloatingActionButton")
+            == "Button"
+        )
         assert _map_class("com.google.android.material.tabs.TabLayout") == "TabBar"
 
     def test_recyclerview(self):
@@ -383,6 +386,7 @@ class TestPressButton:
     @pytest.mark.asyncio
     async def test_unknown_button_raises(self, u2_backend):
         from server.models import DeviceError
+
         with pytest.raises(DeviceError, match="Unknown button"):
             await u2_backend.press_button("emulator-5554", "SIRI")
 

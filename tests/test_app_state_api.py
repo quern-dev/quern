@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,8 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.main import create_app
-from server.models import DeviceError, DeviceState, DeviceType, DeviceInfo
-
+from server.models import DeviceError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -108,7 +106,11 @@ class TestRestoreEndpoint:
     async def test_restore_not_found(self, app, auth_headers, mock_controller):
         with patch(
             "server.api.app_state.restore_state",
-            AsyncMock(side_effect=DeviceError("Checkpoint 'x' not found for com.example.App", tool="simctl")),
+            AsyncMock(
+                side_effect=DeviceError(
+                    "Checkpoint 'x' not found for com.example.App", tool="simctl"
+                )
+            ),
         ):
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -123,7 +125,11 @@ class TestRestoreEndpoint:
 class TestListEndpoint:
     async def test_list_endpoint(self, app, auth_headers, mock_controller):
         states = [
-            {"label": "alpha", "bundle_id": "com.example.App", "captured_at": "2026-01-01T00:00:00+00:00"},
+            {
+                "label": "alpha",
+                "bundle_id": "com.example.App",
+                "captured_at": "2026-01-01T00:00:00+00:00",
+            },
         ]
         with patch("server.api.app_state.list_states", return_value=states):
             transport = ASGITransport(app=app)
@@ -150,7 +156,11 @@ class TestReadPlistEndpoint:
         with (
             patch(
                 "server.api.app_state.resolve_container",
-                AsyncMock(return_value=MagicMock(__truediv__=lambda self, x: MagicMock(exists=lambda: True))),
+                AsyncMock(
+                    return_value=MagicMock(
+                        __truediv__=lambda self, x: MagicMock(exists=lambda: True)
+                    )
+                ),
             ),
             patch("server.api.app_state.read_plist", AsyncMock(return_value=plist_data)),
         ):
@@ -174,7 +184,11 @@ class TestReadPlistEndpoint:
         with (
             patch(
                 "server.api.app_state.resolve_container",
-                AsyncMock(return_value=MagicMock(__truediv__=lambda self, x: MagicMock(exists=lambda: True))),
+                AsyncMock(
+                    return_value=MagicMock(
+                        __truediv__=lambda self, x: MagicMock(exists=lambda: True)
+                    )
+                ),
             ),
             patch("server.api.app_state.read_plist", AsyncMock(return_value=plist_data)),
         ):
@@ -201,7 +215,11 @@ class TestSetPlistValueEndpoint:
         with (
             patch(
                 "server.api.app_state.resolve_container",
-                AsyncMock(return_value=MagicMock(__truediv__=lambda self, x: MagicMock(exists=lambda: True))),
+                AsyncMock(
+                    return_value=MagicMock(
+                        __truediv__=lambda self, x: MagicMock(exists=lambda: True)
+                    )
+                ),
             ),
             patch("server.api.app_state.set_plist_value", AsyncMock()),
         ):

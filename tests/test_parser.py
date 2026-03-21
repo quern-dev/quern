@@ -12,7 +12,7 @@ def adapter() -> SyslogAdapter:
 
 
 def test_parse_standard_line(adapter: SyslogAdapter):
-    line = 'Feb  7 14:23:01 iPhone MyApp(CoreFoundation)[1234] <Notice>: viewDidLoad called'
+    line = "Feb  7 14:23:01 iPhone MyApp(CoreFoundation)[1234] <Notice>: viewDidLoad called"
     entry = adapter._parse_line(line)
 
     assert entry is not None
@@ -26,7 +26,7 @@ def test_parse_standard_line(adapter: SyslogAdapter):
 
 
 def test_parse_line_without_subsystem(adapter: SyslogAdapter):
-    line = 'Feb  7 14:23:01 iPhone MyApp[1234] <Error>: something failed'
+    line = "Feb  7 14:23:01 iPhone MyApp[1234] <Error>: something failed"
     entry = adapter._parse_line(line)
 
     assert entry is not None
@@ -37,7 +37,7 @@ def test_parse_line_without_subsystem(adapter: SyslogAdapter):
 
 
 def test_parse_abbreviated_level(adapter: SyslogAdapter):
-    line = 'Feb  7 14:23:01 iPhone MyApp[1234] <e>: error message'
+    line = "Feb  7 14:23:01 iPhone MyApp[1234] <e>: error message"
     entry = adapter._parse_line(line)
 
     assert entry is not None
@@ -56,7 +56,7 @@ def test_parse_unparseable_line(adapter: SyslogAdapter):
 
 
 def test_parse_empty_message(adapter: SyslogAdapter):
-    line = 'Feb  7 14:23:01 iPhone MyApp[1234] <Info>: '
+    line = "Feb  7 14:23:01 iPhone MyApp[1234] <Info>: "
     entry = adapter._parse_line(line)
 
     assert entry is not None
@@ -70,7 +70,7 @@ def test_parse_empty_message(adapter: SyslogAdapter):
 
 
 def test_parse_no_device_with_subsystem(adapter: SyslogAdapter):
-    line = 'Feb  9 20:26:11 backboardd(CoreBrightness)[72] <Notice>: Ammolite: Lux 475.7'
+    line = "Feb  9 20:26:11 backboardd(CoreBrightness)[72] <Notice>: Ammolite: Lux 475.7"
     entry = adapter._parse_line(line)
 
     assert entry is not None
@@ -82,7 +82,7 @@ def test_parse_no_device_with_subsystem(adapter: SyslogAdapter):
 
 
 def test_parse_no_device_without_subsystem(adapter: SyslogAdapter):
-    line = 'Feb  9 20:26:12 powerexperienced[125] <Notice>: Evaluating power mode'
+    line = "Feb  9 20:26:12 powerexperienced[125] <Notice>: Evaluating power mode"
     entry = adapter._parse_line(line)
 
     assert entry is not None
@@ -94,7 +94,7 @@ def test_parse_no_device_without_subsystem(adapter: SyslogAdapter):
 
 
 def test_parse_no_device_error(adapter: SyslogAdapter):
-    line = 'Feb  9 20:26:12 locationd[78] <Error>: GPS signal lost'
+    line = "Feb  9 20:26:12 locationd[78] <Error>: GPS signal lost"
     entry = adapter._parse_line(line)
 
     assert entry is not None

@@ -10,7 +10,6 @@ import pytest
 from server.device.adb import AdbBackend
 from server.models import DeviceError, DeviceState, DeviceType
 
-
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
@@ -118,37 +117,58 @@ class TestAppLifecycle:
         """launch_app resolves the launcher activity then starts it."""
         backend = AdbBackend()
         # First call: resolve-activity returns component; second call: am start
-        backend._run_adb_for_device = AsyncMock(side_effect=[
-            ("priority=0 preferredOrder=0 match=0x00108000\ncom.example.app/.MainActivity", ""),
-            ("", ""),
-        ])
+        backend._run_adb_for_device = AsyncMock(
+            side_effect=[
+                ("priority=0 preferredOrder=0 match=0x00108000\ncom.example.app/.MainActivity", ""),
+                ("", ""),
+            ]
+        )
         await backend.launch_app("emulator-5554", "com.example.app")
         assert backend._run_adb_for_device.call_count == 2
         backend._run_adb_for_device.assert_any_call(
-            "emulator-5554", "shell", "cmd", "package", "resolve-activity",
-            "--brief", "-a", "android.intent.action.MAIN",
-            "-c", "android.intent.category.LAUNCHER",
+            "emulator-5554",
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
             "com.example.app",
         )
         backend._run_adb_for_device.assert_any_call(
-            "emulator-5554", "shell", "am", "start",
-            "-n", "com.example.app/.MainActivity",
+            "emulator-5554",
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.example.app/.MainActivity",
         )
 
     async def test_launch_app_fallback(self):
         """launch_app falls back to .MainActivity when resolve-activity returns no component."""
         backend = AdbBackend()
-        backend._run_adb_for_device = AsyncMock(side_effect=[
-            ("No activity found\n", ""),
-            ("", ""),
-        ])
+        backend._run_adb_for_device = AsyncMock(
+            side_effect=[
+                ("No activity found\n", ""),
+                ("", ""),
+            ]
+        )
         await backend.launch_app("emulator-5554", "com.example.app")
         assert backend._run_adb_for_device.call_count == 2
         backend._run_adb_for_device.assert_any_call(
-            "emulator-5554", "shell", "am", "start",
-            "-a", "android.intent.action.MAIN",
-            "-c", "android.intent.category.LAUNCHER",
-            "-n", "com.example.app/.MainActivity",
+            "emulator-5554",
+            "shell",
+            "am",
+            "start",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "-n",
+            "com.example.app/.MainActivity",
         )
 
     async def test_terminate_app(self):
@@ -169,9 +189,9 @@ class TestAppLifecycle:
 
     async def test_list_apps(self):
         backend = AdbBackend()
-        backend._run_adb_for_device = AsyncMock(return_value=(
-            "package:com.example.app\npackage:com.example.other\n", ""
-        ))
+        backend._run_adb_for_device = AsyncMock(
+            return_value=("package:com.example.app\npackage:com.example.other\n", "")
+        )
         apps = await backend.list_apps("emulator-5554")
         assert len(apps) == 2
         assert apps[0].bundle_id == "com.example.app"

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device.idb import IdbBackend, _PROBEABLE_ROLES, _PROBE_STEP
+from server.device.idb import IdbBackend
 from server.models import DeviceError
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -83,8 +83,13 @@ class TestRun:
             stdout, stderr = await backend._run("ui", "describe-all", "--udid", "X")
             assert stdout == "ok\n"
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "describe-all", "--udid", "X",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "describe-all",
+                "--udid",
+                "X",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_nonzero_exit_raises(self):
@@ -147,8 +152,14 @@ class TestDescribeAll:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.describe_all("UDID-123")
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "describe-all", "--udid", "UDID-123", "--nested",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "describe-all",
+                "--udid",
+                "UDID-123",
+                "--nested",
+                stdout=-1,
+                stderr=-1,
             )
 
 
@@ -165,10 +176,17 @@ class TestTap:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.tap("AAAA-1111", 100.5, 200.3)
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "tap", "100", "200",
-                "--duration", "0.05",
-                "--udid", "AAAA-1111",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "tap",
+                "100",
+                "200",
+                "--duration",
+                "0.05",
+                "--udid",
+                "AAAA-1111",
+                stdout=-1,
+                stderr=-1,
             )
 
 
@@ -185,11 +203,19 @@ class TestSwipe:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.swipe("AAAA-1111", 100.5, 200.7, 300.2, 400.9, duration=1.0)
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "swipe",
-                "100", "201", "300", "401",
-                "--udid", "AAAA-1111",
-                "--duration", "1.0",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "swipe",
+                "100",
+                "201",
+                "300",
+                "401",
+                "--udid",
+                "AAAA-1111",
+                "--duration",
+                "1.0",
+                stdout=-1,
+                stderr=-1,
             )
 
 
@@ -206,9 +232,14 @@ class TestTypeText:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.type_text("AAAA-1111", "Hello World")
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "text", "Hello World",
-                "--udid", "AAAA-1111",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "text",
+                "Hello World",
+                "--udid",
+                "AAAA-1111",
+                stdout=-1,
+                stderr=-1,
             )
 
 
@@ -225,9 +256,14 @@ class TestPressButton:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.press_button("AAAA-1111", "HOME")
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "button", "HOME",
-                "--udid", "AAAA-1111",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "button",
+                "HOME",
+                "--udid",
+                "AAAA-1111",
+                stdout=-1,
+                stderr=-1,
             )
 
 
@@ -240,14 +276,24 @@ class TestDescribePoint:
     async def test_command_construction(self):
         backend = IdbBackend()
         backend._binary = "/usr/local/bin/idb"
-        element = {"type": "Button", "AXLabel": "Settings", "frame": {"x": 351, "y": 56, "width": 43, "height": 44}}
+        element = {
+            "type": "Button",
+            "AXLabel": "Settings",
+            "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
+        }
         proc = _mock_proc(stdout=json.dumps(element).encode())
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             result = await backend.describe_point("AAAA-1111", 372.5, 78.0)
             mock_exec.assert_called_once_with(
-                "/usr/local/bin/idb", "ui", "describe-point", "372", "78",
-                "--udid", "AAAA-1111",
-                stdout=-1, stderr=-1,
+                "/usr/local/bin/idb",
+                "ui",
+                "describe-point",
+                "372",
+                "78",
+                "--udid",
+                "AAAA-1111",
+                stdout=-1,
+                stderr=-1,
             )
         assert result == element
 
@@ -314,7 +360,8 @@ class TestIsProbeableContainer:
 
     def test_container_with_children_not_probeable(self):
         item = {
-            "type": "Group", "role_description": "Nav bar",
+            "type": "Group",
+            "role_description": "Nav bar",
             "children": [{"type": "Button", "AXLabel": "Back"}],
         }
         assert IdbBackend._is_probeable_container(item) is False
@@ -356,13 +403,16 @@ class TestFindEmptyContainers:
     def test_deeply_nested_container(self):
         data = [
             {
-                "type": "Group", "role_description": "application",
+                "type": "Group",
+                "role_description": "application",
                 "children": [
                     {
-                        "type": "Group", "role_description": "group",
+                        "type": "Group",
+                        "role_description": "group",
                         "children": [
                             {
-                                "type": "Group", "role_description": "Toolbar",
+                                "type": "Group",
+                                "role_description": "Toolbar",
                                 "frame": {"x": 0, "y": 700, "width": 400, "height": 44},
                                 "children": [],
                             }
@@ -387,12 +437,14 @@ class TestProbeContainer:
         backend._binary = "/usr/local/bin/idb"
 
         container = {
-            "type": "Group", "role_description": "Nav bar",
+            "type": "Group",
+            "role_description": "Nav bar",
             "frame": {"x": 0, "y": 56, "width": 100, "height": 44},
         }
 
         # 100pt wide / 20pt step = 5 probes at x=10, 30, 50, 70, 90
         call_xs = []
+
         async def mock_describe_point(udid, x, y):
             call_xs.append(x)
             return None
@@ -408,12 +460,17 @@ class TestProbeContainer:
         backend._binary = "/usr/local/bin/idb"
 
         container = {
-            "type": "Group", "role_description": "Tab bar",
+            "type": "Group",
+            "role_description": "Tab bar",
             "frame": {"x": 0, "y": 791, "width": 100, "height": 83},
         }
 
         # Two probes return the same element (same frame)
-        element = {"type": "RadioButton", "AXLabel": "Home", "frame": {"x": 0, "y": 791, "width": 76, "height": 83}}
+        element = {
+            "type": "RadioButton",
+            "AXLabel": "Home",
+            "frame": {"x": 0, "y": 791, "width": 76, "height": 83},
+        }
 
         with patch.object(backend, "describe_point", return_value=element):
             discovered = await backend._probe_container("X", container)
@@ -427,12 +484,17 @@ class TestProbeContainer:
         backend._binary = "/usr/local/bin/idb"
 
         container = {
-            "type": "Group", "role_description": "Nav bar",
+            "type": "Group",
+            "role_description": "Nav bar",
             "frame": {"x": 0, "y": 56, "width": 100, "height": 44},
         }
 
         # Probe returns the container itself (same frame)
-        container_hit = {"type": "Group", "AXLabel": "Nav bar", "frame": {"x": 0, "y": 56, "width": 100, "height": 44}}
+        container_hit = {
+            "type": "Group",
+            "AXLabel": "Nav bar",
+            "frame": {"x": 0, "y": 56, "width": 100, "height": 44},
+        }
 
         with patch.object(backend, "describe_point", return_value=container_hit):
             discovered = await backend._probe_container("X", container)
@@ -444,20 +506,32 @@ class TestProbeContainer:
         backend._binary = "/usr/local/bin/idb"
 
         container = {
-            "type": "Group", "role_description": "Nav bar",
+            "type": "Group",
+            "role_description": "Nav bar",
             "frame": {"x": 0, "y": 56, "width": 402, "height": 44},
         }
 
         # Different elements at different X positions
-        back_btn = {"type": "Button", "AXLabel": "Back", "frame": {"x": 8, "y": 56, "width": 60, "height": 44}}
-        gear_btn = {"type": "Button", "AXLabel": "Settings", "frame": {"x": 351, "y": 56, "width": 43, "height": 44}}
+        back_btn = {
+            "type": "Button",
+            "AXLabel": "Back",
+            "frame": {"x": 8, "y": 56, "width": 60, "height": 44},
+        }
+        gear_btn = {
+            "type": "Button",
+            "AXLabel": "Settings",
+            "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
+        }
 
         async def mock_describe_point(udid, x, y):
             if x < 100:
                 return back_btn
             elif x > 340:
                 return gear_btn
-            return {"type": "Group", "frame": {"x": 0, "y": 56, "width": 402, "height": 44}}  # container itself
+            return {
+                "type": "Group",
+                "frame": {"x": 0, "y": 56, "width": 402, "height": 44},
+            }  # container itself
 
         with patch.object(backend, "describe_point", side_effect=mock_describe_point):
             discovered = await backend._probe_container("X", container)
@@ -471,7 +545,8 @@ class TestProbeContainer:
         backend._binary = "/usr/local/bin/idb"
 
         container = {
-            "type": "Group", "role_description": "Nav bar",
+            "type": "Group",
+            "role_description": "Nav bar",
             "frame": {"x": 0, "y": 56, "width": 60, "height": 44},
         }
 
@@ -491,11 +566,13 @@ class TestProbeContainer:
         backend._binary = "/usr/local/bin/idb"
 
         container = {
-            "type": "Group", "role_description": "Nav bar",
+            "type": "Group",
+            "role_description": "Nav bar",
             "frame": {"x": 0, "y": 56, "width": 40, "height": 44},
         }
 
         call_ys = []
+
         async def mock_describe_point(udid, x, y):
             call_ys.append(y)
             return None
@@ -522,12 +599,24 @@ class TestDescribeAllWithProbing:
         proc = _mock_proc(stdout=fixture_data)
 
         # Hidden elements that probing discovers
-        gear_btn = {"type": "Button", "AXLabel": "Settings", "AXUniqueId": "_Settings button",
-                     "frame": {"x": 351, "y": 56, "width": 43, "height": 44}}
-        home_tab = {"type": "RadioButton", "AXLabel": "Home", "AXUniqueId": "_Home tab",
-                     "frame": {"x": 0, "y": 791, "width": 80, "height": 83}}
-        profile_tab = {"type": "RadioButton", "AXLabel": "Profile", "AXUniqueId": "_Profile tab",
-                        "frame": {"x": 160, "y": 791, "width": 80, "height": 83}}
+        gear_btn = {
+            "type": "Button",
+            "AXLabel": "Settings",
+            "AXUniqueId": "_Settings button",
+            "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
+        }
+        home_tab = {
+            "type": "RadioButton",
+            "AXLabel": "Home",
+            "AXUniqueId": "_Home tab",
+            "frame": {"x": 0, "y": 791, "width": 80, "height": 83},
+        }
+        profile_tab = {
+            "type": "RadioButton",
+            "AXLabel": "Profile",
+            "AXUniqueId": "_Profile tab",
+            "frame": {"x": 160, "y": 791, "width": 80, "height": 83},
+        }
 
         async def mock_probe(udid, container):
             role_desc = container.get("role_description", "")
@@ -570,29 +659,37 @@ class TestDescribeAllWithProbing:
         backend._binary = "/usr/local/bin/idb"
 
         # Tree with a nav bar that also has a button already in the flat list
-        tree = json.dumps([
-            {
-                "type": "Application", "AXLabel": "App",
-                "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
-                "children": [
-                    {
-                        "type": "Group", "role_description": "Nav bar",
-                        "frame": {"x": 0, "y": 56, "width": 402, "height": 44},
-                        "children": [],
-                    },
-                    {
-                        "type": "Button", "AXLabel": "Existing",
-                        "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
-                    },
-                ],
-            }
-        ]).encode()
+        tree = json.dumps(
+            [
+                {
+                    "type": "Application",
+                    "AXLabel": "App",
+                    "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+                    "children": [
+                        {
+                            "type": "Group",
+                            "role_description": "Nav bar",
+                            "frame": {"x": 0, "y": 56, "width": 402, "height": 44},
+                            "children": [],
+                        },
+                        {
+                            "type": "Button",
+                            "AXLabel": "Existing",
+                            "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
+                        },
+                    ],
+                }
+            ]
+        ).encode()
 
         proc = _mock_proc(stdout=tree)
 
         # Probe returns the same element that's already in the flat list
-        duplicate = {"type": "Button", "AXLabel": "Existing",
-                     "frame": {"x": 351, "y": 56, "width": 43, "height": 44}}
+        duplicate = {
+            "type": "Button",
+            "AXLabel": "Existing",
+            "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
+        }
 
         async def mock_probe(udid, container):
             return [duplicate]
