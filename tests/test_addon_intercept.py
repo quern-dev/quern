@@ -6,14 +6,13 @@ The important thing is testing the addon's logic, not mitmproxy's internals.
 
 import json
 import sys
-import time
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server.proxy.addon import IOSDebugAddon, _serialize_request
-
+from server.proxy.addon import IOSDebugAddon
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,16 +151,18 @@ def test_request_non_matching_intercept_passthrough(addon, output):
 
 def test_request_mock_match_returns_response(addon, output):
     """Matching mock rule should set flow.response and emit mock_hit."""
-    addon._mock_rules.append({
-        "rule_id": "mock_1",
-        "pattern_str": "~d api.example.com",
-        "compiled": lambda f: f.request.pretty_host == "api.example.com",
-        "response": {
-            "status_code": 200,
-            "headers": {"content-type": "application/json"},
-            "body": '{"mocked": true}',
-        },
-    })
+    addon._mock_rules.append(
+        {
+            "rule_id": "mock_1",
+            "pattern_str": "~d api.example.com",
+            "compiled": lambda f: f.request.pretty_host == "api.example.com",
+            "response": {
+                "status_code": 200,
+                "headers": {"content-type": "application/json"},
+                "body": '{"mocked": true}',
+            },
+        }
+    )
 
     flow = _make_mock_flow(host="api.example.com")
     flow.response = None
@@ -182,16 +183,18 @@ def test_request_mock_match_returns_response(addon, output):
 
 def test_request_mock_custom_status_code(addon, output):
     """Mock with non-200 status_code should pass it through to Response.make."""
-    addon._mock_rules.append({
-        "rule_id": "mock_404",
-        "pattern_str": "~d api.example.com",
-        "compiled": lambda f: f.request.pretty_host == "api.example.com",
-        "response": {
-            "status_code": 404,
-            "headers": {"content-type": "text/plain"},
-            "body": '{"error": "not found"}',
-        },
-    })
+    addon._mock_rules.append(
+        {
+            "rule_id": "mock_404",
+            "pattern_str": "~d api.example.com",
+            "compiled": lambda f: f.request.pretty_host == "api.example.com",
+            "response": {
+                "status_code": 404,
+                "headers": {"content-type": "text/plain"},
+                "body": '{"error": "not found"}',
+            },
+        }
+    )
 
     flow = _make_mock_flow(host="api.example.com")
     flow.response = None
@@ -216,12 +219,14 @@ def test_mock_priority_over_intercept(addon, output):
     addon._intercept_compiled = lambda f: f.request.pretty_host == "api.example.com"
     addon._intercept_pattern = "~d api.example.com"
 
-    addon._mock_rules.append({
-        "rule_id": "mock_priority",
-        "pattern_str": "~d api.example.com",
-        "compiled": lambda f: f.request.pretty_host == "api.example.com",
-        "response": {"status_code": 418, "headers": {}, "body": "teapot"},
-    })
+    addon._mock_rules.append(
+        {
+            "rule_id": "mock_priority",
+            "pattern_str": "~d api.example.com",
+            "compiled": lambda f: f.request.pretty_host == "api.example.com",
+            "response": {"status_code": 418, "headers": {}, "body": "teapot"},
+        }
+    )
 
     flow = _make_mock_flow(host="api.example.com")
 
@@ -347,13 +352,15 @@ def test_handle_modify_and_release(addon, output):
     with addon._held_lock:
         addon._held_flows["f_mod"] = (flow, time.time())
 
-    addon._handle_modify_and_release({
-        "flow_id": "f_mod",
-        "modifications": {
-            "method": "POST",
-            "headers": {"x-custom": "value"},
-        },
-    })
+    addon._handle_modify_and_release(
+        {
+            "flow_id": "f_mod",
+            "modifications": {
+                "method": "POST",
+                "headers": {"x-custom": "value"},
+            },
+        }
+    )
 
     # Verify modifications were applied
     assert flow.request.method == "POST"
@@ -391,11 +398,13 @@ def test_handle_release_all(addon, output):
 
 def test_handle_set_mock_valid(addon, output):
     """Valid mock rule should be compiled and added."""
-    addon._handle_set_mock({
-        "rule_id": "mock_test",
-        "pattern": "~d api.example.com",
-        "response": {"status_code": 200, "body": "ok"},
-    })
+    addon._handle_set_mock(
+        {
+            "rule_id": "mock_test",
+            "pattern": "~d api.example.com",
+            "response": {"status_code": 200, "body": "ok"},
+        }
+    )
 
     with addon._mock_lock:
         assert len(addon._mock_rules) == 1
@@ -407,11 +416,13 @@ def test_handle_set_mock_valid(addon, output):
 
 def test_handle_set_mock_invalid(addon, output):
     """Invalid mock pattern should emit error and not add rule."""
-    addon._handle_set_mock({
-        "rule_id": "mock_bad",
-        "pattern": "~invalid_garbage !!!",
-        "response": {"status_code": 200},
-    })
+    addon._handle_set_mock(
+        {
+            "rule_id": "mock_bad",
+            "pattern": "~invalid_garbage !!!",
+            "response": {"status_code": 200},
+        }
+    )
 
     with addon._mock_lock:
         assert len(addon._mock_rules) == 0
@@ -423,11 +434,13 @@ def test_handle_set_mock_invalid(addon, output):
 
 def test_handle_set_mock_tilde_p_is_invalid(addon, output):
     """~p is not a valid mitmproxy filter operator and should be rejected."""
-    addon._handle_set_mock({
-        "rule_id": "mock_path",
-        "pattern": "~p /api/v2/filters",
-        "response": {"status_code": 404, "body": "not found"},
-    })
+    addon._handle_set_mock(
+        {
+            "rule_id": "mock_path",
+            "pattern": "~p /api/v2/filters",
+            "response": {"status_code": 404, "body": "not found"},
+        }
+    )
 
     with addon._mock_lock:
         assert len(addon._mock_rules) == 0

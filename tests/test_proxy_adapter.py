@@ -1,10 +1,10 @@
 """Tests for ProxyAdapter — parsing and emission without spawning mitmdump."""
 
 import json
-import os
 import signal
+from datetime import UTC
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -150,11 +150,13 @@ async def test_parse_flow_with_tls(adapter, flow_store):
 
 
 def test_classify_level_info():
-    from server.models import FlowRecord, FlowRequest, FlowResponse, FlowTiming
-    from datetime import datetime, timezone
+    from datetime import datetime
+
+    from server.models import FlowRecord, FlowRequest, FlowResponse
 
     flow = FlowRecord(
-        id="t", timestamp=datetime.now(timezone.utc),
+        id="t",
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method="GET", url="", host="", path=""),
         response=FlowResponse(status_code=200),
     )
@@ -162,11 +164,13 @@ def test_classify_level_info():
 
 
 def test_classify_level_warning():
+    from datetime import datetime
+
     from server.models import FlowRecord, FlowRequest, FlowResponse
-    from datetime import datetime, timezone
 
     flow = FlowRecord(
-        id="t", timestamp=datetime.now(timezone.utc),
+        id="t",
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method="GET", url="", host="", path=""),
         response=FlowResponse(status_code=404),
     )
@@ -174,11 +178,13 @@ def test_classify_level_warning():
 
 
 def test_classify_level_error_5xx():
+    from datetime import datetime
+
     from server.models import FlowRecord, FlowRequest, FlowResponse
-    from datetime import datetime, timezone
 
     flow = FlowRecord(
-        id="t", timestamp=datetime.now(timezone.utc),
+        id="t",
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method="GET", url="", host="", path=""),
         response=FlowResponse(status_code=503),
     )
@@ -186,11 +192,13 @@ def test_classify_level_error_5xx():
 
 
 def test_classify_level_error_connection():
+    from datetime import datetime
+
     from server.models import FlowRecord, FlowRequest
-    from datetime import datetime, timezone
 
     flow = FlowRecord(
-        id="t", timestamp=datetime.now(timezone.utc),
+        id="t",
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method="GET", url="", host="", path=""),
         error="Connection refused",
     )
@@ -198,11 +206,13 @@ def test_classify_level_error_connection():
 
 
 def test_format_summary_200():
+    from datetime import datetime
+
     from server.models import FlowRecord, FlowRequest, FlowResponse, FlowTiming
-    from datetime import datetime, timezone
 
     flow = FlowRecord(
-        id="t", timestamp=datetime.now(timezone.utc),
+        id="t",
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method="GET", url="", host="", path="/v1/users"),
         response=FlowResponse(status_code=200, reason="OK", body_size=512),
         timing=FlowTiming(total_ms=120.5),
@@ -214,11 +224,13 @@ def test_format_summary_200():
 
 
 def test_format_summary_error():
+    from datetime import datetime
+
     from server.models import FlowRecord, FlowRequest
-    from datetime import datetime, timezone
 
     flow = FlowRecord(
-        id="t", timestamp=datetime.now(timezone.utc),
+        id="t",
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method="GET", url="", host="", path="/health"),
         error="Connection refused",
     )
@@ -260,8 +272,8 @@ def test_reconfigure_while_running_raises():
 @pytest.mark.asyncio
 async def test_handle_intercepted(adapter, emitted_entries):
     """_handle_intercepted should store held flow and emit NOTICE entry."""
-    import time
     import asyncio
+    import time
 
     data = {
         "id": "f_int1",
@@ -355,9 +367,9 @@ async def test_handle_mock_hit(adapter, flow_store, emitted_entries):
 @pytest.mark.asyncio
 async def test_get_held_flows(adapter):
     """get_held_flows should return flows with computed age."""
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     adapter._held_flows["f_1"] = {
         "id": "f_1",
         "held_at": now - timedelta(seconds=5),
@@ -430,11 +442,16 @@ async def test_handle_status_event_mock_cleared_specific_is_noop(adapter):
 async def test_update_mock_preserves_rule(adapter):
     """update_mock should correctly update the rule in _mock_rules."""
     from unittest.mock import AsyncMock
+
     adapter.send_command = AsyncMock()
 
     # Seed a rule
     adapter._mock_rules = [
-        {"rule_id": "r1", "pattern": "~d api.example.com", "response": {"status_code": 200, "body": "ok"}},
+        {
+            "rule_id": "r1",
+            "pattern": "~d api.example.com",
+            "response": {"status_code": 200, "body": "ok"},
+        },
     ]
 
     updated = await adapter.update_mock("r1", response={"status_code": 404, "body": "not found"})
@@ -488,9 +505,14 @@ async def test_set_intercept_validates_pattern(adapter):
 async def test_set_mock_stores_response(adapter):
     """set_mock should store the response dict in _mock_rules for list_mocks."""
     from unittest.mock import AsyncMock
+
     adapter.send_command = AsyncMock()
 
-    response = {"status_code": 404, "body": '{"error": "not found"}', "headers": {"content-type": "text/plain"}}
+    response = {
+        "status_code": 404,
+        "body": '{"error": "not found"}',
+        "headers": {"content-type": "text/plain"},
+    }
     rule_id = await adapter.set_mock(
         pattern="~d api.example.com",
         response=response,
@@ -526,21 +548,22 @@ def test_kill_stale_mitmdump_kills_our_process():
     """Should kill a stale mitmdump running our addon."""
     addon_cmd = f"/usr/bin/mitmdump -s {ADDON_PATH} --listen-port 9101"
     responses = [
-        {"returncode": 0, "stdout": "12345\n"},      # lsof
-        {"returncode": 0, "stdout": addon_cmd},       # ps
+        {"returncode": 0, "stdout": "12345\n"},  # lsof
+        {"returncode": 0, "stdout": addon_cmd},  # ps
     ]
 
     with patch("server.sources.proxy.subprocess.run", side_effect=_mock_run(responses)):
         with patch("server.sources.proxy.os.kill") as mock_kill:
             # Make the process disappear after SIGTERM
             mock_kill.side_effect = lambda pid, sig: (
-                None if sig == signal.SIGTERM
-                else (_ for _ in ()).throw(ProcessLookupError)
+                None if sig == signal.SIGTERM else (_ for _ in ()).throw(ProcessLookupError)
             )
+
             # os.kill(pid, 0) check — process gone
             def kill_effect(pid, sig):
                 if sig == 0:
                     raise ProcessLookupError
+
             mock_kill.side_effect = [None, ProcessLookupError]
 
             ProxyAdapter._kill_stale_mitmdump(9101)
@@ -553,8 +576,8 @@ def test_kill_stale_mitmdump_kills_our_process():
 def test_kill_stale_mitmdump_skips_foreign_process():
     """Should NOT kill a process that isn't our mitmdump."""
     responses = [
-        {"returncode": 0, "stdout": "99999\n"},                      # lsof
-        {"returncode": 0, "stdout": "/usr/bin/nginx -g daemon off;"}, # ps
+        {"returncode": 0, "stdout": "99999\n"},  # lsof
+        {"returncode": 0, "stdout": "/usr/bin/nginx -g daemon off;"},  # ps
     ]
 
     with patch("server.sources.proxy.subprocess.run", side_effect=_mock_run(responses)):

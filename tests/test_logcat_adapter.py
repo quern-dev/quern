@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from server.models import LogLevel, LogSource
-from server.sources.logcat import LogcatAdapter, LOGCAT_PATTERN
-
+from server.sources.logcat import LOGCAT_PATTERN, LogcatAdapter
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -74,7 +71,7 @@ class TestParseLine:
         assert entry.source == LogSource.LOGCAT
 
     def test_activity_manager_line(self):
-        line = "03-08 14:22:47.001  2345  6789 I ActivityManager: Start proc 1234:com.example.app/u0a123"
+        line = "03-08 14:22:47.001  2345  6789 I ActivityManager: Start proc 1234:com.example.app/u0a123"  # noqa: E501
         entry = self.adapter._parse_line(line)
         assert entry is not None
         assert entry.level == LogLevel.INFO

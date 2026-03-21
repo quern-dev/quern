@@ -1,6 +1,6 @@
 """Integration tests — create app, inject entries, query endpoints."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -8,8 +8,15 @@ from httpx import ASGITransport, AsyncClient
 
 from server.config import ServerConfig
 from server.main import create_app
-from server.models import LogEntry, LogLevel, LogSource
-from server.models import FlowRecord, FlowRequest, FlowResponse, FlowTiming
+from server.models import (
+    FlowRecord,
+    FlowRequest,
+    FlowResponse,
+    FlowTiming,
+    LogEntry,
+    LogLevel,
+    LogSource,
+)
 from server.proxy.flow_store import FlowStore
 
 
@@ -21,7 +28,7 @@ def _make_entry(
 ) -> LogEntry:
     return LogEntry(
         id="int-test",
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         process=process,
         level=level,
         message=message,
@@ -62,7 +69,7 @@ async def test_query_returns_injected_entries(app, auth_headers):
     """Inject entries into the ring buffer and query them back."""
     buffer = app.state.ring_buffer
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await buffer.append(_make_entry("info message", level=LogLevel.INFO, timestamp=now))
     await buffer.append(
         _make_entry("error message", level=LogLevel.ERROR, timestamp=now + timedelta(seconds=1))
@@ -100,21 +107,22 @@ async def test_summary_endpoint(app, auth_headers):
     """Inject entries and get a summary back."""
     buffer = app.state.ring_buffer
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
+    await buffer.append(_make_entry("HTTP 401 Unauthorized", level=LogLevel.ERROR, timestamp=now))
     await buffer.append(
-        _make_entry("HTTP 401 Unauthorized", level=LogLevel.ERROR, timestamp=now)
+        _make_entry(
+            "HTTP 401 Unauthorized", level=LogLevel.ERROR, timestamp=now + timedelta(seconds=1)
+        )
     )
     await buffer.append(
-        _make_entry("HTTP 401 Unauthorized", level=LogLevel.ERROR,
-                     timestamp=now + timedelta(seconds=1))
+        _make_entry(
+            "Token refresh succeeded", level=LogLevel.INFO, timestamp=now + timedelta(seconds=2)
+        )
     )
     await buffer.append(
-        _make_entry("Token refresh succeeded", level=LogLevel.INFO,
-                     timestamp=now + timedelta(seconds=2))
-    )
-    await buffer.append(
-        _make_entry("Layout warning in FeedVC", level=LogLevel.WARNING,
-                     timestamp=now + timedelta(seconds=3))
+        _make_entry(
+            "Layout warning in FeedVC", level=LogLevel.WARNING, timestamp=now + timedelta(seconds=3)
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -140,7 +148,7 @@ async def test_summary_cursor_delta(app, auth_headers):
     """Cursor should allow fetching only new entries."""
     buffer = app.state.ring_buffer
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await buffer.append(_make_entry("first", timestamp=now))
 
     transport = ASGITransport(app=app)
@@ -152,9 +160,7 @@ async def test_summary_cursor_delta(app, auth_headers):
         cursor = resp1.json()["cursor"]
 
         # Add more entries
-        await buffer.append(
-            _make_entry("second", timestamp=now + timedelta(seconds=5))
-        )
+        await buffer.append(_make_entry("second", timestamp=now + timedelta(seconds=5)))
 
         # Delta summary using cursor
         resp2 = await client.get(
@@ -295,7 +301,7 @@ def _make_flow(
 ) -> FlowRecord:
     return FlowRecord(
         id=flow_id,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         request=FlowRequest(method=method, url=f"https://{host}{path}", host=host, path=path),
         response=FlowResponse(status_code=status_code, reason="OK"),
         timing=FlowTiming(total_ms=100.0),
@@ -462,7 +468,7 @@ async def test_proxy_flow_summary_with_data(app, auth_headers):
     flow_store = FlowStore()
     app.state.flow_store = flow_store
 
-    now = datetime.now(timezone.utc)
+    datetime.now(UTC)
     await flow_store.add(_make_flow(flow_id="f_s1", status_code=200))
     await flow_store.add(_make_flow(flow_id="f_s2", status_code=500))
     await flow_store.add(_make_flow(flow_id="f_s3", host="cdn.example.com", status_code=200))
@@ -581,7 +587,7 @@ def _make_server_entry(
 ) -> LogEntry:
     return LogEntry(
         id="srv-test",
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         process="quern-debug-server",
         level=level,
         message=message,
@@ -593,12 +599,10 @@ def _make_server_entry(
 @pytest.mark.asyncio
 async def test_query_source_server_uses_server_buffer(app, auth_headers):
     """source=server queries only the server_buffer, not ring_buffer."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Put a device entry in ring_buffer
-    await app.state.ring_buffer.append(
-        _make_entry("device log", timestamp=now)
-    )
+    await app.state.ring_buffer.append(_make_entry("device log", timestamp=now))
     # Put a server entry in server_buffer
     await app.state.server_buffer.append(
         _make_server_entry("server startup", timestamp=now + timedelta(seconds=1))
@@ -619,11 +623,9 @@ async def test_query_source_server_uses_server_buffer(app, auth_headers):
 @pytest.mark.asyncio
 async def test_query_no_source_merges_both_buffers(app, auth_headers):
     """No source filter merges ring_buffer + server_buffer, sorted by timestamp."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    await app.state.ring_buffer.append(
-        _make_entry("device log 1", timestamp=now)
-    )
+    await app.state.ring_buffer.append(_make_entry("device log 1", timestamp=now))
     await app.state.server_buffer.append(
         _make_server_entry("server log", timestamp=now + timedelta(seconds=1))
     )
@@ -646,11 +648,9 @@ async def test_query_no_source_merges_both_buffers(app, auth_headers):
 @pytest.mark.asyncio
 async def test_query_source_syslog_skips_server_buffer(app, auth_headers):
     """source=syslog queries only ring_buffer, not server_buffer."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    await app.state.ring_buffer.append(
-        _make_entry("device log", timestamp=now)
-    )
+    await app.state.ring_buffer.append(_make_entry("device log", timestamp=now))
     await app.state.server_buffer.append(
         _make_server_entry("server log", timestamp=now + timedelta(seconds=1))
     )

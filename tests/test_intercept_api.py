@@ -5,7 +5,7 @@ send_command is mocked to no-op (no real mitmdump).
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,7 +16,6 @@ from server.main import create_app
 from server.models import FlowRecord, FlowRequest, FlowResponse, FlowTiming
 from server.proxy.flow_store import FlowStore
 from server.sources.proxy import ProxyAdapter
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,9 +35,13 @@ def _make_flow(
         url = f"https://{host}{path}"
     return FlowRecord(
         id=flow_id,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         request=FlowRequest(
-            method=method, url=url, host=host, path=path, body=body,
+            method=method,
+            url=url,
+            host=host,
+            path=path,
+            body=body,
         ),
         response=FlowResponse(status_code=status_code, reason="OK"),
         timing=FlowTiming(total_ms=100.0),
@@ -62,7 +65,7 @@ def running_adapter(app):
     flow_store = FlowStore()
     adapter = ProxyAdapter(flow_store=flow_store, listen_port=9101)
     adapter._running = True
-    adapter.started_at = datetime.now(timezone.utc)
+    adapter.started_at = datetime.now(UTC)
     adapter.send_command = AsyncMock()
     app.state.proxy_adapter = adapter
     app.state.flow_store = flow_store
@@ -122,7 +125,7 @@ async def test_intercept_clear(app, auth_headers, running_adapter):
     # Inject a held flow
     running_adapter._held_flows["f_1"] = {
         "id": "f_1",
-        "held_at": datetime.now(timezone.utc),
+        "held_at": datetime.now(UTC),
         "request": {"method": "GET", "path": "/test"},
     }
 
@@ -156,7 +159,7 @@ async def test_held_flows_empty(app, auth_headers, running_adapter):
 @pytest.mark.asyncio
 async def test_held_flows_with_data(app, auth_headers, running_adapter):
     """GET /intercept/held should return held flows."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     running_adapter._held_flows["f_held"] = {
         "id": "f_held",
         "held_at": now,
@@ -203,11 +206,12 @@ async def test_held_flows_longpoll_timeout_zero(app, auth_headers, running_adapt
 @pytest.mark.asyncio
 async def test_held_flows_longpoll_with_inject(app, auth_headers, running_adapter):
     """Long-poll should return when a flow is injected."""
+
     async def inject_flow():
         await asyncio.sleep(0.1)
         running_adapter._held_flows["f_inject"] = {
             "id": "f_inject",
-            "held_at": datetime.now(timezone.utc),
+            "held_at": datetime.now(UTC),
             "request": {
                 "method": "GET",
                 "url": "https://api.example.com/test",
@@ -241,7 +245,7 @@ async def test_release_flow_success(app, auth_headers, running_adapter):
     """POST /intercept/release should release a held flow."""
     running_adapter._held_flows["f_rel"] = {
         "id": "f_rel",
-        "held_at": datetime.now(timezone.utc),
+        "held_at": datetime.now(UTC),
         "request": {"method": "GET", "path": "/test"},
     }
 
@@ -276,7 +280,7 @@ async def test_release_flow_with_modifications(app, auth_headers, running_adapte
     """Release with modifications should pass them through."""
     running_adapter._held_flows["f_mod"] = {
         "id": "f_mod",
-        "held_at": datetime.now(timezone.utc),
+        "held_at": datetime.now(UTC),
         "request": {"method": "GET", "path": "/test"},
     }
 
@@ -294,10 +298,7 @@ async def test_release_flow_with_modifications(app, auth_headers, running_adapte
 
     # Verify send_command was called with modify_and_release
     calls = running_adapter.send_command.call_args_list
-    assert any(
-        c.args[0].get("action") == "modify_and_release"
-        for c in calls
-    )
+    assert any(c.args[0].get("action") == "modify_and_release" for c in calls)
 
 
 @pytest.mark.asyncio
@@ -305,12 +306,12 @@ async def test_release_all(app, auth_headers, running_adapter):
     """POST /intercept/release-all should release all held flows."""
     running_adapter._held_flows["f_1"] = {
         "id": "f_1",
-        "held_at": datetime.now(timezone.utc),
+        "held_at": datetime.now(UTC),
         "request": {},
     }
     running_adapter._held_flows["f_2"] = {
         "id": "f_2",
-        "held_at": datetime.now(timezone.utc),
+        "held_at": datetime.now(UTC),
         "request": {},
     }
 
@@ -596,7 +597,7 @@ async def test_status_includes_intercept_fields(app, auth_headers, running_adapt
     running_adapter._intercept_pattern = "~d api.example.com"
     running_adapter._held_flows["f_1"] = {
         "id": "f_1",
-        "held_at": datetime.now(timezone.utc),
+        "held_at": datetime.now(UTC),
         "request": {},
     }
     running_adapter._mock_rules = [{"rule_id": "m1", "pattern": "~d test.com"}]

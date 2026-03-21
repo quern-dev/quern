@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,7 +15,6 @@ from server.models import (
     DeviceState,
     DeviceType,
 )
-
 
 # ----------------------------------------------------------------
 # Fixtures
@@ -201,12 +199,18 @@ class TestCriteriaMatching:
         state = pool._read_state()
         all_devices = list(state.devices.values())
         results = pool._find_candidates(
-            all_devices, name="iPhone 16", os_version="18", device_family="iPhone",
+            all_devices,
+            name="iPhone 16",
+            os_version="18",
+            device_family="iPhone",
         )
         assert all(d.name == "iPhone 16 Pro" for d in results)
         # No results for mismatched OS
         results2 = pool._find_candidates(
-            all_devices, name="iPhone 16", os_version="17", device_family="iPhone",
+            all_devices,
+            name="iPhone 16",
+            os_version="17",
+            device_family="iPhone",
         )
         assert len(results2) == 0
 
@@ -230,19 +234,34 @@ class TestDeviceTypeFiltering:
         ctrl.simctl.list_devices = AsyncMock(
             return_value=[
                 DeviceInfo(
-                    udid="SIM-1", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                    device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
-                    runtime="...", is_available=True, device_family="iPhone",
+                    udid="SIM-1",
+                    name="iPhone 16 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                    os_version="iOS 18.2",
+                    runtime="...",
+                    is_available=True,
+                    device_family="iPhone",
                 ),
                 DeviceInfo(
-                    udid="SIM-2", name="iPhone 15", state=DeviceState.BOOTED,
-                    device_type=DeviceType.SIMULATOR, os_version="iOS 17.5",
-                    runtime="...", is_available=True, device_family="iPhone",
+                    udid="SIM-2",
+                    name="iPhone 15",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                    os_version="iOS 17.5",
+                    runtime="...",
+                    is_available=True,
+                    device_family="iPhone",
                 ),
                 DeviceInfo(
-                    udid="DEV-1", name="John's iPhone", state=DeviceState.BOOTED,
-                    device_type=DeviceType.DEVICE, os_version="iOS 18.2",
-                    is_available=True, device_family="iPhone", connection_type="usb",
+                    udid="DEV-1",
+                    name="John's iPhone",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                    os_version="iOS 18.2",
+                    is_available=True,
+                    device_family="iPhone",
+                    connection_type="usb",
                 ),
             ]
         )
@@ -365,8 +384,12 @@ class TestResolveDevice:
         # Set up pool with ONLY a shutdown device
         shutdown_only = [
             DeviceInfo(
-                udid="CCCC", name="iPhone 16 Pro", state=DeviceState.SHUTDOWN,
-                os_version="iOS 18.2", runtime="...", is_available=True,
+                udid="CCCC",
+                name="iPhone 16 Pro",
+                state=DeviceState.SHUTDOWN,
+                os_version="iOS 18.2",
+                runtime="...",
+                is_available=True,
                 device_family="iPhone",
             ),
         ]
@@ -376,8 +399,12 @@ class TestResolveDevice:
         # After boot, simctl returns CCCC as booted
         booted = [
             DeviceInfo(
-                udid="CCCC", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                os_version="iOS 18.2", runtime="...", is_available=True,
+                udid="CCCC",
+                name="iPhone 16 Pro",
+                state=DeviceState.BOOTED,
+                os_version="iOS 18.2",
+                runtime="...",
+                is_available=True,
                 device_family="iPhone",
             ),
         ]
@@ -526,8 +553,12 @@ class TestEnsureDevices:
             if call_count[0] > 1:
                 return [
                     DeviceInfo(
-                        udid="CCCC", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                        os_version="iOS 18.2", runtime="...", is_available=True,
+                        udid="CCCC",
+                        name="iPhone 16 Pro",
+                        state=DeviceState.BOOTED,
+                        os_version="iOS 18.2",
+                        runtime="...",
+                        is_available=True,
                     ),
                 ]
             return await original_list(*args, **kwargs)
@@ -591,7 +622,9 @@ class TestBuildResolutionError:
         all_devices = list(state.devices.values())
 
         err = pool._build_resolution_error(
-            all_devices, name="iPhone 16 Pro", os_version="17",
+            all_devices,
+            name="iPhone 16 Pro",
+            os_version="17",
         )
         msg = str(err)
         assert "matched name" in msg
@@ -604,7 +637,8 @@ class TestBuildResolutionError:
         shutdown_devices = [state.devices["CCCC"]]
 
         err = pool._build_resolution_error(
-            shutdown_devices, name="iPhone 16 Pro",
+            shutdown_devices,
+            name="iPhone 16 Pro",
         )
         msg = str(err)
         assert "shutdown" in msg.lower()
@@ -678,9 +712,7 @@ class TestControllerPoolFallback:
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
 
         broken_pool = AsyncMock()
-        broken_pool.resolve_device = AsyncMock(
-            side_effect=Exception("pool is broken")
-        )
+        broken_pool.resolve_device = AsyncMock(side_effect=Exception("pool is broken"))
         ctrl._pool = broken_pool
 
         # Pool failed, but old logic should still run
@@ -714,9 +746,7 @@ class TestControllerPoolFallback:
         ctrl.adb = AsyncMock()
         ctrl.adb.list_devices = AsyncMock(return_value=[])
         broken_pool = AsyncMock()
-        broken_pool.resolve_device = AsyncMock(
-            side_effect=Exception("pool broken")
-        )
+        broken_pool.resolve_device = AsyncMock(side_effect=Exception("pool broken"))
         ctrl._pool = broken_pool
 
         udid = await ctrl.resolve_udid()
@@ -789,7 +819,7 @@ class TestFilterByName:
             os_version="iOS 17.5",
             runtime="...",
             device_family="iPhone",
-            last_used=datetime.now(timezone.utc),
+            last_used=datetime.now(UTC),
             is_available=True,
         )
         all_devices.append(pro_max)
@@ -813,10 +843,14 @@ class TestFilterByName:
         """None name should return all devices."""
         devices = [
             DevicePoolEntry(
-                udid="X", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
+                udid="X",
+                name="iPhone 16 Pro",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR,
+                os_version="iOS 18.2",
                 runtime="...",
-                last_used=datetime.now(timezone.utc), is_available=True,
+                last_used=datetime.now(UTC),
+                is_available=True,
             ),
         ]
         assert DevicePool._filter_by_name(devices, None) == devices
@@ -825,10 +859,14 @@ class TestFilterByName:
         """Exact matching should be case-insensitive."""
         devices = [
             DevicePoolEntry(
-                udid="X", name="iPhone 16 Pro", state=DeviceState.BOOTED,
-                device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
+                udid="X",
+                name="iPhone 16 Pro",
+                state=DeviceState.BOOTED,
+                device_type=DeviceType.SIMULATOR,
+                os_version="iOS 18.2",
                 runtime="...",
-                last_used=datetime.now(timezone.utc), is_available=True,
+                last_used=datetime.now(UTC),
+                is_available=True,
             ),
         ]
         results = DevicePool._filter_by_name(devices, "iphone 16 pro")
@@ -845,32 +883,54 @@ class TestParseDeviceFamily:
 
     def test_iphone(self):
         from server.device.simctl import SimctlBackend
-        assert SimctlBackend._parse_device_family(
-            "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
-        ) == "iPhone"
+
+        assert (
+            SimctlBackend._parse_device_family(
+                "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
+            )
+            == "iPhone"
+        )
 
     def test_ipad(self):
         from server.device.simctl import SimctlBackend
-        assert SimctlBackend._parse_device_family(
-            "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4"
-        ) == "iPad"
+
+        assert (
+            SimctlBackend._parse_device_family(
+                "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4"
+            )
+            == "iPad"
+        )
 
     def test_apple_watch(self):
         from server.device.simctl import SimctlBackend
-        assert SimctlBackend._parse_device_family(
-            "com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Series-10-46mm"
-        ) == "Apple Watch"
+
+        assert (
+            SimctlBackend._parse_device_family(
+                "com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Series-10-46mm"
+            )
+            == "Apple Watch"
+        )
 
     def test_apple_tv(self):
         from server.device.simctl import SimctlBackend
-        assert SimctlBackend._parse_device_family(
-            "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K"
-        ) == "Apple TV"
+
+        assert (
+            SimctlBackend._parse_device_family(
+                "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K"
+            )
+            == "Apple TV"
+        )
 
     def test_unknown(self):
         from server.device.simctl import SimctlBackend
+
         assert SimctlBackend._parse_device_family("") == ""
-        assert SimctlBackend._parse_device_family("com.apple.CoreSimulator.SimDeviceType.Unknown-Device") == ""
+        assert (
+            SimctlBackend._parse_device_family(
+                "com.apple.CoreSimulator.SimDeviceType.Unknown-Device"
+            )
+            == ""
+        )
 
 
 # ----------------------------------------------------------------
@@ -963,12 +1023,14 @@ class TestConfigReading:
     def test_missing_config_returns_iphone(self, tmp_path, monkeypatch):
         """Missing config file defaults to 'iPhone'."""
         import server.config
+
         monkeypatch.setattr(server.config, "USER_CONFIG_FILE", tmp_path / "missing.json")
         assert server.config.get_default_device_family() == "iPhone"
 
     def test_config_with_ipad_default(self, tmp_path, monkeypatch):
         """Config with default_device_family='iPad' returns 'iPad'."""
         import server.config
+
         config_file = tmp_path / "config.json"
         config_file.write_text('{"default_device_family": "iPad"}')
         monkeypatch.setattr(server.config, "USER_CONFIG_FILE", config_file)
@@ -977,6 +1039,7 @@ class TestConfigReading:
     def test_invalid_json_returns_iphone(self, tmp_path, monkeypatch):
         """Invalid JSON defaults to 'iPhone'."""
         import server.config
+
         config_file = tmp_path / "config.json"
         config_file.write_text("not json")
         monkeypatch.setattr(server.config, "USER_CONFIG_FILE", config_file)

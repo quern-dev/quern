@@ -215,13 +215,17 @@ class TestFindElementLabelModes:
 
     def test_label_contains_with_type_filter(self, elements):
         results = find_element(
-            elements, label_contains="Calendar", element_type="Button",
+            elements,
+            label_contains="Calendar",
+            element_type="Button",
         )
         assert all(r.type == "Button" for r in results)
 
     def test_label_prefix_with_type_filter(self, elements):
         results = find_element(
-            elements, label_prefix="Cal", element_type="Button",
+            elements,
+            label_prefix="Cal",
+            element_type="Button",
         )
         assert all(r.type == "Button" for r in results)
 

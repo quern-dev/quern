@@ -1,6 +1,6 @@
 """Tests for the log classifier."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.processing.classifier import (
@@ -11,7 +11,7 @@ from server.processing.classifier import (
 
 
 def _ts(offset_seconds: float = 0) -> datetime:
-    base = datetime(2026, 2, 7, 14, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 2, 7, 14, 0, 0, tzinfo=UTC)
     return base + timedelta(seconds=offset_seconds)
 
 

@@ -1,8 +1,6 @@
 """Tests for the flow summary generator."""
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from server.models import (
     FlowRecord,
@@ -10,7 +8,7 @@ from server.models import (
     FlowResponse,
     FlowTiming,
 )
-from server.processing.summarizer import make_cursor, parse_cursor
+from server.processing.summarizer import parse_cursor
 from server.proxy.summary import generate_flow_summary
 
 
@@ -24,12 +22,12 @@ def _make_flow(
     error: str | None = None,
     timestamp: datetime | None = None,
 ) -> FlowRecord:
-    response = None if error and status_code == 0 else FlowResponse(
-        status_code=status_code, reason="OK"
+    response = (
+        None if error and status_code == 0 else FlowResponse(status_code=status_code, reason="OK")
     )
     return FlowRecord(
         id=flow_id,
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         request=FlowRequest(
             method=method,
             url=f"https://{host}{path}",
@@ -67,14 +65,16 @@ class TestGenerateFlowSummary:
         assert result.by_host[0].server_error == 0
 
     def test_mixed_status_codes(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         flows = [
             _make_flow(flow_id="f1", status_code=200, timestamp=now),
             _make_flow(flow_id="f2", status_code=201, timestamp=now + timedelta(seconds=1)),
             _make_flow(flow_id="f3", status_code=404, timestamp=now + timedelta(seconds=2)),
             _make_flow(flow_id="f4", status_code=500, timestamp=now + timedelta(seconds=3)),
             _make_flow(
-                flow_id="f5", status_code=0, error="Connection refused",
+                flow_id="f5",
+                status_code=0,
+                error="Connection refused",
                 timestamp=now + timedelta(seconds=4),
             ),
         ]
@@ -113,14 +113,25 @@ class TestGenerateFlowSummary:
         assert result.by_host[0].host == "api.example.com"
 
     def test_error_pattern_extraction(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         flows = [
-            _make_flow(flow_id="f1", method="POST", path="/v1/login", status_code=401,
-                        timestamp=now),
-            _make_flow(flow_id="f2", method="POST", path="/v1/login", status_code=401,
-                        timestamp=now + timedelta(seconds=1)),
-            _make_flow(flow_id="f3", method="GET", path="/v1/data", status_code=500,
-                        timestamp=now + timedelta(seconds=2)),
+            _make_flow(
+                flow_id="f1", method="POST", path="/v1/login", status_code=401, timestamp=now
+            ),
+            _make_flow(
+                flow_id="f2",
+                method="POST",
+                path="/v1/login",
+                status_code=401,
+                timestamp=now + timedelta(seconds=1),
+            ),
+            _make_flow(
+                flow_id="f3",
+                method="GET",
+                path="/v1/data",
+                status_code=500,
+                timestamp=now + timedelta(seconds=2),
+            ),
         ]
         result = generate_flow_summary(flows, window="5m")
         assert len(result.errors) == 2
@@ -202,7 +213,7 @@ class TestGenerateFlowSummary:
         assert "slow" in result.summary.lower()
 
     def test_cursor_round_trip(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         flows = [_make_flow(timestamp=now)]
         result = generate_flow_summary(flows, window="5m")
 
@@ -218,7 +229,7 @@ class TestGenerateFlowSummary:
         assert result.window == "15m"
 
     def test_generated_at_is_recent(self):
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         result = generate_flow_summary([], window="5m")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
         assert before <= result.generated_at <= after

@@ -1,13 +1,13 @@
 """Tests for the template-based log summarizer."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.processing.summarizer import generate_summary, make_cursor, parse_cursor
 
 
 def _ts(offset_seconds: float = 0) -> datetime:
-    base = datetime(2026, 2, 7, 14, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 2, 7, 14, 0, 0, tzinfo=UTC)
     return base + timedelta(seconds=offset_seconds)
 
 
@@ -35,7 +35,7 @@ def _make_entry(
 
 
 def test_cursor_roundtrip():
-    ts = datetime(2026, 2, 7, 14, 23, 1, 234567, tzinfo=timezone.utc)
+    ts = datetime(2026, 2, 7, 14, 23, 1, 234567, tzinfo=UTC)
     cursor = make_cursor(ts)
     assert cursor.startswith("c_")
 

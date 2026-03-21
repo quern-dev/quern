@@ -1,13 +1,12 @@
 """Tests for the SimulatorLogAdapter."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from server.models import LogLevel, LogSource
 from server.sources.simulator_log import SimulatorLogAdapter
-
 
 SAMPLE_UDID = "43B500A9-1234-5678-9ABC-DEF012345678"
 
@@ -32,8 +31,16 @@ def test_build_command_no_filters(adapter: SimulatorLogAdapter):
     """Basic command without filters."""
     cmd = adapter._build_command()
     assert cmd == [
-        "xcrun", "simctl", "spawn", SAMPLE_UDID,
-        "log", "stream", "--style", "json", "--level", "debug",
+        "xcrun",
+        "simctl",
+        "spawn",
+        SAMPLE_UDID,
+        "log",
+        "stream",
+        "--style",
+        "json",
+        "--level",
+        "debug",
     ]
 
 
@@ -63,7 +70,7 @@ def test_build_command_with_both_filters():
     cmd = adapter._build_command()
     assert "--predicate" in cmd
     predicate = cmd[-1]
-    assert 'process ==' in predicate
+    assert "process ==" in predicate
     assert "subsystem ==" in predicate
     assert " AND " in predicate
 
@@ -238,6 +245,7 @@ async def test_read_loop_emits_entries():
 
         # Give the read loop a moment to process
         import asyncio
+
         await asyncio.sleep(0.1)
 
         await adapter.stop()
@@ -254,7 +262,7 @@ async def test_read_loop_pretty_printed_json():
     # Simulate the pretty-printed output from simctl spawn
     lines = [
         b'Filtering the log data using "process == \\"TestApp\\""\n',
-        b'[{\n',
+        b"[{\n",
         b'  "eventMessage" : "hello pretty",\n',
         b'  "eventType" : "logEvent",\n',
         b'  "subsystem" : "com.test",\n',
@@ -263,7 +271,7 @@ async def test_read_loop_pretty_printed_json():
         b'  "messageType" : "Default",\n',
         b'  "processID" : 42,\n',
         b'  "processImagePath" : "/path/to/TestApp"\n',
-        b'}]\n',
+        b"}]\n",
     ]
 
     emitted = []
@@ -298,6 +306,7 @@ async def test_read_loop_pretty_printed_json():
         await adapter.start()
 
         import asyncio
+
         await asyncio.sleep(0.1)
 
         await adapter.stop()
@@ -323,7 +332,7 @@ async def test_reconfigure_updates_filters_and_restarts():
     mock_proc.wait = AsyncMock()
     mock_proc.kill = MagicMock()
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         adapter = SimulatorLogAdapter(
             udid=SAMPLE_UDID,
             process_filter="OldApp",

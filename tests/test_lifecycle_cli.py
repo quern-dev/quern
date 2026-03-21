@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -74,6 +73,7 @@ def _kill_server(state: dict | None = None) -> None:
 def _wait_for_health(port: int, timeout: float = 5.0) -> bool:
     """Wait for the server to respond on the given port."""
     import urllib.request
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -93,7 +93,9 @@ def _free_port(port: int) -> None:
     try:
         result = subprocess.run(
             ["lsof", "-ti", f":{port}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         for pid_str in result.stdout.split():
             try:
@@ -104,7 +106,6 @@ def _free_port(port: int) -> None:
         pass
     # Brief wait for the socket to fully close
     time.sleep(0.1)
-
 
 
 class TestStartDaemon:
@@ -121,8 +122,19 @@ class TestStartDaemon:
     def test_start_creates_state_and_process(self):
         """start should create state.json and a running daemon."""
         result = subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
-            capture_output=True, text=True, timeout=30,
+            [
+                PYTHON,
+                "-m",
+                "server.main",
+                "start",
+                "--no-proxy",
+                "--no-oslog",
+                "--no-crash",
+                "--no-syslog",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         try:
             assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
@@ -146,8 +158,19 @@ class TestStartDaemon:
     def test_start_is_idempotent(self):
         """Starting twice should exit 0 with 'already running' message."""
         result1 = subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
-            capture_output=True, text=True, timeout=30,
+            [
+                PYTHON,
+                "-m",
+                "server.main",
+                "start",
+                "--no-proxy",
+                "--no-oslog",
+                "--no-crash",
+                "--no-syslog",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         try:
             assert result1.returncode == 0
@@ -156,8 +179,19 @@ class TestStartDaemon:
 
             # Second start
             result2 = subprocess.run(
-                [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    PYTHON,
+                    "-m",
+                    "server.main",
+                    "start",
+                    "--no-proxy",
+                    "--no-oslog",
+                    "--no-crash",
+                    "--no-syslog",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert result2.returncode == 0
             assert "already running" in result2.stdout.lower()
@@ -167,6 +201,7 @@ class TestStartDaemon:
             assert state2["pid"] == state["pid"]
         finally:
             _kill_server()
+
 
 class TestStop:
     """Tests for `quern-debug-server stop`."""
@@ -181,8 +216,19 @@ class TestStop:
         """stop should terminate the daemon and remove state.json."""
         # Start first
         subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
-            capture_output=True, text=True, timeout=30,
+            [
+                PYTHON,
+                "-m",
+                "server.main",
+                "start",
+                "--no-proxy",
+                "--no-oslog",
+                "--no-crash",
+                "--no-syslog",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         state = _read_state()
         assert state is not None
@@ -191,7 +237,9 @@ class TestStop:
         # Stop
         result = subprocess.run(
             [PYTHON, "-m", "server.main", "stop"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         assert result.returncode == 0
         assert "stopped" in result.stdout.lower() or "killed" in result.stdout.lower()
@@ -216,7 +264,9 @@ class TestStop:
 
         result = subprocess.run(
             [PYTHON, "-m", "server.main", "stop"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
         assert "no server running" in result.stdout.lower()
@@ -234,8 +284,19 @@ class TestStatus:
     def test_status_shows_running_server(self):
         """status should show info when server is running."""
         subprocess.run(
-            [PYTHON, "-m", "server.main", "start", "--no-proxy", "--no-oslog", "--no-crash", "--no-syslog"],
-            capture_output=True, text=True, timeout=30,
+            [
+                PYTHON,
+                "-m",
+                "server.main",
+                "start",
+                "--no-proxy",
+                "--no-oslog",
+                "--no-crash",
+                "--no-syslog",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         state = _read_state()
         assert state is not None
@@ -243,7 +304,9 @@ class TestStatus:
         try:
             result = subprocess.run(
                 [PYTHON, "-m", "server.main", "status"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert result.returncode == 0
             assert str(state["server_port"]) in result.stdout
@@ -256,7 +319,9 @@ class TestStatus:
 
         result = subprocess.run(
             [PYTHON, "-m", "server.main", "status"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 1
         assert "no server running" in result.stdout.lower()

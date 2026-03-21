@@ -16,13 +16,7 @@ from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.device.wda import (
     ICON_PATH,
-    WDA_APP,
-    WDA_DERIVED,
-    WDA_REPO,
-    WDA_STATE_FILE,
-    XCTESTRUN,
     _find_xctestrun,
-    _is_process_alive,
     _parse_ios_major_version,
     _rename_xctestrun,
     build_wda,
@@ -38,7 +32,6 @@ from server.device.wda import (
 )
 from server.main import create_app
 from server.models import DeviceInfo, DeviceState, DeviceType
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,7 +91,11 @@ XCODE_PREFS_MULTI_TEAM = {
     "IDEProvisioningTeamByIdentifier": {
         "acct-uuid-1": [
             {"teamID": "TEAM123", "teamName": "Acme Inc.", "teamType": "Company"},
-            {"teamID": "TEAMABC", "teamName": "John Doe (Personal Team)", "teamType": "Personal Team"},
+            {
+                "teamID": "TEAMABC",
+                "teamName": "John Doe (Personal Team)",
+                "teamType": "Personal Team",
+            },
         ],
     },
 }
@@ -112,13 +109,14 @@ XCODE_PREFS_MULTI_TEAM = {
 class TestDiscoverSigningIdentities:
     def test_single_team(self, tmp_path):
         import plistlib
+
         plist_path = tmp_path / "com.apple.dt.Xcode.plist"
         with open(plist_path, "wb") as f:
             plistlib.dump(XCODE_PREFS_SINGLE_TEAM, f)
 
         with patch("server.device.wda.Path.home", return_value=tmp_path / "fake_home"):
             # We need to patch the actual plist path
-            fake_prefs = tmp_path / "com.apple.dt.Xcode.plist"
+            tmp_path / "com.apple.dt.Xcode.plist"
             with patch("server.device.wda.Path.home") as mock_home:
                 # Build the path so home() / "Library" / ... resolves to our file
                 mock_home.return_value = tmp_path
@@ -127,7 +125,6 @@ class TestDiscoverSigningIdentities:
                 pass
 
         # Simpler: just patch plistlib.load to return our test data
-        import plistlib as _plistlib
         with (
             patch("builtins.open", create=True),
             patch("server.device.wda.Path.exists", return_value=True),
@@ -190,7 +187,9 @@ class TestCloneWda:
         with (
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DIR", tmp_path),
-            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch(
+                "server.device.wda.asyncio.create_subprocess_exec", return_value=proc
+            ) as mock_exec,
         ):
             result = await clone_wda()
 
@@ -464,7 +463,9 @@ class TestInstallWda:
         proc = _mock_process()
         with (
             patch("server.device.wda.WDA_APP", app),
-            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch(
+                "server.device.wda.asyncio.create_subprocess_exec", return_value=proc
+            ) as mock_exec,
             patch("server.device.wda.read_wda_state", return_value={}),
             patch("server.device.wda.save_wda_state"),
         ):
@@ -481,7 +482,9 @@ class TestInstallWda:
         proc = _mock_process()
         with (
             patch("server.device.wda.WDA_APP", app),
-            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch(
+                "server.device.wda.asyncio.create_subprocess_exec", return_value=proc
+            ) as mock_exec,
             patch("server.device.wda.shutil.which", return_value="/usr/local/bin/ideviceinstaller"),
             patch("server.device.wda.read_wda_state", return_value={}),
             patch("server.device.wda.save_wda_state"),
@@ -498,7 +501,9 @@ class TestInstallWda:
         proc = _mock_process()
         with (
             patch("server.device.wda.WDA_APP", app),
-            patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+            patch(
+                "server.device.wda.asyncio.create_subprocess_exec", return_value=proc
+            ) as mock_exec,
             patch("server.device.wda.shutil.which", return_value="/usr/local/bin/ideviceinstaller"),
             patch("server.device.wda.read_wda_state", return_value={}),
             patch("server.device.wda.save_wda_state"),
@@ -561,8 +566,10 @@ class TestWdaState:
 
     def test_roundtrip(self, tmp_path):
         state_file = tmp_path / "wda-state.json"
-        with patch("server.device.wda.WDA_STATE_FILE", state_file), \
-             patch("server.device.wda.CONFIG_DIR", tmp_path):
+        with (
+            patch("server.device.wda.WDA_STATE_FILE", state_file),
+            patch("server.device.wda.CONFIG_DIR", tmp_path),
+        ):
             save_wda_state({"cloned": True, "builds": {"DEV1": {"team_id": "T"}}})
             state = read_wda_state()
         assert state["cloned"] is True
@@ -666,10 +673,12 @@ def auth_headers():
 def mock_controller(app):
     ctrl = DeviceController()
     ctrl._active_udid = None
-    ctrl.list_devices = AsyncMock(return_value=[
-        _physical_device(),
-        _simulator(),
-    ])
+    ctrl.list_devices = AsyncMock(
+        return_value=[
+            _physical_device(),
+            _simulator(),
+        ]
+    )
     ctrl.check_tools = AsyncMock(return_value={"simctl": True, "idb": False})
     app.state.device_controller = ctrl
     return ctrl
@@ -693,9 +702,7 @@ class TestWdaApi:
         assert data["status"] == "ok"
 
     async def test_setup_wda_simulator_rejected(self, app, auth_headers, mock_controller):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/wda/setup",
                 json={"udid": "AAAA-1111"},
@@ -706,9 +713,7 @@ class TestWdaApi:
         assert "simulator" in resp.json()["detail"].lower()
 
     async def test_setup_wda_device_not_found(self, app, auth_headers, mock_controller):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/wda/setup",
                 json={"udid": "nonexistent-udid"},
@@ -772,9 +777,7 @@ class TestWdaApi:
 
     async def test_setup_wda_no_controller(self, app, auth_headers):
         """Should return 503 when device controller isn't initialized."""
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/wda/setup",
                 json={"udid": "00008030-AABBCCDD"},
@@ -873,11 +876,21 @@ class TestStartDriver:
             patch("server.device.wda.WDA_LOG_DIR", tmp_path / "logs"),
             patch("server.device.wda.read_wda_state", return_value={}),
             patch("server.device.wda.save_wda_state") as mock_save,
-            patch("server.device.tunneld.resolve_tunnel_udid", new_callable=AsyncMock, return_value="hw-udid-123"),
-            patch("server.device.tunneld.get_tunneld_devices", new_callable=AsyncMock, return_value={
-                "hw-udid-123": [{"tunnel-address": "fd35::1"}]
-            }),
-            patch("server.device.wda.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc),
+            patch(
+                "server.device.tunneld.resolve_tunnel_udid",
+                new_callable=AsyncMock,
+                return_value="hw-udid-123",
+            ),
+            patch(
+                "server.device.tunneld.get_tunneld_devices",
+                new_callable=AsyncMock,
+                return_value={"hw-udid-123": [{"tunnel-address": "fd35::1"}]},
+            ),
+            patch(
+                "server.device.wda.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ),
             patch("server.device.wda._poll_wda_status", new_callable=AsyncMock, return_value=True),
         ):
             result = await start_driver("DEV-UUID-123", "iOS 17.4")
@@ -916,9 +929,19 @@ class TestStartDriver:
             patch("server.device.wda.read_wda_state", return_value=state),
             patch("server.device.wda.save_wda_state"),
             patch("server.device.wda._is_process_alive", return_value=False),
-            patch("server.device.tunneld.resolve_tunnel_udid", new_callable=AsyncMock, return_value=None),
-            patch("server.device.tunneld.get_tunneld_devices", new_callable=AsyncMock, return_value={}),
-            patch("server.device.wda.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc),
+            patch(
+                "server.device.tunneld.resolve_tunnel_udid",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "server.device.tunneld.get_tunneld_devices", new_callable=AsyncMock, return_value={}
+            ),
+            patch(
+                "server.device.wda.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ),
             patch("server.device.wda._poll_wda_status", new_callable=AsyncMock, return_value=True),
         ):
             result = await start_driver("DEV1", "iOS 17.4")
@@ -967,7 +990,9 @@ class TestStopDriver:
 class TestWdaStartStopApi:
     async def test_start_driver_api(self, app, auth_headers, mock_controller):
         mock_result = {"status": "started", "udid": "00008030-AABBCCDD", "pid": 42, "ready": True}
-        with patch("server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result
+        ):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -981,9 +1006,7 @@ class TestWdaStartStopApi:
         assert resp.json()["status"] == "started"
 
     async def test_start_driver_simulator_rejected(self, app, auth_headers, mock_controller):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/wda/start",
                 json={"udid": "AAAA-1111"},
@@ -994,9 +1017,7 @@ class TestWdaStartStopApi:
         assert "simulator" in resp.json()["detail"].lower()
 
     async def test_start_driver_not_found(self, app, auth_headers, mock_controller):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/wda/start",
                 json={"udid": "nonexistent"},
@@ -1007,7 +1028,9 @@ class TestWdaStartStopApi:
 
     async def test_stop_driver_api(self, app, auth_headers, mock_controller):
         mock_result = {"status": "stopped", "udid": "00008030-AABBCCDD"}
-        with patch("server.device.wda.stop_driver", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "server.device.wda.stop_driver", new_callable=AsyncMock, return_value=mock_result
+        ):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -1021,9 +1044,7 @@ class TestWdaStartStopApi:
         assert resp.json()["status"] == "stopped"
 
     async def test_stop_driver_simulator_rejected(self, app, auth_headers, mock_controller):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/wda/stop",
                 json={"udid": "AAAA-1111"},

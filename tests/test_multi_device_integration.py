@@ -87,7 +87,6 @@ def mock_device_pool(app, tmp_path):
 
 
 class TestPoolAPIIntegration:
-
     async def test_resolve_sets_active_device(self, app, auth_headers, mock_device_pool):
         """Resolve sets the active device, subsequent resolve with no params returns it."""
         transport = ASGITransport(app=app)

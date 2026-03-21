@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,6 +22,7 @@ class TestReadPlist:
     async def test_read_plist_parses_output(self, tmp_path):
         # Write a real plist file and read it back
         import plistlib
+
         plist_path = tmp_path / "test.plist"
         with open(plist_path, "wb") as f:
             plistlib.dump({"foo": "bar", "count": 42}, f)

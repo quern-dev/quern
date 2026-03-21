@@ -40,8 +40,12 @@ class TestRunSimctl:
             stdout, stderr = await backend._run_simctl("list", "devices")
             assert stdout == "ok\n"
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "list", "devices",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "list",
+                "devices",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_nonzero_exit_raises(self):
@@ -65,8 +69,11 @@ class TestRunShell:
             stdout, _ = await backend._run_shell("xcrun simctl listapps X | plutil ...")
             assert stdout == '{"ok": true}'
             mock_exec.assert_called_once_with(
-                "sh", "-c", "xcrun simctl listapps X | plutil ...",
-                stdout=-1, stderr=-1,
+                "sh",
+                "-c",
+                "xcrun simctl listapps X | plutil ...",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_failure_raises(self):
@@ -161,19 +168,22 @@ class TestListDevices:
 
 class TestParseRuntime:
     def test_ios_18_6(self):
-        assert SimctlBackend._parse_runtime(
-            "com.apple.CoreSimulator.SimRuntime.iOS-18-6"
-        ) == "iOS 18.6"
+        assert (
+            SimctlBackend._parse_runtime("com.apple.CoreSimulator.SimRuntime.iOS-18-6")
+            == "iOS 18.6"
+        )
 
     def test_ios_17_2(self):
-        assert SimctlBackend._parse_runtime(
-            "com.apple.CoreSimulator.SimRuntime.iOS-17-2"
-        ) == "iOS 17.2"
+        assert (
+            SimctlBackend._parse_runtime("com.apple.CoreSimulator.SimRuntime.iOS-17-2")
+            == "iOS 17.2"
+        )
 
     def test_watchos(self):
-        assert SimctlBackend._parse_runtime(
-            "com.apple.CoreSimulator.SimRuntime.watchOS-11-0"
-        ) == "watchOS 11.0"
+        assert (
+            SimctlBackend._parse_runtime("com.apple.CoreSimulator.SimRuntime.watchOS-11-0")
+            == "watchOS 11.0"
+        )
 
     def test_unknown_format(self):
         result = SimctlBackend._parse_runtime("some-weird-runtime")
@@ -192,8 +202,12 @@ class TestSimctlCommands:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.boot("AAAA-1111")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "boot", "AAAA-1111",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "boot",
+                "AAAA-1111",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_shutdown(self):
@@ -202,8 +216,12 @@ class TestSimctlCommands:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.shutdown("AAAA-1111")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "shutdown", "AAAA-1111",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "shutdown",
+                "AAAA-1111",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_install_app(self):
@@ -212,8 +230,13 @@ class TestSimctlCommands:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.install_app("AAAA-1111", "/path/to/App.app")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "install", "AAAA-1111", "/path/to/App.app",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "install",
+                "AAAA-1111",
+                "/path/to/App.app",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_launch_app(self):
@@ -222,8 +245,13 @@ class TestSimctlCommands:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.launch_app("AAAA-1111", "com.example.App")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "launch", "AAAA-1111", "com.example.App",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "launch",
+                "AAAA-1111",
+                "com.example.App",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_terminate_app(self):
@@ -232,8 +260,13 @@ class TestSimctlCommands:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.terminate_app("AAAA-1111", "com.example.App")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "terminate", "AAAA-1111", "com.example.App",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "terminate",
+                "AAAA-1111",
+                "com.example.App",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_uninstall_app(self):
@@ -242,8 +275,13 @@ class TestSimctlCommands:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.uninstall_app("AAAA-1111", "com.example.App")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "uninstall", "AAAA-1111", "com.example.App",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "uninstall",
+                "AAAA-1111",
+                "com.example.App",
+                stdout=-1,
+                stderr=-1,
             )
 
 
@@ -289,8 +327,14 @@ class TestSetLocation:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.set_location("AAAA-1111", 37.7749, -122.4194)
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "location", "AAAA-1111", "set", "37.7749,-122.4194",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "location",
+                "AAAA-1111",
+                "set",
+                "37.7749,-122.4194",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_set_location_error(self):
@@ -313,8 +357,15 @@ class TestGrantPermission:
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.grant_permission("AAAA-1111", "com.example.App", "photos")
             mock_exec.assert_called_once_with(
-                "xcrun", "simctl", "privacy", "AAAA-1111", "grant", "photos", "com.example.App",
-                stdout=-1, stderr=-1,
+                "xcrun",
+                "simctl",
+                "privacy",
+                "AAAA-1111",
+                "grant",
+                "photos",
+                "com.example.App",
+                stdout=-1,
+                stderr=-1,
             )
 
     async def test_grant_permission_error(self):

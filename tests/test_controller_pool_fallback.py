@@ -8,7 +8,7 @@ import pytest
 
 from server.device.controller import DeviceController
 from server.device.pool import DevicePool
-from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType
+from server.models import DeviceInfo, DeviceState, DeviceType
 
 
 @pytest.fixture
@@ -43,7 +43,6 @@ def controller_with_pool(tmp_path):
 
 
 class TestPoolFallback:
-
     async def test_pool_none_uses_old_logic(self):
         """When _pool is None, behave identically to pre-4b-gamma."""
         ctrl = DeviceController()

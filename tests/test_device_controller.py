@@ -7,8 +7,7 @@ from unittest.mock import AsyncMock, call, patch
 import pytest
 
 from server.device.controller import DeviceController
-from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
-
+from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,10 +52,12 @@ class TestResolveUdid:
     async def test_single_booted_auto_detect(self):
         """Case 3: Exactly 1 booted device is auto-detected."""
         ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[
-            _device(udid="auto-udid", state=DeviceState.BOOTED),
-            _device(udid="other-udid", state=DeviceState.SHUTDOWN),
-        ])
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[
+                _device(udid="auto-udid", state=DeviceState.BOOTED),
+                _device(udid="other-udid", state=DeviceState.SHUTDOWN),
+            ]
+        )
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
@@ -67,9 +68,11 @@ class TestResolveUdid:
     async def test_no_booted_error(self):
         """Case 4: No booted devices raises error."""
         ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[
-            _device(udid="off1", state=DeviceState.SHUTDOWN),
-        ])
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[
+                _device(udid="off1", state=DeviceState.SHUTDOWN),
+            ]
+        )
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
@@ -79,10 +82,12 @@ class TestResolveUdid:
     async def test_multiple_booted_error(self):
         """Case 5: Multiple booted devices raises error."""
         ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[
-            _device(udid="dev1", name="iPhone A", state=DeviceState.BOOTED),
-            _device(udid="dev2", name="iPhone B", state=DeviceState.BOOTED),
-        ])
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[
+                _device(udid="dev1", name="iPhone A", state=DeviceState.BOOTED),
+                _device(udid="dev2", name="iPhone B", state=DeviceState.BOOTED),
+            ]
+        )
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
@@ -105,7 +110,14 @@ class TestCheckTools:
         ctrl.adb.is_available = AsyncMock(return_value=True)
         with patch("server.device.tunneld.is_tunneld_running", return_value=True):
             tools = await ctrl.check_tools()
-        assert tools == {"simctl": True, "idb": True, "devicectl": True, "pymobiledevice3": True, "tunneld": True, "adb": True}
+        assert tools == {
+            "simctl": True,
+            "idb": True,
+            "devicectl": True,
+            "pymobiledevice3": True,
+            "tunneld": True,
+            "adb": True,
+        }
 
     async def test_simctl_only(self):
         ctrl = DeviceController()
@@ -116,7 +128,14 @@ class TestCheckTools:
         ctrl.adb.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
-        assert tools == {"simctl": True, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False, "adb": False}
+        assert tools == {
+            "simctl": True,
+            "idb": False,
+            "devicectl": False,
+            "pymobiledevice3": False,
+            "tunneld": False,
+            "adb": False,
+        }
 
     async def test_none_available(self):
         ctrl = DeviceController()
@@ -127,7 +146,14 @@ class TestCheckTools:
         ctrl.adb.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
-        assert tools == {"simctl": False, "idb": False, "devicectl": False, "pymobiledevice3": False, "tunneld": False, "adb": False}
+        assert tools == {
+            "simctl": False,
+            "idb": False,
+            "devicectl": False,
+            "pymobiledevice3": False,
+            "tunneld": False,
+            "adb": False,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +173,11 @@ class TestBoot:
     async def test_boot_by_name(self):
         ctrl = DeviceController()
         ctrl.adb.is_available = AsyncMock(return_value=False)
-        ctrl.simctl.list_devices = AsyncMock(return_value=[
-            _device(udid="found-udid", name="iPhone 16 Pro", state=DeviceState.SHUTDOWN),
-        ])
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[
+                _device(udid="found-udid", name="iPhone 16 Pro", state=DeviceState.SHUTDOWN),
+            ]
+        )
         ctrl.simctl.boot = AsyncMock()
         udid = await ctrl.boot(name="iPhone 16 Pro")
         ctrl.simctl.boot.assert_called_once_with("found-udid")
@@ -345,7 +373,9 @@ class TestGetUIElements:
         assert len(elements) == 4
         assert elements[0].type == "Application"
         assert elements[1].label == "Settings"
-        ctrl.idb.describe_all.assert_called_once_with("AAAA-1111", snapshot_depth=None, source_timeout=None)
+        ctrl.idb.describe_all.assert_called_once_with(
+            "AAAA-1111", snapshot_depth=None, source_timeout=None
+        )
 
     async def test_with_explicit_udid(self):
         ctrl = DeviceController()
@@ -353,7 +383,9 @@ class TestGetUIElements:
 
         elements, udid = await ctrl.get_ui_elements(udid="BBBB-2222")
         assert udid == "BBBB-2222"
-        ctrl.idb.describe_all.assert_called_once_with("BBBB-2222", snapshot_depth=None, source_timeout=None)
+        ctrl.idb.describe_all.assert_called_once_with(
+            "BBBB-2222", snapshot_depth=None, source_timeout=None
+        )
 
 
 class TestGetScreenSummary:
@@ -414,7 +446,9 @@ class TestTapElement:
 
     async def test_no_label_or_identifier_raises(self):
         ctrl = DeviceController()
-        with pytest.raises(DeviceError, match="Either label/label_contains/label_prefix or identifier is required"):
+        with pytest.raises(
+            DeviceError, match="Either label/label_contains/label_prefix or identifier is required"
+        ):
             await ctrl.tap_element()
 
     async def test_by_identifier(self):
@@ -431,15 +465,17 @@ class TestTapElement:
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         # Add a non-button Calendar element
-        data = _FAKE_IDB_OUTPUT + [{
-            "type": "StaticText",
-            "AXLabel": "Settings",
-            "AXUniqueId": "SettingsLabel",
-            "frame": {"x": 0, "y": 0, "width": 100, "height": 20},
-            "enabled": True,
-            "role": "AXStaticText",
-            "role_description": "text",
-        }]
+        data = _FAKE_IDB_OUTPUT + [
+            {
+                "type": "StaticText",
+                "AXLabel": "Settings",
+                "AXUniqueId": "SettingsLabel",
+                "frame": {"x": 0, "y": 0, "width": 100, "height": 20},
+                "enabled": True,
+                "role": "AXStaticText",
+                "role_description": "text",
+            }
+        ]
         ctrl.idb.describe_all = AsyncMock(return_value=data)
         ctrl.idb.tap = AsyncMock()
 
@@ -548,7 +584,9 @@ class TestGrantPermission:
         udid = await ctrl.grant_permission("com.example.App", "photos")
         assert udid == "AAAA-1111"
         ctrl.simctl.grant_permission.assert_called_once_with(
-            "AAAA-1111", "com.example.App", "photos",
+            "AAAA-1111",
+            "com.example.App",
+            "photos",
         )
 
 
@@ -638,15 +676,17 @@ class TestWdaDirectQuery:
         ctrl = DeviceController()
         ctrl._active_udid = "PHYS-0001"
         ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
-        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[
-            {
-                "type": "Button",
-                "AXLabel": "Done",
-                "AXUniqueId": "done_btn",
-                "frame": {"x": 10, "y": 20, "width": 80, "height": 40},
-                "enabled": True,
-            },
-        ])
+        ctrl.wda_client.find_elements_by_query = AsyncMock(
+            return_value=[
+                {
+                    "type": "Button",
+                    "AXLabel": "Done",
+                    "AXUniqueId": "done_btn",
+                    "frame": {"x": 10, "y": 20, "width": 80, "height": 40},
+                    "enabled": True,
+                },
+            ]
+        )
 
         elements, elapsed = await ctrl._wda_direct_query("PHYS-0001", identifier="done_btn")
         assert len(elements) == 1
@@ -661,19 +701,22 @@ class TestGetUIElementsWdaDispatch:
         ctrl = DeviceController()
         ctrl._active_udid = "PHYS-0001"
         ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
-        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[
-            {
-                "type": "Button",
-                "AXLabel": "Done",
-                "AXUniqueId": "done_btn",
-                "frame": {"x": 10, "y": 20, "width": 80, "height": 40},
-                "enabled": True,
-            },
-        ])
+        ctrl.wda_client.find_elements_by_query = AsyncMock(
+            return_value=[
+                {
+                    "type": "Button",
+                    "AXLabel": "Done",
+                    "AXUniqueId": "done_btn",
+                    "frame": {"x": 10, "y": 20, "width": 80, "height": 40},
+                    "enabled": True,
+                },
+            ]
+        )
         ctrl.wda_client.describe_all = AsyncMock()
 
         elements, udid = await ctrl.get_ui_elements(
-            "PHYS-0001", filter_identifier="done_btn",
+            "PHYS-0001",
+            filter_identifier="done_btn",
         )
         assert len(elements) == 1
         assert elements[0].label == "Done"
@@ -700,7 +743,8 @@ class TestGetUIElementsWdaDispatch:
         ctrl.wda_client.find_elements_by_query = AsyncMock()
 
         elements, udid = await ctrl.get_ui_elements(
-            "AAAA-1111", filter_label="Settings",
+            "AAAA-1111",
+            filter_label="Settings",
         )
         # Should use describe_all (idb), not WDA direct query
         ctrl.idb.describe_all.assert_called_once()
@@ -712,8 +756,10 @@ class TestGetUIElementsWdaDispatch:
         ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
 
         # Pre-populate cache
-        from server.device.ui_elements import parse_elements
         import time
+
+        from server.device.ui_elements import parse_elements
+
         cached_elements = parse_elements(_FAKE_IDB_OUTPUT)
         ctrl._ui_cache["PHYS-0001"] = (cached_elements, time.time())
 
@@ -721,7 +767,8 @@ class TestGetUIElementsWdaDispatch:
         ctrl.wda_client.describe_all = AsyncMock()
 
         elements, udid = await ctrl.get_ui_elements(
-            "PHYS-0001", filter_label="Settings",
+            "PHYS-0001",
+            filter_label="Settings",
         )
         assert len(elements) == 1
         assert elements[0].label == "Settings"
@@ -737,14 +784,16 @@ class TestGetScreenSummaryStrategy:
         ctrl = DeviceController()
         ctrl._active_udid = "PHYS-0001"
         ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
-        ctrl.wda_client.build_screen_skeleton = AsyncMock(return_value=[
-            {
-                "type": "TabBar",
-                "AXLabel": "Tab Bar",
-                "frame": {"x": 0, "y": 800, "width": 393, "height": 52},
-                "enabled": True,
-            },
-        ])
+        ctrl.wda_client.build_screen_skeleton = AsyncMock(
+            return_value=[
+                {
+                    "type": "TabBar",
+                    "AXLabel": "Tab Bar",
+                    "frame": {"x": 0, "y": 800, "width": 393, "height": 52},
+                    "enabled": True,
+                },
+            ]
+        )
         ctrl.wda_client.describe_all = AsyncMock()
 
         summary, udid = await ctrl.get_screen_summary(strategy="skeleton")
@@ -785,19 +834,23 @@ class TestUdidMapping:
         """list_devices() should correlate devicectl and usbmux names."""
         ctrl = DeviceController()
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(return_value=[
-            DeviceInfo(
-                udid="B34C4EE9-CORE-DEVICE-UUID",
-                name="iPhone 11",
-                state=DeviceState.BOOTED,
-                device_type=DeviceType.DEVICE,
-                os_version="iOS 18.4",
-            ),
-        ])
+        ctrl.devicectl.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="B34C4EE9-CORE-DEVICE-UUID",
+                    name="iPhone 11",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                    os_version="iOS 18.4",
+                ),
+            ]
+        )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={
-            "iPhone 11": "00008030-AABBCCDDEEFF",
-        })
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(
+            return_value={
+                "iPhone 11": "00008030-AABBCCDDEEFF",
+            }
+        )
 
         await ctrl.list_devices()
 
@@ -821,19 +874,23 @@ class TestUdidMapping:
         """get_libimobiledevice_udid refreshes device list on cache miss."""
         ctrl = DeviceController()
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(return_value=[
-            DeviceInfo(
-                udid="NEW-CORE-UUID",
-                name="iPhone 15 Pro",
-                state=DeviceState.BOOTED,
-                device_type=DeviceType.DEVICE,
-                os_version="iOS 18.4",
-            ),
-        ])
+        ctrl.devicectl.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="NEW-CORE-UUID",
+                    name="iPhone 15 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                    os_version="iOS 18.4",
+                ),
+            ]
+        )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={
-            "iPhone 15 Pro": "00008030-NEWDEVICE",
-        })
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(
+            return_value={
+                "iPhone 15 Pro": "00008030-NEWDEVICE",
+            }
+        )
 
         result = await ctrl.get_libimobiledevice_udid("NEW-CORE-UUID")
         assert result == "00008030-NEWDEVICE"
@@ -842,15 +899,17 @@ class TestUdidMapping:
         """Network-only devices have no usbmux UDID."""
         ctrl = DeviceController()
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(return_value=[
-            DeviceInfo(
-                udid="WIFI-ONLY-UUID",
-                name="iPhone via Wi-Fi",
-                state=DeviceState.BOOTED,
-                device_type=DeviceType.DEVICE,
-                os_version="iOS 18.4",
-            ),
-        ])
+        ctrl.devicectl.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="WIFI-ONLY-UUID",
+                    name="iPhone via Wi-Fi",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                    os_version="iOS 18.4",
+                ),
+            ]
+        )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
 
@@ -938,7 +997,7 @@ class TestAndroidAppLifecycle:
         ctrl.adb.terminate_app = AsyncMock()
         ctrl.simctl.terminate_app = AsyncMock()
 
-        udid = await ctrl.terminate_app("com.example.app")
+        await ctrl.terminate_app("com.example.app")
         ctrl.adb.terminate_app.assert_called_once_with("emulator-5554", "com.example.app")
         ctrl.simctl.terminate_app.assert_not_called()
 
@@ -949,7 +1008,7 @@ class TestAndroidAppLifecycle:
         ctrl.adb.install_app = AsyncMock()
         ctrl.simctl.install_app = AsyncMock()
 
-        udid = await ctrl.install_app("/path/to/app.apk")
+        await ctrl.install_app("/path/to/app.apk")
         ctrl.adb.install_app.assert_called_once_with("emulator-5554", "/path/to/app.apk")
         ctrl.simctl.install_app.assert_not_called()
 
@@ -960,7 +1019,7 @@ class TestAndroidAppLifecycle:
         ctrl.adb.uninstall_app = AsyncMock()
         ctrl.simctl.uninstall_app = AsyncMock()
 
-        udid = await ctrl.uninstall_app("com.example.app")
+        await ctrl.uninstall_app("com.example.app")
         ctrl.adb.uninstall_app.assert_called_once_with("emulator-5554", "com.example.app")
         ctrl.simctl.uninstall_app.assert_not_called()
 
@@ -994,15 +1053,19 @@ class TestAndroidAppLifecycle:
 class TestAndroidListDevicesMerge:
     async def test_list_devices_includes_android(self):
         ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[
-            _device(udid="SIM-1111", state=DeviceState.BOOTED),
-        ])
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[
+                _device(udid="SIM-1111", state=DeviceState.BOOTED),
+            ]
+        )
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
-        ctrl.adb.list_devices = AsyncMock(return_value=[
-            _android_device(udid="emulator-5554"),
-        ])
+        ctrl.adb.list_devices = AsyncMock(
+            return_value=[
+                _android_device(udid="emulator-5554"),
+            ]
+        )
 
         devices = await ctrl.list_devices()
         assert len(devices) == 2
@@ -1044,10 +1107,12 @@ class TestAndroidUIBackendSelection:
         ctrl = DeviceController()
         ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
         from server.device.u2_client import U2Backend
+
         assert isinstance(ctrl._ui_backend("emulator-5554"), U2Backend)
 
     def test_android_physical_uses_u2_backend(self):
         ctrl = DeviceController()
         ctrl._device_type_cache["ZY224H6L"] = DeviceType.ANDROID_DEVICE
         from server.device.u2_client import U2Backend
+
         assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)

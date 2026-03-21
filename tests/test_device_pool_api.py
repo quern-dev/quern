@@ -162,7 +162,9 @@ class TestDevicePoolAPI:
             assert len(data["devices"]) == 1
             assert data["devices"][0]["name"] == "iPhone 15"
 
-    async def test_list_devices_with_device_family_filter(self, app, auth_headers, mock_device_pool):
+    async def test_list_devices_with_device_family_filter(
+        self, app, auth_headers, mock_device_pool
+    ):
         """List devices endpoint filters by device family."""
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

@@ -10,7 +10,6 @@ import pytest
 from server.device.pmd3 import Pmd3Backend
 from server.models import DeviceError
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -32,7 +31,9 @@ def _make_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
 class TestIsAvailable:
     async def test_available(self):
         backend = Pmd3Backend()
-        with patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")):
+        with patch(
+            "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+        ):
             assert await backend.is_available() is True
 
     async def test_not_available(self):
@@ -59,11 +60,15 @@ class TestScreenshot:
         backend = Pmd3Backend()
         fake_png = b"\x89PNG\r\n\x1a\nfake_image_data"
 
-        with patch("server.device.tunneld.is_tunneld_running", return_value=True), \
-             patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")), \
-             patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"), \
-             patch("asyncio.create_subprocess_exec") as mock_exec, \
-             patch("tempfile.NamedTemporaryFile") as mock_tmp:
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
             mock_file = MagicMock()
             tmp_file = tmp_path / "screenshot.png"
             tmp_file.write_bytes(fake_png)
@@ -87,10 +92,14 @@ class TestScreenshot:
         backend = Pmd3Backend()
         fake_png = b"\x89PNG\r\n\x1a\nfake_image_data"
 
-        with patch("server.device.tunneld.is_tunneld_running", return_value=False), \
-             patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")), \
-             patch("asyncio.create_subprocess_exec") as mock_exec, \
-             patch("tempfile.NamedTemporaryFile") as mock_tmp:
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=False),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
             mock_file = MagicMock()
             tmp_file = tmp_path / "screenshot.png"
             tmp_file.write_bytes(fake_png)
@@ -117,11 +126,15 @@ class TestScreenshot:
         backend = Pmd3Backend()
         fake_png = b"\x89PNG\r\n\x1a\nfake_image_data"
 
-        with patch("server.device.tunneld.is_tunneld_running", return_value=True), \
-             patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")), \
-             patch("server.device.tunneld.resolve_tunnel_udid", return_value=None), \
-             patch("asyncio.create_subprocess_exec") as mock_exec, \
-             patch("tempfile.NamedTemporaryFile") as mock_tmp:
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("server.device.tunneld.resolve_tunnel_udid", return_value=None),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
             mock_file = MagicMock()
             tmp_file = tmp_path / "screenshot.png"
             tmp_file.write_bytes(fake_png)
@@ -142,11 +155,15 @@ class TestScreenshot:
     async def test_screenshot_failure(self, tmp_path):
         backend = Pmd3Backend()
 
-        with patch("server.device.tunneld.is_tunneld_running", return_value=True), \
-             patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")), \
-             patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"), \
-             patch("asyncio.create_subprocess_exec") as mock_exec, \
-             patch("tempfile.NamedTemporaryFile") as mock_tmp:
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
             mock_file = MagicMock()
             tmp_file = tmp_path / "screenshot.png"
             tmp_file.write_bytes(b"")
@@ -164,10 +181,14 @@ class TestScreenshot:
         """Older iOS without DeveloperDiskImage gives a helpful error."""
         backend = Pmd3Backend()
 
-        with patch("server.device.tunneld.is_tunneld_running", return_value=False), \
-             patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")), \
-             patch("asyncio.create_subprocess_exec") as mock_exec, \
-             patch("tempfile.NamedTemporaryFile") as mock_tmp:
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=False),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
             mock_file = MagicMock()
             tmp_file = tmp_path / "screenshot.png"
             tmp_file.write_bytes(b"")
@@ -177,7 +198,8 @@ class TestScreenshot:
             mock_tmp.return_value = mock_file
 
             mock_exec.return_value = _make_proc(
-                1, stderr=b"DeveloperDiskImage is not mounted",
+                1,
+                stderr=b"DeveloperDiskImage is not mounted",
             )
 
             with pytest.raises(DeviceError, match="Developer disk image not mounted"):

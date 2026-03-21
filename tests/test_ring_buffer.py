@@ -1,6 +1,6 @@
 """Tests for the ring buffer storage."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,7 +18,7 @@ def _make_entry(
     """Helper to create a LogEntry for testing."""
     return LogEntry(
         id="test123",
-        timestamp=kwargs.get("timestamp", datetime.now(timezone.utc)),
+        timestamp=kwargs.get("timestamp", datetime.now(UTC)),
         device_id=kwargs.get("device_id", "default"),
         process=process,
         level=level,

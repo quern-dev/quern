@@ -5,7 +5,7 @@ Uses httpx/ASGITransport against the real FastAPI app with mocked DeviceControll
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -14,7 +14,6 @@ from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.main import create_app
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,35 +59,61 @@ def mock_controller(app):
     ctrl.launch_app = AsyncMock(return_value="AAAA-1111")
     ctrl.terminate_app = AsyncMock(return_value="AAAA-1111")
     ctrl.uninstall_app = AsyncMock(return_value="AAAA-1111")
-    ctrl.list_apps = AsyncMock(return_value=(
-        [AppInfo(bundle_id="com.example.App", name="My App", app_type="User")],
-        "AAAA-1111",
-    ))
+    ctrl.list_apps = AsyncMock(
+        return_value=(
+            [AppInfo(bundle_id="com.example.App", name="My App", app_type="User")],
+            "AAAA-1111",
+        )
+    )
     ctrl.screenshot = AsyncMock(return_value=(b"\x89PNGfake", "image/png"))
     # Phase 3b: UI inspection mocks
     _sample_elements = [
-        UIElement(type="Application", label="Springboard", frame={"x": 0, "y": 0, "width": 393, "height": 852}),
-        UIElement(type="Button", label="Settings", identifier="Settings", frame={"x": 302, "y": 476, "width": 68, "height": 86}),
-        UIElement(type="Button", label="Maps", identifier="Maps", frame={"x": 27, "y": 382, "width": 68, "height": 86}),
+        UIElement(
+            type="Application",
+            label="Springboard",
+            frame={"x": 0, "y": 0, "width": 393, "height": 852},
+        ),
+        UIElement(
+            type="Button",
+            label="Settings",
+            identifier="Settings",
+            frame={"x": 302, "y": 476, "width": 68, "height": 86},
+        ),
+        UIElement(
+            type="Button",
+            label="Maps",
+            identifier="Maps",
+            frame={"x": 27, "y": 382, "width": 68, "height": 86},
+        ),
     ]
     ctrl.get_ui_elements = AsyncMock(return_value=(_sample_elements, "AAAA-1111"))
-    ctrl.get_screen_summary = AsyncMock(return_value=(
-        {
-            "summary": "Springboard screen with 2 buttons.",
-            "element_count": 3,
-            "element_types": {"Application": 1, "Button": 2},
-            "interactive_elements": [
-                {"type": "Button", "label": "Settings", "identifier": "Settings"},
-                {"type": "Button", "label": "Maps", "identifier": "Maps"},
-            ],
-        },
-        "AAAA-1111",
-    ))
+    ctrl.get_screen_summary = AsyncMock(
+        return_value=(
+            {
+                "summary": "Springboard screen with 2 buttons.",
+                "element_count": 3,
+                "element_types": {"Application": 1, "Button": 2},
+                "interactive_elements": [
+                    {"type": "Button", "label": "Settings", "identifier": "Settings"},
+                    {"type": "Button", "label": "Maps", "identifier": "Maps"},
+                ],
+            },
+            "AAAA-1111",
+        )
+    )
     ctrl.tap = AsyncMock(return_value="AAAA-1111")
-    ctrl.tap_element = AsyncMock(return_value={
-        "status": "ok",
-        "tapped": {"label": "Settings", "type": "Button", "identifier": "Settings", "x": 336.0, "y": 519.0},
-    })
+    ctrl.tap_element = AsyncMock(
+        return_value={
+            "status": "ok",
+            "tapped": {
+                "label": "Settings",
+                "type": "Button",
+                "identifier": "Settings",
+                "x": 336.0,
+                "y": 519.0,
+            },
+        }
+    )
     ctrl.swipe = AsyncMock(return_value="AAAA-1111")
     ctrl.type_text = AsyncMock(return_value="AAAA-1111")
     ctrl.clear_text = AsyncMock(return_value="AAAA-1111")
@@ -161,7 +186,9 @@ class TestBootDevice:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.boot.assert_called_once_with(udid=None, name="iPhone 16 Pro", headless=False)
+        mock_controller.boot.assert_called_once_with(
+            udid=None, name="iPhone 16 Pro", headless=False
+        )
 
     async def test_boot_no_booted_device_error(self, app, auth_headers, mock_controller):
         mock_controller.boot = AsyncMock(
@@ -273,7 +300,6 @@ class TestAppEndpoints:
         mock_controller.list_apps.assert_called_once_with(udid="BBBB-2222")
 
 
-
 # ---------------------------------------------------------------------------
 # GET /device/screenshot
 # ---------------------------------------------------------------------------
@@ -291,13 +317,14 @@ class TestScreenshot:
         assert resp.headers["content-type"] == "image/png"
         assert resp.content == b"\x89PNGfake"
         mock_controller.screenshot.assert_called_once_with(
-            udid=None, format="png", scale=0.5, quality=85,
+            udid=None,
+            format="png",
+            scale=0.5,
+            quality=85,
         )
 
     async def test_screenshot_jpeg(self, app, auth_headers, mock_controller):
-        mock_controller.screenshot = AsyncMock(
-            return_value=(b"jpeg-data", "image/jpeg")
-        )
+        mock_controller.screenshot = AsyncMock(return_value=(b"jpeg-data", "image/jpeg"))
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
@@ -307,7 +334,10 @@ class TestScreenshot:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/jpeg"
         mock_controller.screenshot.assert_called_once_with(
-            udid=None, format="jpeg", scale=1.0, quality=50,
+            udid=None,
+            format="jpeg",
+            scale=1.0,
+            quality=50,
         )
 
     async def test_screenshot_error(self, app, auth_headers, mock_controller):
@@ -362,7 +392,9 @@ class TestGetUIElements:
         assert data["element_count"] == 3
         assert len(data["elements"]) == 3
         assert data["udid"] == "AAAA-1111"
-        mock_controller.get_ui_elements.assert_called_once_with(udid=None, snapshot_depth=None, source_timeout=None)
+        mock_controller.get_ui_elements.assert_called_once_with(
+            udid=None, snapshot_depth=None, source_timeout=None
+        )
 
     async def test_get_ui_elements_with_udid(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
@@ -372,7 +404,9 @@ class TestGetUIElements:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.get_ui_elements.assert_called_once_with(udid="BBBB-2222", snapshot_depth=None, source_timeout=None)
+        mock_controller.get_ui_elements.assert_called_once_with(
+            udid="BBBB-2222", snapshot_depth=None, source_timeout=None
+        )
 
     async def test_get_ui_elements_idb_not_found(self, app, auth_headers, mock_controller):
         mock_controller.get_ui_elements = AsyncMock(
@@ -421,7 +455,13 @@ class TestScreenSummary:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.get_screen_summary.assert_called_once_with(max_elements=20, udid="BBBB-2222", snapshot_depth=None, strategy=None, source_timeout=None)
+        mock_controller.get_screen_summary.assert_called_once_with(
+            max_elements=20,
+            udid="BBBB-2222",
+            snapshot_depth=None,
+            strategy=None,
+            source_timeout=None,
+        )
 
     async def test_screen_summary_with_strategy(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
@@ -432,7 +472,11 @@ class TestScreenSummary:
             )
         assert resp.status_code == 200
         mock_controller.get_screen_summary.assert_called_once_with(
-            max_elements=20, udid=None, snapshot_depth=None, strategy="skeleton", source_timeout=None,
+            max_elements=20,
+            udid=None,
+            snapshot_depth=None,
+            strategy="skeleton",
+            source_timeout=None,
         )
 
 
@@ -455,9 +499,14 @@ class TestTapElement:
         assert data["status"] == "ok"
         assert data["tapped"]["label"] == "Settings"
         mock_controller.tap_element.assert_called_once_with(
-            label="Settings", label_contains=None, label_prefix=None,
-            identifier=None, element_type=None, udid=None,
-            skip_stability_check=False, source_timeout=None,
+            label="Settings",
+            label_contains=None,
+            label_prefix=None,
+            identifier=None,
+            element_type=None,
+            udid=None,
+            skip_stability_check=False,
+            source_timeout=None,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -470,9 +519,14 @@ class TestTapElement:
             )
         assert resp.status_code == 200
         mock_controller.tap_element.assert_called_once_with(
-            label=None, label_contains=None, label_prefix=None,
-            identifier="Settings", element_type=None, udid=None,
-            skip_stability_check=False, source_timeout=None,
+            label=None,
+            label_contains=None,
+            label_prefix=None,
+            identifier="Settings",
+            element_type=None,
+            udid=None,
+            skip_stability_check=False,
+            source_timeout=None,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -485,20 +539,27 @@ class TestTapElement:
             )
         assert resp.status_code == 200
         mock_controller.tap_element.assert_called_once_with(
-            label="Calendar", label_contains=None, label_prefix=None,
-            identifier=None, element_type="Button", udid=None,
-            skip_stability_check=False, source_timeout=None,
+            label="Calendar",
+            label_contains=None,
+            label_prefix=None,
+            identifier=None,
+            element_type="Button",
+            udid=None,
+            skip_stability_check=False,
+            source_timeout=None,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
-        mock_controller.tap_element = AsyncMock(return_value={
-            "status": "ambiguous",
-            "matches": [
-                {"label": "Calendar", "type": "Button", "identifier": "Calendar-1"},
-                {"label": "Calendar", "type": "Button", "identifier": "Calendar-2"},
-            ],
-            "message": "Found 2 matches, specify element_type or identifier to narrow",
-        })
+        mock_controller.tap_element = AsyncMock(
+            return_value={
+                "status": "ambiguous",
+                "matches": [
+                    {"label": "Calendar", "type": "Button", "identifier": "Calendar-1"},
+                    {"label": "Calendar", "type": "Button", "identifier": "Calendar-2"},
+                ],
+                "message": "Found 2 matches, specify element_type or identifier to narrow",
+            }
+        )
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
@@ -602,7 +663,12 @@ class TestSwipe:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         mock_controller.swipe.assert_called_once_with(
-            start_x=100, start_y=400, end_x=100, end_y=100, duration=0.5, udid=None,
+            start_x=100,
+            start_y=400,
+            end_x=100,
+            end_y=100,
+            duration=0.5,
+            udid=None,
         )
 
     async def test_swipe_with_duration(self, app, auth_headers, mock_controller):
@@ -615,7 +681,12 @@ class TestSwipe:
             )
         assert resp.status_code == 200
         mock_controller.swipe.assert_called_once_with(
-            start_x=0, start_y=0, end_x=0, end_y=500, duration=1.5, udid=None,
+            start_x=0,
+            start_y=0,
+            end_x=0,
+            end_y=500,
+            duration=1.5,
+            udid=None,
         )
 
     async def test_swipe_no_auth(self, app):
@@ -739,7 +810,9 @@ class TestSetLocation:
         assert data["latitude"] == 37.7749
         assert data["longitude"] == -122.4194
         mock_controller.set_location.assert_called_once_with(
-            latitude=37.7749, longitude=-122.4194, udid=None,
+            latitude=37.7749,
+            longitude=-122.4194,
+            udid=None,
         )
 
     async def test_set_location_no_auth(self, app):
@@ -785,7 +858,9 @@ class TestGrantPermission:
         assert data["bundle_id"] == "com.example.App"
         assert data["permission"] == "photos"
         mock_controller.grant_permission.assert_called_once_with(
-            bundle_id="com.example.App", permission="photos", udid=None,
+            bundle_id="com.example.App",
+            permission="photos",
+            udid=None,
         )
 
     async def test_grant_permission_no_auth(self, app):
@@ -828,7 +903,9 @@ class TestAnnotatedScreenshot:
         assert resp.headers["content-type"] == "image/png"
         assert resp.content == b"\x89PNGannotated"
         mock_controller.screenshot_annotated.assert_called_once_with(
-            udid=None, scale=0.5, quality=85,
+            udid=None,
+            scale=0.5,
+            quality=85,
         )
 
     async def test_annotated_screenshot_with_params(self, app, auth_headers, mock_controller):
@@ -840,7 +917,9 @@ class TestAnnotatedScreenshot:
             )
         assert resp.status_code == 200
         mock_controller.screenshot_annotated.assert_called_once_with(
-            udid="BBBB-2222", scale=1.0, quality=85,
+            udid="BBBB-2222",
+            scale=1.0,
+            quality=85,
         )
 
     async def test_annotated_screenshot_no_auth(self, app):

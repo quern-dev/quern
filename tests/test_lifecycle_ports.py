@@ -6,7 +6,7 @@ import socket
 
 import pytest
 
-from server.lifecycle.ports import is_port_available, find_available_port
+from server.lifecycle.ports import find_available_port, is_port_available
 
 
 def test_port_available_when_free():

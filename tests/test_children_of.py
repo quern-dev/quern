@@ -14,7 +14,6 @@ from server.device.ui_elements import find_children_of
 from server.main import create_app
 from server.models import UIElement
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture: nested tree
 # ---------------------------------------------------------------------------
@@ -87,7 +86,6 @@ NESTED_TREE = [
 
 
 class TestFindChildrenOf:
-
     def test_find_by_identifier(self):
         """Find children by AXUniqueId."""
         children = find_children_of(NESTED_TREE, parent_identifier="form-group-1")
@@ -178,7 +176,6 @@ def mock_controller_with_children(app):
 
 
 class TestChildrenOfAPI:
-
     async def test_children_of_param(self, app, auth_headers, mock_controller_with_children):
         """GET /ui?children_of=FormGroup returns scoped results."""
         transport = ASGITransport(app=app)
@@ -194,10 +191,14 @@ class TestChildrenOfAPI:
         assert "Username" in labels
         assert "Password" in labels
         mock_controller_with_children.get_ui_elements_children_of.assert_called_once_with(
-            children_of="FormGroup", udid=None, snapshot_depth=None,
+            children_of="FormGroup",
+            udid=None,
+            snapshot_depth=None,
         )
 
-    async def test_without_children_of_uses_normal_path(self, app, auth_headers, mock_controller_with_children):
+    async def test_without_children_of_uses_normal_path(
+        self, app, auth_headers, mock_controller_with_children
+    ):
         """GET /ui without children_of uses standard get_ui_elements."""
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -206,5 +207,7 @@ class TestChildrenOfAPI:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller_with_children.get_ui_elements.assert_called_once_with(udid=None, snapshot_depth=None, source_timeout=None)
+        mock_controller_with_children.get_ui_elements.assert_called_once_with(
+            udid=None, snapshot_depth=None, source_timeout=None
+        )
         mock_controller_with_children.get_ui_elements_children_of.assert_not_called()

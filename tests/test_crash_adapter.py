@@ -12,7 +12,6 @@ import pytest
 from server.models import LogLevel, LogSource
 from server.sources.crash import CrashAdapter
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -327,13 +326,15 @@ async def test_skips_non_crash_ips(tmp_crash_dir):
     (tmp_crash_dir / "SFA-networking.ips").write_text(sfa)
 
     # Real crash (bug_type 309) — should be captured
-    crash = json.dumps({
-        "bug_type": "309",
-        "procName": "TestApp",
-        "exception": {"type": "EXC_CRASH", "signal": "SIGABRT"},
-        "faultingThread": 0,
-        "threads": [{"frames": [{"symbol": "abort"}]}],
-    })
+    crash = json.dumps(
+        {
+            "bug_type": "309",
+            "procName": "TestApp",
+            "exception": {"type": "EXC_CRASH", "signal": "SIGABRT"},
+            "faultingThread": 0,
+            "threads": [{"frames": [{"symbol": "abort"}]}],
+        }
+    )
     (tmp_crash_dir / "TestApp-crash.ips").write_text(f'{{"bug_type":"309"}}\n{crash}')
 
     await asyncio.sleep(0.5)
@@ -408,16 +409,18 @@ async def test_status_watching(tmp_crash_dir):
 async def test_pull_from_device_with_udid(tmp_crash_dir):
     """pull_from_device should call idevicecrashreport with -u <udid>."""
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
-    entries = _collect_entries(adapter)
+    _collect_entries(adapter)
     await adapter.start()
 
     mock_proc = AsyncMock()
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.returncode = 0
 
-    with patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"), \
-         patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        result = await adapter.pull_from_device("00008030-AABBCCDD")
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec,
+    ):
+        await adapter.pull_from_device("00008030-AABBCCDD")
 
         # Verify the -u flag was passed
         mock_exec.assert_called_once()
@@ -439,8 +442,10 @@ async def test_pull_from_device_without_udid(tmp_crash_dir):
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.returncode = 0
 
-    with patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"), \
-         patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec,
+    ):
         await adapter.pull_from_device()
 
         args = mock_exec.call_args[0]
@@ -454,7 +459,7 @@ async def test_pull_from_device_without_udid(tmp_crash_dir):
 async def test_pull_from_device_returns_new_reports(tmp_crash_dir):
     """pull_from_device should return only newly discovered crash reports."""
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
-    entries = _collect_entries(adapter)
+    _collect_entries(adapter)
     await adapter.start()
 
     src = FIXTURES / "crash_sample.ips"
@@ -468,8 +473,10 @@ async def test_pull_from_device_returns_new_reports(tmp_crash_dir):
     mock_proc.wait = fake_wait
     mock_proc.returncode = 0
 
-    with patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"), \
-         patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+    ):
         new_reports = await adapter.pull_from_device("00008030-AABBCCDD")
 
     assert len(new_reports) == 1

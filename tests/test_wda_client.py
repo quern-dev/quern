@@ -6,19 +6,16 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
-import httpx
-
 from server.device.wda_client import (
+    _ELEMENT_RESPONSE_ATTRIBUTES,
     ACTION_TIMEOUT,
     IDLE_TIMEOUT,
-    SKELETON_QUERY_TIMEOUT,
     SNAPSHOT_MAX_DEPTH,
     SOURCE_TIMEOUT,
     WdaBackend,
-    _ELEMENT_RESPONSE_ATTRIBUTES,
-    _SKELETON_CONTAINER_TYPES,
     _map_wda_element,
     _map_wda_element_from_query,
     _parse_wda_error,
@@ -36,7 +33,6 @@ from server.models import (
     WdaKeyboardNotPresentError,
     WdaStaleElementError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Sample WDA source data
@@ -426,9 +422,11 @@ class TestWdaBackendActivateApp:
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
-        mock_response.json = MagicMock(return_value={
-            "value": {"error": "unknown error", "message": "activate failed"},
-        })
+        mock_response.json = MagicMock(
+            return_value={
+                "value": {"error": "unknown error", "message": "activate failed"},
+            }
+        )
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -469,9 +467,11 @@ class TestWdaBackendTerminateApp:
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
-        mock_response.json = MagicMock(return_value={
-            "value": {"error": "unknown error", "message": "terminate failed"},
-        })
+        mock_response.json = MagicMock(
+            return_value={
+                "value": {"error": "unknown error", "message": "terminate failed"},
+            }
+        )
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -572,7 +572,8 @@ class TestWdaConnectionManagement:
             url = await backend._get_base_url("test-udid")
             assert url == "http://[fd35::1]:8100"
             mock_client.get.assert_called_once_with(
-                "http://[fd35::1]:8100/status", timeout=2.0,
+                "http://[fd35::1]:8100/status",
+                timeout=2.0,
             )
 
     async def test_stale_tunneld_connection_reconnects(self):
@@ -591,7 +592,8 @@ class TestWdaConnectionManagement:
 
         with patch("server.device.wda_client.httpx.AsyncClient", return_value=mock_client):
             with patch.object(
-                backend, "_try_tunneld_connection",
+                backend,
+                "_try_tunneld_connection",
                 new_callable=AsyncMock,
                 return_value="http://[fd99::2]:8100",
             ):
@@ -700,16 +702,20 @@ class TestAutoStart:
 
         with (
             patch.object(
-                backend, "_try_tunneld_connection",
+                backend,
+                "_try_tunneld_connection",
                 new_callable=AsyncMock,
                 side_effect=[None, "http://[fd35::1]:8100"],
             ),
             patch.object(
-                backend, "_start_usbmux_forward",
+                backend,
+                "_start_usbmux_forward",
                 new_callable=AsyncMock,
                 side_effect=DeviceError("not reachable", tool="wda"),
             ),
-            patch("server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result),
+            patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result
+            ),
         ):
             url = await backend._get_base_url("test-udid")
             assert url == "http://[fd35::1]:8100"
@@ -720,12 +726,14 @@ class TestAutoStart:
 
         with (
             patch.object(
-                backend, "_try_tunneld_connection",
+                backend,
+                "_try_tunneld_connection",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
             patch.object(
-                backend, "_start_usbmux_forward",
+                backend,
+                "_start_usbmux_forward",
                 new_callable=AsyncMock,
                 side_effect=DeviceError("not reachable", tool="wda"),
             ),
@@ -741,16 +749,20 @@ class TestAutoStart:
 
         with (
             patch.object(
-                backend, "_try_tunneld_connection",
+                backend,
+                "_try_tunneld_connection",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
             patch.object(
-                backend, "_start_usbmux_forward",
+                backend,
+                "_start_usbmux_forward",
                 new_callable=AsyncMock,
                 side_effect=DeviceError("not reachable", tool="wda"),
             ),
-            patch("server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result),
+            patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock, return_value=mock_result
+            ),
         ):
             with pytest.raises(DeviceError, match="did not become responsive"):
                 await backend._get_base_url("test-udid")
@@ -865,7 +877,10 @@ class TestDescribeAllTimeoutFallback:
             # /source was called with SOURCE_TIMEOUT
             mock_client.get.assert_called_once()
             call_kwargs = mock_client.get.call_args
-            assert call_kwargs.kwargs.get("timeout") == SOURCE_TIMEOUT or call_kwargs[1].get("timeout") == SOURCE_TIMEOUT
+            assert (
+                call_kwargs.kwargs.get("timeout") == SOURCE_TIMEOUT
+                or call_kwargs[1].get("timeout") == SOURCE_TIMEOUT
+            )
 
     async def test_describe_all_timeout_falls_back_to_skeleton(self):
         """When /source times out but WDA is responsive, use skeleton queries."""
@@ -883,15 +898,30 @@ class TestDescribeAllTimeoutFallback:
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=mock_get)
-            mock_client.post = AsyncMock(return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []})))
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []}))
+            )
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[
-                {"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44}},
-                {"type": "Button", "AXLabel": "Home", "frame": {"x": 2, "y": 808, "width": 96, "height": 44}},
-            ]) as mock_skeleton:
+            with patch.object(
+                backend,
+                "build_screen_skeleton",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "TabBar",
+                        "AXLabel": "",
+                        "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                    },
+                    {
+                        "type": "Button",
+                        "AXLabel": "Home",
+                        "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
+                    },
+                ],
+            ) as mock_skeleton:
                 result = await backend.describe_all("test-udid")
 
                 mock_skeleton.assert_called_once_with("test-udid")
@@ -934,14 +964,22 @@ class TestDescribeAllTimeoutFallback:
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=mock_get)
-            mock_client.post = AsyncMock(return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []})))
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []}))
+            )
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch("server.device.wda.stop_driver", new_callable=AsyncMock, side_effect=fake_stop) as mock_stop:
-                with patch("server.device.wda.start_driver", new_callable=AsyncMock, side_effect=fake_start) as mock_start:
-                    with patch.object(backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]) as mock_skel:
+            with patch(
+                "server.device.wda.stop_driver", new_callable=AsyncMock, side_effect=fake_stop
+            ) as mock_stop:
+                with patch(
+                    "server.device.wda.start_driver", new_callable=AsyncMock, side_effect=fake_start
+                ) as mock_start:
+                    with patch.object(
+                        backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+                    ) as mock_skel:
                         result = await backend.describe_all("test-udid")
 
                         mock_stop.assert_called_once_with("test-udid")
@@ -966,14 +1004,25 @@ class TestDescribeAllTimeoutFallback:
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=mock_get)
-            mock_client.post = AsyncMock(return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []})))
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []}))
+            )
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[
-                {"type": "NavigationBar", "AXLabel": "Settings", "frame": {"x": 0, "y": 0, "width": 393, "height": 44}},
-            ]) as mock_skeleton:
+            with patch.object(
+                backend,
+                "build_screen_skeleton",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "NavigationBar",
+                        "AXLabel": "Settings",
+                        "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
+                    },
+                ],
+            ) as mock_skeleton:
                 result = await backend.describe_all_nested("test-udid")
 
                 mock_skeleton.assert_called_once_with("test-udid")
@@ -1048,7 +1097,12 @@ class TestIsWdaResponsive:
     async def test_no_connection_returns_false(self):
         backend = WdaBackend()
         # No connection, no os_version — _get_base_url will raise
-        with patch.object(backend, "_get_base_url", new_callable=AsyncMock, side_effect=DeviceError("nope", tool="wda")):
+        with patch.object(
+            backend,
+            "_get_base_url",
+            new_callable=AsyncMock,
+            side_effect=DeviceError("nope", tool="wda"),
+        ):
             assert await backend._is_wda_responsive("test-udid") is False
 
 
@@ -1136,7 +1190,7 @@ class TestSnapshotDepth:
             assert len(result) == 1
 
     async def test_describe_all_without_snapshot_depth_no_settings_call(self):
-        """describe_all() without snapshot_depth skips settings POST when depth is already correct."""
+        """describe_all() without snapshot_depth skips settings POST when depth is correct."""
         backend = _make_session_backend()
         # Simulate depth already set (e.g. from session creation)
         backend._current_depth["test-udid"] = SNAPSHOT_MAX_DEPTH
@@ -1274,7 +1328,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar",
             )
 
             assert len(result) == 1
@@ -1300,7 +1356,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "class name", "XCUIElementTypeButton",
+                "test-udid",
+                "class name",
+                "XCUIElementTypeButton",
                 scope_element_id="tabbar-uuid-001",
             )
 
@@ -1326,7 +1384,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "accessibility id", "Back",
+                "test-udid",
+                "accessibility id",
+                "Back",
             )
 
             assert len(result) == 1
@@ -1343,7 +1403,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar",
             )
 
             assert result == []
@@ -1363,7 +1425,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeAlert",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeAlert",
             )
 
             assert result == []
@@ -1383,7 +1447,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar",
                 timeout=2.0,
             )
 
@@ -1413,13 +1479,15 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar/XCUIElementTypeButton",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar/XCUIElementTypeButton",
             )
 
             assert result[0]["type"] == "Button"
 
     async def test_class_chain_fallback_strips_prefix(self):
-        """When element has no 'type' field, class chain value like **/XCUIElementTypeTabBar is stripped."""
+        """Class chain like **/XCUIElementTypeTabBar is stripped when 'type' is missing."""
         backend = _make_session_backend()
 
         el_without_type = {
@@ -1440,7 +1508,9 @@ class TestFindElementsByQuery:
             mock_client_cls.return_value = mock_client
 
             result = await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar",
             )
 
             # Should be "TabBar", not "**/XCUIElementTypeTabBar"
@@ -1464,31 +1534,79 @@ class TestBuildScreenSkeleton:
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
             # Phase 1: container queries
             if value == "**/XCUIElementTypeTabBar":
-                return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "tabbar-uuid"}]
+                return [
+                    {
+                        "type": "TabBar",
+                        "AXLabel": "",
+                        "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "tabbar-uuid",
+                    }
+                ]
             if value == "**/XCUIElementTypeNavigationBar":
-                return [{"type": "NavigationBar", "AXLabel": "Map", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
-                         "AXUniqueId": "Map", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "navbar-uuid"}]
+                return [
+                    {
+                        "type": "NavigationBar",
+                        "AXLabel": "Map",
+                        "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
+                        "AXUniqueId": "Map",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "navbar-uuid",
+                    }
+                ]
             # Phase 2: unscoped class chain child queries
             if value == "**/XCUIElementTypeTabBar/**/XCUIElementTypeButton":
                 return [
-                    {"type": "Button", "AXLabel": "Home", "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
-                     "AXUniqueId": "Home", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                     "_wda_element_id": "btn-1"},
-                    {"type": "Button", "AXLabel": "Search", "frame": {"x": 100, "y": 808, "width": 96, "height": 44},
-                     "AXUniqueId": "Search", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                     "_wda_element_id": "btn-2"},
+                    {
+                        "type": "Button",
+                        "AXLabel": "Home",
+                        "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
+                        "AXUniqueId": "Home",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "btn-1",
+                    },
+                    {
+                        "type": "Button",
+                        "AXLabel": "Search",
+                        "frame": {"x": 100, "y": 808, "width": 96, "height": 44},
+                        "AXUniqueId": "Search",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "btn-2",
+                    },
                 ]
             if value == "**/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton":
-                return [{"type": "Button", "AXLabel": "Back", "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
-                         "AXUniqueId": "Back", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "btn-3"}]
+                return [
+                    {
+                        "type": "Button",
+                        "AXLabel": "Back",
+                        "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
+                        "AXUniqueId": "Back",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "btn-3",
+                    }
+                ]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
-             patch.object(backend, "_set_snapshot_depth", side_effect=mock_set_depth):
+        with (
+            patch.object(backend, "find_elements_by_query", side_effect=mock_find),
+            patch.object(backend, "_set_snapshot_depth", side_effect=mock_set_depth),
+        ):
             result = await backend.build_screen_skeleton("test-udid")
 
         # 2 containers + 3 buttons = 5
@@ -1513,22 +1631,54 @@ class TestBuildScreenSkeleton:
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
             if value == "**/XCUIElementTypeTabBar":
-                return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "tabbar-uuid"}]
+                return [
+                    {
+                        "type": "TabBar",
+                        "AXLabel": "",
+                        "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "tabbar-uuid",
+                    }
+                ]
             if value == "**/XCUIElementTypeNavigationBar":
-                return [{"type": "NavigationBar", "AXLabel": "", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "navbar-uuid"}]
+                return [
+                    {
+                        "type": "NavigationBar",
+                        "AXLabel": "",
+                        "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "navbar-uuid",
+                    }
+                ]
             # Both container child queries return same element (e.g. shared button)
             if "/**/XCUIElementTypeButton" in value:
-                return [{"type": "Button", "AXLabel": "Home", "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
-                         "AXUniqueId": "Home", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "btn-1"}]
+                return [
+                    {
+                        "type": "Button",
+                        "AXLabel": "Home",
+                        "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
+                        "AXUniqueId": "Home",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "btn-1",
+                    }
+                ]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
-             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
+        with (
+            patch.object(backend, "find_elements_by_query", side_effect=mock_find),
+            patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock),
+        ):
             result = await backend.build_screen_skeleton("test-udid")
 
         # 2 containers + 1 child (btn-1 deduped across TabBar and NavBar queries)
@@ -1543,17 +1693,39 @@ class TestBuildScreenSkeleton:
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
             if value == "**/XCUIElementTypeTabBar":
-                return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "tabbar-uuid"}]
+                return [
+                    {
+                        "type": "TabBar",
+                        "AXLabel": "",
+                        "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "tabbar-uuid",
+                    }
+                ]
             if "/**/XCUIElementTypeButton" in value:
-                return [{"type": "Button", "AXLabel": "Tab1", "frame": {"x": 0, "y": 808, "width": 96, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "btn-1"}]
+                return [
+                    {
+                        "type": "Button",
+                        "AXLabel": "Tab1",
+                        "frame": {"x": 0, "y": 808, "width": 96, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "btn-1",
+                    }
+                ]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
-             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
+        with (
+            patch.object(backend, "find_elements_by_query", side_effect=mock_find),
+            patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock),
+        ):
             result = await backend.build_screen_skeleton("test-udid")
 
         # 1 container + 1 button
@@ -1568,8 +1740,10 @@ class TestBuildScreenSkeleton:
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
-             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
+        with (
+            patch.object(backend, "find_elements_by_query", side_effect=mock_find),
+            patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock),
+        ):
             result = await backend.build_screen_skeleton("test-udid")
 
         assert result == []
@@ -1582,17 +1756,39 @@ class TestBuildScreenSkeleton:
             if "TabBar" in value and "Button" not in value:
                 raise httpx.ReadTimeout("hung")
             if value == "**/XCUIElementTypeNavigationBar":
-                return [{"type": "NavigationBar", "AXLabel": "Map", "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "nav-uuid"}]
+                return [
+                    {
+                        "type": "NavigationBar",
+                        "AXLabel": "Map",
+                        "frame": {"x": 0, "y": 0, "width": 393, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "nav-uuid",
+                    }
+                ]
             if value == "**/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton":
-                return [{"type": "Button", "AXLabel": "Back", "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "btn-1"}]
+                return [
+                    {
+                        "type": "Button",
+                        "AXLabel": "Back",
+                        "frame": {"x": 0, "y": 0, "width": 44, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "btn-1",
+                    }
+                ]
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
-             patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock):
+        with (
+            patch.object(backend, "find_elements_by_query", side_effect=mock_find),
+            patch.object(backend, "_set_snapshot_depth", new_callable=AsyncMock),
+        ):
             result = await backend.build_screen_skeleton("test-udid")
 
         # Should still have NavigationBar + its button despite TabBar failure
@@ -1610,15 +1806,27 @@ class TestBuildScreenSkeleton:
 
         async def mock_find(udid, using, value, *, scope_element_id=None, timeout=None):
             if value == "**/XCUIElementTypeTabBar":
-                return [{"type": "TabBar", "AXLabel": "", "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
-                         "AXUniqueId": "", "AXValue": None, "enabled": True, "role": "", "role_description": "",
-                         "_wda_element_id": "tabbar-uuid"}]
+                return [
+                    {
+                        "type": "TabBar",
+                        "AXLabel": "",
+                        "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                        "AXUniqueId": "",
+                        "AXValue": None,
+                        "enabled": True,
+                        "role": "",
+                        "role_description": "",
+                        "_wda_element_id": "tabbar-uuid",
+                    }
+                ]
             if "/**/XCUIElementTypeButton" in value:
                 raise httpx.ReadTimeout("hung")
             return []
 
-        with patch.object(backend, "find_elements_by_query", side_effect=mock_find), \
-             patch.object(backend, "_set_snapshot_depth", side_effect=mock_set_depth):
+        with (
+            patch.object(backend, "find_elements_by_query", side_effect=mock_find),
+            patch.object(backend, "_set_snapshot_depth", side_effect=mock_set_depth),
+        ):
             result = await backend.build_screen_skeleton("test-udid")
 
         # Container present, child query failed
@@ -1652,7 +1860,9 @@ class TestSessionSetupSettings:
             if "/session" in url and "/appium/settings" not in url:
                 return MagicMock(
                     status_code=200,
-                    json=MagicMock(return_value={"sessionId": "new-sess", "value": {"sessionId": "new-sess"}}),
+                    json=MagicMock(
+                        return_value={"sessionId": "new-sess", "value": {"sessionId": "new-sess"}}
+                    ),
                 )
             if "/appium/settings" in url:
                 posted_settings.update(kwargs.get("json", {}).get("settings", {}))
@@ -1692,23 +1902,44 @@ class TestDescribeAllSkeletonFallback:
             return mock_status
 
         skeleton_result = [
-            {"type": "TabBar", "AXLabel": "", "AXUniqueId": "", "AXValue": None,
-             "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
-             "enabled": True, "role": "", "role_description": ""},
-            {"type": "Button", "AXLabel": "Home", "AXUniqueId": "Home", "AXValue": None,
-             "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
-             "enabled": True, "role": "", "role_description": ""},
+            {
+                "type": "TabBar",
+                "AXLabel": "",
+                "AXUniqueId": "",
+                "AXValue": None,
+                "frame": {"x": 0, "y": 808, "width": 393, "height": 44},
+                "enabled": True,
+                "role": "",
+                "role_description": "",
+            },
+            {
+                "type": "Button",
+                "AXLabel": "Home",
+                "AXUniqueId": "Home",
+                "AXValue": None,
+                "frame": {"x": 2, "y": 808, "width": 96, "height": 44},
+                "enabled": True,
+                "role": "",
+                "role_description": "",
+            },
         ]
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=mock_get)
-            mock_client.post = AsyncMock(return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []})))
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(status_code=200, json=MagicMock(return_value={"value": []}))
+            )
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=skeleton_result):
+            with patch.object(
+                backend,
+                "build_screen_skeleton",
+                new_callable=AsyncMock,
+                return_value=skeleton_result,
+            ):
                 result = await backend.describe_all("test-udid")
 
                 assert len(result) == 2
@@ -1739,52 +1970,76 @@ class TestParseWdaError:
         assert _parse_wda_error(resp, "test-udid") is None
 
     def test_invalid_session(self):
-        resp = _mock_response(404, {
-            "value": {"error": "invalid session id", "message": "Session does not exist"},
-        })
+        resp = _mock_response(
+            404,
+            {
+                "value": {"error": "invalid session id", "message": "Session does not exist"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaInvalidSessionError)
         assert error.wda_error == "invalid session id"
 
     def test_no_such_element(self):
-        resp = _mock_response(404, {
-            "value": {"error": "no such element", "message": "unable to find element"},
-        })
+        resp = _mock_response(
+            404,
+            {
+                "value": {"error": "no such element", "message": "unable to find element"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaElementNotFoundError)
 
     def test_stale_element(self):
-        resp = _mock_response(404, {
-            "value": {"error": "stale element reference", "message": "Element is stale"},
-        })
+        resp = _mock_response(
+            404,
+            {
+                "value": {"error": "stale element reference", "message": "Element is stale"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaStaleElementError)
 
     def test_element_not_interactable(self):
-        resp = _mock_response(400, {
-            "value": {"error": "element not interactable", "message": "Element is not hittable"},
-        })
+        resp = _mock_response(
+            400,
+            {
+                "value": {
+                    "error": "element not interactable",
+                    "message": "Element is not hittable",
+                },
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaElementNotInteractableError)
 
     def test_keyboard_not_present(self):
-        resp = _mock_response(400, {
-            "value": {"error": "invalid element state", "message": "No keyboard is present"},
-        })
+        resp = _mock_response(
+            400,
+            {
+                "value": {"error": "invalid element state", "message": "No keyboard is present"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaKeyboardNotPresentError)
 
     def test_invalid_element_state_non_keyboard(self):
-        resp = _mock_response(400, {
-            "value": {"error": "invalid element state", "message": "Element is not enabled"},
-        })
+        resp = _mock_response(
+            400,
+            {
+                "value": {"error": "invalid element state", "message": "Element is not enabled"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaElementNotInteractableError)
 
     def test_app_crashed(self):
-        resp = _mock_response(500, {
-            "value": {"error": "unknown error", "message": "Application crash detected"},
-        })
+        resp = _mock_response(
+            500,
+            {
+                "value": {"error": "unknown error", "message": "Application crash detected"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaAppCrashedError)
 
@@ -1796,9 +2051,12 @@ class TestParseWdaError:
         assert "502" in str(error)
 
     def test_unknown_w3c_error(self):
-        resp = _mock_response(500, {
-            "value": {"error": "some new error", "message": "Something unexpected"},
-        })
+        resp = _mock_response(
+            500,
+            {
+                "value": {"error": "some new error", "message": "Something unexpected"},
+            },
+        )
         error = _parse_wda_error(resp, "test-udid")
         assert isinstance(error, WdaError)
         assert error.wda_error == "some new error"
@@ -1808,9 +2066,12 @@ class TestRequestRaisesWdaError:
     async def test_request_raises_specific_error(self):
         backend = _make_session_backend()
 
-        mock_response = _mock_response(404, {
-            "value": {"error": "no such element", "message": "unable to find element"},
-        })
+        mock_response = _mock_response(
+            404,
+            {
+                "value": {"error": "no such element", "message": "unable to find element"},
+            },
+        )
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -1825,9 +2086,12 @@ class TestRequestRaisesWdaError:
     async def test_tap_raises_wda_error(self):
         backend = _make_session_backend()
 
-        mock_response = _mock_response(400, {
-            "value": {"error": "invalid element state", "message": "No keyboard is present"},
-        })
+        mock_response = _mock_response(
+            400,
+            {
+                "value": {"error": "invalid element state", "message": "No keyboard is present"},
+            },
+        )
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -1843,9 +2107,12 @@ class TestRequestRaisesWdaError:
         """WdaError subclasses are caught by except DeviceError."""
         backend = _make_session_backend()
 
-        mock_response = _mock_response(404, {
-            "value": {"error": "no such element", "message": "unable to find element"},
-        })
+        mock_response = _mock_response(
+            404,
+            {
+                "value": {"error": "no such element", "message": "unable to find element"},
+            },
+        )
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -1865,9 +2132,12 @@ class TestRequestRaisesWdaError:
 
 def _invalid_session_response() -> MagicMock:
     """Helper: mock httpx.Response for an invalid session error."""
-    return _mock_response(404, {
-        "value": {"error": "invalid session id", "message": "Session does not exist"},
-    })
+    return _mock_response(
+        404,
+        {
+            "value": {"error": "invalid session id", "message": "Session does not exist"},
+        },
+    )
 
 
 def _ok_response(json_body: dict | None = None) -> MagicMock:
@@ -1898,7 +2168,6 @@ class TestSessionAutoRecovery:
             mock_client_cls.return_value = mock_client
 
             # Mock _ensure_session to provide a new session on retry
-            original_ensure = backend._ensure_session
 
             async def patched_ensure(udid):
                 conn = backend._connections.get(udid)
@@ -1910,7 +2179,10 @@ class TestSessionAutoRecovery:
 
             with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
                 resp = await backend._request(
-                    "get", "test-udid", "/element", use_session=True,
+                    "get",
+                    "test-udid",
+                    "/element",
+                    use_session=True,
                 )
 
             assert resp.status_code == 200
@@ -1938,7 +2210,10 @@ class TestSessionAutoRecovery:
             with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
                 with pytest.raises(WdaInvalidSessionError):
                     await backend._request(
-                        "get", "test-udid", "/element", use_session=True,
+                        "get",
+                        "test-udid",
+                        "/element",
+                        use_session=True,
                     )
 
     async def test_request_no_retry_without_use_session(self):
@@ -1988,7 +2263,10 @@ class TestSessionAutoRecovery:
 
             with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
                 await backend._request(
-                    "get", "test-udid", "/element", use_session=True,
+                    "get",
+                    "test-udid",
+                    "/element",
+                    use_session=True,
                 )
 
             assert "test-udid" not in backend._current_depth
@@ -2022,7 +2300,9 @@ class TestSessionAutoRecovery:
 
             with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
                 result = await backend.find_elements_by_query(
-                    "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                    "test-udid",
+                    "class chain",
+                    "**/XCUIElementTypeTabBar",
                 )
 
             assert len(result) == 1
@@ -2033,12 +2313,15 @@ class TestSessionAutoRecovery:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "_request",
+            backend,
+            "_request",
             new_callable=AsyncMock,
             side_effect=DeviceError("connection lost", tool="wda"),
         ):
             result = await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar",
             )
 
             assert result == []
@@ -2049,9 +2332,13 @@ class TestSessionAutoRecovery:
 
         mock_resp = _mock_response(200, {"value": WDA_TABBAR_BUTTONS})
 
-        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp) as mock_req:
+        with patch.object(
+            backend, "_request", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_req:
             await backend.find_elements_by_query(
-                "test-udid", "class name", "XCUIElementTypeButton",
+                "test-udid",
+                "class name",
+                "XCUIElementTypeButton",
                 scope_element_id="tabbar-uuid-001",
             )
 
@@ -2065,9 +2352,13 @@ class TestSessionAutoRecovery:
 
         mock_resp = _mock_response(200, {"value": []})
 
-        with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp) as mock_req:
+        with patch.object(
+            backend, "_request", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_req:
             await backend.find_elements_by_query(
-                "test-udid", "class chain", "**/XCUIElementTypeTabBar",
+                "test-udid",
+                "class chain",
+                "**/XCUIElementTypeTabBar",
             )
 
             call_args = mock_req.call_args
@@ -2091,12 +2382,14 @@ class TestSessionAutoRecovery:
             if "test-session" in url:
                 resp.status_code = 404
                 resp.text = '{"value": {"error": "invalid session id", "message": "gone"}}'
-                resp.json = MagicMock(return_value={
-                    "value": {"error": "invalid session id", "message": "gone"},
-                })
+                resp.json = MagicMock(
+                    return_value={
+                        "value": {"error": "invalid session id", "message": "gone"},
+                    }
+                )
             elif "/appium/settings" in url:
                 resp.status_code = 200
-                resp.text = '{}'
+                resp.text = "{}"
                 resp.json = MagicMock(return_value={})
             elif url.endswith("/session"):
                 # Session creation POST /session
@@ -2104,10 +2397,12 @@ class TestSessionAutoRecovery:
                 creation_count += 1
                 resp.status_code = 200
                 resp.text = '{"sessionId": "recovered-session"}'
-                resp.json = MagicMock(return_value={
-                    "sessionId": "recovered-session",
-                    "value": {"sessionId": "recovered-session"},
-                })
+                resp.json = MagicMock(
+                    return_value={
+                        "sessionId": "recovered-session",
+                        "value": {"sessionId": "recovered-session"},
+                    }
+                )
             else:
                 # Element query with recovered session
                 resp.status_code = 200
@@ -2124,7 +2419,9 @@ class TestSessionAutoRecovery:
 
             tasks = [
                 backend.find_elements_by_query(
-                    "test-udid", "class chain", "**/XCUIElementTypeButton",
+                    "test-udid",
+                    "class chain",
+                    "**/XCUIElementTypeButton",
                 )
                 for _ in range(5)
             ]
@@ -2186,16 +2483,18 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         # Element at (100, 200) with size (120, 44) → center (160, 222)
-        el_response = [{
-            "ELEMENT": "btn-001",
-            "element-6066-11e4-a52e-4f735466cecf": "btn-001",
-            "type": "XCUIElementTypeButton",
-            "label": "Login",
-            "name": "loginButton",
-            "rect": {"x": 100, "y": 200, "width": 120, "height": 44},
-            "isEnabled": True,
-            "value": None,
-        }]
+        el_response = [
+            {
+                "ELEMENT": "btn-001",
+                "element-6066-11e4-a52e-4f735466cecf": "btn-001",
+                "type": "XCUIElementTypeButton",
+                "label": "Login",
+                "name": "loginButton",
+                "rect": {"x": 100, "y": 200, "width": 120, "height": 44},
+                "isEnabled": True,
+                "value": None,
+            }
+        ]
 
         find_resp = _mock_response(200, {"value": el_response})
         tap_resp = _mock_response(200, {"value": {}})
@@ -2222,16 +2521,18 @@ class TestElementSelector:
         """clear() uses the native /element/{id}/clear endpoint when element has a WDA ID."""
         backend = _make_session_backend()
 
-        el_response = [{
-            "ELEMENT": "field-001",
-            "element-6066-11e4-a52e-4f735466cecf": "field-001",
-            "type": "XCUIElementTypeTextField",
-            "label": "Email",
-            "name": "emailField",
-            "rect": {"x": 20, "y": 300, "width": 300, "height": 44},
-            "isEnabled": True,
-            "value": "old text",
-        }]
+        el_response = [
+            {
+                "ELEMENT": "field-001",
+                "element-6066-11e4-a52e-4f735466cecf": "field-001",
+                "type": "XCUIElementTypeTextField",
+                "label": "Email",
+                "name": "emailField",
+                "rect": {"x": 20, "y": 300, "width": 300, "height": 44},
+                "isEnabled": True,
+                "value": "old text",
+            }
+        ]
 
         find_resp = _mock_response(200, {"value": el_response})
         clear_resp = _mock_response(200, {"value": {}})
@@ -2262,7 +2563,9 @@ class TestElementSelector:
                 return []
             return [{"AXLabel": "Done", "frame": {"x": 0, "y": 0, "width": 100, "height": 44}}]
 
-        with patch.object(backend, "find_elements_by_query", new_callable=AsyncMock, side_effect=mock_find):
+        with patch.object(
+            backend, "find_elements_by_query", new_callable=AsyncMock, side_effect=mock_find
+        ):
             el = await backend.element("test-udid", label="Done").wait(timeout=5, interval=0.05)
 
         assert el["AXLabel"] == "Done"
@@ -2273,8 +2576,10 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ):
             with pytest.raises(WdaElementNotFoundError, match="Timed out"):
                 await backend.element("test-udid", name="Never").wait(timeout=0.1, interval=0.03)
@@ -2284,14 +2589,19 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", name="loginButton").find()
 
         mock_query.assert_called_once_with(
-            "test-udid", "accessibility id", "loginButton",
-            scope_element_id=None, timeout=None,
+            "test-udid",
+            "accessibility id",
+            "loginButton",
+            scope_element_id=None,
+            timeout=None,
         )
 
     async def test_label_uses_predicate_string(self):
@@ -2299,14 +2609,19 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", label="Submit").find()
 
         mock_query.assert_called_once_with(
-            "test-udid", "predicate string", "label ==[c] 'Submit'",
-            scope_element_id=None, timeout=None,
+            "test-udid",
+            "predicate string",
+            "label ==[c] 'Submit'",
+            scope_element_id=None,
+            timeout=None,
         )
 
     async def test_type_adds_xcui_prefix(self):
@@ -2314,14 +2629,19 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", type="Button").find()
 
         mock_query.assert_called_once_with(
-            "test-udid", "predicate string", "type == 'XCUIElementTypeButton'",
-            scope_element_id=None, timeout=None,
+            "test-udid",
+            "predicate string",
+            "type == 'XCUIElementTypeButton'",
+            scope_element_id=None,
+            timeout=None,
         )
 
     async def test_combined_criteria_uses_and_predicate(self):
@@ -2329,8 +2649,10 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", name="login", label="Log In", type="Button").find()
 
@@ -2345,14 +2667,19 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", class_chain="**/XCUIElementTypeTabBar").find()
 
         mock_query.assert_called_once_with(
-            "test-udid", "class chain", "**/XCUIElementTypeTabBar",
-            scope_element_id=None, timeout=None,
+            "test-udid",
+            "class chain",
+            "**/XCUIElementTypeTabBar",
+            scope_element_id=None,
+            timeout=None,
         )
 
     async def test_predicate_passthrough(self):
@@ -2360,14 +2687,19 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", predicate="value == '1' AND visible == 1").find()
 
         mock_query.assert_called_once_with(
-            "test-udid", "predicate string", "value == '1' AND visible == 1",
-            scope_element_id=None, timeout=None,
+            "test-udid",
+            "predicate string",
+            "value == '1' AND visible == 1",
+            scope_element_id=None,
+            timeout=None,
         )
 
     async def test_child_scoped_query(self):
@@ -2386,9 +2718,14 @@ class TestElementSelector:
             return parent_response
 
         with patch.object(backend, "_request", new_callable=AsyncMock, side_effect=mock_request):
-            children = await backend.element(
-                "test-udid", type="TabBar",
-            ).child(type="Button").find()
+            children = (
+                await backend.element(
+                    "test-udid",
+                    type="TabBar",
+                )
+                .child(type="Button")
+                .find()
+            )
 
         assert len(children) == 2
         # First call: find parent (unscoped /elements)
@@ -2403,9 +2740,14 @@ class TestElementSelector:
 
         with patch.object(backend, "_request", new_callable=AsyncMock, return_value=mock_resp):
             with pytest.raises(WdaElementNotFoundError, match="No element found"):
-                await backend.element(
-                    "test-udid", name="NonExistent",
-                ).child(type="Button").find()
+                await (
+                    backend.element(
+                        "test-udid",
+                        name="NonExistent",
+                    )
+                    .child(type="Button")
+                    .find()
+                )
 
     async def test_no_criteria_raises_valueerror(self):
         """ElementSelector with no criteria raises ValueError on execute."""
@@ -2419,8 +2761,10 @@ class TestElementSelector:
         backend = _make_session_backend()
 
         with patch.object(
-            backend, "find_elements_by_query",
-            new_callable=AsyncMock, return_value=[],
+            backend,
+            "find_elements_by_query",
+            new_callable=AsyncMock,
+            return_value=[],
         ) as mock_query:
             await backend.element("test-udid", label="It's here").find()
 
@@ -2455,8 +2799,7 @@ class TestConnectionRecovery:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "_get_base_url",
-                              return_value="http://localhost:8100"):
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
                 resp = await backend._request("get", "test-udid", "/status")
 
         assert resp.status_code == 200
@@ -2481,8 +2824,7 @@ class TestConnectionRecovery:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "_get_base_url",
-                              return_value="http://localhost:8100"):
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
                 resp = await backend._request("get", "test-udid", "/status")
 
         assert resp.status_code == 200
@@ -2499,8 +2841,7 @@ class TestConnectionRecovery:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "_get_base_url",
-                              return_value="http://localhost:8100"):
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
                 with pytest.raises(DeviceError, match="after reconnect attempt"):
                     await backend._request("get", "test-udid", "/status")
 
@@ -2519,7 +2860,10 @@ class TestConnectionRecovery:
 
             with pytest.raises(httpx.TimeoutException):
                 await backend._request(
-                    "get", "test-udid", "/status", raise_on_timeout=True,
+                    "get",
+                    "test-udid",
+                    "/status",
+                    raise_on_timeout=True,
                 )
 
             # Connection should NOT have been popped (timeout passthrough)
@@ -2545,8 +2889,7 @@ class TestConnectionRecovery:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            with patch.object(backend, "_get_base_url",
-                              return_value="http://localhost:8100"):
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
                 await backend._request("get", "test-udid", "/status")
 
         assert "test-udid" not in backend._current_depth
@@ -2588,10 +2931,11 @@ class TestConnectionRecovery:
                 return "new-session"
 
             with patch.object(backend, "_ensure_session", side_effect=patched_ensure):
-                with patch.object(backend, "_get_base_url",
-                                  return_value="http://localhost:8100"):
+                with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
                     resp = await backend._request(
-                        "get", "test-udid", "/element",
+                        "get",
+                        "test-udid",
+                        "/element",
                         use_session=True,
                     )
 
@@ -2622,14 +2966,12 @@ class TestConnectionRecovery:
 
             connections_during_retry = {}
 
-            original_get_base_url = backend._get_base_url
 
             async def tracking_get_base_url(udid):
                 connections_during_retry[udid] = udid in backend._connections
                 return "http://localhost:8100"
 
-            with patch.object(backend, "_get_base_url",
-                              side_effect=tracking_get_base_url):
+            with patch.object(backend, "_get_base_url", side_effect=tracking_get_base_url):
                 await backend._request("get", "test-udid", "/status")
 
         # Connection should have been absent when _get_base_url was called on retry

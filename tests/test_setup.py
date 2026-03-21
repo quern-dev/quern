@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from server.lifecycle.setup import (
-    INSTALL_MANIFEST,
     PYTHON_MAX,
     PYTHON_MIN,
     CheckResult,
@@ -21,8 +18,8 @@ from server.lifecycle.setup import (
     check_booted_simulators,
     check_homebrew,
     check_libimobiledevice,
-    check_mitmproxy_cert,
     check_mitmdump,
+    check_mitmproxy_cert,
     check_node,
     check_platform,
     check_python,
@@ -33,7 +30,6 @@ from server.lifecycle.setup import (
     install_cert_simulator,
     run_uninstall,
 )
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -54,8 +50,10 @@ def _patch_run(return_value):
 
 def _patch_which(mapping: dict[str, str | None]):
     """Patch shutil.which to return values based on a mapping."""
+
     def fake_which(name):
         return mapping.get(name)
+
     return patch("server.lifecycle.setup.shutil.which", side_effect=fake_which)
 
 
@@ -106,8 +104,12 @@ class TestCheckResult:
 
 class TestCheckPlatform:
     def test_macos(self):
-        with patch("server.lifecycle.setup.platform.system", return_value="Darwin"), \
-             patch("server.lifecycle.setup.platform.mac_ver", return_value=("15.2", ("", "", ""), "")):
+        with (
+            patch("server.lifecycle.setup.platform.system", return_value="Darwin"),
+            patch(
+                "server.lifecycle.setup.platform.mac_ver", return_value=("15.2", ("", "", ""), "")
+            ),
+        ):
             result = check_platform()
             assert result.status == CheckStatus.OK
             assert "15.2" in result.message
@@ -147,6 +149,7 @@ class TestCheckPython:
 
     def test_too_new_version_with_supported_available(self):
         """Above max but a supported python exists — OK with note."""
+
         def mock_which(name):
             if name == "python3.13":
                 return None
@@ -187,8 +190,10 @@ class TestCheckVenv:
         venv_dir = tmp_path / ".venv"
         venv_dir.mkdir()
         (tmp_path / "pyproject.toml").write_text("")
-        with patch("server.lifecycle.setup.sys") as mock_sys, \
-             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path):
+        with (
+            patch("server.lifecycle.setup.sys") as mock_sys,
+            patch("server.lifecycle.setup._find_project_root", return_value=tmp_path),
+        ):
             mock_sys.prefix = "/usr/local"
             mock_sys.base_prefix = "/usr/local"
             result = check_venv()
@@ -199,8 +204,10 @@ class TestCheckVenv:
     def test_not_in_venv_no_existing(self, tmp_path):
         # No .venv at all
         (tmp_path / "pyproject.toml").write_text("")
-        with patch("server.lifecycle.setup.sys") as mock_sys, \
-             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path):
+        with (
+            patch("server.lifecycle.setup.sys") as mock_sys,
+            patch("server.lifecycle.setup._find_project_root", return_value=tmp_path),
+        ):
             mock_sys.prefix = "/usr/local"
             mock_sys.base_prefix = "/usr/local"
             result = check_venv()
@@ -208,8 +215,10 @@ class TestCheckVenv:
             assert result.fixable
 
     def test_not_in_venv_no_project_root(self):
-        with patch("server.lifecycle.setup.sys") as mock_sys, \
-             patch("server.lifecycle.setup._find_project_root", return_value=None):
+        with (
+            patch("server.lifecycle.setup.sys") as mock_sys,
+            patch("server.lifecycle.setup._find_project_root", return_value=None),
+        ):
             mock_sys.prefix = "/usr/local"
             mock_sys.base_prefix = "/usr/local"
             result = check_venv()
@@ -226,15 +235,19 @@ class TestCreateVenv:
             call_count += 1
             return _mock_run()
 
-        with patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect), \
-             patch("server.lifecycle.setup.sys") as mock_sys:
+        with (
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup.sys") as mock_sys,
+        ):
             mock_sys.executable = "/usr/bin/python3"
             assert create_venv(tmp_path) is True
             assert call_count == 2  # venv creation + pip install
 
     def test_venv_creation_fails(self, tmp_path):
-        with _patch_run(_mock_run(stderr="error", returncode=1)), \
-             patch("server.lifecycle.setup.sys") as mock_sys:
+        with (
+            _patch_run(_mock_run(stderr="error", returncode=1)),
+            patch("server.lifecycle.setup.sys") as mock_sys,
+        ):
             mock_sys.executable = "/usr/bin/python3"
             assert create_venv(tmp_path) is False
 
@@ -248,8 +261,10 @@ class TestCreateVenv:
                 return _mock_run()  # venv creation succeeds
             return _mock_run(returncode=1)  # pip install fails
 
-        with patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect), \
-             patch("server.lifecycle.setup.sys") as mock_sys:
+        with (
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup.sys") as mock_sys,
+        ):
             mock_sys.executable = "/usr/bin/python3"
             assert create_venv(tmp_path) is False
 
@@ -259,8 +274,10 @@ class TestCreateVenv:
 
 class TestCheckHomebrew:
     def test_installed(self):
-        with _patch_which({"brew": "/opt/homebrew/bin/brew"}), \
-             _patch_run(_mock_run(stdout="Homebrew 4.2.0")):
+        with (
+            _patch_which({"brew": "/opt/homebrew/bin/brew"}),
+            _patch_run(_mock_run(stdout="Homebrew 4.2.0")),
+        ):
             result = check_homebrew()
             assert result.status == CheckStatus.OK
             assert "Homebrew" in result.message
@@ -277,8 +294,10 @@ class TestCheckHomebrew:
 
 class TestCheckLibimobiledevice:
     def test_installed(self):
-        with _patch_which({"idevicesyslog": "/opt/homebrew/bin/idevicesyslog"}), \
-             _patch_run(_mock_run(stdout="idevicesyslog 1.3.0")):
+        with (
+            _patch_which({"idevicesyslog": "/opt/homebrew/bin/idevicesyslog"}),
+            _patch_run(_mock_run(stdout="idevicesyslog 1.3.0")),
+        ):
             result = check_libimobiledevice()
             assert result.status == CheckStatus.OK
 
@@ -294,8 +313,10 @@ class TestCheckLibimobiledevice:
 
 class TestCheckXcodeCliTools:
     def test_installed_with_simctl(self):
-        with _patch_which({"xcrun": "/usr/bin/xcrun"}), \
-             _patch_run(_mock_run(stdout="usage: simctl...")):
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            _patch_run(_mock_run(stdout="usage: simctl...")),
+        ):
             result = check_xcode_cli_tools()
             assert result.status == CheckStatus.OK
             assert "simctl" in result.message
@@ -310,8 +331,10 @@ class TestCheckXcodeCliTools:
         def side_effect(cmd, **kwargs):
             return _mock_run(stdout="", returncode=1)
 
-        with _patch_which({"xcrun": "/usr/bin/xcrun"}), \
-             patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect):
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+        ):
             result = check_xcode_cli_tools()
             assert result.status == CheckStatus.WARNING
 
@@ -321,8 +344,10 @@ class TestCheckXcodeCliTools:
 
 class TestCheckMitmdump:
     def test_installed(self):
-        with _patch_which({"mitmdump": "/usr/local/bin/mitmdump"}), \
-             _patch_run(_mock_run(stdout="Mitmproxy: 10.2.4")):
+        with (
+            _patch_which({"mitmdump": "/usr/local/bin/mitmdump"}),
+            _patch_run(_mock_run(stdout="Mitmproxy: 10.2.4")),
+        ):
             result = check_mitmdump()
             assert result.status == CheckStatus.OK
 
@@ -338,8 +363,10 @@ class TestCheckMitmdump:
 
 class TestCheckNode:
     def test_installed(self):
-        with _patch_which({"node": "/opt/homebrew/bin/node"}), \
-             _patch_run(_mock_run(stdout="v20.10.0")):
+        with (
+            _patch_which({"node": "/opt/homebrew/bin/node"}),
+            _patch_run(_mock_run(stdout="v20.10.0")),
+        ):
             result = check_node()
             assert result.status == CheckStatus.OK
             assert "v20" in result.message
@@ -374,8 +401,10 @@ class TestCheckVpn:
                 return _mock_run(stdout=route_out)
             return _mock_run()
 
-        with patch("server.lifecycle.setup.platform.system", return_value="Darwin"), \
-             patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect):
+        with (
+            patch("server.lifecycle.setup.platform.system", return_value="Darwin"),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+        ):
             result = check_vpn()
             assert result.status == CheckStatus.OK
 
@@ -390,8 +419,10 @@ class TestCheckVpn:
                 return _mock_run(stdout=route_out)
             return _mock_run()
 
-        with patch("server.lifecycle.setup.platform.system", return_value="Darwin"), \
-             patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect):
+        with (
+            patch("server.lifecycle.setup.platform.system", return_value="Darwin"),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+        ):
             result = check_vpn()
             assert result.status == CheckStatus.WARNING
             assert "Corp VPN" in result.message
@@ -407,8 +438,10 @@ class TestCheckVpn:
                 return _mock_run(stdout=route_out)
             return _mock_run()
 
-        with patch("server.lifecycle.setup.platform.system", return_value="Darwin"), \
-             patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect):
+        with (
+            patch("server.lifecycle.setup.platform.system", return_value="Darwin"),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+        ):
             result = check_vpn()
             assert result.status == CheckStatus.WARNING
             assert "tunnel" in result.message.lower()
@@ -449,14 +482,14 @@ class TestCheckMitmproxyCert:
 
 class TestCheckBootedSimulators:
     def test_finds_booted(self):
-        json_output = '{"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-17-2": [{"name": "iPhone 15", "udid": "AAAA-BBBB", "state": "Booted"}, {"name": "iPhone 14", "udid": "CCCC-DDDD", "state": "Shutdown"}]}}'
+        json_output = '{"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-17-2": [{"name": "iPhone 15", "udid": "AAAA-BBBB", "state": "Booted"}, {"name": "iPhone 14", "udid": "CCCC-DDDD", "state": "Shutdown"}]}}'  # noqa: E501
         with _patch_run(_mock_run(stdout=json_output)):
             booted = check_booted_simulators()
             assert len(booted) == 1
             assert booted[0]["name"] == "iPhone 15"
 
     def test_none_booted(self):
-        json_output = '{"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-17-2": [{"name": "iPhone 15", "udid": "AAAA-BBBB", "state": "Shutdown"}]}}'
+        json_output = '{"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-17-2": [{"name": "iPhone 15", "udid": "AAAA-BBBB", "state": "Shutdown"}]}}'  # noqa: E501
         with _patch_run(_mock_run(stdout=json_output)):
             booted = check_booted_simulators()
             assert booted == []
@@ -481,9 +514,11 @@ class TestInstallCertSimulator:
         async def mock_install(ctrl, udid, force=False):
             return True
 
-        with patch("server.lifecycle.setup.Path.home", return_value=tmp_path), \
-             patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed), \
-             patch("server.proxy.cert_manager.install_cert", side_effect=mock_install):
+        with (
+            patch("server.lifecycle.setup.Path.home", return_value=tmp_path),
+            patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed),
+            patch("server.proxy.cert_manager.install_cert", side_effect=mock_install),
+        ):
             result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.OK
 
@@ -495,8 +530,10 @@ class TestInstallCertSimulator:
         async def mock_is_installed(ctrl, udid, verify=False):
             return True
 
-        with patch("server.lifecycle.setup.Path.home", return_value=tmp_path), \
-             patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed):
+        with (
+            patch("server.lifecycle.setup.Path.home", return_value=tmp_path),
+            patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed),
+        ):
             result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.OK
             assert "already" in result.message.lower()
@@ -514,8 +551,10 @@ class TestInstallCertSimulator:
         async def mock_is_installed(ctrl, udid, verify=False):
             raise RuntimeError("simctl failed")
 
-        with patch("server.lifecycle.setup.Path.home", return_value=tmp_path), \
-             patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed):
+        with (
+            patch("server.lifecycle.setup.Path.home", return_value=tmp_path),
+            patch("server.proxy.cert_manager.is_cert_installed", side_effect=mock_is_installed),
+        ):
             result = install_cert_simulator("AAAA-BBBB", "iPhone 15")
             assert result.status == CheckStatus.ERROR
 
@@ -561,20 +600,24 @@ class TestInstallManifest:
 class TestBrewInstallTracking:
     def test_successful_install_recorded(self, tmp_path):
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
-        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
-             patch("server.lifecycle.setup.subprocess.run",
-                   return_value=_mock_run(returncode=0)):
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup.subprocess.run", return_value=_mock_run(returncode=0)),
+        ):
             from server.lifecycle.setup import _brew_install
+
             assert _brew_install("libimobiledevice") is True
             data = _read_manifest()
             assert "libimobiledevice" in data["brew"]
 
     def test_failed_install_not_recorded(self, tmp_path):
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
-        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
-             patch("server.lifecycle.setup.subprocess.run",
-                   return_value=_mock_run(returncode=1)):
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup.subprocess.run", return_value=_mock_run(returncode=1)),
+        ):
             from server.lifecycle.setup import _brew_install
+
             assert _brew_install("node") is False
             data = _read_manifest()
             assert "node" not in data.get("brew", [])
@@ -587,47 +630,62 @@ class TestPromptYn:
     def test_tty_stdin(self):
         """Normal TTY stdin reads via input()."""
         from server.lifecycle.setup import _prompt_yn
-        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
-             patch("builtins.input", return_value="y"):
+
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.input", return_value="y"),
+        ):
             mock_stdin.isatty.return_value = True
             assert _prompt_yn("Install?") is True
 
     def test_piped_stdin_opens_tty(self, tmp_path):
         """When stdin is a pipe, _prompt_yn opens /dev/tty."""
-        from server.lifecycle.setup import _prompt_yn
         from io import StringIO
 
+        from server.lifecycle.setup import _prompt_yn
+
         mock_tty = StringIO("y\n")
-        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
-             patch("builtins.open", return_value=mock_tty):
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", return_value=mock_tty),
+        ):
             mock_stdin.isatty.return_value = False
             assert _prompt_yn("Install?") is True
 
     def test_piped_stdin_default_on_empty_yes(self, tmp_path):
         """Empty answer uses the default=True."""
-        from server.lifecycle.setup import _prompt_yn
         from io import StringIO
 
-        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
-             patch("builtins.open", return_value=StringIO("\n")):
+        from server.lifecycle.setup import _prompt_yn
+
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", return_value=StringIO("\n")),
+        ):
             mock_stdin.isatty.return_value = False
             assert _prompt_yn("Install?", default=True) is True
 
     def test_piped_stdin_default_on_empty_no(self, tmp_path):
         """Empty answer uses the default=False."""
-        from server.lifecycle.setup import _prompt_yn
         from io import StringIO
 
-        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
-             patch("builtins.open", return_value=StringIO("\n")):
+        from server.lifecycle.setup import _prompt_yn
+
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", return_value=StringIO("\n")),
+        ):
             mock_stdin.isatty.return_value = False
             assert _prompt_yn("Install?", default=False) is False
 
     def test_piped_stdin_no_tty_returns_false(self):
         """If /dev/tty can't be opened, returns False."""
         from server.lifecycle.setup import _prompt_yn
-        with patch("server.lifecycle.setup.sys.stdin") as mock_stdin, \
-             patch("builtins.open", side_effect=OSError("no tty")):
+
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
             mock_stdin.isatty.return_value = False
             assert _prompt_yn("Install?") is False
 
@@ -639,37 +697,50 @@ class TestRunUninstall:
     def test_abort_on_decline(self, tmp_path):
         """Declining the confirmation aborts cleanly."""
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
-        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
-             patch("server.lifecycle.setup._prompt_yn", return_value=False), \
-             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path):
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup._prompt_yn", return_value=False),
+            patch("server.lifecycle.setup._find_project_root", return_value=tmp_path),
+        ):
             assert run_uninstall() == 0
 
     def test_removes_tracked_brew_packages(self, tmp_path):
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
         manifest_path.parent.mkdir(parents=True)
         import json
-        manifest_path.write_text(json.dumps({
-            "brew": ["libimobiledevice", "idb-companion"],
-            "pip": [],
-            "pipx": [],
-        }))
+
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "brew": ["libimobiledevice", "idb-companion"],
+                    "pip": [],
+                    "pipx": [],
+                }
+            )
+        )
 
         uninstalled = []
 
         prompt_calls = [0]
+
         def mock_prompt(q, default=True):
             prompt_calls[0] += 1
             if prompt_calls[0] == 1:
                 return True  # main confirmation
             return False  # decline tunneld
 
-        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
-             patch("server.lifecycle.setup._prompt_yn", side_effect=mock_prompt), \
-             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path), \
-             patch("server.lifecycle.setup._which", return_value="/opt/homebrew/bin/brew"), \
-             patch("server.lifecycle.setup._brew_uninstall", side_effect=lambda f: (uninstalled.append(f), True)[-1]), \
-             patch("server.lifecycle.state.read_state", return_value=None), \
-             patch("server.lifecycle.setup._remove_mcp_registrations"):
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup._prompt_yn", side_effect=mock_prompt),
+            patch("server.lifecycle.setup._find_project_root", return_value=tmp_path),
+            patch("server.lifecycle.setup._which", return_value="/opt/homebrew/bin/brew"),
+            patch(
+                "server.lifecycle.setup._brew_uninstall",
+                side_effect=lambda f: (uninstalled.append(f), True)[-1],
+            ),
+            patch("server.lifecycle.state.read_state", return_value=None),
+            patch("server.lifecycle.setup._remove_mcp_registrations"),
+        ):
             result = run_uninstall()
             assert result == 0
             assert "libimobiledevice" in uninstalled
@@ -679,18 +750,21 @@ class TestRunUninstall:
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
 
         prompt_calls = [0]
+
         def mock_prompt(q, default=True):
             prompt_calls[0] += 1
             if prompt_calls[0] == 1:
                 return True
             return False
 
-        with patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path), \
-             patch("server.lifecycle.setup._prompt_yn", side_effect=mock_prompt), \
-             patch("server.lifecycle.setup._find_project_root", return_value=tmp_path), \
-             patch("server.lifecycle.setup._which", return_value=None), \
-             patch("server.lifecycle.state.read_state", return_value=None), \
-             patch("server.lifecycle.setup._remove_mcp_registrations"):
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup._prompt_yn", side_effect=mock_prompt),
+            patch("server.lifecycle.setup._find_project_root", return_value=tmp_path),
+            patch("server.lifecycle.setup._which", return_value=None),
+            patch("server.lifecycle.state.read_state", return_value=None),
+            patch("server.lifecycle.setup._remove_mcp_registrations"),
+        ):
             run_uninstall()
             output = capsys.readouterr().out
             assert "none were installed by setup" in output

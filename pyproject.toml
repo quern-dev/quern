@@ -45,6 +45,11 @@ target-version = "py311"
 select = ["E", "F", "I", "UP"]
 ignore = ["UP042"]
 
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures with embedded data (pbxproj, simctl JSON) can't be wrapped
+"tests/test_wda.py" = ["E501"]
+"tests/test_setup.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

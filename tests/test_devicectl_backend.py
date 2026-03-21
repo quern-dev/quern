@@ -141,9 +141,11 @@ class TestListDevices:
 
 class TestLaunchApp:
     async def test_launch_returns_pid(self):
-        launch_response = json.dumps({
-            "result": {"process": {"processIdentifier": 12345}},
-        })
+        launch_response = json.dumps(
+            {
+                "result": {"process": {"processIdentifier": 12345}},
+            }
+        )
         backend = DevicectlBackend()
         backend._run_devicectl = AsyncMock(return_value=(launch_response, ""))
 
@@ -183,9 +185,13 @@ class TestTerminateApp:
         await backend.terminate_app("UUID", "com.example.app")
 
         backend._run_devicectl.assert_called_once_with(
-            "device", "process", "terminate",
-            "--device", "UUID",
-            "--pid", "999",
+            "device",
+            "process",
+            "terminate",
+            "--device",
+            "UUID",
+            "--pid",
+            "999",
         )
         assert ("UUID", "com.example.app") not in backend._launched_pids
 
@@ -209,8 +215,11 @@ class TestUninstallApp:
         await backend.uninstall_app("UUID", "com.example.app")
 
         backend._run_devicectl.assert_called_once_with(
-            "device", "uninstall", "app",
-            "--device", "UUID",
+            "device",
+            "uninstall",
+            "app",
+            "--device",
+            "UUID",
             "com.example.app",
         )
 
@@ -222,14 +231,20 @@ class TestUninstallApp:
 
 class TestListApps:
     async def test_parses_apps(self):
-        apps_response = json.dumps({
-            "result": {
-                "apps": [
-                    {"bundleIdentifier": "com.example.app", "name": "My App", "type": "User"},
-                    {"bundleIdentifier": "com.apple.mobilesafari", "name": "Safari", "type": "System"},
-                ],
-            },
-        })
+        apps_response = json.dumps(
+            {
+                "result": {
+                    "apps": [
+                        {"bundleIdentifier": "com.example.app", "name": "My App", "type": "User"},
+                        {
+                            "bundleIdentifier": "com.apple.mobilesafari",
+                            "name": "Safari",
+                            "type": "System",
+                        },
+                    ],
+                },
+            }
+        )
         backend = DevicectlBackend()
         backend._run_devicectl = AsyncMock(return_value=(apps_response, ""))
 
@@ -262,8 +277,11 @@ class TestInstallApp:
         await backend.install_app("UUID", "/path/to/app.ipa")
 
         backend._run_devicectl.assert_called_once_with(
-            "device", "install", "app",
-            "--device", "UUID",
+            "device",
+            "install",
+            "app",
+            "--device",
+            "UUID",
             "/path/to/app.ipa",
         )
 
@@ -277,7 +295,9 @@ class TestRunDevicectl:
     async def test_non_zero_exit_raises(self):
         backend = DevicectlBackend()
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_proc(1, stderr=b"error msg")):
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=_make_proc(1, stderr=b"error msg")
+        ):
             with pytest.raises(DeviceError, match="error msg"):
                 await backend._run_devicectl("list", "devices")
 
@@ -285,8 +305,10 @@ class TestRunDevicectl:
         backend = DevicectlBackend()
         expected_json = '{"result": "ok"}'
 
-        with patch("asyncio.create_subprocess_exec", return_value=_make_proc(0)), \
-             patch("tempfile.NamedTemporaryFile") as mock_tmp:
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=_make_proc(0)),
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
             mock_file = MagicMock()
             json_file = tmp_path / "output.json"
             json_file.write_text(expected_json)
