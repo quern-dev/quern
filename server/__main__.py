@@ -251,6 +251,40 @@ def _install_codex(mcp_index: Path) -> tuple[bool, str]:
     return True, f"{verb} quern in {config_path}"
 
 
+def _cmd_grant_full_perms() -> int:
+    """Add a wildcard allow permission for quern-debug tools to Claude Code user settings."""
+    import json
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if settings_path.exists():
+        try:
+            config = json.loads(settings_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            print(f"Error: {settings_path} contains invalid JSON")
+            return 1
+    else:
+        config = {}
+
+    if "permissions" not in config:
+        config["permissions"] = {}
+    if "allow" not in config["permissions"]:
+        config["permissions"]["allow"] = []
+
+    rule = "mcp__quern-debug"
+    allow_list: list[str] = config["permissions"]["allow"]
+    if rule in allow_list:
+        print(f"  Already granted: {rule} is in {settings_path}")
+        return 0
+
+    allow_list.append(rule)
+    settings_path.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"  ✓ Added '{rule}' to permissions.allow in {settings_path}")
+    print("  All quern-debug MCP tools will now run without prompting.")
+    return 0
+
+
 def _cmd_mcp_install() -> int:
     """Add quern-debug MCP server to one or more AI tool configs."""
     import argparse
@@ -349,6 +383,9 @@ def main() -> None:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
         sys.exit(_cmd_mcp_install())
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
+        sys.exit(_cmd_grant_full_perms())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import run_update

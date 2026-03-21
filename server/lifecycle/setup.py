@@ -83,6 +83,10 @@ class SetupReport:
             print("  Setup complete with warnings (see above).")
         else:
             print("  All checks passed — ready to go!")
+        if not self.has_errors:
+            print()
+            print("  Tip: Run 'quern grant-full-perms' to allow all quern")
+            print("  tools in Claude Code without per-tool approval prompts.")
         print()
 
 
