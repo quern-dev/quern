@@ -18,7 +18,8 @@ These terms have specific meaning within this knowledge base:
 | Term | Meaning |
 |---|---|
 | screen | A distinct UI state with its own document in `screens/`. Modals and sheets count as separate screens; transient popups and dialogs are alerts instead. |
-| flow | An ordered sequence of actions across screens to achieve a goal. |
+| flow | An ordered sequence of actions across screens to achieve a goal. Includes setup (state prep), steps (actions + verifications), failure modes, teardown (cleanup), and shortcuts. |
+| interceptor | An alert or coaching tip that appears mid-flow and must be dismissed before proceeding. Documented in flow failure modes tables. |
 | deep link | A URL (custom scheme or universal link) that jumps directly to a screen, bypassing manual navigation. |
 | alert | A transient dialog, popup, permission prompt, or coaching overlay that appears on top of a screen. Documented in `alerts/` when it can appear across multiple screens. |
 | state | An app-wide mode (auth, subscription, onboarding, environment) that affects which screens are accessible and how they behave. Defined in `states.md`. |
