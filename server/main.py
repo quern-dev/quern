@@ -688,7 +688,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
     enable_crash = not args.no_crash
     local_capture_processes = get_local_capture_processes() if enable_proxy else []
 
-    # Write state file
+    # Write state file (preserve active_devices across restarts)
+    prev_state = read_state()
+    prev_active = prev_state.get("active_devices", []) if prev_state else []
     write_state({
         "pid": os.getpid(),
         "server_host": args.host,
@@ -700,7 +702,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "local_capture": local_capture_processes,
         "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
-        "active_devices": [],
+        "active_devices": prev_active,
     })
 
     if args.foreground:
