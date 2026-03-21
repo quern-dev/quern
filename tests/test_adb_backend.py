@@ -114,15 +114,41 @@ class TestAppLifecycle:
             "emulator-5554", "install", "-r", "/path/to/app.apk"
         )
 
-    async def test_launch_app(self):
+    async def test_launch_app_resolves_activity(self):
+        """launch_app resolves the launcher activity then starts it."""
         backend = AdbBackend()
-        backend._run_adb_for_device = AsyncMock(return_value=("", ""))
+        # First call: resolve-activity returns component; second call: am start
+        backend._run_adb_for_device = AsyncMock(side_effect=[
+            ("priority=0 preferredOrder=0 match=0x00108000\ncom.example.app/.MainActivity", ""),
+            ("", ""),
+        ])
         await backend.launch_app("emulator-5554", "com.example.app")
-        backend._run_adb_for_device.assert_called_once_with(
-            "emulator-5554", "shell", "monkey",
-            "-p", "com.example.app",
+        assert backend._run_adb_for_device.call_count == 2
+        backend._run_adb_for_device.assert_any_call(
+            "emulator-5554", "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
             "-c", "android.intent.category.LAUNCHER",
-            "1",
+            "com.example.app",
+        )
+        backend._run_adb_for_device.assert_any_call(
+            "emulator-5554", "shell", "am", "start",
+            "-n", "com.example.app/.MainActivity",
+        )
+
+    async def test_launch_app_fallback(self):
+        """launch_app falls back to .MainActivity when resolve-activity returns no component."""
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(side_effect=[
+            ("No activity found\n", ""),
+            ("", ""),
+        ])
+        await backend.launch_app("emulator-5554", "com.example.app")
+        assert backend._run_adb_for_device.call_count == 2
+        backend._run_adb_for_device.assert_any_call(
+            "emulator-5554", "shell", "am", "start",
+            "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER",
+            "-n", "com.example.app/.MainActivity",
         )
 
     async def test_terminate_app(self):

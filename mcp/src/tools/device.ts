@@ -81,7 +81,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("boot_device", {
-    description: `Boot an iOS simulator by UDID or name. Simulator only — not supported for physical devices.`,
+    description: `Boot an iOS simulator or Android emulator by UDID or name. Not supported for physical devices.`,
     inputSchema: strictParams({
       udid: z.string().optional().describe("Device UDID to boot"),
       name: z

@@ -415,13 +415,29 @@ class AdbBackend:
         await self._run_adb_for_device(serial, "install", "-r", apk_path)
 
     async def launch_app(self, serial: str, package: str) -> None:
-        """Launch an app using monkey (no need to know the activity class)."""
-        await self._run_adb_for_device(
-            serial, "shell", "monkey",
-            "-p", package,
+        """Launch an app's main/launcher activity."""
+        # Resolve the launcher activity from the package manifest
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "cmd", "package", "resolve-activity",
+            "--brief", "-a", "android.intent.action.MAIN",
             "-c", "android.intent.category.LAUNCHER",
-            "1",
+            package,
         )
+        # Output is two lines: priority/preferred line, then component (package/activity)
+        lines = [l.strip() for l in stdout.strip().splitlines() if "/" in l]
+        if lines:
+            component = lines[-1]
+            await self._run_adb_for_device(
+                serial, "shell", "am", "start", "-n", component,
+            )
+        else:
+            # Fallback: let am figure it out (works on some Android versions)
+            await self._run_adb_for_device(
+                serial, "shell", "am", "start",
+                "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.LAUNCHER",
+                "-n", f"{package}/.MainActivity",
+            )
 
     async def terminate_app(self, serial: str, package: str) -> None:
         """Force-stop an app."""
