@@ -291,21 +291,38 @@ class DevicePool:
 
         Raises DeviceError if boot fails or times out.
         """
-        await self.controller.simctl.boot(udid)
+        is_android = self.controller._is_android(udid)
+        if is_android:
+            # Android emulators need the AVD name to boot; look it up from pool state
+            pool_state = self._read_state()
+            entry = pool_state.devices.get(udid)
+            if entry and entry.name:
+                await self.controller.adb.boot_emulator(entry.name)
+            else:
+                raise DeviceError(
+                    f"Cannot boot Android device {udid[:8]} — no AVD name in pool state",
+                    tool="adb",
+                )
+        else:
+            await self.controller.simctl.boot(udid)
 
         start = time.time()
         while time.time() - start < timeout:
             await asyncio.sleep(poll_interval)
-            devices = await self.controller.simctl.list_devices()
+            if is_android:
+                devices = await self.controller.adb.list_devices()
+            else:
+                devices = await self.controller.simctl.list_devices()
             for d in devices:
                 if d.udid == udid and d.state == DeviceState.BOOTED:
                     await self.refresh(force=True)
                     logger.info("Device %s booted in %.1fs", udid[:8], time.time() - start)
                     return
 
+        tool = "adb" if is_android else "simctl"
         raise DeviceError(
             f"Device {udid} did not boot within {timeout}s",
-            tool="simctl",
+            tool=tool,
         )
 
     def _build_resolution_error(
