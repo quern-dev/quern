@@ -1,6 +1,6 @@
 # App Knowledge Base — Agent Guide
 
-You have an `app-knowledge/` directory in this project for documenting the app under test. This guide explains how to build and maintain it.
+You have a `.quern/knowledge/` directory in this project for documenting the app under test. This guide explains how to build and maintain it.
 
 ## What This Is
 
@@ -8,12 +8,12 @@ The app knowledge base is a set of markdown files that capture everything you ne
 
 ## Getting Started
 
-If `app-knowledge/` was just initialized from templates, start with:
+If `.quern/knowledge/` was just initialized from templates, start with:
 
 1. **Fill in `app.md`** — Ask the user for the bundle ID, URL scheme, and universal link domain. Use `list_apps` on a device where the app is installed to find the bundle ID if unknown.
 2. **Launch the app** and begin the guided tour (see below).
 
-If `app-knowledge/` already has content, read the existing files before making changes. Your job is to extend and correct, not overwrite.
+If `.quern/knowledge/` already has content, read the existing files before making changes. Your job is to extend and correct, not overwrite.
 
 ## Before You Start
 
@@ -39,6 +39,8 @@ Prepare the device before launching the app. Skipping this causes unnecessary in
 4. **Check proxy status** if network capture is relevant (`proxy_status`).
 
 ## The Guided Tour
+
+This is a one-time investment in complete app coverage — not a quick overview. Expect the process to take one or more sessions, especially for apps with many screens. Don't optimize for speed; optimize for thoroughness. Document every screen you can reach, even trivial settings sub-pages, because the goal is a complete map that future agents can rely on without gaps. If you run low on context, stop at a natural boundary and pick up in the next session — partial coverage that's thorough is better than rushed coverage that's shallow.
 
 The guided tour is a collaborative process with the user. You explore the app together, and you document what you find.
 
@@ -80,7 +82,9 @@ Element types and identifier patterns vary by app framework (UIKit vs SwiftUI) a
 
 ### What to Capture Per Screen
 
-Use `get_screen_summary` for a quick overview, then `get_ui_tree` for the full element list. For each screen:
+Follow this workflow for each screen: `get_screen_summary` first for quick orientation, then `get_ui_tree` for the full element list, then write the document, then move on to the next screen. This summary → tree → document → move on rhythm is the most efficient way to maintain momentum without missing details.
+
+For each screen, capture:
 
 1. **Identification** — Find the most unique, stable element(s) that distinguish this screen. A navigation bar title is ideal. Avoid dynamic content.
 2. **Key elements** — List interactive elements with their types and labels. Note which elements are conditional (appear only in certain states).
@@ -150,7 +154,7 @@ Accessibility identifiers in real apps are frequently misleading, reused, or mis
 
 **Missing identifiers.** Some elements have no identifier at all. Use `label` (visible text) + `element_type` as the primary selector. Document this so agents don't waste time searching for an identifier that doesn't exist.
 
-**Quick wins for the dev team.** Misleading, shared, and missing identifiers are among the easiest things to fix in the app code — usually a single line setting `accessibilityIdentifier`. When you discover these during the tour, call them out to the user as quick-win fixes. A short list of "these 5 identifiers need fixing" is high-value, low-effort work that immediately improves both agent reliability and general accessibility/testability. Consider collecting these in a quirk doc (e.g., `quirks/identifier-issues.md`) so they can be tracked and fixed as a batch.
+**These could be bugs.** Misleading, shared, or missing identifiers are usually not intentional — they're accessibility defects in the app code, typically fixable with a single line setting `accessibilityIdentifier`. When you discover one during the tour, document it immediately in `quirks/identifier-issues.md` and flag it to the user as something worth investigating right away. Don't just work around it silently. A short list of "these identifiers need attention" is high-value, low-effort work that improves both agent reliability and the app's general accessibility.
 
 **General rule:** When writing `tap_element` commands in screen docs, use the most reliable selector you found during the tour — usually `label` for visible text. Add a comment if the identifier is known to be misleading or shared. The Key Elements table should capture both label and identifier so future agents can choose the right approach.
 

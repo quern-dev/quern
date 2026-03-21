@@ -7,7 +7,7 @@ When an AI agent tests your app, it spends most of its time *navigating* — fig
 A directory of structured markdown files that live in your repo alongside the app code. Each file documents one thing — a screen, a user flow, an alert, a quirk — in a format optimized for agent consumption. The agent reads these files at the start of a session and immediately knows how to get anywhere in the app, what to expect when it arrives, and how to handle surprises.
 
 ```
-app-knowledge/
+.quern/knowledge/
 ├── app.md              # Bundle ID, entry points, global navigation
 ├── states.md           # Auth, subscription tier, onboarding — app-wide modes
 ├── environments.md     # Staging vs production, how to switch

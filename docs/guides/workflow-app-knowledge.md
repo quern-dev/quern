@@ -22,7 +22,7 @@ Apps often have onboarding flows that trigger below a certain activity threshold
 
 > "Initialize an app knowledge base for this project"
 
-Your agent scaffolds the `app-knowledge/` directory. The first files to fill in are `app.md` (bundle ID, URL scheme, universal link domains), `states.md` (auth, subscription, onboarding modes), and `environments.md` (staging vs production, how to switch).
+Your agent scaffolds the `.quern/knowledge/` directory. The first files to fill in are `app.md` (bundle ID, URL scheme, universal link domains), `states.md` (auth, subscription, onboarding modes), and `environments.md` (staging vs production, how to switch).
 
 Tell the agent these up front — they're things the agent can't discover from the UI:
 
