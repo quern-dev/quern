@@ -12,7 +12,7 @@ export function registerAppKnowledgeTools(server: McpServer): void {
   server.registerTool("init_app_knowledge", {
     description: `Initialize or detect an app knowledge base in a project directory.
 
-If the target directory already contains an app-knowledge/ folder, returns its current contents summary.
+If the target directory already contains a .quern/knowledge/ folder, returns its current contents summary.
 If not, copies the template structure from quern's templates into the target.
 
 After initialization, read the quern://app-knowledge-guide resource for instructions on how to conduct a guided tour of the app with the user.`,
@@ -23,7 +23,7 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
     }),
   }, async ({ project_dir }) => {
     try {
-      const targetDir = join(project_dir, "app-knowledge");
+      const targetDir = join(project_dir, ".quern", "knowledge");
       const existed = existsSync(targetDir);
 
       if (!existed) {
