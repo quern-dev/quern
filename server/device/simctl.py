@@ -56,15 +56,26 @@ class SimctlBackend:
         return stdout.decode(), stderr.decode()
 
     async def is_available(self) -> bool:
-        """Check if xcrun simctl is available."""
+        """Check if xcrun simctl is available and working."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "which", "xcrun",
+                "xcrun", "simctl", "help",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             await proc.communicate()
-            return proc.returncode == 0
+            if proc.returncode == 0:
+                return True
+            # xcrun exists but simctl failed — check for stale developer dir
+            logger.warning(
+                "xcrun simctl failed — this often happens when Xcode has been "
+                "renamed or moved. Run 'xcode-select -p' to check the current "
+                "developer directory, and 'sudo xcode-select -s /path/to/Xcode.app"
+                "/Contents/Developer' to fix it."
+            )
+            return False
+        except FileNotFoundError:
+            return False
         except Exception:
             return False
 

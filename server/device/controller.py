@@ -186,10 +186,26 @@ class DeviceController(DeviceControllerUI):
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List all devices (simulators + physical + pre-iOS 17 USB + Android)."""
-        sim_devices = await self.simctl.list_devices()
-        physical_devices = await self.devicectl.list_devices()
-        usbmux_devices = await self.usbmux.list_devices()
-        android_devices = await self.adb.list_devices()
+        try:
+            sim_devices = await self.simctl.list_devices()
+        except DeviceError:
+            logger.debug("simctl list_devices failed (simctl unavailable)", exc_info=True)
+            sim_devices = []
+        try:
+            physical_devices = await self.devicectl.list_devices()
+        except DeviceError:
+            logger.debug("devicectl list_devices failed", exc_info=True)
+            physical_devices = []
+        try:
+            usbmux_devices = await self.usbmux.list_devices()
+        except DeviceError:
+            logger.debug("usbmux list_devices failed", exc_info=True)
+            usbmux_devices = []
+        try:
+            android_devices = await self.adb.list_devices()
+        except DeviceError:
+            logger.debug("adb list_devices failed", exc_info=True)
+            android_devices = []
 
         # Populate device type cache and WDA os_version cache
         for d in sim_devices:

@@ -135,6 +135,11 @@ def _print_status(state: dict) -> None:
         print("  Proxy:      disabled")
     print(f"  API key:    {key_display}")
     print(f"  Log file:   {LOG_FILE}")
+    dev_dir_note = state.get("developer_dir_note")
+    if dev_dir_note:
+        for i, line in enumerate(dev_dir_note.splitlines()):
+            prefix = "  Note: " if i == 0 else "        "
+            print(f"{prefix}{line}")
 
 
 def install_signal_handlers(cleanup_fn) -> None:

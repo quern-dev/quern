@@ -110,6 +110,40 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _fix_developer_dir_for_setup() -> str | None:
+    """Auto-fix DEVELOPER_DIR if xcode-select doesn't provide simctl.
+
+    Sets the DEVELOPER_DIR env var for this process so subsequent xcrun
+    calls work. Returns a message describing the fix, or None if not needed.
+    """
+    if os.environ.get("DEVELOPER_DIR"):
+        return None
+
+    # Check if simctl already works
+    rc, _, _ = _run(["xcrun", "simctl", "help"])
+    if rc == 0:
+        return None
+
+    # simctl broken — find a working Xcode
+    rc, current_dir, _ = _run(["xcode-select", "-p"])
+    current_dir = current_dir.strip() if rc == 0 else "(unknown)"
+
+    for xcode_app in sorted(Path("/Applications").glob("Xcode*.app")):
+        candidate = xcode_app / "Contents" / "Developer"
+        if candidate.exists():
+            os.environ["DEVELOPER_DIR"] = str(candidate)
+            rc, _, _ = _run(["xcrun", "simctl", "help"])
+            if rc == 0:
+                return (
+                    f"Xcode developer tools not found at default location ({current_dir}).\n"
+                    f"Using {xcode_app} instead.\n"
+                    f"To make this permanent: sudo xcode-select -s '{candidate}'"
+                )
+            del os.environ["DEVELOPER_DIR"]
+
+    return None
+
+
 def _get_version(cmd: list[str]) -> str | None:
     """Run a version command and extract the version string."""
     rc, stdout, stderr = _run(cmd)
@@ -627,6 +661,57 @@ def check_ideviceinstaller() -> CheckResult:
     )
 
 
+def _diagnose_developer_dir() -> str | None:
+    """Check if xcode-select developer dir provides simctl; suggest fix if not.
+
+    Returns a diagnostic string if the developer dir is stale/invalid or
+    points to CommandLineTools (which lacks simctl), or None if fine.
+    """
+    rc, dev_dir, _ = _run(["xcode-select", "-p"])
+    if rc != 0:
+        return None
+    dev_dir = dev_dir.strip()
+
+    # Check two failure modes:
+    # 1. Path doesn't exist (renamed/moved Xcode)
+    # 2. Path exists but is CommandLineTools (no simctl)
+    path_exists = Path(dev_dir).exists()
+    is_clt = "CommandLineTools" in dev_dir
+
+    if path_exists and not is_clt:
+        return None  # Looks fine — pointing to an Xcode.app
+
+    if is_clt:
+        reason = (
+            f"xcode-select points to '{dev_dir}' (Command Line Tools), "
+            f"which does not include simctl."
+        )
+    else:
+        reason = f"xcode-select points to '{dev_dir}' which does not exist."
+
+    # Search for Xcode installations to suggest a fix
+    xcode_apps = sorted(Path("/Applications").glob("Xcode*.app"))
+    if xcode_apps:
+        best = xcode_apps[0]
+        candidate = best / "Contents" / "Developer"
+        if candidate.exists():
+            return (
+                f"{reason}\n"
+                f"Found Xcode at '{best}'.\n"
+                f"Fix with: sudo xcode-select -s '{candidate}'"
+            )
+        return (
+            f"{reason}\n"
+            f"Found '{best}' but it has no Contents/Developer.\n"
+            f"Reinstall Xcode or run: sudo xcode-select -s /path/to/Xcode.app/Contents/Developer"
+        )
+    return (
+        f"{reason}\n"
+        f"No Xcode found in /Applications. Install Xcode from the App Store,\n"
+        f"or if you renamed it, run: sudo xcode-select -s /path/to/YourXcode.app/Contents/Developer"
+    )
+
+
 def check_xcode_cli_tools() -> CheckResult:
     """Check for Xcode command line tools (provides xcrun, simctl)."""
     xcrun = _which("xcrun")
@@ -644,6 +729,16 @@ def check_xcode_cli_tools() -> CheckResult:
             name="Xcode CLI Tools",
             status=CheckStatus.OK,
             message="Installed (simctl available)",
+        )
+
+    # simctl failed — check if it's a stale developer dir (renamed Xcode)
+    diagnosis = _diagnose_developer_dir()
+    if diagnosis:
+        return CheckResult(
+            name="Xcode CLI Tools",
+            status=CheckStatus.ERROR,
+            message="xcrun found but simctl unavailable (developer dir mismatch)",
+            detail=diagnosis,
         )
     return CheckResult(
         name="Xcode CLI Tools",
@@ -1206,8 +1301,18 @@ def run_setup() -> int:
 
     # ── iOS support (requires Xcode CLI Tools) ──
 
+    # Auto-fix developer dir if simctl is missing due to renamed Xcode or
+    # xcode-select pointing at CommandLineTools instead of a full Xcode.
+    dev_dir_msg = _fix_developer_dir_for_setup()
     xcode_result = check_xcode_cli_tools()
     has_ios = xcode_result.status == CheckStatus.OK
+    if has_ios and dev_dir_msg:
+        xcode_result = CheckResult(
+            name="Xcode CLI Tools",
+            status=CheckStatus.OK,
+            message="Installed (simctl available)",
+            detail=dev_dir_msg,
+        )
     report.add(xcode_result)
 
     if has_ios:

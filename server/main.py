@@ -76,6 +76,74 @@ from server.storage.ring_buffer import RingBuffer
 logger = logging.getLogger("quern-debug-server")
 
 
+def _fix_developer_dir() -> str | None:
+    """Auto-fix DEVELOPER_DIR if xcode-select doesn't provide simctl.
+
+    Common scenarios this handles:
+    1. User renamed Xcode.app (e.g. to "Xcode 26.3.app") — xcode-select -p
+       returns a stale path that no longer exists.
+    2. xcode-select points to CommandLineTools, which has xcrun but not simctl.
+
+    Setting DEVELOPER_DIR env var overrides xcode-select for this process
+    and all child processes (xcrun, xcodebuild, swiftc, etc.).
+
+    Returns a message describing the fix applied, or None if no fix was needed.
+    """
+    if os.environ.get("DEVELOPER_DIR"):
+        return None  # Already explicitly set, don't override
+
+    import subprocess
+
+    def _simctl_works() -> bool:
+        try:
+            r = subprocess.run(
+                ["xcrun", "simctl", "help"],
+                capture_output=True, timeout=5,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    if _simctl_works():
+        return None  # Everything is fine
+
+    # simctl doesn't work — try to find an Xcode installation and set DEVELOPER_DIR
+    try:
+        result = subprocess.run(
+            ["xcode-select", "-p"], capture_output=True, text=True, timeout=5,
+        )
+        current_dir = result.stdout.strip() if result.returncode == 0 else "(unknown)"
+    except Exception:
+        current_dir = "(unknown)"
+
+    try:
+        for xcode_app in sorted(Path("/Applications").glob("Xcode*.app")):
+            candidate = xcode_app / "Contents" / "Developer"
+            if candidate.exists():
+                os.environ["DEVELOPER_DIR"] = str(candidate)
+                # Verify this actually fixes simctl
+                if _simctl_works():
+                    msg = (
+                        f"Xcode developer tools not found at default location ({current_dir}).\n"
+                        f"Using {xcode_app} instead.\n"
+                        f"To make this permanent: sudo xcode-select -s '{candidate}'"
+                    )
+                    logger.info(msg)
+                    return msg
+                # Didn't help — undo and try next
+                del os.environ["DEVELOPER_DIR"]
+
+        logger.warning(
+            "simctl not available (xcode-select points to '%s'). "
+            "No working Xcode found in /Applications. "
+            "Simulator features will be disabled.",
+            current_dir,
+        )
+    except Exception:
+        pass  # Best-effort — don't block startup
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -225,7 +293,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if not tools.get("simctl"):
         logger.warning(
             "simctl not available — device management and screenshots disabled. "
-            "Install Xcode Command Line Tools: xcode-select --install"
+            "If Xcode is installed, check 'xcode-select -p' points to a valid path. "
+            "Fix with: sudo xcode-select -s /path/to/Xcode.app/Contents/Developer  "
+            "Otherwise install Xcode Command Line Tools: xcode-select --install"
         )
     if not tools.get("idb"):
         logger.warning(
@@ -688,10 +758,13 @@ def _cmd_start(args: argparse.Namespace) -> None:
     enable_crash = not args.no_crash
     local_capture_processes = get_local_capture_processes() if enable_proxy else []
 
+    # Auto-fix developer dir before any tool checks
+    developer_dir_msg = _fix_developer_dir()
+
     # Write state file (preserve active_devices across restarts)
     prev_state = read_state()
     prev_active = prev_state.get("active_devices", []) if prev_state else []
-    write_state({
+    state_dict = {
         "pid": os.getpid(),
         "server_host": args.host,
         "local_ip": detect_local_ip(),
@@ -703,7 +776,10 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
         "active_devices": prev_active,
-    })
+    }
+    if developer_dir_msg:
+        state_dict["developer_dir_note"] = developer_dir_msg
+    write_state(state_dict)
 
     if args.foreground:
         print("Quern Debug Server v0.1.0")
@@ -732,6 +808,10 @@ def _cmd_start(args: argparse.Namespace) -> None:
                 print("    Run: quern enable-local-capture [process ...]")
         if args.on_crash:
             print(f"  On-crash hook: {args.on_crash}")
+        if developer_dir_msg:
+            for i, line in enumerate(developer_dir_msg.splitlines()):
+                prefix = "  Note: " if i == 0 else "        "
+                print(f"{prefix}{line}")
         print()
 
     crash_extra_watch_dirs = []
