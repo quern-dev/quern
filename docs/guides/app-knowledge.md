@@ -7,21 +7,25 @@ When an AI agent tests your app, it spends most of its time *navigating* — fig
 A directory of structured markdown files that live in your repo alongside the app code. Each file documents one thing — a screen, a user flow, an alert, a quirk — in a format optimized for agent consumption. The agent reads these files at the start of a session and immediately knows how to get anywhere in the app, what to expect when it arrives, and how to handle surprises.
 
 ```
-.quern/knowledge/
-├── app.md              # Bundle ID, entry points, global navigation
-├── states.md           # Auth, subscription tier, onboarding — app-wide modes
-├── environments.md     # Staging vs production, how to switch
-├── glossary.md         # Domain terminology
-├── screens/            # One file per screen
-│   ├── home.md
-│   ├── product-detail.md
-│   ├── login.md
-│   └── ...
-├── flows/              # Multi-step sequences (login, purchase, etc.)
-├── alerts/             # Modals, dialogs, coaching tips that can appear unexpectedly
-├── deep-links/         # URL schemes and universal links
-└── quirks/             # Non-obvious behaviors, workarounds, device-specific issues
+.quern/
+├── config.json             # Machine-readable project config (bundle ID, schemes, environments, state flags)
+└── knowledge/
+    ├── app.md              # Entry points, global navigation, test accounts
+    ├── states.md           # Auth, subscription tier, onboarding — app-wide modes
+    ├── environments.md     # Staging vs production, how to switch
+    ├── glossary.md         # Domain terminology
+    ├── screens/            # One file per screen
+    │   ├── home.md
+    │   ├── product-detail.md
+    │   ├── login.md
+    │   └── ...
+    ├── flows/              # Multi-step sequences (login, purchase, etc.)
+    ├── alerts/             # Modals, dialogs, coaching tips that can appear unexpectedly
+    ├── deep-links/         # URL schemes and universal links
+    └── quirks/             # Non-obvious behaviors, workarounds, device-specific issues
 ```
+
+`config.json` is the machine-readable companion to the knowledge base markdown files. It stores structured data — bundle ID, build schemes, environment domains, plist watch targets, state flags, and saved checkpoint metadata — in a format designed for tool consumption. The markdown files document *how* and *why*; config.json captures the *what* in a parseable format.
 
 ## Why It Matters
 

@@ -1,0 +1,18 @@
+{
+  "bundle_id": null,
+  "app_name": null,
+  "workspace": null,
+  "schemes": {
+    "app": null,
+    "unit_tests": null,
+    "ui_tests": null
+  },
+  "url_scheme": null,
+  "universal_link_domains": [],
+  "environments": {},
+  "plist_watch": {
+    "watches": []
+  },
+  "state_flags": {},
+  "saved_checkpoints": {}
+}

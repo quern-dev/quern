@@ -1,12 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { strictParams } from "./helpers.js";
-import { existsSync, cpSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, cpSync, readdirSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, "..", "..", "..", "templates", "app-knowledge");
+const CONFIG_TEMPLATE = join(TEMPLATES_DIR, "config.json");
 
 export function registerAppKnowledgeTools(server: McpServer): void {
   server.registerTool("init_app_knowledge", {
@@ -23,10 +24,12 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
     }),
   }, async ({ project_dir }) => {
     try {
-      const targetDir = join(project_dir, ".quern", "knowledge");
-      const existed = existsSync(targetDir);
+      const quernDir = join(project_dir, ".quern");
+      const targetDir = join(quernDir, "knowledge");
+      const configPath = join(quernDir, "config.json");
+      const knowledgeExisted = existsSync(targetDir);
 
-      if (!existed) {
+      if (!knowledgeExisted) {
         if (!existsSync(TEMPLATES_DIR)) {
           return {
             content: [{
@@ -37,28 +40,56 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
           };
         }
         cpSync(TEMPLATES_DIR, targetDir, { recursive: true });
+        // Remove config.json from knowledge/ — it belongs at .quern/config.json
+        const copiedConfig = join(targetDir, "config.json");
+        if (existsSync(copiedConfig)) {
+          unlinkSync(copiedConfig);
+        }
+      }
+
+      // Create config.json at .quern/config.json if it doesn't exist
+      const configExisted = existsSync(configPath);
+      if (!configExisted && existsSync(CONFIG_TEMPLATE)) {
+        mkdirSync(quernDir, { recursive: true });
+        cpSync(CONFIG_TEMPLATE, configPath);
       }
 
       // Build a summary of what's in the knowledge base
       const summary = summarizeKnowledgeBase(targetDir);
 
-      const status = existed
+      // Summarize config.json status
+      let configStatus: string;
+      if (configExisted) {
+        const content = readFileSync(configPath, "utf-8");
+        try {
+          const config = JSON.parse(content);
+          const hasContent = config.bundle_id !== null && config.bundle_id !== "";
+          configStatus = `- config.json: ${hasContent ? "configured" : "template (needs setup)"}`;
+        } catch {
+          configStatus = "- config.json: exists (invalid JSON)";
+        }
+      } else {
+        configStatus = "- config.json: created from template (needs setup)";
+      }
+
+      const status = knowledgeExisted
         ? "Existing app knowledge base found."
         : "App knowledge base initialized from templates.";
 
-      const nextSteps = existed
+      const nextSteps = knowledgeExisted
         ? "Read the existing files to understand what's documented, then continue the guided tour to fill gaps."
         : [
             "Next steps:",
             "1. Read the quern://app-knowledge-guide resource for the full guided tour process.",
-            "2. Fill in app.md with the app's bundle ID, URL scheme, and other basics.",
-            "3. Launch the app and begin documenting screens with the user.",
+            "2. Fill in .quern/config.json with the app's bundle ID, app name, workspace, and schemes.",
+            "3. Fill in app.md with entry points, global navigation, and test accounts.",
+            "4. Launch the app and begin documenting screens with the user.",
           ].join("\n");
 
       return {
         content: [{
           type: "text" as const,
-          text: [status, "", summary, "", nextSteps].join("\n"),
+          text: [status, "", summary, configStatus, "", nextSteps].join("\n"),
         }],
       };
     } catch (e) {
