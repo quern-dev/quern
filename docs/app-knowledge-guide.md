@@ -10,10 +10,11 @@ The app knowledge base is a set of markdown files that capture everything you ne
 
 If `.quern/knowledge/` was just initialized from templates, start with:
 
-1. **Fill in `app.md`** — Ask the user for the bundle ID, URL scheme, and universal link domain. Use `list_apps` on a device where the app is installed to find the bundle ID if unknown.
-2. **Launch the app** and begin the guided tour (see below).
+1. **Fill in `.quern/config.json`** — This is the machine-readable project config. Set `bundle_id` and `app_name` first (use `list_apps` on a device where the app is installed if unknown). If you can find the Xcode project/workspace in the directory, set `workspace` and discover available schemes. Set `url_scheme` and `universal_link_domains` if the user provides them.
+2. **Fill in `app.md`** — Entry points, global navigation, and test accounts. The bundle ID and URL scheme should match what you put in config.json.
+3. **Launch the app** and begin the guided tour (see below).
 
-If `.quern/knowledge/` already has content, read the existing files before making changes. Your job is to extend and correct, not overwrite.
+If `.quern/knowledge/` already has content, read the existing files and `.quern/config.json` before making changes. Your job is to extend and correct, not overwrite.
 
 ## Before You Start
 
@@ -59,12 +60,22 @@ Start from the app's entry point and work outward:
 
 1. **Launch screen** — What does the user see on cold launch? Document it.
 2. **Primary navigation** — Tab bar? Sidebar? Document `app.md`'s global navigation table.
-3. **States and environments** — Before going deep, ask the user about app-wide states (auth, subscription, onboarding) and available environments (staging, production). Fill in `states.md` and `environments.md`. This shapes the rest of the tour.
+3. **States and environments** — Before going deep, ask the user about app-wide states (auth, subscription, onboarding) and available environments (staging, production). Fill in `states.md` and `environments.md`. Also update `.quern/config.json`: add each environment to the `environments` object with its domain and deep link pattern.
 4. **Each top-level screen** — Visit each tab/section. Document screens as you go. Create stubs for screens you discover but don't visit yet. As you encounter domain-specific terms (codes, ratings, feature names, acronyms), add them to `glossary.md` — don't wait until the end.
 5. **Alerts** — As you encounter any dialog, popup, permission prompt, or coaching overlay, document it in `alerts/` immediately. Also ask: "Are there other popups I should know about on this screen?"
 6. **Key flows** — After screens are documented, trace the most important user flows (login, core feature, settings changes) and document them.
 7. **Deep links** — Ask the user: "Are there deep links or URL schemes I should know about?" Document each one, verify it works by launching with `launch_app url=...`.
 8. **Quirks** — As you encounter anything unexpected, document it immediately. Also ask: "Are there any known quirks or device-specific issues with this screen?"
+
+### Updating config.json During the Tour
+
+As you discover app details during the tour, keep `.quern/config.json` updated alongside the markdown knowledge base files:
+
+- **Plist watch targets.** When you investigate plist files (app containers, app group containers), add watch entries to `plist_watch.watches`. Each entry needs `container` (e.g. `"data"`, `"group.com.example.app"`), `plist_path`, and optionally `ignore_prefixes` for noisy third-party SDK keys.
+- **State flags.** When you discover plist flags that control coaching modals, onboarding state, environment switching, or feature toggles, add them to `state_flags`. Group them by category (e.g. `"coaching"`, `"environment"`) with the key name mapped to a human-readable description of what it controls.
+- **Saved checkpoints.** When you save an app state checkpoint with `save_app_state`, add it to `saved_checkpoints` with the label as the key and a description of the state (account info, environment, what's been dismissed).
+
+This structured data in config.json complements the prose in the knowledge base markdown files. Config.json is designed for future tool consumption — keeping it accurate means tools will eventually be able to auto-configure plist watches, restore checkpoints, and set state flags without parsing markdown.
 
 ### Common iOS Element Types
 
