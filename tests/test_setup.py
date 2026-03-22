@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,8 @@ from server.lifecycle.setup import (
     CheckResult,
     CheckStatus,
     SetupReport,
+    _diagnose_developer_dir,
+    _fix_developer_dir_for_setup,
     _read_manifest,
     _record_install,
     _write_manifest,
@@ -334,9 +337,147 @@ class TestCheckXcodeCliTools:
         with (
             _patch_which({"xcrun": "/usr/bin/xcrun"}),
             patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup._diagnose_developer_dir", return_value=None),
         ):
             result = check_xcode_cli_tools()
             assert result.status == CheckStatus.WARNING
+
+    def test_xcrun_stale_developer_dir(self):
+        """When Xcode is renamed, simctl fails and we diagnose the stale path."""
+        def side_effect(cmd, **kwargs):
+            return _mock_run(stdout="", returncode=1)
+
+        diagnosis = (
+            "xcode-select points to '/Applications/Xcode.app/Contents/Developer' "
+            "which does not exist. Found Xcode at '/Applications/Xcode 26.3.app'. "
+            "Fix with: sudo xcode-select -s '/Applications/Xcode 26.3.app/Contents/Developer'"
+        )
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup._diagnose_developer_dir", return_value=diagnosis),
+        ):
+            result = check_xcode_cli_tools()
+            assert result.status == CheckStatus.ERROR
+            assert "developer dir mismatch" in result.message
+            assert "xcode-select -s" in result.detail
+
+
+class TestDiagnoseDeveloperDir:
+    def test_valid_developer_dir(self, tmp_path):
+        """When developer dir exists, returns None."""
+        dev_dir = tmp_path / "Xcode.app" / "Contents" / "Developer"
+        dev_dir.mkdir(parents=True)
+
+        def side_effect(cmd, **kwargs):
+            return _mock_run(stdout=str(dev_dir))
+
+        with patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect):
+            assert _diagnose_developer_dir() is None
+
+    def test_stale_developer_dir_with_renamed_xcode(self, tmp_path):
+        """When Xcode is renamed, suggests xcode-select -s with correct path."""
+        stale_dir = str(tmp_path / "Xcode.app" / "Contents" / "Developer")
+        # Create the renamed Xcode with valid Contents/Developer
+        renamed_xcode = tmp_path / "Xcode 26.3.app"
+        (renamed_xcode / "Contents" / "Developer").mkdir(parents=True)
+
+        def side_effect(cmd, **kwargs):
+            if cmd == ["xcode-select", "-p"]:
+                return _mock_run(stdout=stale_dir)
+            return _mock_run(returncode=1)
+
+        # Patch /Applications glob to return our tmp_path renamed xcode
+        with (
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup.Path.glob",
+                  return_value=sorted([renamed_xcode])),
+        ):
+            result = _diagnose_developer_dir()
+            assert result is not None
+            assert "does not exist" in result
+            assert "xcode-select -s" in result
+            assert "Xcode 26.3.app" in result
+
+    def test_xcode_select_fails(self):
+        """When xcode-select -p fails, returns None."""
+        def side_effect(cmd, **kwargs):
+            return _mock_run(returncode=1)
+
+        with patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect):
+            assert _diagnose_developer_dir() is None
+
+    def test_commandlinetools_with_xcode_available(self, tmp_path):
+        """When pointing to CommandLineTools, suggests the found Xcode."""
+        clt_dir = "/Library/Developer/CommandLineTools"
+
+        renamed_xcode = tmp_path / "Xcode 26.3.app"
+        (renamed_xcode / "Contents" / "Developer").mkdir(parents=True)
+
+        def side_effect(cmd, **kwargs):
+            if cmd == ["xcode-select", "-p"]:
+                return _mock_run(stdout=clt_dir)
+            return _mock_run(returncode=1)
+
+        with (
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup.Path.glob",
+                  return_value=sorted([renamed_xcode])),
+        ):
+            result = _diagnose_developer_dir()
+            assert result is not None
+            assert "Command Line Tools" in result
+            assert "xcode-select -s" in result
+
+
+class TestFixDeveloperDirForSetup:
+    def test_simctl_already_works(self):
+        """Returns None when simctl works fine."""
+        def side_effect(cmd, **kwargs):
+            return _mock_run(stdout="usage: simctl...")
+
+        with (
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            # Ensure DEVELOPER_DIR is not set
+            os.environ.pop("DEVELOPER_DIR", None)
+            assert _fix_developer_dir_for_setup() is None
+
+    def test_fixes_renamed_xcode(self, tmp_path):
+        """Sets DEVELOPER_DIR and returns message when Xcode is renamed."""
+        renamed_xcode = tmp_path / "Xcode 26.3.app"
+        candidate = renamed_xcode / "Contents" / "Developer"
+        candidate.mkdir(parents=True)
+
+        call_count = 0
+
+        def side_effect(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if cmd[:3] == ["xcrun", "simctl", "help"]:
+                # First call: fails (before fix). Second call: succeeds (after fix).
+                if call_count <= 1:
+                    return _mock_run(returncode=1)
+                return _mock_run(stdout="usage: simctl...")
+            if cmd == ["xcode-select", "-p"]:
+                return _mock_run(stdout="/Applications/Xcode.app/Contents/Developer")
+            return _mock_run(returncode=1)
+
+        with (
+            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
+            patch("server.lifecycle.setup.Path.glob",
+                  return_value=sorted([renamed_xcode])),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("DEVELOPER_DIR", None)
+            result = _fix_developer_dir_for_setup()
+            assert result is not None
+            assert "Xcode 26.3.app" in result
+            assert "xcode-select -s" in result
+            assert os.environ.get("DEVELOPER_DIR") == str(candidate)
+            # Clean up
+            del os.environ["DEVELOPER_DIR"]
 
 
 # ── mitmdump check ───────────────────────────────────────────────────────
