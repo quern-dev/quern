@@ -714,6 +714,19 @@ rm -rf /data/local/tmp/tmp-ca-copy
             str(longitude), str(latitude), "0", str(satellites),
         )
 
+    async def open_url(self, serial: str, url: str) -> None:
+        """Open a URL via Android's VIEW intent.
+
+        Runs: adb -s <serial> shell am start -a android.intent.action.VIEW -d <url>
+        Supports any URI scheme the device has a handler for: https://, geo:,
+        tel:, mailto:, custom app schemes, etc.
+        """
+        await self._run_adb_for_device(
+            serial, "shell", "am", "start",
+            "-a", "android.intent.action.VIEW",
+            "-d", url,
+        )
+
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.
 

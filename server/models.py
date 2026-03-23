@@ -828,6 +828,13 @@ class SetLocationRequest(BaseModel):
     udid: str | None = None
 
 
+class OpenUrlRequest(BaseModel):
+    """Request body for POST /device/open-url."""
+
+    url: str
+    udid: str | None = None
+
+
 class GrantPermissionRequest(BaseModel):
     """Request body for POST /device/permission."""
 

@@ -201,6 +201,16 @@ class SimctlBackend:
         """
         await self._run_simctl("location", udid, "set", f"{latitude},{longitude}")
 
+    async def open_url(self, udid: str, url: str) -> None:
+        """Open a URL on the simulator.
+
+        Runs: xcrun simctl openurl <udid> <url>
+        Supports any URI scheme the simulator has a handler for: https://,
+        maps://, App-prefs:, custom app schemes, etc. Some schemes (tel:,
+        mailto:) are unavailable on simulators.
+        """
+        await self._run_simctl("openurl", udid, url)
+
     async def grant_permission(self, udid: str, bundle_id: str, permission: str) -> None:
         """Grant an app permission.
 

@@ -16,6 +16,7 @@ from server.models import (
     GrantPermissionRequest,
     InstallAppRequest,
     LaunchAppRequest,
+    OpenUrlRequest,
     PreviewStartRequest,
     PreviewStopRequest,
     SetDisplayDensityRequest,
@@ -394,6 +395,17 @@ async def set_location(request: Request, body: SetLocationRequest):
             "latitude": body.latitude,
             "longitude": body.longitude,
         }
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/open-url")
+async def open_url(request: Request, body: OpenUrlRequest):
+    """Open a URL on a simulator or emulator."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.open_url(url=body.url, udid=body.udid)
+        return {"status": "ok", "udid": udid, "url": body.url}
     except DeviceError as e:
         raise _handle_device_error(e)
 

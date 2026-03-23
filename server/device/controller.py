@@ -468,6 +468,16 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.set_location(resolved, latitude, longitude)
         return resolved
 
+    async def open_url(self, url: str, udid: str | None = None) -> str:
+        """Open a URL on the device. Returns the resolved udid."""
+        resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            await self.adb.open_url(resolved, url)
+        else:
+            self._require_simulator(resolved, "Open URL")
+            await self.simctl.open_url(resolved, url)
+        return resolved
+
     async def grant_permission(
         self, bundle_id: str, permission: str, udid: str | None = None,
     ) -> str:

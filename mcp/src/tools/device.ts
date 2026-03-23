@@ -552,6 +552,55 @@ NOTE: If you want to capture network traffic from this app:
     }
   });
 
+  server.registerTool("open_url", {
+    description: `Open a URL on a simulator or emulator using the platform's default handler. Supports any URI scheme the device has a handler for: https://, geo: (maps), tel:, mailto:, custom app URL schemes, deep links, universal links, and settings URIs (Android: android.settings.* actions, iOS: App-prefs:).
+
+Note: tel: and mailto: are unavailable on iOS simulators (no Phone or Mail app).
+
+Examples:
+- Web: "https://example.com"
+- Maps: "geo:48.8584,2.2945?z=15" (Android) or "maps://?ll=48.8584,2.2945&z=15" (iOS)
+- Settings: "App-prefs:WIFI" (iOS) — Android uses action-based intents via adb
+- Deep link: "myapp://path/to/screen"`,
+    inputSchema: strictParams({
+      url: z.string().describe(
+        "URL or URI to open (e.g. https://example.com, geo:48.8,2.3?z=15, maps://?ll=48.8,2.3)"
+      ),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ url, udid }) => {
+    try {
+      const body: Record<string, unknown> = { url };
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/open-url",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("grant_permission", {
     description: `Grant an app permission on an iOS simulator or Android device (emulator or physical). iOS permissions: photos, camera, location, contacts, calendar, microphone, notifications. Android also supports: storage, phone, sms, call-log, body-sensors, nearby-devices, or any full android.permission.* string.`,
     inputSchema: strictParams({
