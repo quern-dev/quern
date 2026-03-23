@@ -52,6 +52,16 @@ Returns per-device install results plus per-architecture build results.`,
         body
       );
 
+      // Return concise summary on full success, full JSON on any failure
+      const resp = data as Record<string, unknown>;
+      if (resp.all_installed && resp.summary) {
+        return {
+          content: [
+            { type: "text" as const, text: resp.summary as string },
+          ],
+        };
+      }
+
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(data, null, 2) },

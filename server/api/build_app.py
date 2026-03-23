@@ -46,6 +46,7 @@ class BuildAndInstallResponse(BaseModel):
     # Per-device results
     devices: list[DeviceInstallResult]
     all_installed: bool
+    summary: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +336,74 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     )
     device_results: list[DeviceInstallResult] = await asyncio.gather(*install_tasks)
 
-    return BuildAndInstallResponse(
+    response = BuildAndInstallResponse(
         build_iphoneos=result_iphoneos,
         build_iphonesimulator=result_iphonesimulator,
         devices=device_results,
         all_installed=all(r.installed for r in device_results),
     )
+    response.summary = _build_install_summary(response)
+    return response
+
+
+def _build_install_summary(resp: BuildAndInstallResponse) -> str:
+    """Generate a concise text summary of the build-and-install result."""
+    parts: list[str] = []
+
+    # Determine architectures and success
+    archs: list[str] = []
+    builds = {
+        "iphonesimulator": resp.build_iphonesimulator,
+        "iphoneos": resp.build_iphoneos,
+    }
+    for arch, build in builds.items():
+        if build and build.succeeded:
+            archs.append(arch)
+
+    if not archs:
+        # All builds failed — generate failure summary
+        failed_parts = ["Build failed."]
+        for arch, build in builds.items():
+            if build and not build.succeeded:
+                failed_parts.append(f"{arch}: {len(build.errors)} error(s).")
+                for err in build.errors[:5]:
+                    loc = err.file
+                    if err.line:
+                        loc += f":{err.line}"
+                    failed_parts.append(f"  {loc}: {err.message}")
+                if len(build.errors) > 5:
+                    failed_parts.append(f"  ... and {len(build.errors) - 5} more")
+        return "\n".join(failed_parts)
+
+    arch_str = " + ".join(archs)
+    parts.append(f"Build succeeded ({arch_str}).")
+
+    # Aggregate warnings across architectures
+    total_warnings = sum(b.warning_count for b in builds.values() if b)
+    total_groups = sum(len(b.warning_groups) for b in builds.values() if b)
+
+    if total_warnings == 0:
+        parts.append("Clean build.")
+    elif total_groups and total_groups < total_warnings:
+        parts.append(f"{total_warnings} warnings ({total_groups} unique groups).")
+    else:
+        parts.append(f"{total_warnings} warning(s).")
+
+    # Tests (from whichever arch ran them)
+    for build in builds.values():
+        if build and build.tests:
+            t = build.tests
+            parts.append(f"Tests: {t.passed} passed, {t.failed} failed ({t.duration:.1f}s).")
+            break
+
+    # Install results
+    installed = [d for d in resp.devices if d.installed]
+    failed = [d for d in resp.devices if not d.installed]
+    if installed:
+        names = ", ".join(d.udid[:12] for d in installed)
+        parts.append(f"Installed on: {names}.")
+    if failed:
+        for d in failed:
+            parts.append(f"Install failed ({d.udid[:12]}): {d.error}")
+
+    return " ".join(parts)
