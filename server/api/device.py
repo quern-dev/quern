@@ -188,7 +188,36 @@ async def boot_device(request: Request, body: BootDeviceRequest):
         except Exception as exc:
             logger.warning("Auto cert install failed for %s: %s", udid, exc)
 
-    return {"status": "booted", "udid": udid, "cert_auto_installed": cert_auto_installed}
+    # Auto-start proxy if cert is installed but proxy isn't running
+    proxy_auto_started = False
+    has_cert = cert_auto_installed is True
+    if not has_cert:
+        # Check if cert was previously installed
+        from server.proxy.cert_state import read_cert_state_for_device
+        state = read_cert_state_for_device(udid)
+        has_cert = state.get("cert_installed", False) if state else False
+
+    if has_cert:
+        proxy_adapter = request.app.state.proxy_adapter
+        if proxy_adapter is not None and not proxy_adapter.is_running:
+            try:
+                await proxy_adapter.start()
+                try:
+                    from server.lifecycle.state import update_state
+                    update_state(proxy_status="running")
+                except Exception:
+                    pass
+                proxy_auto_started = True
+                logger.info("Auto-started proxy for device %s (cert installed)", udid[:12])
+            except Exception as exc:
+                logger.warning("Failed to auto-start proxy for %s: %s", udid[:12], exc)
+
+    return {
+        "status": "booted",
+        "udid": udid,
+        "cert_auto_installed": cert_auto_installed,
+        "proxy_auto_started": proxy_auto_started,
+    }
 
 
 @router.post("/shutdown")
