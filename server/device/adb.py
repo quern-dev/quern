@@ -694,11 +694,15 @@ rm -rf /data/local/tmp/tmp-ca-copy
             serial, "shell", "input", "swipe", "540", "1800", "540", "800", "300",
         )
 
-    async def set_location(self, serial: str, latitude: float, longitude: float) -> None:
+    async def set_location(
+        self, serial: str, latitude: float, longitude: float,
+        satellites: int = 4,
+    ) -> None:
         """Set simulated GPS location on an emulator.
 
-        Runs: adb -s <serial> emu geo fix <longitude> <latitude>
+        Runs: adb -s <serial> emu geo fix <longitude> <latitude> [alt] [satellites]
         Note: the emulator console takes longitude first, then latitude.
+        A default satellite count of 4 avoids anti-spoof heuristics that flag 0 satellites.
         """
         if not serial.startswith("emulator-"):
             raise DeviceError(
@@ -707,7 +711,7 @@ rm -rf /data/local/tmp/tmp-ca-copy
             )
         await self._run_adb_for_device(
             serial, "emu", "geo", "fix",
-            str(longitude), str(latitude),
+            str(longitude), str(latitude), "0", str(satellites),
         )
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
