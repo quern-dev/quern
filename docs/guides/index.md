@@ -49,6 +49,7 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 ## Cross-Platform
 
 - [Network Debugging Patterns](network-debugging.md) — Mocking, intercepting, and replaying network traffic
+- [Deep Link Testing](deep-link-testing.md) — Custom URL schemes vs universal links, testing both paths, common verification failures
 - [App Knowledge Base](app-knowledge.md) — Give your agent a pre-built map of your app: screens, navigation, alerts, state flags
 
 ---
