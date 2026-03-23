@@ -230,6 +230,42 @@ class BuildResult(BaseModel):
     warning_count: int = 0
     tests: TestSummary | None = None
     raw_line_count: int = 0
+    summary: str = ""
+
+    def generate_summary(self) -> str:
+        """Generate a concise text summary of the build result."""
+        if not self.succeeded:
+            parts = [f"Build failed. {len(self.errors)} error(s)."]
+            for err in self.errors[:5]:
+                loc = err.file
+                if err.line:
+                    loc += f":{err.line}"
+                parts.append(f"  {loc}: {err.message}")
+            if len(self.errors) > 5:
+                parts.append(f"  ... and {len(self.errors) - 5} more")
+            return "\n".join(parts)
+
+        parts = ["Build succeeded."]
+        if self.warning_count == 0:
+            parts.append(f"Clean build, {self.raw_line_count} lines parsed.")
+        elif self.warning_groups and len(self.warning_groups) < self.warning_count:
+            parts.append(
+                f"{self.warning_count} warnings "
+                f"({len(self.warning_groups)} unique groups), "
+                f"{self.raw_line_count} lines parsed."
+            )
+        else:
+            parts.append(f"{self.warning_count} warning(s), {self.raw_line_count} lines parsed.")
+
+        if self.tests:
+            t = self.tests
+            parts.append(f"Tests: {t.passed} passed, {t.failed} failed ({t.duration:.1f}s).")
+            for f in t.failures[:3]:
+                parts.append(f"  FAIL: {f.class_name}.{f.method}: {f.message}")
+            if len(t.failures) > 3:
+                parts.append(f"  ... and {len(t.failures) - 3} more failures")
+
+        return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------

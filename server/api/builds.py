@@ -22,20 +22,28 @@ class BuildParseFileRequest(BaseModel):
     fuzzy_groups: bool = True
 
 
+def _ensure_summary(result: BuildResult) -> BuildResult:
+    """Populate the summary field if not already set."""
+    if not result.summary:
+        result = result.model_copy(update={"summary": result.generate_summary()})
+    return result
+
+
 @router.get("/latest")
 async def get_latest_build(request: Request) -> BuildResult | None:
     """Return the most recent parsed build result."""
     build_adapter = request.app.state.build_adapter
     if build_adapter is None:
         return None
-    return build_adapter.latest_result
+    result = build_adapter.latest_result
+    return _ensure_summary(result) if result else None
 
 
 @router.post("/parse", response_model=BuildResult)
 async def parse_build(request: Request, body: BuildParseRequest) -> BuildResult:
     """Accept raw xcodebuild output and return the parsed result."""
     build_adapter = request.app.state.build_adapter
-    return await build_adapter.parse_build_output(body.output)
+    return _ensure_summary(await build_adapter.parse_build_output(body.output))
 
 
 @router.post("/parse-file", response_model=BuildResult)
@@ -52,4 +60,4 @@ async def parse_build_file(request: Request, body: BuildParseFileRequest) -> Bui
     result = await build_adapter.parse_build_output(content, fuzzy=body.fuzzy_groups)
     if not body.include_raw_warnings:
         result = result.model_copy(update={"warnings": []})
-    return result
+    return _ensure_summary(result)

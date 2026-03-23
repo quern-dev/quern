@@ -412,6 +412,16 @@ export function registerLogTools(server: McpServer): void {
           };
         }
 
+        // Return concise summary on success, full JSON on failure
+        const resp = data as Record<string, unknown>;
+        if (resp.succeeded && resp.summary) {
+          return {
+            content: [
+              { type: "text" as const, text: resp.summary as string },
+            ],
+          };
+        }
+
         return {
           content: [
             { type: "text" as const, text: JSON.stringify(data, null, 2) },
@@ -454,6 +464,16 @@ export function registerLogTools(server: McpServer): void {
           undefined,
           body
         );
+
+        // Return concise summary on success, full JSON on failure
+        const resp = data as Record<string, unknown>;
+        if (resp.succeeded && resp.summary) {
+          return {
+            content: [
+              { type: "text" as const, text: resp.summary as string },
+            ],
+          };
+        }
 
         return {
           content: [
