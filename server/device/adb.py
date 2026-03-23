@@ -549,7 +549,14 @@ class AdbBackend:
         if api_level >= 34:
             await self._install_cert_api34(serial, cert_filename, tmp_cert)
         else:
-            await self._install_cert_remount(serial, cert_filename, tmp_cert)
+            try:
+                await self._install_cert_remount(serial, cert_filename, tmp_cert)
+            except DeviceError:
+                logger.info(
+                    "Remount failed on %s (API %d), falling back to tmpfs overlay",
+                    serial, api_level,
+                )
+                await self._install_cert_tmpfs(serial, cert_filename, tmp_cert)
 
         logger.info("Installed system cert %s on %s (API %d)", cert_filename, serial, api_level)
         return True
@@ -563,6 +570,36 @@ class AdbBackend:
             f"chmod 644 /system/etc/security/cacerts/{cert_filename} && "
             f"chown root:root /system/etc/security/cacerts/{cert_filename}",
         )
+
+    async def _install_cert_tmpfs(self, serial: str, cert_filename: str, tmp_cert: str) -> None:
+        """Install cert via tmpfs overlay for API < 34 when remount fails.
+
+        Copies existing certs from /system/etc/security/cacerts/ into a tmpfs
+        mounted over the same path. No APEX or zygote nsenter needed — pre-34
+        Android reads certs directly from /system/etc/security/cacerts/.
+        """
+        script = f"""set -e
+# Copy existing system certs to temp
+mkdir -p -m 700 /data/local/tmp/tmp-ca-copy
+cp /system/etc/security/cacerts/* /data/local/tmp/tmp-ca-copy/
+
+# Mount tmpfs over the certs directory
+mount -t tmpfs tmpfs /system/etc/security/cacerts
+
+# Restore existing certs + add new one
+mv /data/local/tmp/tmp-ca-copy/* /system/etc/security/cacerts/
+cp {tmp_cert} /system/etc/security/cacerts/{cert_filename}
+
+# Fix permissions
+chown root:root /system/etc/security/cacerts/*
+chmod 644 /system/etc/security/cacerts/*
+chcon u:object_r:system_file:s0 /system/etc/security/cacerts/*
+
+# Cleanup
+rm -f {tmp_cert}
+rm -rf /data/local/tmp/tmp-ca-copy
+"""
+        await self._run_adb_for_device(serial, "shell", script)
 
     async def _install_cert_api34(self, serial: str, cert_filename: str, tmp_cert: str) -> None:
         """Install cert via nsenter APEX injection for API >= 34."""

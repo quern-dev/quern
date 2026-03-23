@@ -298,6 +298,7 @@ class DeviceController(DeviceControllerUI):
                 avds = await self.adb.list_avds()
                 if name in avds:
                     serial = await self.adb.boot_emulator(name, headless=headless)
+                    self._device_type_cache[serial] = DeviceType.ANDROID_EMULATOR
                     self._active_udid = serial
                     return serial
 
