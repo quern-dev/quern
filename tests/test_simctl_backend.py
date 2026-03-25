@@ -244,15 +244,20 @@ class TestSimctlCommands:
         proc = _mock_proc()
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
             await backend.launch_app("AAAA-1111", "com.example.App")
-            mock_exec.assert_called_once_with(
-                "xcrun",
-                "simctl",
-                "launch",
-                "AAAA-1111",
-                "com.example.App",
-                stdout=-1,
-                stderr=-1,
-            )
+            mock_exec.assert_called_once()
+            args, kwargs = mock_exec.call_args
+            assert args == ("xcrun", "simctl", "launch", "AAAA-1111", "com.example.App")
+            assert kwargs["env"]["SIMCTL_CHILD_QUERN_AUTOMATION"] == "YES"
+
+    async def test_launch_app_with_custom_env(self):
+        backend = SimctlBackend()
+        proc = _mock_proc()
+        with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+            await backend.launch_app("AAAA-1111", "com.example.App", env={"DEBUG": "1"})
+            mock_exec.assert_called_once()
+            _, kwargs = mock_exec.call_args
+            assert kwargs["env"]["SIMCTL_CHILD_QUERN_AUTOMATION"] == "YES"
+            assert kwargs["env"]["SIMCTL_CHILD_DEBUG"] == "1"
 
     async def test_terminate_app(self):
         backend = SimctlBackend()

@@ -237,7 +237,7 @@ class TestAppDelegation:
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.launch_app = AsyncMock()
         udid = await ctrl.launch_app("com.example.App")
-        ctrl.simctl.launch_app.assert_called_once_with("AAAA-1111", "com.example.App")
+        ctrl.simctl.launch_app.assert_called_once_with("AAAA-1111", "com.example.App", env=None)
         assert udid == "AAAA-1111"
 
     async def test_terminate_app(self):
