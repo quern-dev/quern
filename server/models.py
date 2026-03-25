@@ -645,17 +645,61 @@ class MockResponseSpec(BaseModel):
 
 
 class SetMockRequest(BaseModel):
-    """Request body for POST /api/v1/proxy/mocks."""
+    """Request body for POST /api/v1/proxy/mocks.
+
+    Accepts both nested and flat shapes:
+      Nested: {"pattern": "...", "response": {"status_code": 200, "body": "..."}}
+      Flat:   {"pattern": "...", "status_code": 200, "body": "..."}
+    """
 
     pattern: str
-    response: MockResponseSpec
+    response: MockResponseSpec | None = None
+    status_code: int | None = None
+    headers: dict[str, str] | None = None
+    body: str | None = None
+
+    @model_validator(mode="after")
+    def wrap_flat_fields(self) -> SetMockRequest:
+        if self.response is None:
+            self.response = MockResponseSpec(
+                status_code=self.status_code if self.status_code is not None else 200,
+                headers=self.headers or {"content-type": "application/json"},
+                body=self.body or "",
+            )
+        self.status_code = None
+        self.headers = None
+        self.body = None
+        return self
 
 
 class UpdateMockRequest(BaseModel):
-    """Request body for PATCH /api/v1/proxy/mocks/{rule_id}."""
+    """Request body for PATCH /api/v1/proxy/mocks/{rule_id}.
+
+    Accepts both nested and flat shapes, same as SetMockRequest.
+    """
 
     pattern: str | None = None
     response: MockResponseSpec | None = None
+    status_code: int | None = None
+    headers: dict[str, str] | None = None
+    body: str | None = None
+
+    @model_validator(mode="after")
+    def wrap_flat_fields(self) -> UpdateMockRequest:
+        if self.response is None and (
+            self.status_code is not None
+            or self.headers is not None
+            or self.body is not None
+        ):
+            self.response = MockResponseSpec(
+                status_code=self.status_code if self.status_code is not None else 200,
+                headers=self.headers or {"content-type": "application/json"},
+                body=self.body or "",
+            )
+        self.status_code = None
+        self.headers = None
+        self.body = None
+        return self
 
 
 class MockRuleInfo(BaseModel):

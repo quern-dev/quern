@@ -7,12 +7,14 @@ export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
     "set_intercept",
     {
-      description: `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them. Uses mitmproxy filter syntax (e.g. "~d api.example.com", "~m POST & ~d api.example.com").`,
+      description: `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them.
+
+Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
       inputSchema: strictParams({
         pattern: z
           .string()
           .describe(
-            'mitmproxy filter pattern (e.g. "~d api.example.com", "~m POST & ~d api.example.com")'
+            'Filter pattern (e.g. "~d api.example.com & ~u /v1/users", "~m POST & ~d api.example.com")'
           ),
       }),
     },
@@ -212,11 +214,13 @@ export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
     "set_mock",
     {
-      description: `Add a mock response rule. Requests matching the pattern will receive a synthetic response instead of hitting the real server. Mock rules take priority over intercept. Uses mitmproxy filter syntax.`,
+      description: `Add a mock response rule. Requests matching the pattern will receive a synthetic response instead of hitting the real server. Mock rules take priority over intercept.
+
+Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
       inputSchema: strictParams({
         pattern: z
           .string()
-          .describe('mitmproxy filter pattern (e.g. "~d api.example.com & ~m POST")'),
+          .describe('Filter pattern (e.g. "~d api.example.com & ~u /v1/users", "~m POST & ~u /v1/login")'),
         status_code: z
           .coerce.number()
           .default(200)

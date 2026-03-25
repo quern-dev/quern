@@ -301,9 +301,10 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `list_held_flows`    | GET         | `/api/v1/proxy/intercept/held`         |
 | `release_flow`       | POST        | `/api/v1/proxy/intercept/release`      |
 | `replay_flow`        | POST        | `/api/v1/proxy/replay/{id}`            |
-| `set_mock`           | POST        | `/api/v1/proxy/mock`                   |
-| `list_mocks`         | GET         | `/api/v1/proxy/mock`                   |
-| `clear_mocks`        | DELETE      | `/api/v1/proxy/mock`                   |
+| `set_mock`           | POST        | `/api/v1/proxy/mocks`                  |
+| `update_mock`        | PATCH       | `/api/v1/proxy/mocks/{rule_id}`        |
+| `list_mocks`         | GET         | `/api/v1/proxy/mocks`                  |
+| `clear_mocks`        | DELETE      | `/api/v1/proxy/mocks`                  |
 | `list_devices`       | GET         | `/api/v1/device/list`                  |
 | `boot_device`        | POST        | `/api/v1/device/boot`                  |
 | `shutdown_device`    | POST        | `/api/v1/device/shutdown`              |
@@ -366,9 +367,11 @@ Use this to test error handling, slow network conditions, and malformed response
 
 ### Mocking for Deterministic Testing
 
-Use `set_mock` to return synthetic responses for specific endpoints. This lets you create reliable, repeatable test scenarios — fixed user data, specific error conditions, or edge-case payloads — without depending on backend state.
+Use `set_mock` to return synthetic responses for specific endpoints. This lets you create reliable, repeatable test scenarios — fixed user data, specific error conditions, or edge-case payloads — without depending on backend state. Use `update_mock` to modify an existing rule's pattern or response without deleting and recreating it.
 
 Mock rules take priority over intercept rules. Clear them with `clear_mocks` when done.
+
+**Filter pattern syntax:** Mock and intercept patterns use mitmproxy filter expressions. Common operators: `~d` (domain), `~u` (URL/path — use this for path matching), `~m` (method), `~c` (status code), `~h` (header), `~t` (content-type), `~b` (body). Combine with `&` (and), `|` (or), `!` (not). Examples: `"~d api.example.com & ~u /v1/users"`, `"~m POST & ~d api.example.com & ~u /v1/login"`. Note: `~p` is not a valid operator — use `~u` for path matching.
 
 ---
 
