@@ -21,7 +21,7 @@ A directory of structured markdown files that live in your repo alongside the ap
     │   └── ...
     ├── flows/              # Multi-step sequences (login, purchase, etc.)
     ├── alerts/             # Modals, dialogs, coaching tips that can appear unexpectedly
-    ├── deep-links/         # URL schemes and universal links
+    ├── deep-links/         # deep_links.json — structured deep link registry
     └── quirks/             # Non-obvious behaviors, workarounds, device-specific issues
 ```
 

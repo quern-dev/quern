@@ -64,7 +64,7 @@ Start from the app's entry point and work outward:
 4. **Each top-level screen** — Visit each tab/section. Document screens as you go. Create stubs for screens you discover but don't visit yet. As you encounter domain-specific terms (codes, ratings, feature names, acronyms), add them to `glossary.md` — don't wait until the end.
 5. **Alerts** — As you encounter any dialog, popup, permission prompt, or coaching overlay, document it in `alerts/` immediately. Also ask: "Are there other popups I should know about on this screen?"
 6. **Key flows** — After screens are documented, trace the most important user flows (login, core feature, settings changes) and document them.
-7. **Deep links** — Ask the user: "Are there deep links or URL schemes I should know about?" Document each one, verify it works by launching with `launch_app url=...`.
+7. **Deep links** — Deep links are not discoverable from the UI. Ask the user: "Does this app have deep links or universal links? Can you point me to the routing code or AASA file?" Extracting paths from source code is the fastest way to populate `deep-links/deep_links.json`. If source isn't available, the user can provide paths directly. Then verify each link on the simulator (see "Documenting Deep Links" below).
 8. **Quirks** — As you encounter anything unexpected, document it immediately. Also ask: "Are there any known quirks or device-specific issues with this screen?"
 
 ### Updating config.json During the Tour
@@ -265,6 +265,49 @@ Alerts are dialogs, popups, permission prompts, info bubbles, and any transient 
 - Any proxy/cert setup differences
 
 **Ask the user early:** "Does this app have staging/dev environments? How do I switch between them?" This shapes everything else — test accounts, network capture setup, and which behaviors are real vs environment-specific.
+
+### Documenting Deep Links
+
+Deep links are stored as structured JSON in `deep-links/deep_links.json`, not as individual markdown files. This format serves both agents (reading descriptions and caveats) and test scripts (reading URLs and verification elements).
+
+**Discovery:** Deep links are never found by exploring the UI. They come from:
+1. **Source code** — deep link routers, URL handlers, AASA files, entitlements. Offer to extract paths from source as a fast path: "Can you point me to the routing code or AASA file? I can extract the deep link paths directly."
+2. **The user** — "Here are our deep link paths."
+
+**JSON schema:** Each entry in the `deep_links` array captures:
+
+```json
+{
+  "name": "profile",
+  "description": "Navigate to the user's profile screen.",
+  "path": "/dl/profile",
+  "lands_on": "screens/profile",
+  "skips_screens": ["home"],
+  "verify": {"identifier": "_profile_header"},
+  "premium_gated": false,
+  "caveats": ["May show onboarding on first visit"]
+}
+```
+
+Key fields: `path` (appended to domain), `lands_on` (screen doc reference), `verify` (`wait_for_element` kwargs to confirm the landing screen), `premium_gated` (whether Basic accounts see an upsell), `caveats` (edge cases and gotchas).
+
+Use separate arrays for different link categories (e.g. `coord_info_links`, `special_links`) when the app has distinct deep link families with different URL patterns or behaviors.
+
+**Verification workflow:** After populating the JSON:
+
+1. Open each link with `open_url` on a logged-in simulator.
+2. Capture the landing screen and fill in the `verify` field with the identifying element.
+3. Test with a Basic account to determine `premium_gated` status.
+4. Add caveats as discovered (coaching modals, pending deep links after login, web views).
+
+This can be semi-automated: open each link, capture the screen, propose the verification element. The user confirms or corrects.
+
+**What we've learned about deep link testing:**
+
+- **Universal links on simulators:** Always use `open_url` (quern tool). Raw `simctl openurl` often opens Safari instead of the app.
+- **Pending deep links:** When a universal link is opened while logged out, the app may hold it as "pending" and execute it after login — landing on the deep link target, not the default home screen. Test setup must account for this.
+- **Coaching modals:** Deep links to screens with first-visit coaching need those modals suppressed via plist. The `QUERN_AUTOMATION` env var prevents the app from wiping coaching flags on launch.
+- **Per-account behavior:** The same deep link can behave differently on Basic vs Premium. Capture this in `premium_gated` and `basic_shows_upsell` fields.
 
 ## Maintaining the Knowledge Base
 

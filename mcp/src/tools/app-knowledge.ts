@@ -133,6 +133,23 @@ function summarizeKnowledgeBase(dir: string): string {
     return { documented, stubs };
   };
 
+  const countDeepLinks = (baseDir: string): { total: number; configured: boolean } => {
+    const jsonPath = join(baseDir, "deep-links", "deep_links.json");
+    if (!existsSync(jsonPath)) return { total: 0, configured: false };
+    try {
+      const data = JSON.parse(readFileSync(jsonPath, "utf-8"));
+      const links = [
+        ...(data.deep_links ?? []),
+        ...(data.coord_info_links ?? []),
+        ...(data.special_links ?? []),
+      ];
+      const hasDomain = data.staging_domain !== null || data.production_domain !== null;
+      return { total: links.length, configured: hasDomain || links.length > 0 };
+    } catch {
+      return { total: 0, configured: false };
+    }
+  };
+
   // Check app.md
   const appMd = join(dir, "app.md");
   if (existsSync(appMd)) {
@@ -153,7 +170,7 @@ function summarizeKnowledgeBase(dir: string): string {
 
   const screens = countScreensByStatus("screens");
   const flowCount = countFiles("flows");
-  const deepLinkCount = countFiles("deep-links");
+  const deepLinkCount = countDeepLinks(dir);
   const alertCount = countFiles("alerts");
   const quirkCount = countFiles("quirks");
 
@@ -166,7 +183,7 @@ function summarizeKnowledgeBase(dir: string): string {
     sections.push(`  Stubs needing visit: ${screens.stubs.join(", ")}`);
   }
   sections.push(`- flows/: ${flowCount} documented`);
-  sections.push(`- deep-links/: ${deepLinkCount} documented`);
+  sections.push(`- deep-links/: ${deepLinkCount.total} links${deepLinkCount.configured ? "" : " (template, needs setup)"}`);
   sections.push(`- alerts/: ${alertCount} documented`);
   sections.push(`- quirks/: ${quirkCount} documented`);
 
