@@ -721,6 +721,7 @@ class LaunchAppRequest(BaseModel):
 
     bundle_id: str
     udid: str | None = None
+    env: dict[str, str] | None = None
 
 
 class TerminateAppRequest(BaseModel):

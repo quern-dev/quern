@@ -205,11 +205,16 @@ NOTE: If you want to capture network traffic from this app:
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      env: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("Environment variables to pass to the app process (iOS simulators only). Uses the SIMCTL_CHILD_ prefix convention. QUERN_AUTOMATION=YES is always set automatically."),
     }),
-  }, async ({ bundle_id, udid }) => {
+  }, async ({ bundle_id, udid, env }) => {
     try {
       const body: Record<string, unknown> = { bundle_id };
       if (udid) body.udid = udid;
+      if (env) body.env = env;
 
       const data = await apiRequest(
         "POST",

@@ -261,7 +261,7 @@ async def launch_app(request: Request, body: LaunchAppRequest):
     """Launch an app on a simulator."""
     controller = _get_controller(request)
     try:
-        udid = await controller.launch_app(bundle_id=body.bundle_id, udid=body.udid)
+        udid = await controller.launch_app(bundle_id=body.bundle_id, udid=body.udid, env=body.env)
         return {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
     except DeviceError as e:
         raise _handle_device_error(e)

@@ -382,7 +382,12 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.install_app(resolved, app_path)
         return resolved
 
-    async def launch_app(self, bundle_id: str, udid: str | None = None) -> str:
+    async def launch_app(
+        self,
+        bundle_id: str,
+        udid: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
         """Launch an app. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         if self._is_android(resolved):
@@ -390,7 +395,7 @@ class DeviceController(DeviceControllerUI):
         elif self._is_physical(resolved):
             await self.wda_client.activate_app(resolved, bundle_id)
         else:
-            await self.simctl.launch_app(resolved, bundle_id)
+            await self.simctl.launch_app(resolved, bundle_id, env=env)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 

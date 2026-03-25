@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -163,9 +164,31 @@ class SimctlBackend:
         """Install an app on a simulator."""
         await self._run_simctl("install", udid, app_path)
 
-    async def launch_app(self, udid: str, bundle_id: str) -> None:
-        """Launch an app on a simulator."""
-        await self._run_simctl("launch", udid, bundle_id)
+    async def launch_app(
+        self, udid: str, bundle_id: str, env: dict[str, str] | None = None,
+    ) -> None:
+        """Launch an app on a simulator.
+
+        If env is provided, the key-value pairs are passed to the app process
+        via the SIMCTL_CHILD_ prefix convention.  QUERN_AUTOMATION=YES is
+        always set so apps can detect quern-driven launches.
+        """
+        launch_env = {**os.environ, "SIMCTL_CHILD_QUERN_AUTOMATION": "YES"}
+        if env:
+            for key, value in env.items():
+                launch_env[f"SIMCTL_CHILD_{key}"] = value
+        proc = await asyncio.create_subprocess_exec(
+            "xcrun", "simctl", "launch", udid, bundle_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=launch_env,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise DeviceError(
+                f"simctl launch failed: {stderr.decode().strip()}",
+                tool="simctl",
+            )
 
     async def terminate_app(self, udid: str, bundle_id: str) -> None:
         """Terminate an app on a simulator."""
