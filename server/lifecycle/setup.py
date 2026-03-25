@@ -456,6 +456,58 @@ exec "{venv_python}" -m server "$@"
         )
 
 
+def _install_skills(project_root: Path) -> CheckResult:
+    """Symlink quern skills into ~/.claude/skills/ for Claude Code."""
+    skills_src = project_root / "skills"
+    if not skills_src.exists() or not any(skills_src.iterdir()):
+        return CheckResult(
+            name="Claude Code skills",
+            status=CheckStatus.OK,
+            message="No skills to install",
+        )
+
+    claude_dir = Path.home() / ".claude"
+    if not claude_dir.exists():
+        return CheckResult(
+            name="Claude Code skills",
+            status=CheckStatus.OK,
+            message="Skipped (no ~/.claude directory)",
+        )
+
+    skills_dest = claude_dir / "skills"
+    skills_dest.mkdir(parents=True, exist_ok=True)
+
+    installed = []
+    for skill_dir in sorted(skills_src.iterdir()):
+        if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+            continue
+        link_path = skills_dest / skill_dir.name
+        if link_path.is_symlink():
+            if link_path.resolve() == skill_dir.resolve():
+                installed.append(f"{skill_dir.name} (already linked)")
+                continue
+            link_path.unlink()
+        elif link_path.exists():
+            installed.append(f"{skill_dir.name} (skipped — non-symlink exists)")
+            continue
+        link_path.symlink_to(skill_dir)
+        installed.append(skill_dir.name)
+
+    if not installed:
+        return CheckResult(
+            name="Claude Code skills",
+            status=CheckStatus.OK,
+            message="No skills to install",
+        )
+
+    return CheckResult(
+        name="Claude Code skills",
+        status=CheckStatus.OK,
+        message=f"Linked {len(installed)} skill(s) to ~/.claude/skills/",
+        detail=", ".join(installed),
+    )
+
+
 # ── Individual checks ─────────────────────────────────────────────────────
 
 def _find_project_root() -> Path | None:
@@ -1602,6 +1654,11 @@ def run_setup() -> int:
     # ── Wrapper script installation ──
 
     report.add(install_wrapper_script())
+
+    # ── Claude Code skills ──
+
+    if project_root:
+        report.add(_install_skills(project_root))
 
     # ── Build MCP server ──
     # Build the TypeScript MCP server so it's ready when Claude Code connects.
