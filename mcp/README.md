@@ -93,9 +93,11 @@ src/
 
 | Tool | Description |
 |---|---|
-| `query_flows` | Query captured HTTP flows with filters |
+| `query_flows` | Query captured HTTP flows with filters (hosts, exclude_hosts, detail level) |
 | `wait_for_flow` | Block until a matching HTTP flow appears |
 | `get_flow_detail` | Full request/response detail for a flow |
+| `start_capture_session` | Start a capture session to bracket a UI action |
+| `stop_capture_session` | Stop a capture session and get its flows |
 | `proxy_status` | Check proxy state and configuration |
 | `verify_proxy_setup` | Verify mitmproxy CA cert on simulators |
 | `start_proxy` | Start mitmproxy network capture |

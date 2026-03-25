@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -344,6 +345,8 @@ class FlowQueryParams(BaseModel):
     """Parameters for querying captured flows."""
 
     host: str | None = None
+    hosts: list[str] | None = None
+    exclude_hosts: list[str] | None = None
     path_contains: str | None = None
     method: str | None = None
     status_min: int | None = None
@@ -354,16 +357,67 @@ class FlowQueryParams(BaseModel):
     device_id: str = "default"
     simulator_udid: str | None = None
     client_ip: str | None = None
+    detail: Literal["full", "summary"] = "full"
     limit: int = Field(default=100, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+
+
+class FlowSummaryItem(BaseModel):
+    """Lightweight flow representation for detail='summary' responses."""
+
+    id: str
+    timestamp: datetime
+    method: str
+    url: str
+    host: str
+    path: str
+    status_code: int | None = None
+    error: str | None = None
+    total_ms: float | None = None
 
 
 class FlowQueryResponse(BaseModel):
     """Response from flow query endpoint."""
 
-    flows: list[FlowRecord]
+    flows: list[FlowRecord] = []
+    flow_summaries: list[FlowSummaryItem] | None = None
     total: int
     has_more: bool
+
+
+class CaptureStartRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/capture/start."""
+
+    id: str | None = None
+    hosts: list[str] | None = None
+    exclude_hosts: list[str] | None = None
+    simulator_udid: str | None = None
+    client_ip: str | None = None
+    detail: Literal["full", "summary"] = "full"
+
+
+class CaptureStartResponse(BaseModel):
+    """Response from POST /api/v1/proxy/capture/start."""
+
+    session_id: str
+    start_time: datetime
+
+
+class CaptureStopRequest(BaseModel):
+    """Request body for POST /api/v1/proxy/capture/stop."""
+
+    session_id: str
+
+
+class CaptureStopResponse(BaseModel):
+    """Response from POST /api/v1/proxy/capture/stop."""
+
+    session_id: str
+    duration_seconds: float
+    total_flows: int
+    flows: list[FlowRecord] = []
+    flow_summaries: list[FlowSummaryItem] | None = None
+    by_host: list[HostSummary] = []
 
 
 class WaitForFlowRequest(BaseModel):

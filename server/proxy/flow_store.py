@@ -99,11 +99,17 @@ class FlowStore:
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
         """Apply query filters. Returns newest-first. Must be called under lock."""
         results: list[FlowRecord] = []
+        hosts_set = set(params.hosts) if params.hosts else None
+        exclude_set = set(params.exclude_hosts) if params.exclude_hosts else None
 
         for flow in self._flows.values():
             if params.device_id and flow.device_id != params.device_id:
                 continue
-            if params.host and flow.request.host != params.host:
+            if hosts_set and flow.request.host not in hosts_set:
+                continue
+            elif params.host and flow.request.host != params.host:
+                continue
+            if exclude_set and flow.request.host in exclude_set:
                 continue
             if params.path_contains and params.path_contains not in flow.request.path:
                 continue

@@ -115,9 +115,39 @@ Mock it before you start. You'll get consistent, fast responses instead of waiti
 
 If you're running multiple simulators, your agent can filter traffic by simulator. Each flow is automatically tagged with its originating simulator — no app-side changes needed.
 
+## Capture Sessions: Building Test Fixtures
+
+When you need to record the exact API calls an app makes during a specific action — for mock fixtures, regression tests, or documentation — use capture sessions to bracket the action and isolate its traffic.
+
+> "Record the API calls when I open the profile deep link"
+
+Your agent:
+1. Calls `start_capture_session` with `exclude_hosts` to filter out analytics noise (Firebase, AppsFlyer, Facebook SDKs, etc.) or `hosts` to capture only specific API domains
+2. Opens the deep link and waits for the screen to render
+3. Calls `stop_capture_session` to get only the flows from that window
+
+The result includes the flows (in compact summary or full detail), a by_host breakdown, and the duration. This replaces the manual pattern of recording timestamps, querying all flows, and filtering client-side.
+
+### Multi-Host Filtering
+
+Real apps talk to many hosts simultaneously — your API, analytics, crash reporting, feature flags, CDNs. Use `hosts` to include only specific domains, or `exclude_hosts` to filter out known noise:
+
+```
+query_flows hosts=["api.example.com", "cdn.example.com"]
+query_flows exclude_hosts=["firebaselogging-pa.googleapis.com", "api.iterable.com"]
+```
+
+Both parameters are also available on `start_capture_session` and are applied automatically when the session stops.
+
+### Compact Responses
+
+For discovery and triage, use `detail="summary"` on `query_flows` to get compact results (method, URL, status, timing only — no headers or bodies). This keeps responses within token limits and is the default for capture sessions in the MCP tools. Use `get_flow_detail` to drill into specific flows when you need full headers and response bodies.
+
 ## Tips
 
 - **Ask for summaries first, details second.** Summaries show the shape of traffic; raw flows are for drilling in.
 - **Filter aggressively.** A busy app generates a lot of traffic. Always narrow by host, method, or status when possible.
+- **Use capture sessions for test fixtures.** They handle time-window scoping, host filtering, and detail level in two calls.
+- **Use `detail="summary"` for discovery.** Full flow responses can exceed token limits; summaries give you what you need to decide which flows to inspect.
 - **Clear mocks when done.** Stale mocks from previous sessions cause confusing behavior.
 - **Intercepts block the app.** Be specific with intercept patterns and clear them when you're done investigating.

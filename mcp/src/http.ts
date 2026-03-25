@@ -3,7 +3,7 @@ import { discoverServer } from "./config.js";
 export async function apiRequest(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
-  params?: Record<string, string | number | boolean | undefined>,
+  params?: Record<string, string | number | boolean | string[] | undefined>,
   body?: unknown,
   timeoutMs?: number
 ): Promise<unknown> {
@@ -13,7 +13,11 @@ export async function apiRequest(
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null) {
-        url.searchParams.set(k, String(v));
+        if (Array.isArray(v)) {
+          for (const item of v) url.searchParams.append(k, String(item));
+        } else {
+          url.searchParams.set(k, String(v));
+        }
       }
     }
   }

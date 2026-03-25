@@ -81,7 +81,7 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 **Logs**: Filter by `level`, `process`, `search` text, and time range. Don't fetch 1,000 entries when 50 filtered ones will do. For sustained debugging, use `set_log_filter` to drop noise at ingestion — the `device-quiet` preset removes common system daemons, or combine `process` + `subsystems` includes for app-only output with zero framework noise. Setting a process filter automatically restarts running log adapters with subprocess-level filtering, cutting noise at the source. You can also apply presets at start time: `start_device_logging(process: "MyApp", preset: "device-quiet")`.
 
-**Flows**: Filter by `host`, `method`, `path_contains`, and `status_min`/`status_max`. Use `get_flow_summary` first to identify which hosts or patterns to investigate.
+**Flows**: Filter by `host` (single), `hosts` (list), `exclude_hosts` (list), `method`, `path_contains`, and `status_min`/`status_max`. Use `detail="summary"` to get compact results (method/url/status/timing only) that stay within token limits. Use `get_flow_summary` first to identify which hosts or patterns to investigate.
 
 **UI Tree**: Use `get_screen_summary` with a reasonable `max_elements` limit. If you need detail, scope `get_ui_tree` with `children_of` to a specific container rather than fetching the full 500+ element hierarchy.
 
@@ -100,7 +100,9 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 **Key insight**: Start with summary, trigger action, drill down to specific flows.
 
-**Per-simulator flow filtering**: When local capture is enabled, each flow is tagged with the originating simulator's UDID. Use `simulator_udid` in `query_flows` and `get_flow_summary` to see only traffic from a specific simulator — essential when running parallel tests.
+**Capture sessions for test fixtures**: To isolate the API calls for a specific UI action, use `start_capture_session` before the action and `stop_capture_session` after. This returns only the flows from that time window, with built-in host filtering and compact summaries. Use `exclude_hosts` to filter out analytics/SDK noise, or `hosts` to capture only specific API domains.
+
+**Per-simulator flow filtering**: When local capture is enabled, each flow is tagged with the originating simulator's UDID. Use `simulator_udid` in `query_flows`, `get_flow_summary`, and `start_capture_session` to see only traffic from a specific simulator — essential when running parallel tests.
 
 **Proxy modes for simulators**:
 
@@ -236,7 +238,8 @@ Open real-time video windows to see what's happening on USB-connected physical d
 
 **"I need to see network traffic"**
 - Overview: `get_flow_summary` (use `simulator_udid` to filter by simulator)
-- Specific requests: `query_flows` with filters
+- Specific requests: `query_flows` with filters (`hosts`, `exclude_hosts`, `detail="summary"`)
+- Bracket a UI action: `start_capture_session` → action → `stop_capture_session`
 - Full detail: `get_flow_detail`
 - Modify traffic: `set_intercept` + `release_flow` with modifications
 - Mock responses: `set_mock`
@@ -282,10 +285,12 @@ When calling the HTTP API directly (without MCP), use these paths:
 | `get_latest_crash`   | GET         | `/api/v1/crashes/latest`               |
 | `set_log_filter`     | POST        | `/api/v1/logs/filter`                  |
 | `list_log_sources`   | GET         | `/api/v1/logs/sources`                 |
-| `query_flows`        | GET         | `/api/v1/proxy/flows`                  |
-| `get_flow_detail`    | GET         | `/api/v1/proxy/flows/{id}`             |
-| `wait_for_flow`      | POST        | `/api/v1/proxy/flows/wait`             |
-| `get_flow_summary`   | GET         | `/api/v1/proxy/flows/summary`          |
+| `query_flows`              | GET         | `/api/v1/proxy/flows`                  |
+| `get_flow_detail`          | GET         | `/api/v1/proxy/flows/{id}`             |
+| `wait_for_flow`            | POST        | `/api/v1/proxy/flows/wait`             |
+| `get_flow_summary`         | GET         | `/api/v1/proxy/flows/summary`          |
+| `start_capture_session`    | POST        | `/api/v1/proxy/capture/start`          |
+| `stop_capture_session`     | POST        | `/api/v1/proxy/capture/stop`           |
 | `proxy_status`       | GET         | `/api/v1/proxy/status`                 |
 | `verify_proxy_setup` | POST        | `/api/v1/proxy/cert/verify`            |
 | `start_proxy`        | POST        | `/api/v1/proxy/start`                  |
@@ -417,7 +422,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **Limit result counts.** Fetch 50 entries, not 10,000. You can always query for more if needed.
 
-**Use cursors for incremental updates.** `get_log_summary` and `get_flow_summary` return a cursor. Pass it back with `since_cursor` to get only new activity since your last call — critical for token efficiency. The continuous monitoring pattern: call the summary tool, save the cursor, and on each subsequent check pass `since_cursor` to get a lightweight delta instead of re-fetching everything.
+**Use cursors for incremental updates.** `get_log_summary` and `get_flow_summary` return a cursor. Pass it back with `since_cursor` to get only new activity since your last call — critical for token efficiency. The continuous monitoring pattern: call the summary tool, save the cursor, and on each subsequent check pass `since_cursor` to get a lightweight delta instead of re-fetching everything. For one-off actions where you need all flows from a specific time window, use `start_capture_session` / `stop_capture_session` instead — they handle the time-bracketing and filtering automatically.
 
 **Scope UI tree queries.** Use `get_ui_tree` with `children_of` to fetch a subtree instead of the full hierarchy. Use `get_screen_summary` with a reasonable `max_elements` limit.
 

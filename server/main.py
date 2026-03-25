@@ -63,6 +63,7 @@ from server.lifecycle.watchdog import proxy_watchdog
 from server.models import LogEntry
 from server.processing.deduplicator import Deduplicator
 from server.processing.ingestion_filter import IngestionFilter
+from server.proxy.capture_session import CaptureSessionManager
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter
 from server.sources.build import BuildAdapter
@@ -217,6 +218,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Only auto-start when enabled via --proxy / enable_proxy.
     flow_store = FlowStore()
     app.state.flow_store = flow_store
+    app.state.capture_sessions = CaptureSessionManager()
     proxy = ProxyAdapter(
         device_id=config.default_device_id,
         on_entry=dedup.process,

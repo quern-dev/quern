@@ -10,7 +10,9 @@ export function registerProxyTools(server: McpServer): void {
 
 For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP.`,
     inputSchema: strictParams({
-      host: z.string().optional().describe("Filter by hostname"),
+      host: z.string().optional().describe("Filter by hostname (single host; use hosts for multiple)"),
+      hosts: z.array(z.string()).optional().describe("Filter to flows matching any of these hostnames"),
+      exclude_hosts: z.array(z.string()).optional().describe("Exclude flows matching any of these hostnames (analytics, SDKs, etc.)"),
       path_contains: z.string().optional().describe("Filter by path substring"),
       method: z
         .string()
@@ -36,6 +38,10 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .string()
         .optional()
         .describe("Filter by client IP address (physical device identification)"),
+      detail: z
+        .enum(["full", "summary"])
+        .default("full")
+        .describe("Detail level: 'full' includes headers/bodies, 'summary' returns only method/url/status/timing"),
       limit: z
         .coerce.number()
         .min(1)
@@ -46,6 +52,8 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
     }),
   }, async ({
     host,
+    hosts,
+    exclude_hosts,
     path_contains,
     method,
     status_min,
@@ -53,12 +61,15 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
     has_error,
     simulator_udid,
     client_ip,
+    detail,
     limit,
     offset,
   }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/proxy/flows", {
         host,
+        hosts,
+        exclude_hosts,
         path_contains,
         method,
         status_min,
@@ -66,6 +77,7 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         has_error,
         simulator_udid,
         client_ip,
+        detail,
         limit,
         offset,
       });
@@ -83,6 +95,61 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
             text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs the Quern Debug Server running? Start it with: quern-debug-server`,
           },
         ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("start_capture_session", {
+    description: `Start a capture session to bracket a UI action and isolate its network flows. Returns a session ID.
+
+Workflow:
+1. start_capture_session (with optional host filters)
+2. Perform UI actions (open deep link, tap buttons, etc.)
+3. stop_capture_session → get only the flows from that window
+
+Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebook, etc.). Use hosts to capture only specific API domains.`,
+    inputSchema: strictParams({
+      id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
+      hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
+      exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
+      simulator_udid: z.string().optional().describe("Filter to flows from this simulator"),
+      client_ip: z.string().optional().describe("Filter by client IP (physical devices)"),
+      detail: z
+        .enum(["full", "summary"])
+        .default("summary")
+        .describe("Detail level for flows on stop: 'summary' (default, compact) or 'full' (includes headers/bodies)"),
+    }),
+  }, async ({ id, hosts, exclude_hosts, simulator_udid, client_ip, detail }) => {
+    try {
+      const body: Record<string, unknown> = { detail };
+      if (id !== undefined) body.id = id;
+      if (hosts !== undefined) body.hosts = hosts;
+      if (exclude_hosts !== undefined) body.exclude_hosts = exclude_hosts;
+      if (simulator_udid !== undefined) body.simulator_udid = simulator_udid;
+      if (client_ip !== undefined) body.client_ip = client_ip;
+      const data = await apiRequest("POST", "/api/v1/proxy/capture/start", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("stop_capture_session", {
+    description: `Stop a capture session and get the flows captured during that window. Returns flows (summary or full based on session config), a by_host breakdown, total count, and duration.`,
+    inputSchema: strictParams({
+      session_id: z.string().describe("Session ID from start_capture_session"),
+    }),
+  }, async ({ session_id }) => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/proxy/capture/stop", undefined, { session_id });
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
         isError: true,
       };
     }

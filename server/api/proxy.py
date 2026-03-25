@@ -13,6 +13,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from server.lifecycle.state import detect_current_ssid, detect_host_ip_for_subnet, update_state
 from server.models import (
+    CaptureStartRequest,
+    CaptureStartResponse,
+    CaptureStopRequest,
+    CaptureStopResponse,
     DeviceCertState,
     FlowEvent,
     FlowQueryParams,
@@ -419,6 +423,8 @@ async def unconfigure_system(request: Request) -> SystemProxyRestoreInfo:
 async def query_flows(
     request: Request,
     host: str | None = None,
+    hosts: list[str] | None = Query(default=None),
+    exclude_hosts: list[str] | None = Query(default=None),
     path_contains: str | None = None,
     method: str | None = None,
     status_min: int | None = None,
@@ -429,16 +435,19 @@ async def query_flows(
     device_id: str = "default",
     simulator_udid: str | None = None,
     client_ip: str | None = None,
+    detail: str = Query(default="full", pattern=r"^(full|summary)$"),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> FlowQueryResponse:
     """Query captured HTTP flows with filters and pagination."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
-        return FlowQueryResponse(flows=[], total=0, has_more=False)
+        return FlowQueryResponse(total=0, has_more=False)
 
     params = FlowQueryParams(
         host=host,
+        hosts=hosts,
+        exclude_hosts=exclude_hosts,
         path_contains=path_contains,
         method=method,
         status_min=status_min,
@@ -454,11 +463,30 @@ async def query_flows(
     )
 
     flows, total = await flow_store.query(params)
-    return FlowQueryResponse(
-        flows=flows,
-        total=total,
-        has_more=(offset + limit) < total,
-    )
+    has_more = (offset + limit) < total
+
+    if detail == "summary":
+        from server.models import FlowSummaryItem
+
+        summaries = [
+            FlowSummaryItem(
+                id=f.id,
+                timestamp=f.timestamp,
+                method=f.request.method,
+                url=f.request.url,
+                host=f.request.host,
+                path=f.request.path,
+                status_code=f.response.status_code if f.response else None,
+                error=f.error,
+                total_ms=f.timing.total_ms if f.timing else None,
+            )
+            for f in flows
+        ]
+        return FlowQueryResponse(
+            flow_summaries=summaries, total=total, has_more=has_more,
+        )
+
+    return FlowQueryResponse(flows=flows, total=total, has_more=has_more)
 
 
 @router.get("/flows/summary", response_model=FlowSummaryResponse)
@@ -608,6 +636,32 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
             )
 
         await asyncio.sleep(body.interval)
+
+
+@router.post("/capture/start", response_model=CaptureStartResponse)
+async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureStartResponse:
+    """Start a capture session to bracket a UI action and isolate its flows."""
+    manager = request.app.state.capture_sessions
+    try:
+        session = manager.start(body)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return CaptureStartResponse(session_id=session.id, start_time=session.start_time)
+
+
+@router.post("/capture/stop", response_model=CaptureStopResponse)
+async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureStopResponse:
+    """Stop a capture session and return the flows captured during that window."""
+    manager = request.app.state.capture_sessions
+    flow_store = request.app.state.flow_store
+    if flow_store is None:
+        return CaptureStopResponse(
+            session_id=body.session_id, duration_seconds=0, total_flows=0,
+        )
+    try:
+        return await manager.stop(body.session_id, flow_store)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/flows/{flow_id}", response_model=FlowRecord)

@@ -124,6 +124,12 @@ Your agent shows you the outbound request body. Did your code serialize the mode
 
 Your agent captures the OAuth dance, token exchange, refresh flow — whatever your auth system does. Useful for verifying that tokens are stored correctly, refresh logic works, and logout actually clears everything.
 
+### Recording Mock Fixtures with Capture Sessions
+
+> "Record the API calls for each deep link so we can mock them in tests"
+
+Your agent uses `start_capture_session` to bracket each UI action, automatically filtering out analytics and SDK traffic. The captured flows become mock fixtures — the exact request/response pairs needed to make each screen work in isolation. This pattern turns live API exploration into reproducible test infrastructure.
+
 ### Third-Party SDK Traffic
 
 > "What network calls is my app making that aren't to our API?"
