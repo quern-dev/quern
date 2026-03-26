@@ -328,6 +328,18 @@ class DeviceController(DeviceControllerUI):
         if self._active_udid == udid:
             self._active_udid = None
 
+    async def erase(self, udid: str) -> None:
+        """Erase a simulator, resetting it to factory state. Shuts down first if booted."""
+        self._require_simulator(udid, "Erase")
+        # simctl erase requires the simulator to be shutdown
+        try:
+            await self.simctl.shutdown(udid)
+        except DeviceError:
+            pass  # already shutdown
+        await self.simctl.erase(udid)
+        if self._active_udid == udid:
+            self._active_udid = None
+
     def _is_pre_ios17_udid(self, udid: str) -> bool:
         """Return True if this UDID is a pre-iOS 17 libimobiledevice UDID.
 
