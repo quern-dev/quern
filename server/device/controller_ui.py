@@ -808,6 +808,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         skip_stability_check: bool = False,
         source_timeout: float | None = None,
+        value: str | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -904,6 +905,21 @@ class DeviceControllerUI:
 
         if len(matches) == 1:
             el = matches[0]
+
+            # Value check for switches/toggles: skip tap if already in desired state
+            if value is not None:
+                current_value = el.value or ""
+                if current_value == value:
+                    return {
+                        "status": "already_set",
+                        "value": current_value,
+                        "element": {
+                            "label": el.label,
+                            "type": el.type,
+                            "identifier": el.identifier,
+                        },
+                    }
+
             cx, cy = get_tap_point(el)
 
             # Home indicator obstruction check: if the element's tap point
@@ -1011,7 +1027,7 @@ class DeviceControllerUI:
             #         logger.warning("Element still present after tap, may have failed")
             #         # Could retry here if retry_attempts > 1
 
-            return {
+            result = {
                 "status": "ok",
                 "tapped": {
                     "label": el.label,
@@ -1021,6 +1037,10 @@ class DeviceControllerUI:
                     "y": cy,
                 },
             }
+            if value is not None:
+                result["previous_value"] = el.value or ""
+                result["requested_value"] = value
+            return result
 
         # Future enhancement: Retry logic implementation
         # If we add retry_attempts parameter, wrap the tap attempt in a loop:

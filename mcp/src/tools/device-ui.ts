@@ -362,8 +362,12 @@ Label matching modes (mutually exclusive — use only one):
         .max(60)
         .optional()
         .describe("Override WDA /source timeout in seconds. Use 10-15 for slow screens on older devices. Physical devices only."),
+      value: z
+        .string()
+        .optional()
+        .describe('For switches/toggles: desired value ("1" = on, "0" = off). Checks current state first and skips the tap if already set. Returns status "already_set" if no tap was needed.'),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
@@ -373,6 +377,7 @@ Label matching modes (mutually exclusive — use only one):
       if (element_type) body.element_type = element_type;
       if (udid) body.udid = udid;
       if (source_timeout) body.source_timeout = source_timeout;
+      if (value !== undefined) body.value = value;
 
       const data = await apiRequest(
         "POST",

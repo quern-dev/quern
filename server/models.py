@@ -876,6 +876,7 @@ class TapElementRequest(BaseModel):
     udid: str | None = None
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
+    value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):

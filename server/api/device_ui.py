@@ -313,6 +313,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             udid=body.udid,
             skip_stability_check=body.skip_stability_check,
             source_timeout=body.source_timeout,
+            value=body.value,
         )
 
         end = time.perf_counter()
