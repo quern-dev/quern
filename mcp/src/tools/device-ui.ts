@@ -31,8 +31,12 @@ export function registerDeviceUITools(server: McpServer): void {
         .max(60)
         .optional()
         .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Physical devices only."),
+      mode: z
+        .enum(["flat"])
+        .optional()
+        .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Default uses nested mode with probe-based discovery. Simulators only."),
     }),
-  }, async ({ udid, children_of, snapshot_depth, strategy, source_timeout }) => {
+  }, async ({ udid, children_of, snapshot_depth, strategy, source_timeout, mode }) => {
     try {
       const params: Record<string, string> = {};
       if (udid) params.udid = udid;
@@ -40,6 +44,7 @@ export function registerDeviceUITools(server: McpServer): void {
       if (snapshot_depth !== undefined) params.snapshot_depth = String(snapshot_depth);
       if (strategy) params.strategy = strategy;
       if (source_timeout !== undefined) params.source_timeout = String(source_timeout);
+      if (mode) params.mode = mode;
       const data = await apiRequest("GET", "/api/v1/device/ui", params);
 
       return {
@@ -167,6 +172,10 @@ export function registerDeviceUITools(server: McpServer): void {
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      mode: z
+        .enum(["flat"])
+        .optional()
+        .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Simulators only."),
     }),
   }, async ({
     label,
@@ -179,6 +188,7 @@ export function registerDeviceUITools(server: McpServer): void {
     timeout,
     interval,
     udid,
+    mode,
   }) => {
     try {
       const body: Record<string, unknown> = {
@@ -193,6 +203,7 @@ export function registerDeviceUITools(server: McpServer): void {
       if (identifier !== undefined) body.identifier = identifier;
       if (element_type !== undefined) body.type = element_type;
       if (value !== undefined) body.value = value;
+      if (mode !== undefined) body.mode = mode;
       if (udid !== undefined) body.udid = udid;
 
       const data = await apiRequest(
@@ -249,8 +260,12 @@ This is the recommended first step before interacting with UI. Use this to disco
         .max(60)
         .optional()
         .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Physical devices only."),
+      mode: z
+        .enum(["flat"])
+        .optional()
+        .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Default uses nested mode with probe-based discovery. Simulators only."),
     }),
-  }, async ({ max_elements, udid, snapshot_depth, strategy, source_timeout }) => {
+  }, async ({ max_elements, udid, snapshot_depth, strategy, source_timeout, mode }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/screen-summary", {
         max_elements,
@@ -258,6 +273,7 @@ This is the recommended first step before interacting with UI. Use this to disco
         snapshot_depth,
         strategy,
         source_timeout,
+        mode,
       });
 
       return {

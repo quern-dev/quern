@@ -54,13 +54,17 @@ async def get_ui_elements(
         default=None, ge=1, le=60,
         description="Override WDA /source timeout in seconds. Physical devices only.",
     ),
+    mode: str | None = Query(
+        default=None, pattern=r"^(flat)$",
+        description="'flat' uses flat idb output with custom companion. Default uses nested.",
+    ),
 ):
     """Get all UI accessibility elements from the current screen.
 
     Optionally scope to children of a specific element using the `children_of` parameter.
     """
     start = time.perf_counter()
-    logger.info(f"[PERF] API /ui START (children_of={children_of})")
+    logger.info(f"[PERF] API /ui START (children_of={children_of}, mode={mode})")
 
     controller = _get_controller(request)
     try:
@@ -73,7 +77,7 @@ async def get_ui_elements(
             else:
                 elements, resolved_udid = await controller.get_ui_elements(
                     udid=udid, snapshot_depth=snapshot_depth,
-                    source_timeout=source_timeout,
+                    source_timeout=source_timeout, mode=mode,
                 )
         elif children_of:
             elements, resolved_udid = await controller.get_ui_elements_children_of(
@@ -82,7 +86,7 @@ async def get_ui_elements(
         else:
             elements, resolved_udid = await controller.get_ui_elements(
                 udid=udid, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout,
+                source_timeout=source_timeout, mode=mode,
             )
 
         end = time.perf_counter()
@@ -199,6 +203,7 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
             timeout=body.timeout,
             interval=body.interval,
             udid=body.udid,
+            mode=body.mode,
         )
         result["udid"] = resolved_udid
 
@@ -243,6 +248,10 @@ async def get_screen_summary(
             "Use for slow screens on older devices. Physical devices only."
         ),
     ),
+    mode: str | None = Query(
+        default=None, pattern=r"^(flat)$",
+        description="'flat' uses flat idb output with custom companion. Default uses nested.",
+    ),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
@@ -253,6 +262,7 @@ async def get_screen_summary(
       Only affects physical devices.
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
     - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
+    - mode: 'flat' to use flat idb output with custom companion. Default uses nested.
 
     Returns summary with truncated, total_interactive_elements fields.
     """
@@ -264,6 +274,7 @@ async def get_screen_summary(
             snapshot_depth=snapshot_depth,
             strategy=strategy,
             source_timeout=source_timeout,
+            mode=mode,
         )
         summary["udid"] = resolved_udid
         return summary
