@@ -18,6 +18,24 @@ from server.device.ui_elements import (
 from server.models import DeviceError, UIElement, WaitCondition
 
 
+def _build_screen_context(elements: list[UIElement]) -> dict:
+    """Build a lightweight screen context dict from an existing elements list.
+
+    Used to enrich error responses so callers know what screen the app is on
+    when an action fails. Uses max_elements=10 for compact output.
+    """
+    try:
+        summary = generate_screen_summary(elements, max_elements=10)
+        return {
+            "screen_title": summary.get("screen_title", ""),
+            "summary": summary.get("summary", ""),
+            "element_count": summary.get("element_count", 0),
+            "interactive_elements": summary.get("interactive_elements", []),
+        }
+    except Exception:
+        return {}  # best-effort — don't mask the original error
+
+
 def _effective_filter_label(
     label: str | None,
     label_contains: str | None,
@@ -715,12 +733,21 @@ class DeviceControllerUI:
 
                 # Condition not met yet, but fast path worked - check timeout
                 if elapsed >= timeout:
+                    # Best-effort screen context for fast-path timeout
+                    try:
+                        ctx_elements, _ = await self.get_ui_elements(
+                            resolved, mode=mode,
+                        )
+                        screen_context = _build_screen_context(ctx_elements)
+                    except Exception:
+                        screen_context = {}
                     return (
                         {
                             "matched": False,
                             "elapsed_seconds": round(elapsed, 2),
                             "polls": polls,
                             "last_state": last_element.model_dump() if last_element else None,
+                            "screen_context": screen_context,
                         },
                         resolved,
                     )
@@ -764,11 +791,21 @@ class DeviceControllerUI:
 
             # Check timeout
             if elapsed >= timeout:
+                # Fetch unfiltered elements for screen context (the polling
+                # loop uses filtered fetches that may return empty)
+                try:
+                    ctx_elements, _ = await self.get_ui_elements(
+                        resolved, mode=mode,
+                    )
+                    screen_context = _build_screen_context(ctx_elements)
+                except Exception:
+                    screen_context = {}
                 return {
                     "matched": False,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "last_state": last_element.model_dump() if last_element else None,
+                    "screen_context": screen_context,
                 }, resolved
 
             # Sleep before next poll
@@ -912,10 +949,19 @@ class DeviceControllerUI:
             )
             if element_type:
                 search_desc += f", type='{element_type}'"
-            raise DeviceError(
-                f"No element found matching {search_desc}",
-                tool="idb",
-            )
+            # Fetch full (unfiltered) elements for screen context if we used filters
+            if filter_label or identifier or element_type:
+                try:
+                    all_elements, _ = await self.get_ui_elements(resolved)
+                except Exception:
+                    all_elements = elements
+            else:
+                all_elements = elements
+            return {
+                "status": "not_found",
+                "detail": f"No element found matching {search_desc}",
+                "screen_context": _build_screen_context(all_elements),
+            }
 
         if len(matches) == 1:
             el = matches[0]

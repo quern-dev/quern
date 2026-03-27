@@ -328,6 +328,12 @@ async def tap_element(request: Request, body: TapElementRequest):
         )
 
         end = time.perf_counter()
+
+        # Element not found — return 404 with screen context
+        if result.get("status") == "not_found":
+            logger.info(f"[PERF] API /ui/tap-element NOT_FOUND: {(end-start)*1000:.1f}ms")
+            raise HTTPException(status_code=404, detail=result)
+
         logger.info(f"[PERF] API /ui/tap-element SUCCESS: {(end-start)*1000:.1f}ms")
         return result
     except DeviceError as e:
