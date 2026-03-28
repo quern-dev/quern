@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server.api.device import _capture_screen_context, _get_controller, _handle_device_error
+from server.api.device import (
+    _capture_action_screenshot,
+    _capture_screen_context,
+    _get_controller,
+    _handle_device_error,
+)
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -315,6 +321,10 @@ async def tap_element(request: Request, body: TapElementRequest):
 
     controller = _get_controller(request)
     try:
+        if body.capture_screenshots:
+            resolved = await controller.resolve_udid(body.udid)
+            before = await _capture_action_screenshot(controller, resolved, "tap_before")
+
         result = await controller.tap_element(
             label=body.label,
             label_contains=body.label_contains,
@@ -333,6 +343,11 @@ async def tap_element(request: Request, body: TapElementRequest):
         if result.get("status") == "not_found":
             logger.info(f"[PERF] API /ui/tap-element NOT_FOUND: {(end-start)*1000:.1f}ms")
             raise HTTPException(status_code=404, detail=result)
+
+        if body.capture_screenshots:
+            await asyncio.sleep(0.5)  # let screen settle after tap
+            after = await _capture_action_screenshot(controller, body.udid, "tap_after")
+            result["screenshots"] = {"before": before, "after": after}
 
         if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
             result["screen_context"] = await _capture_screen_context(controller, body.udid)
@@ -368,8 +383,15 @@ async def type_text(request: Request, body: TypeTextRequest):
     """Type text into the focused field."""
     controller = _get_controller(request)
     try:
+        if body.capture_screenshots:
+            resolved = await controller.resolve_udid(body.udid)
+            before = await _capture_action_screenshot(controller, resolved, "type_before")
         udid = await controller.type_text(text=body.text, udid=body.udid)
-        result = {"status": "ok", "udid": udid}
+        result: dict = {"status": "ok", "udid": udid}
+        if body.capture_screenshots:
+            await asyncio.sleep(0.5)  # let screen settle after typing
+            after = await _capture_action_screenshot(controller, udid, "type_after")
+            result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result

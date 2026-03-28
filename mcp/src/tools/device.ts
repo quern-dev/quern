@@ -245,13 +245,18 @@ NOTE: If you want to capture network traffic from this app:
         .boolean()
         .default(false)
         .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle."),
+      capture_screenshots: z
+        .boolean()
+        .default(false)
+        .describe("Capture before/after screenshots around the app launch."),
     }),
-  }, async ({ bundle_id, udid, env, include_screen_context }) => {
+  }, async ({ bundle_id, udid, env, include_screen_context, capture_screenshots }) => {
     try {
       const body: Record<string, unknown> = { bundle_id };
       if (udid) body.udid = udid;
       if (env) body.env = env;
       if (include_screen_context) body.include_screen_context = true;
+      if (capture_screenshots) body.capture_screenshots = true;
 
       const data = await apiRequest(
         "POST",
@@ -616,12 +621,17 @@ Examples:
         .boolean()
         .default(false)
         .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle."),
+      capture_screenshots: z
+        .boolean()
+        .default(false)
+        .describe("Capture before/after screenshots around the URL open."),
     }),
-  }, async ({ url, udid, include_screen_context }) => {
+  }, async ({ url, udid, include_screen_context, capture_screenshots }) => {
     try {
       const body: Record<string, unknown> = { url };
       if (udid) body.udid = udid;
       if (include_screen_context) body.include_screen_context = true;
+      if (capture_screenshots) body.capture_screenshots = true;
 
       const data = await apiRequest(
         "POST",

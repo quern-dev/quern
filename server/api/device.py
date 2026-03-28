@@ -61,6 +61,24 @@ async def _capture_screen_context(controller, udid: str) -> dict:
         return {}
 
 
+async def _capture_action_screenshot(controller, udid: str, label: str) -> str | None:
+    """Best-effort screenshot capture for action before/after pairs."""
+    try:
+        from datetime import UTC, datetime
+        from pathlib import Path
+
+        screenshot_dir = Path("/tmp/quern/screenshots")
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+        filename = f"{ts}_{label}.png"
+        filepath = screenshot_dir / filename
+        image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
+        filepath.write_bytes(image_bytes)
+        return str(filepath)
+    except Exception:
+        return None
+
+
 def _get_controller(request: Request):
     """Get the DeviceController from app state."""
     controller = request.app.state.device_controller
@@ -288,10 +306,20 @@ async def launch_app(request: Request, body: LaunchAppRequest):
     """Launch an app on a simulator."""
     controller = _get_controller(request)
     try:
-        udid = await controller.launch_app(bundle_id=body.bundle_id, udid=body.udid, env=body.env)
-        result = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
+        resolved = await controller.resolve_udid(body.udid)
+        if body.capture_screenshots:
+            before = await _capture_action_screenshot(controller, resolved, "launch_before")
+        udid = await controller.launch_app(
+            bundle_id=body.bundle_id, udid=body.udid, env=body.env,
+        )
+        result: dict = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
+        if body.capture_screenshots:
+            await asyncio.sleep(0.5)
+            after = await _capture_action_screenshot(controller, udid, "launch_after")
+            result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
-            await asyncio.sleep(0.5)  # let the app settle
+            if not body.capture_screenshots:
+                await asyncio.sleep(0.5)
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result
     except DeviceError as e:
@@ -435,10 +463,18 @@ async def open_url(request: Request, body: OpenUrlRequest):
     """Open a URL on a simulator or emulator."""
     controller = _get_controller(request)
     try:
+        resolved = await controller.resolve_udid(body.udid)
+        if body.capture_screenshots:
+            before = await _capture_action_screenshot(controller, resolved, "open_url_before")
         udid = await controller.open_url(url=body.url, udid=body.udid)
-        result = {"status": "ok", "udid": udid, "url": body.url}
+        result: dict = {"status": "ok", "udid": udid, "url": body.url}
+        if body.capture_screenshots:
+            await asyncio.sleep(0.5)
+            after = await _capture_action_screenshot(controller, udid, "open_url_after")
+            result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
-            await asyncio.sleep(0.5)  # let deep link handler settle
+            if not body.capture_screenshots:
+                await asyncio.sleep(0.5)
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result
     except DeviceError as e:

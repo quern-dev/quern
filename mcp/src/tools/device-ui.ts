@@ -386,8 +386,12 @@ Label matching modes (mutually exclusive — use only one):
         .boolean()
         .default(false)
         .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation."),
+      capture_screenshots: z
+        .boolean()
+        .default(false)
+        .describe("Capture before/after screenshots around the tap. Returns file paths in screenshots.before and screenshots.after."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, include_screen_context }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, include_screen_context, capture_screenshots }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
@@ -399,6 +403,7 @@ Label matching modes (mutually exclusive — use only one):
       if (source_timeout) body.source_timeout = source_timeout;
       if (value !== undefined) body.value = value;
       if (include_screen_context) body.include_screen_context = true;
+      if (capture_screenshots) body.capture_screenshots = true;
 
       const data = await apiRequest(
         "POST",
@@ -489,12 +494,17 @@ Label matching modes (mutually exclusive — use only one):
         .boolean()
         .default(false)
         .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues."),
+      capture_screenshots: z
+        .boolean()
+        .default(false)
+        .describe("Capture before/after screenshots around the text entry."),
     }),
-  }, async ({ text, udid, include_screen_context }) => {
+  }, async ({ text, udid, include_screen_context, capture_screenshots }) => {
     try {
       const body: Record<string, unknown> = { text };
       if (udid) body.udid = udid;
       if (include_screen_context) body.include_screen_context = true;
+      if (capture_screenshots) body.capture_screenshots = true;
 
       const data = await apiRequest(
         "POST",

@@ -41,8 +41,8 @@ def _build_screen_context(elements: list[UIElement]) -> dict:
 _SCREENSHOT_DIR = Path("/tmp/quern/screenshots")
 
 
-async def _capture_error_screenshot(controller, udid: str, label: str) -> str | None:
-    """Best-effort screenshot capture on error. Returns file path or None."""
+async def _capture_screenshot(controller, udid: str, label: str) -> str | None:
+    """Best-effort screenshot capture. Returns file path or None."""
     try:
         _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
@@ -760,7 +760,7 @@ class DeviceControllerUI:
                         screen_context = _build_screen_context(ctx_elements)
                     except Exception:
                         screen_context = {}
-                    screenshot = await _capture_error_screenshot(
+                    screenshot = await _capture_screenshot(
                         self, resolved, "wait_timeout",
                     )
                     if screenshot:
@@ -824,7 +824,7 @@ class DeviceControllerUI:
                     screen_context = _build_screen_context(ctx_elements)
                 except Exception:
                     screen_context = {}
-                screenshot = await _capture_error_screenshot(
+                screenshot = await _capture_screenshot(
                     self, resolved, "wait_timeout",
                 )
                 if screenshot:
@@ -987,7 +987,7 @@ class DeviceControllerUI:
             else:
                 all_elements = elements
             screen_context = _build_screen_context(all_elements)
-            screenshot = await _capture_error_screenshot(
+            screenshot = await _capture_screenshot(
                 self, resolved, "tap_not_found",
             )
             if screenshot:
