@@ -345,7 +345,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             raise HTTPException(status_code=404, detail=result)
 
         if body.capture_screenshots:
-            await asyncio.sleep(0.5)  # let screen settle after tap
+            await asyncio.sleep(1.0)  # let screen settle after tap
             after = await _capture_action_screenshot(controller, body.udid, "tap_after")
             result["screenshots"] = {"before": before, "after": after}
 
@@ -389,7 +389,7 @@ async def type_text(request: Request, body: TypeTextRequest):
         udid = await controller.type_text(text=body.text, udid=body.udid)
         result: dict = {"status": "ok", "udid": udid}
         if body.capture_screenshots:
-            await asyncio.sleep(0.5)  # let screen settle after typing
+            await asyncio.sleep(1.0)  # let screen settle after typing
             after = await _capture_action_screenshot(controller, udid, "type_after")
             result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:

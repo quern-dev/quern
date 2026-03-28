@@ -559,6 +559,59 @@ NOTE: If you want to capture network traffic from this app:
     }
   });
 
+  server.registerTool("start_screenshot_timeline", {
+    description: `Start a screenshot timeline that auto-captures a screenshot after every UI action (tap, type, swipe, launch, open_url, etc.). Screenshots are saved sequentially with high-fidelity action labels. Call stop_screenshot_timeline to get the manifest with all entries.
+
+Use this to build visual test reports — every action becomes a timestamped step with a screenshot.`,
+    inputSchema: strictParams({
+      udid: z.string().optional().describe("Device UDID for screenshots (defaults to active device)"),
+      session_id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
+    }),
+  }, async ({ udid, session_id }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid) body.udid = udid;
+      if (session_id) body.session_id = session_id;
+      const data = await apiRequest("POST", "/api/v1/device/screenshot/timeline/start", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("stop_screenshot_timeline", {
+    description: `Stop the active screenshot timeline and return its manifest. The manifest lists every action with timestamp, action label, screenshot path, and HTTP status code.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/device/screenshot/timeline/stop");
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("get_screenshot_timeline", {
+    description: `Get the manifest of the active screenshot timeline without stopping it. Shows all entries captured so far.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/screenshot/timeline");
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("set_location", {
     description: `Set the simulated GPS location on an iOS simulator or Android emulator.`,
     inputSchema: strictParams({

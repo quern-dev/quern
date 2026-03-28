@@ -314,12 +314,12 @@ async def launch_app(request: Request, body: LaunchAppRequest):
         )
         result: dict = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
         if body.capture_screenshots:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             after = await _capture_action_screenshot(controller, udid, "launch_after")
             result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
             if not body.capture_screenshots:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result
     except DeviceError as e:
@@ -469,12 +469,12 @@ async def open_url(request: Request, body: OpenUrlRequest):
         udid = await controller.open_url(url=body.url, udid=body.udid)
         result: dict = {"status": "ok", "udid": udid, "url": body.url}
         if body.capture_screenshots:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             after = await _capture_action_screenshot(controller, udid, "open_url_after")
             result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
             if not body.capture_screenshots:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result
     except DeviceError as e:
@@ -1046,3 +1046,60 @@ async def screenshot_annotated(
         return Response(content=image_bytes, media_type=media_type)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Screenshot timeline
+# ---------------------------------------------------------------------------
+
+
+@router.post("/screenshot/timeline/start")
+async def start_timeline(
+    request: Request,
+    body: dict | None = None,
+):
+    """Start a screenshot timeline that auto-captures around every UI action."""
+    from server.screenshot_timeline import ScreenshotTimeline
+
+    if getattr(request.app.state, "active_timeline", None) is not None:
+        raise HTTPException(status_code=409, detail="A timeline is already active")
+
+    body = body or {}
+    udid = body.get("udid")
+    session_id = body.get("session_id")
+
+    # Resolve active device if no udid provided
+    if not udid:
+        controller = _get_controller(request)
+        try:
+            udid = await controller.resolve_udid(None)
+        except DeviceError:
+            pass
+
+    timeline = ScreenshotTimeline(udid=udid, session_id=session_id)
+    request.app.state.active_timeline = timeline
+    return {
+        "session_id": timeline.session_id,
+        "started_at": timeline.started_at.isoformat(),
+        "output_dir": str(timeline.output_dir),
+        "udid": udid,
+    }
+
+
+@router.post("/screenshot/timeline/stop")
+async def stop_timeline(request: Request):
+    """Stop the active screenshot timeline and return its manifest."""
+    timeline = getattr(request.app.state, "active_timeline", None)
+    if timeline is None:
+        raise HTTPException(status_code=404, detail="No active timeline")
+    request.app.state.active_timeline = None
+    return timeline.get_manifest()
+
+
+@router.get("/screenshot/timeline")
+async def get_timeline(request: Request):
+    """Get the manifest of the active screenshot timeline."""
+    timeline = getattr(request.app.state, "active_timeline", None)
+    if timeline is None:
+        raise HTTPException(status_code=404, detail="No active timeline")
+    return timeline.get_manifest()
