@@ -160,6 +160,10 @@ class SimctlBackend:
         """Shutdown a simulator."""
         await self._run_simctl("shutdown", udid)
 
+    async def erase(self, udid: str) -> None:
+        """Erase a simulator, resetting it to factory state. Must be shutdown first."""
+        await self._run_simctl("erase", udid)
+
     async def install_app(self, udid: str, app_path: str) -> None:
         """Install an app on a simulator."""
         await self._run_simctl("install", udid, app_path)

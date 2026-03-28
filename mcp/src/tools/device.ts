@@ -152,6 +152,38 @@ export function registerDeviceTools(server: McpServer): void {
     }
   });
 
+  server.registerTool("erase_device", {
+    description: `Erase a simulator, resetting it to factory state. All apps, data, and settings are removed. The simulator is shut down automatically before erasing. Simulator only — not supported for physical devices or Android.`,
+    inputSchema: strictParams({
+      udid: z.string().describe("Simulator UDID to erase"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/erase",
+        undefined,
+        { udid }
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("install_app", {
     description: `Install an app (.app, .ipa, or .apk) on an iOS or Android device.`,
     inputSchema: strictParams({

@@ -394,6 +394,7 @@ class DeviceControllerUI:
         filter_type: str | None = None,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        mode: str | None = None,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -470,10 +471,18 @@ class DeviceControllerUI:
         if self._is_android(resolved):
             await self._ensure_android_screen_on(resolved)
 
-        raw = await self._ui_backend(resolved).describe_all(
-            resolved, snapshot_depth=snapshot_depth,
-            source_timeout=source_timeout,
-        )
+        backend = self._ui_backend(resolved)
+        if mode == "flat" and hasattr(backend, "describe_all_flat"):
+            raw = await backend.describe_all_flat(
+                resolved, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout,
+            )
+            use_cache = False  # flat mode returns different elements
+        else:
+            raw = await backend.describe_all(
+                resolved, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout,
+            )
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -584,6 +593,7 @@ class DeviceControllerUI:
         timeout: float = 10,
         interval: float = 0.5,
         udid: str | None = None,
+        mode: str | None = None,
     ) -> tuple[dict, str]:
         """Wait for an element to satisfy a condition (server-side polling).
 
@@ -727,6 +737,7 @@ class DeviceControllerUI:
                 filter_label=filter_label,
                 filter_identifier=identifier,
                 filter_type=element_type,
+                mode=mode,
             )
 
             matches = find_element(
@@ -770,6 +781,7 @@ class DeviceControllerUI:
         snapshot_depth: int | None = None,
         strategy: str | None = None,
         source_timeout: float | None = None,
+        mode: str | None = None,
     ) -> tuple[dict, str]:
         """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
 
@@ -779,6 +791,7 @@ class DeviceControllerUI:
             snapshot_depth: WDA accessibility tree depth (1-50, physical devices only)
             strategy: 'skeleton' to skip /source timeout on complex screens (physical only)
             source_timeout: Override WDA /source timeout in seconds (physical devices only)
+            mode: 'flat' to use flat idb output (for custom companion). Default uses nested.
         """
         resolved = await self.resolve_udid(udid)
         if strategy == "skeleton" and self._is_physical(resolved):
@@ -788,6 +801,7 @@ class DeviceControllerUI:
             elements, resolved = await self.get_ui_elements(
                 udid, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout,
+                mode=mode,
             )
         return generate_screen_summary(elements, max_elements=max_elements), resolved
 
@@ -808,6 +822,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         skip_stability_check: bool = False,
         source_timeout: float | None = None,
+        value: str | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -904,6 +919,21 @@ class DeviceControllerUI:
 
         if len(matches) == 1:
             el = matches[0]
+
+            # Value check for switches/toggles: skip tap if already in desired state
+            if value is not None:
+                current_value = el.value or ""
+                if current_value == value:
+                    return {
+                        "status": "already_set",
+                        "value": current_value,
+                        "element": {
+                            "label": el.label,
+                            "type": el.type,
+                            "identifier": el.identifier,
+                        },
+                    }
+
             cx, cy = get_tap_point(el)
 
             # Home indicator obstruction check: if the element's tap point
@@ -1011,7 +1041,7 @@ class DeviceControllerUI:
             #         logger.warning("Element still present after tap, may have failed")
             #         # Could retry here if retry_attempts > 1
 
-            return {
+            result = {
                 "status": "ok",
                 "tapped": {
                     "label": el.label,
@@ -1021,6 +1051,10 @@ class DeviceControllerUI:
                     "y": cy,
                 },
             }
+            if value is not None:
+                result["previous_value"] = el.value or ""
+                result["requested_value"] = value
+            return result
 
         # Future enhancement: Retry logic implementation
         # If we add retry_attempts parameter, wrap the tap attempt in a loop:

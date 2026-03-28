@@ -232,6 +232,17 @@ async def shutdown_device(request: Request, body: ShutdownDeviceRequest):
         raise _handle_device_error(e)
 
 
+@router.post("/erase")
+async def erase_device(request: Request, body: ShutdownDeviceRequest):
+    """Erase a simulator, resetting it to factory state. Simulator only."""
+    controller = _get_controller(request)
+    try:
+        await controller.erase(udid=body.udid)
+        return {"status": "erased", "udid": body.udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
 @router.post("/active")
 async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     """Set the active device by UDID."""

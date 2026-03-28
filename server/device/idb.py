@@ -118,9 +118,27 @@ class IdbBackend:
         )
 
         if proc.returncode != 0:
+            error_msg = stderr.decode().strip()
+            # Auto-reconnect if companion is not running
+            if "Connection refused" in error_msg and not getattr(self, "_reconnecting", False):
+                self._reconnecting = True
+                try:
+                    # Extract UDID from --udid flag in args
+                    udid = None
+                    arg_list = list(args)
+                    for i, a in enumerate(arg_list):
+                        if a == "--udid" and i + 1 < len(arg_list):
+                            udid = arg_list[i + 1]
+                            break
+                    if udid:
+                        logger.info("Companion not connected — running idb connect %s", udid)
+                        await self._run("connect", udid)
+                        return await self._run(*args)
+                finally:
+                    self._reconnecting = False
             cmd = args[0] if args else "unknown"
             raise DeviceError(
-                f"idb {cmd} failed: {stderr.decode().strip()}",
+                f"idb {cmd} failed: {error_msg}",
                 tool="idb",
             )
         return stdout.decode(), stderr.decode()
@@ -268,6 +286,73 @@ class IdbBackend:
                 tool="idb",
             )
         return data
+
+    async def describe_all_flat(
+        self, udid: str, *,
+        snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
+    ) -> list[dict]:
+        """Get UI elements using flat mode — designed for the custom companion.
+
+        Uses flat format (no --nested) so the custom companion's Group-children
+        fix works correctly. Deduplicates by element identity (type + label +
+        identifier + frame) to handle idb's flat-mode duplicate emission.
+        No probing — the companion enumerates Group children directly.
+
+        Returns the same flat list[dict] interface as describe_all.
+        """
+        import time
+        start = time.perf_counter()
+        logger.info(f"[PERF] idb.describe_all_flat START (udid={udid[:8]})")
+
+        stdout, _ = await self._run(
+            "ui", "describe-all", "--udid", udid,
+        )
+
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise DeviceError(
+                f"Failed to parse idb describe-all output: {exc}",
+                tool="idb",
+            )
+
+        if not isinstance(data, list):
+            raise DeviceError(
+                f"Expected JSON array from describe-all, got {type(data).__name__}",
+                tool="idb",
+            )
+
+        # Deduplicate by full element identity — flat mode emits the same
+        # element twice (parent + child traversal), but different elements
+        # can legitimately share the same frame.
+        seen: set[tuple] = set()
+        flat: list[dict] = []
+        for el in data:
+            f = el.get("frame")
+            frame_key = (
+                int(f.get("x", 0)), int(f.get("y", 0)),
+                int(f.get("width", 0)), int(f.get("height", 0)),
+            ) if f else ()
+            key = (
+                el.get("type", ""),
+                el.get("AXLabel", ""),
+                el.get("AXUniqueId", el.get("identifier", "")),
+                frame_key,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            flat.append(el)
+
+        end = time.perf_counter()
+        logger.info(
+            f"[PERF] idb.describe_all_flat COMPLETE: "
+            f"total={(end-start)*1000:.1f}ms, "
+            f"raw={len(data)}, deduped={len(flat)}"
+        )
+
+        return flat
 
     async def describe_point(self, udid: str, x: float, y: float) -> dict | None:
         """Get the UI element at specific coordinates.

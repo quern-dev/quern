@@ -876,6 +876,7 @@ class TapElementRequest(BaseModel):
     udid: str | None = None
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
+    value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
@@ -989,6 +990,7 @@ class WaitForElementRequest(BaseModel):
     timeout: float = Field(default=10, ge=0, le=60)  # ge=0 allows instant checks
     interval: float = Field(default=0.5, ge=0.1, le=5)
     udid: str | None = None
+    mode: str | None = None  # "flat" for custom companion flat mode
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
