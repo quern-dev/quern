@@ -436,13 +436,14 @@ class TestTapElement:
         assert "Calendar-1" in [m["identifier"] for m in result["matches"]]
         assert "Calendar-2" in [m["identifier"] for m in result["matches"]]
 
-    async def test_no_match_raises(self):
+    async def test_no_match_returns_not_found(self):
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
 
-        with pytest.raises(DeviceError, match="No element found"):
-            await ctrl.tap_element(label="Nonexistent")
+        result = await ctrl.tap_element(label="Nonexistent")
+        assert result["status"] == "not_found"
+        assert "No element found" in result["detail"]
 
     async def test_no_label_or_identifier_raises(self):
         ctrl = DeviceController()

@@ -208,6 +208,6 @@ class TestChildrenOfAPI:
             )
         assert resp.status_code == 200
         mock_controller_with_children.get_ui_elements.assert_called_once_with(
-            udid=None, snapshot_depth=None, source_timeout=None
+            udid=None, snapshot_depth=None, source_timeout=None, mode=None
         )
         mock_controller_with_children.get_ui_elements_children_of.assert_not_called()

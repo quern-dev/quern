@@ -393,7 +393,7 @@ class TestGetUIElements:
         assert len(data["elements"]) == 3
         assert data["udid"] == "AAAA-1111"
         mock_controller.get_ui_elements.assert_called_once_with(
-            udid=None, snapshot_depth=None, source_timeout=None
+            udid=None, snapshot_depth=None, source_timeout=None, mode=None
         )
 
     async def test_get_ui_elements_with_udid(self, app, auth_headers, mock_controller):
@@ -405,7 +405,7 @@ class TestGetUIElements:
             )
         assert resp.status_code == 200
         mock_controller.get_ui_elements.assert_called_once_with(
-            udid="BBBB-2222", snapshot_depth=None, source_timeout=None
+            udid="BBBB-2222", snapshot_depth=None, source_timeout=None, mode=None
         )
 
     async def test_get_ui_elements_idb_not_found(self, app, auth_headers, mock_controller):
@@ -461,6 +461,7 @@ class TestScreenSummary:
             snapshot_depth=None,
             strategy=None,
             source_timeout=None,
+            mode=None,
         )
 
     async def test_screen_summary_with_strategy(self, app, auth_headers, mock_controller):
@@ -477,6 +478,7 @@ class TestScreenSummary:
             snapshot_depth=None,
             strategy="skeleton",
             source_timeout=None,
+            mode=None,
         )
 
 
@@ -507,6 +509,7 @@ class TestTapElement:
             udid=None,
             skip_stability_check=False,
             source_timeout=None,
+            value=None,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -527,6 +530,7 @@ class TestTapElement:
             udid=None,
             skip_stability_check=False,
             source_timeout=None,
+            value=None,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -547,6 +551,7 @@ class TestTapElement:
             udid=None,
             skip_stability_check=False,
             source_timeout=None,
+            value=None,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
