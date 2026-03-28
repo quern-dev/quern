@@ -249,14 +249,21 @@ NOTE: If you want to capture network traffic from this app:
         .boolean()
         .default(false)
         .describe("Capture before/after screenshots around the app launch."),
+      settle_delay: z
+        .coerce.number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ bundle_id, udid, env, include_screen_context, capture_screenshots }) => {
+  }, async ({ bundle_id, udid, env, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { bundle_id };
       if (udid) body.udid = udid;
       if (env) body.env = env;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
+      if (settle_delay !== undefined) body.settle_delay = settle_delay;
 
       const data = await apiRequest(
         "POST",
@@ -678,13 +685,20 @@ Examples:
         .boolean()
         .default(false)
         .describe("Capture before/after screenshots around the URL open."),
+      settle_delay: z
+        .coerce.number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ url, udid, include_screen_context, capture_screenshots }) => {
+  }, async ({ url, udid, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { url };
       if (udid) body.udid = udid;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
+      if (settle_delay !== undefined) body.settle_delay = settle_delay;
 
       const data = await apiRequest(
         "POST",

@@ -390,8 +390,14 @@ Label matching modes (mutually exclusive — use only one):
         .boolean()
         .default(false)
         .describe("Capture before/after screenshots around the tap. Returns file paths in screenshots.before and screenshots.after."),
+      settle_delay: z
+        .coerce.number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0). Increase for slow devices or complex transitions."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, include_screen_context, capture_screenshots }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
@@ -404,6 +410,7 @@ Label matching modes (mutually exclusive — use only one):
       if (value !== undefined) body.value = value;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
+      if (settle_delay !== undefined) body.settle_delay = settle_delay;
 
       const data = await apiRequest(
         "POST",
@@ -498,13 +505,20 @@ Label matching modes (mutually exclusive — use only one):
         .boolean()
         .default(false)
         .describe("Capture before/after screenshots around the text entry."),
+      settle_delay: z
+        .coerce.number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ text, udid, include_screen_context, capture_screenshots }) => {
+  }, async ({ text, udid, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { text };
       if (udid) body.udid = udid;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
+      if (settle_delay !== undefined) body.settle_delay = settle_delay;
 
       const data = await apiRequest(
         "POST",

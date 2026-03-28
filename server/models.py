@@ -822,6 +822,7 @@ class LaunchAppRequest(BaseModel):
     env: dict[str, str] | None = None
     include_screen_context: bool = False
     capture_screenshots: bool = False
+    settle_delay: float = Field(default=1.0, ge=0, le=10)
 
 
 class TerminateAppRequest(BaseModel):
@@ -881,6 +882,7 @@ class TapElementRequest(BaseModel):
     value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
     include_screen_context: bool = False
     capture_screenshots: bool = False
+    settle_delay: float = Field(default=1.0, ge=0, le=10)
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
@@ -911,6 +913,7 @@ class TypeTextRequest(BaseModel):
     udid: str | None = None
     include_screen_context: bool = False
     capture_screenshots: bool = False
+    settle_delay: float = Field(default=1.0, ge=0, le=10)
 
 
 class ClearTextRequest(BaseModel):
@@ -941,6 +944,7 @@ class OpenUrlRequest(BaseModel):
     udid: str | None = None
     include_screen_context: bool = False
     capture_screenshots: bool = False
+    settle_delay: float = Field(default=1.0, ge=0, le=10)
 
 
 class GrantPermissionRequest(BaseModel):

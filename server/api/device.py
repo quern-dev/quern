@@ -314,12 +314,12 @@ async def launch_app(request: Request, body: LaunchAppRequest):
         )
         result: dict = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
         if body.capture_screenshots:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "launch_after")
             result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
             if not body.capture_screenshots:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(body.settle_delay)
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result
     except DeviceError as e:
@@ -469,12 +469,12 @@ async def open_url(request: Request, body: OpenUrlRequest):
         udid = await controller.open_url(url=body.url, udid=body.udid)
         result: dict = {"status": "ok", "udid": udid, "url": body.url}
         if body.capture_screenshots:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "open_url_after")
             result["screenshots"] = {"before": before, "after": after}
         if body.include_screen_context:
             if not body.capture_screenshots:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(body.settle_delay)
             result["screen_context"] = await _capture_screen_context(controller, udid)
         return result
     except DeviceError as e:
