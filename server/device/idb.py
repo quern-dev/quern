@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -24,6 +25,8 @@ _PROBE_STEP = 20
 
 class IdbBackend:
     """Manages UI inspection and interaction via idb subprocess calls."""
+
+    _QUERN_COMPANION = Path.home() / ".quern" / "bin" / "idb_companion"
 
     def __init__(self) -> None:
         self._binary: str | None = None
@@ -46,11 +49,23 @@ class IdbBackend:
         if path is None:
             raise DeviceError(
                 "idb not found. Install with: pip install fb-idb "
-                "(also requires: brew install idb-companion)",
+                "(also requires: ./quern setup to install idb_companion)",
                 tool="idb",
             )
         self._binary = path
         return path
+
+    def _companion_path(self) -> Path | None:
+        """Return path to the patched companion if installed."""
+        return self._QUERN_COMPANION if self._QUERN_COMPANION.is_file() else None
+
+    def _companion_env(self) -> dict[str, str]:
+        """Build env with DYLD_FRAMEWORK_PATH for the patched companion."""
+        bin_dir = self._QUERN_COMPANION.parent
+        fw_dir = bin_dir / "Frameworks"
+        env = os.environ.copy()
+        env["DYLD_FRAMEWORK_PATH"] = f"{fw_dir}:{fw_dir / 'PackageFrameworks'}"
+        return env
 
     async def is_available(self) -> bool:
         """Check if idb CLI is available."""
@@ -63,6 +78,12 @@ class IdbBackend:
         """
         import time
         binary = self._resolve_binary()
+        companion = self._companion_path()
+
+        cmd = [binary]
+        if companion:
+            cmd.extend(["--companion-path", str(companion)])
+        cmd.extend(args)
 
         cmd_str = ' '.join(args[:3])  # First 3 args for logging
         start = time.perf_counter()
@@ -70,11 +91,13 @@ class IdbBackend:
 
         # Time the process creation
         t1 = time.perf_counter()
-        proc = await asyncio.create_subprocess_exec(
-            binary, *args,
+        kwargs: dict = dict(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if companion:
+            kwargs["env"] = self._companion_env()
+        proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
         t2 = time.perf_counter()
         logger.info(f"[PERF IDB] subprocess spawned: {(t2-t1)*1000:.1f}ms")
 
