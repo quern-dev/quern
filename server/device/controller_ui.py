@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 from server.device.screenshots import annotate_screenshot
 from server.device.ui_elements import (
@@ -34,6 +36,23 @@ def _build_screen_context(elements: list[UIElement]) -> dict:
         }
     except Exception:
         return {}  # best-effort — don't mask the original error
+
+
+_SCREENSHOT_DIR = Path("/tmp/quern/screenshots")
+
+
+async def _capture_error_screenshot(controller, udid: str, label: str) -> str | None:
+    """Best-effort screenshot capture on error. Returns file path or None."""
+    try:
+        _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+        filename = f"{ts}_{label}.png"
+        filepath = _SCREENSHOT_DIR / filename
+        image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
+        filepath.write_bytes(image_bytes)
+        return str(filepath)
+    except Exception:
+        return None
 
 
 def _effective_filter_label(
@@ -733,7 +752,7 @@ class DeviceControllerUI:
 
                 # Condition not met yet, but fast path worked - check timeout
                 if elapsed >= timeout:
-                    # Best-effort screen context for fast-path timeout
+                    # Best-effort screen context + screenshot for fast-path timeout
                     try:
                         ctx_elements, _ = await self.get_ui_elements(
                             resolved, mode=mode,
@@ -741,6 +760,11 @@ class DeviceControllerUI:
                         screen_context = _build_screen_context(ctx_elements)
                     except Exception:
                         screen_context = {}
+                    screenshot = await _capture_error_screenshot(
+                        self, resolved, "wait_timeout",
+                    )
+                    if screenshot:
+                        screen_context["screenshot"] = screenshot
                     return (
                         {
                             "matched": False,
@@ -800,6 +824,11 @@ class DeviceControllerUI:
                     screen_context = _build_screen_context(ctx_elements)
                 except Exception:
                     screen_context = {}
+                screenshot = await _capture_error_screenshot(
+                    self, resolved, "wait_timeout",
+                )
+                if screenshot:
+                    screen_context["screenshot"] = screenshot
                 return {
                     "matched": False,
                     "elapsed_seconds": round(elapsed, 2),
@@ -957,10 +986,16 @@ class DeviceControllerUI:
                     all_elements = elements
             else:
                 all_elements = elements
+            screen_context = _build_screen_context(all_elements)
+            screenshot = await _capture_error_screenshot(
+                self, resolved, "tap_not_found",
+            )
+            if screenshot:
+                screen_context["screenshot"] = screenshot
             return {
                 "status": "not_found",
                 "detail": f"No element found matching {search_desc}",
-                "screen_context": _build_screen_context(all_elements),
+                "screen_context": screen_context,
             }
 
         if len(matches) == 1:
