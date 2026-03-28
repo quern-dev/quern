@@ -7,7 +7,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server.api.device import _get_controller, _handle_device_error
+from server.api.device import _capture_screen_context, _get_controller, _handle_device_error
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -334,6 +334,9 @@ async def tap_element(request: Request, body: TapElementRequest):
             logger.info(f"[PERF] API /ui/tap-element NOT_FOUND: {(end-start)*1000:.1f}ms")
             raise HTTPException(status_code=404, detail=result)
 
+        if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
+            result["screen_context"] = await _capture_screen_context(controller, body.udid)
+
         logger.info(f"[PERF] API /ui/tap-element SUCCESS: {(end-start)*1000:.1f}ms")
         return result
     except DeviceError as e:
@@ -366,7 +369,10 @@ async def type_text(request: Request, body: TypeTextRequest):
     controller = _get_controller(request)
     try:
         udid = await controller.type_text(text=body.text, udid=body.udid)
-        return {"status": "ok", "udid": udid}
+        result = {"status": "ok", "udid": udid}
+        if body.include_screen_context:
+            result["screen_context"] = await _capture_screen_context(controller, udid)
+        return result
     except DeviceError as e:
         raise _handle_device_error(e)
 

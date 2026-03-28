@@ -45,6 +45,22 @@ logger = logging.getLogger("quern-debug-server.api")
 # ---------------------------------------------------------------------------
 
 
+async def _capture_screen_context(controller, udid: str) -> dict:
+    """Best-effort screen context capture for action responses."""
+    try:
+        summary, _ = await controller.get_screen_summary(
+            max_elements=10, udid=udid,
+        )
+        return {
+            "screen_title": summary.get("screen_title", ""),
+            "summary": summary.get("summary", ""),
+            "element_count": summary.get("element_count", 0),
+            "interactive_elements": summary.get("interactive_elements", []),
+        }
+    except Exception:
+        return {}
+
+
 def _get_controller(request: Request):
     """Get the DeviceController from app state."""
     controller = request.app.state.device_controller
@@ -273,7 +289,11 @@ async def launch_app(request: Request, body: LaunchAppRequest):
     controller = _get_controller(request)
     try:
         udid = await controller.launch_app(bundle_id=body.bundle_id, udid=body.udid, env=body.env)
-        return {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
+        result = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
+        if body.include_screen_context:
+            await asyncio.sleep(0.5)  # let the app settle
+            result["screen_context"] = await _capture_screen_context(controller, udid)
+        return result
     except DeviceError as e:
         raise _handle_device_error(e)
 
@@ -416,7 +436,11 @@ async def open_url(request: Request, body: OpenUrlRequest):
     controller = _get_controller(request)
     try:
         udid = await controller.open_url(url=body.url, udid=body.udid)
-        return {"status": "ok", "udid": udid, "url": body.url}
+        result = {"status": "ok", "udid": udid, "url": body.url}
+        if body.include_screen_context:
+            await asyncio.sleep(0.5)  # let deep link handler settle
+            result["screen_context"] = await _capture_screen_context(controller, udid)
+        return result
     except DeviceError as e:
         raise _handle_device_error(e)
 

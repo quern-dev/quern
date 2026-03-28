@@ -382,8 +382,12 @@ Label matching modes (mutually exclusive — use only one):
         .string()
         .optional()
         .describe('For switches/toggles: desired value ("1" = on, "0" = off). Checks current state first and skips the tap if already set. Returns status "already_set" if no tap was needed.'),
+      include_screen_context: z
+        .boolean()
+        .default(false)
+        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, include_screen_context }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
@@ -394,6 +398,7 @@ Label matching modes (mutually exclusive — use only one):
       if (udid) body.udid = udid;
       if (source_timeout) body.source_timeout = source_timeout;
       if (value !== undefined) body.value = value;
+      if (include_screen_context) body.include_screen_context = true;
 
       const data = await apiRequest(
         "POST",
@@ -480,11 +485,16 @@ Label matching modes (mutually exclusive — use only one):
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      include_screen_context: z
+        .boolean()
+        .default(false)
+        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues."),
     }),
-  }, async ({ text, udid }) => {
+  }, async ({ text, udid, include_screen_context }) => {
     try {
       const body: Record<string, unknown> = { text };
       if (udid) body.udid = udid;
+      if (include_screen_context) body.include_screen_context = true;
 
       const data = await apiRequest(
         "POST",

@@ -820,6 +820,7 @@ class LaunchAppRequest(BaseModel):
     bundle_id: str
     udid: str | None = None
     env: dict[str, str] | None = None
+    include_screen_context: bool = False
 
 
 class TerminateAppRequest(BaseModel):
@@ -877,6 +878,7 @@ class TapElementRequest(BaseModel):
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
     value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
+    include_screen_context: bool = False
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):
@@ -905,6 +907,7 @@ class TypeTextRequest(BaseModel):
 
     text: str
     udid: str | None = None
+    include_screen_context: bool = False
 
 
 class ClearTextRequest(BaseModel):
@@ -933,6 +936,7 @@ class OpenUrlRequest(BaseModel):
 
     url: str
     udid: str | None = None
+    include_screen_context: bool = False
 
 
 class GrantPermissionRequest(BaseModel):

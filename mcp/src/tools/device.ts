@@ -241,12 +241,17 @@ NOTE: If you want to capture network traffic from this app:
         .record(z.string(), z.string())
         .optional()
         .describe("Environment variables to pass to the app process (iOS simulators only). Uses the SIMCTL_CHILD_ prefix convention. QUERN_AUTOMATION=YES is always set automatically."),
+      include_screen_context: z
+        .boolean()
+        .default(false)
+        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle."),
     }),
-  }, async ({ bundle_id, udid, env }) => {
+  }, async ({ bundle_id, udid, env, include_screen_context }) => {
     try {
       const body: Record<string, unknown> = { bundle_id };
       if (udid) body.udid = udid;
       if (env) body.env = env;
+      if (include_screen_context) body.include_screen_context = true;
 
       const data = await apiRequest(
         "POST",
@@ -607,11 +612,16 @@ Examples:
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      include_screen_context: z
+        .boolean()
+        .default(false)
+        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle."),
     }),
-  }, async ({ url, udid }) => {
+  }, async ({ url, udid, include_screen_context }) => {
     try {
       const body: Record<string, unknown> = { url };
       if (udid) body.udid = udid;
+      if (include_screen_context) body.include_screen_context = true;
 
       const data = await apiRequest(
         "POST",
