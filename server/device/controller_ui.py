@@ -1246,6 +1246,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         scale: float = 0.5,
         quality: int = 85,
+        grid: int | None = None,
     ) -> tuple[bytes, str]:
         """Capture an annotated screenshot with accessibility overlays.
 
@@ -1259,4 +1260,4 @@ class DeviceControllerUI:
         else:
             raw_png = await self.simctl.screenshot(resolved)
         elements, _ = await self.get_ui_elements(resolved)
-        return annotate_screenshot(raw_png, elements, scale=scale, quality=quality)
+        return annotate_screenshot(raw_png, elements, scale=scale, quality=quality, grid=grid)

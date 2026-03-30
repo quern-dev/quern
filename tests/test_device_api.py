@@ -911,6 +911,7 @@ class TestAnnotatedScreenshot:
             udid=None,
             scale=0.5,
             quality=85,
+            grid=None,
         )
 
     async def test_annotated_screenshot_with_params(self, app, auth_headers, mock_controller):
@@ -925,6 +926,7 @@ class TestAnnotatedScreenshot:
             udid="BBBB-2222",
             scale=1.0,
             quality=85,
+            grid=None,
         )
 
     async def test_annotated_screenshot_no_auth(self, app):

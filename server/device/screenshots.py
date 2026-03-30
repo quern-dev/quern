@@ -74,19 +74,103 @@ def _is_interactive(el: UIElement) -> bool:
     return False
 
 
+def _draw_grid(
+    draw: ImageDraw.Draw,
+    img_width: int,
+    img_height: int,
+    retina_scale: float,
+    display_scale: float,
+    spacing_pt: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    """Draw a coordinate grid overlay in point coordinates.
+
+    Grid lines are drawn at every ``spacing_pt`` points with coordinate
+    labels along the top and left edges.  Coordinates match the point
+    system used by the ``tap`` tool so agents can read positions directly.
+    """
+    pt_width = img_width / retina_scale
+    pt_height = img_height / retina_scale
+
+    line_color = (128, 128, 128, 80)
+    line_w = max(1, int(1 * display_scale))
+
+    # Smaller font for grid labels
+    grid_font_size = max(10, int(10 * display_scale))
+    try:
+        grid_font = ImageFont.truetype(
+            "/System/Library/Fonts/Helvetica.ttc", grid_font_size,
+        )
+    except OSError:
+        grid_font = font  # fallback to whatever was loaded
+
+    # When spacing is very small, only label every Nth line to avoid overlap
+    label_every = 1
+    if spacing_pt < 25:
+        label_every = max(1, 50 // spacing_pt)
+
+    pad = max(2, int(2 * display_scale))
+    label_bg = (0, 0, 0, 140)
+    label_fg = (255, 255, 255, 220)
+
+    # Vertical lines + top-edge labels
+    idx = 0
+    for pt in range(0, int(pt_width) + 1, spacing_pt):
+        x_px = pt * retina_scale
+        draw.line([(x_px, 0), (x_px, img_height)], fill=line_color, width=line_w)
+        if idx % label_every == 0:
+            text = str(pt)
+            bbox = draw.textbbox((0, 0), text, font=grid_font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            lx = x_px + pad
+            # Keep label on-screen
+            if lx + tw + pad > img_width:
+                lx = x_px - tw - pad * 2
+            draw.rectangle([lx, pad, lx + tw + pad, pad + th + pad], fill=label_bg)
+            draw.text((lx + pad // 2, pad + pad // 2), text, fill=label_fg, font=grid_font)
+        idx += 1
+
+    # Horizontal lines + left-edge labels
+    idx = 0
+    for pt in range(0, int(pt_height) + 1, spacing_pt):
+        y_px = pt * retina_scale
+        draw.line([(0, y_px), (img_width, y_px)], fill=line_color, width=line_w)
+        if idx % label_every == 0:
+            text = str(pt)
+            bbox = draw.textbbox((0, 0), text, font=grid_font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            ly = y_px + pad
+            # Keep label on-screen
+            if ly + th + pad > img_height:
+                ly = y_px - th - pad * 2
+            draw.rectangle([pad, ly, pad + tw + pad, ly + th + pad], fill=label_bg)
+            draw.text((pad + pad // 2, ly + pad // 2), text, fill=label_fg, font=grid_font)
+        idx += 1
+
+
 def annotate_screenshot(
     raw_png: bytes,
     elements: list[UIElement],
     scale: float = 0.5,
     quality: int = 85,
+    grid: int | None = None,
 ) -> tuple[bytes, str]:
     """Draw red bounding boxes and labels on interactive elements.
+
+    When no interactive elements are found, a coordinate grid is
+    automatically overlaid so agents can still identify tap positions.
+    Pass ``grid=<spacing>`` to force the grid, or ``grid=0`` to disable
+    the auto-fallback.
 
     Args:
         raw_png: Raw PNG bytes from simctl screenshot.
         elements: Parsed UI accessibility elements.
         scale: Output scale factor (0.1–1.0).
         quality: Ignored (always PNG output for annotation clarity).
+        grid: Grid spacing in points.  None = auto (grid when 0 elements),
+              0 = off, positive int = forced grid at that spacing.
 
     Returns:
         Tuple of (annotated_png_bytes, "image/png").
@@ -122,11 +206,14 @@ def annotate_screenshot(
     except OSError:
         font = ImageFont.load_default()
 
+    drawn_count = 0
     for el in elements:
         if not _is_interactive(el):
             continue
         if not el.frame:
             continue
+
+        drawn_count += 1
 
         # Scale point coordinates to pixel coordinates
         x = el.frame["x"] * retina_scale
@@ -160,6 +247,12 @@ def annotate_screenshot(
             (x + pad // 2, label_y + pad // 2), label_text,
             fill=(255, 255, 255, 255), font=font,
         )
+
+    # Coordinate grid: auto when no interactive elements, forced when grid > 0
+    if grid is None and drawn_count == 0:
+        _draw_grid(draw, img.width, img.height, retina_scale, display_scale, 50, font)
+    elif grid is not None and grid > 0:
+        _draw_grid(draw, img.width, img.height, retina_scale, display_scale, grid, font)
 
     # Composite overlay onto original
     img = Image.alpha_composite(img, overlay)

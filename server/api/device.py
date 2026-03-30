@@ -1036,12 +1036,16 @@ async def screenshot_annotated(
     udid: str | None = Query(default=None),
     scale: float = Query(default=0.5, ge=0.1, le=1.0),
     quality: int = Query(default=85, ge=1, le=100),
+    grid: int | None = Query(
+        default=None, ge=0,
+        description="Grid spacing in points. Omit=auto, 0=off, N=force",
+    ),
 ):
     """Capture an annotated screenshot with accessibility overlays."""
     controller = _get_controller(request)
     try:
         image_bytes, media_type = await controller.screenshot_annotated(
-            udid=udid, scale=scale, quality=quality,
+            udid=udid, scale=scale, quality=quality, grid=grid,
         )
         return Response(content=image_bytes, media_type=media_type)
     except DeviceError as e:

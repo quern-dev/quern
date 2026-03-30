@@ -487,7 +487,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("take_annotated_screenshot", {
-    description: `Capture a screenshot with accessibility annotations overlaid. Draws red bounding boxes and labels (element type + accessibility label) on interactive UI elements (buttons, text fields, switches, etc.). Useful for debugging UI automation issues — visually confirms what the accessibility tree sees vs. what's on screen. Always returns PNG.`,
+    description: `Capture a screenshot with accessibility annotations overlaid. Draws red bounding boxes and labels on interactive UI elements. When no interactive elements are found, automatically overlays a coordinate grid (in points, matching the tap coordinate system) so you can identify tap positions visually. Use grid=true to force the grid even when elements exist, or grid=<number> for custom point spacing.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -505,6 +505,12 @@ NOTE: If you want to capture network traffic from this app:
         .max(100)
         .default(85)
         .describe("JPEG quality (1-100, used for base screenshot before annotation)"),
+      grid: z
+        .union([z.literal(true), z.coerce.number().int().min(0)])
+        .optional()
+        .describe(
+          "Coordinate grid overlay. true = 50pt grid, number = custom spacing in points, 0 = disable auto-grid. Omit for auto (grid when no interactive elements found)."
+        ),
       save_path: z
         .string()
         .optional()
@@ -512,13 +518,17 @@ NOTE: If you want to capture network traffic from this app:
           "Save screenshot to this file path instead of returning base64. Parent directories are created automatically."
         ),
     }),
-  }, async ({ udid, scale, quality, save_path }) => {
+  }, async ({ udid, scale, quality, grid, save_path }) => {
     try {
       const srv = discoverServer();
       const url = new URL("/api/v1/device/screenshot/annotated", srv.url);
       if (udid) url.searchParams.set("udid", udid);
       url.searchParams.set("scale", String(scale));
       url.searchParams.set("quality", String(quality));
+      if (grid !== undefined) {
+        const gridVal = grid === true ? 50 : grid;
+        url.searchParams.set("grid", String(gridVal));
+      }
 
       const resp = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${srv.apiKey}` },
