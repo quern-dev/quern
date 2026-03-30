@@ -14,6 +14,12 @@ from server.models import DeviceError
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _no_companion(monkeypatch):
+    """Prevent tests from picking up a real patched companion on this machine."""
+    monkeypatch.setattr(IdbBackend, "_companion_path", lambda self: None)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -90,6 +96,31 @@ class TestRun:
                 "X",
                 stdout=-1,
                 stderr=-1,
+            )
+
+    async def test_success_with_companion(self):
+        backend = IdbBackend()
+        backend._binary = "/usr/local/bin/idb"
+        companion = Path("/opt/quern/bin/idb_companion")
+        proc = _mock_proc(stdout=b"ok\n")
+        with (
+            patch.object(backend, "_companion_path", return_value=companion),
+            patch.object(backend, "_companion_env", return_value={"DYLD_FRAMEWORK_PATH": "/test"}),
+            patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+        ):
+            stdout, _ = await backend._run("ui", "describe-all", "--udid", "X")
+            assert stdout == "ok\n"
+            mock_exec.assert_called_once_with(
+                "/usr/local/bin/idb",
+                "--companion-path",
+                str(companion),
+                "ui",
+                "describe-all",
+                "--udid",
+                "X",
+                stdout=-1,
+                stderr=-1,
+                env={"DYLD_FRAMEWORK_PATH": "/test"},
             )
 
     async def test_nonzero_exit_raises(self):

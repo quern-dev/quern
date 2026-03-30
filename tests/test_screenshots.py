@@ -94,3 +94,79 @@ class TestAnnotateScreenshot:
         assert media_type == "image/png"
         img = Image.open(io.BytesIO(result))
         assert img.size == (400, 800)
+
+
+# ---------------------------------------------------------------------------
+# Coordinate grid overlay
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinateGrid:
+    def test_grid_auto_fallback_on_empty_elements(self):
+        """Grid drawn automatically when no interactive elements exist."""
+        raw = _make_test_png()
+        # No grid param (None) + empty elements → auto grid
+        result_with_grid, _ = annotate_screenshot(raw, [], scale=1.0, grid=None)
+        # Compare against grid=0 (explicitly off) to confirm grid was drawn
+        result_no_grid, _ = annotate_screenshot(raw, [], scale=1.0, grid=0)
+        assert result_with_grid != result_no_grid
+
+    def test_grid_no_auto_fallback_with_interactive_elements(self):
+        """Grid NOT drawn when interactive elements are present (auto mode)."""
+        raw = _make_test_png()
+        elements = [_button("OK", 100, 200)]
+        # grid=None + elements present → no grid, just annotations
+        result_auto, _ = annotate_screenshot(raw, elements, scale=1.0, grid=None)
+        # grid=50 + same elements → annotations + grid
+        result_forced, _ = annotate_screenshot(raw, elements, scale=1.0, grid=50)
+        assert result_auto != result_forced
+
+    def test_grid_forced_with_elements(self):
+        """grid=50 forces grid even when interactive elements exist."""
+        raw = _make_test_png()
+        elements = [_button("OK", 100, 200)]
+        result, media_type = annotate_screenshot(raw, elements, scale=1.0, grid=50)
+        assert media_type == "image/png"
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "PNG"
+
+    def test_grid_custom_spacing(self):
+        """Custom grid spacing produces valid output."""
+        raw = _make_test_png()
+        result, _ = annotate_screenshot(raw, [], scale=1.0, grid=100)
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "PNG"
+        assert img.size == (400, 800)
+
+    def test_grid_zero_disables(self):
+        """grid=0 suppresses auto-fallback even with no elements."""
+        raw = _make_test_png()
+        # grid=0 → no grid drawn, just bare screenshot
+        result_off, _ = annotate_screenshot(raw, [], scale=1.0, grid=0)
+        # Plain call without any overlay (same as grid=0 since no elements)
+        # Should be identical to a plain process
+        img = Image.open(io.BytesIO(result_off))
+        assert img.format == "PNG"
+        assert img.size == (400, 800)
+
+    def test_grid_with_retina_scale(self):
+        """Grid works correctly with 3x retina screenshots."""
+        # 1200x2400 pixel image, Application reports 400x800 points → 3x retina
+        raw = _make_test_png(1200, 2400)
+        elements = [
+            UIElement(
+                type="Application", label="App",
+                frame={"x": 0, "y": 0, "width": 400, "height": 800},
+            ),
+        ]
+        result, _ = annotate_screenshot(raw, elements, scale=1.0, grid=50)
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "PNG"
+        assert img.size == (1200, 2400)
+
+    def test_grid_small_spacing_labels(self):
+        """Very small grid spacing doesn't crash (labels skip to avoid overlap)."""
+        raw = _make_test_png()
+        result, _ = annotate_screenshot(raw, [], scale=1.0, grid=10)
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "PNG"

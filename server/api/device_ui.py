@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server.api.device import _get_controller, _handle_device_error
+from server.api.device import (
+    _capture_action_screenshot,
+    _capture_screen_context,
+    _get_controller,
+    _handle_device_error,
+)
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -54,13 +60,17 @@ async def get_ui_elements(
         default=None, ge=1, le=60,
         description="Override WDA /source timeout in seconds. Physical devices only.",
     ),
+    mode: str | None = Query(
+        default=None, pattern=r"^(flat)$",
+        description="'flat' uses flat idb output with custom companion. Default uses nested.",
+    ),
 ):
     """Get all UI accessibility elements from the current screen.
 
     Optionally scope to children of a specific element using the `children_of` parameter.
     """
     start = time.perf_counter()
-    logger.info(f"[PERF] API /ui START (children_of={children_of})")
+    logger.info(f"[PERF] API /ui START (children_of={children_of}, mode={mode})")
 
     controller = _get_controller(request)
     try:
@@ -73,7 +83,7 @@ async def get_ui_elements(
             else:
                 elements, resolved_udid = await controller.get_ui_elements(
                     udid=udid, snapshot_depth=snapshot_depth,
-                    source_timeout=source_timeout,
+                    source_timeout=source_timeout, mode=mode,
                 )
         elif children_of:
             elements, resolved_udid = await controller.get_ui_elements_children_of(
@@ -82,7 +92,7 @@ async def get_ui_elements(
         else:
             elements, resolved_udid = await controller.get_ui_elements(
                 udid=udid, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout,
+                source_timeout=source_timeout, mode=mode,
             )
 
         end = time.perf_counter()
@@ -199,6 +209,7 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
             timeout=body.timeout,
             interval=body.interval,
             udid=body.udid,
+            mode=body.mode,
         )
         result["udid"] = resolved_udid
 
@@ -243,6 +254,10 @@ async def get_screen_summary(
             "Use for slow screens on older devices. Physical devices only."
         ),
     ),
+    mode: str | None = Query(
+        default=None, pattern=r"^(flat)$",
+        description="'flat' uses flat idb output with custom companion. Default uses nested.",
+    ),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
@@ -253,6 +268,7 @@ async def get_screen_summary(
       Only affects physical devices.
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
     - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
+    - mode: 'flat' to use flat idb output with custom companion. Default uses nested.
 
     Returns summary with truncated, total_interactive_elements fields.
     """
@@ -264,6 +280,7 @@ async def get_screen_summary(
             snapshot_depth=snapshot_depth,
             strategy=strategy,
             source_timeout=source_timeout,
+            mode=mode,
         )
         summary["udid"] = resolved_udid
         return summary
@@ -304,6 +321,10 @@ async def tap_element(request: Request, body: TapElementRequest):
 
     controller = _get_controller(request)
     try:
+        if body.capture_screenshots:
+            resolved = await controller.resolve_udid(body.udid)
+            before = await _capture_action_screenshot(controller, resolved, "tap_before")
+
         result = await controller.tap_element(
             label=body.label,
             label_contains=body.label_contains,
@@ -317,6 +338,20 @@ async def tap_element(request: Request, body: TapElementRequest):
         )
 
         end = time.perf_counter()
+
+        # Element not found — return 404 with screen context
+        if result.get("status") == "not_found":
+            logger.info(f"[PERF] API /ui/tap-element NOT_FOUND: {(end-start)*1000:.1f}ms")
+            raise HTTPException(status_code=404, detail=result)
+
+        if body.capture_screenshots:
+            await asyncio.sleep(body.settle_delay)
+            after = await _capture_action_screenshot(controller, body.udid, "tap_after")
+            result["screenshots"] = {"before": before, "after": after}
+
+        if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
+            result["screen_context"] = await _capture_screen_context(controller, body.udid)
+
         logger.info(f"[PERF] API /ui/tap-element SUCCESS: {(end-start)*1000:.1f}ms")
         return result
     except DeviceError as e:
@@ -348,8 +383,18 @@ async def type_text(request: Request, body: TypeTextRequest):
     """Type text into the focused field."""
     controller = _get_controller(request)
     try:
+        if body.capture_screenshots:
+            resolved = await controller.resolve_udid(body.udid)
+            before = await _capture_action_screenshot(controller, resolved, "type_before")
         udid = await controller.type_text(text=body.text, udid=body.udid)
-        return {"status": "ok", "udid": udid}
+        result: dict = {"status": "ok", "udid": udid}
+        if body.capture_screenshots:
+            await asyncio.sleep(body.settle_delay)
+            after = await _capture_action_screenshot(controller, udid, "type_after")
+            result["screenshots"] = {"before": before, "after": after}
+        if body.include_screen_context:
+            result["screen_context"] = await _capture_screen_context(controller, udid)
+        return result
     except DeviceError as e:
         raise _handle_device_error(e)
 

@@ -241,12 +241,29 @@ NOTE: If you want to capture network traffic from this app:
         .record(z.string(), z.string())
         .optional()
         .describe("Environment variables to pass to the app process (iOS simulators only). Uses the SIMCTL_CHILD_ prefix convention. QUERN_AUTOMATION=YES is always set automatically."),
+      include_screen_context: z
+        .boolean()
+        .default(false)
+        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle."),
+      capture_screenshots: z
+        .boolean()
+        .default(false)
+        .describe("Capture before/after screenshots around the app launch."),
+      settle_delay: z
+        .coerce.number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ bundle_id, udid, env }) => {
+  }, async ({ bundle_id, udid, env, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { bundle_id };
       if (udid) body.udid = udid;
       if (env) body.env = env;
+      if (include_screen_context) body.include_screen_context = true;
+      if (capture_screenshots) body.capture_screenshots = true;
+      if (settle_delay !== undefined) body.settle_delay = settle_delay;
 
       const data = await apiRequest(
         "POST",
@@ -470,7 +487,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("take_annotated_screenshot", {
-    description: `Capture a screenshot with accessibility annotations overlaid. Draws red bounding boxes and labels (element type + accessibility label) on interactive UI elements (buttons, text fields, switches, etc.). Useful for debugging UI automation issues — visually confirms what the accessibility tree sees vs. what's on screen. Always returns PNG.`,
+    description: `Capture a screenshot with accessibility annotations overlaid. Draws red bounding boxes and labels on interactive UI elements. When no interactive elements are found, automatically overlays a coordinate grid (in points, matching the tap coordinate system) so you can identify tap positions visually. Use grid=true to force the grid even when elements exist, or grid=<number> for custom point spacing.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -488,6 +505,12 @@ NOTE: If you want to capture network traffic from this app:
         .max(100)
         .default(85)
         .describe("JPEG quality (1-100, used for base screenshot before annotation)"),
+      grid: z
+        .union([z.literal(true), z.coerce.number().int().min(0)])
+        .optional()
+        .describe(
+          "Coordinate grid overlay. true = 50pt grid, number = custom spacing in points, 0 = disable auto-grid. Omit for auto (grid when no interactive elements found)."
+        ),
       save_path: z
         .string()
         .optional()
@@ -495,13 +518,17 @@ NOTE: If you want to capture network traffic from this app:
           "Save screenshot to this file path instead of returning base64. Parent directories are created automatically."
         ),
     }),
-  }, async ({ udid, scale, quality, save_path }) => {
+  }, async ({ udid, scale, quality, grid, save_path }) => {
     try {
       const srv = discoverServer();
       const url = new URL("/api/v1/device/screenshot/annotated", srv.url);
       if (udid) url.searchParams.set("udid", udid);
       url.searchParams.set("scale", String(scale));
       url.searchParams.set("quality", String(quality));
+      if (grid !== undefined) {
+        const gridVal = grid === true ? 50 : grid;
+        url.searchParams.set("grid", String(gridVal));
+      }
 
       const resp = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${srv.apiKey}` },
@@ -544,6 +571,59 @@ NOTE: If you want to capture network traffic from this app:
             text: `Error: ${e instanceof Error ? e.message : String(e)}`,
           },
         ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("start_screenshot_timeline", {
+    description: `Start a screenshot timeline that auto-captures a screenshot after every UI action (tap, type, swipe, launch, open_url, etc.). Screenshots are saved sequentially with high-fidelity action labels. Call stop_screenshot_timeline to get the manifest with all entries.
+
+Use this to build visual test reports — every action becomes a timestamped step with a screenshot.`,
+    inputSchema: strictParams({
+      udid: z.string().optional().describe("Device UDID for screenshots (defaults to active device)"),
+      session_id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
+    }),
+  }, async ({ udid, session_id }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid) body.udid = udid;
+      if (session_id) body.session_id = session_id;
+      const data = await apiRequest("POST", "/api/v1/device/screenshot/timeline/start", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("stop_screenshot_timeline", {
+    description: `Stop the active screenshot timeline and return its manifest. The manifest lists every action with timestamp, action label, screenshot path, and HTTP status code.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/device/screenshot/timeline/stop");
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("get_screenshot_timeline", {
+    description: `Get the manifest of the active screenshot timeline without stopping it. Shows all entries captured so far.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/screenshot/timeline");
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
         isError: true,
       };
     }
@@ -607,11 +687,28 @@ Examples:
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      include_screen_context: z
+        .boolean()
+        .default(false)
+        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle."),
+      capture_screenshots: z
+        .boolean()
+        .default(false)
+        .describe("Capture before/after screenshots around the URL open."),
+      settle_delay: z
+        .coerce.number()
+        .min(0)
+        .max(10)
+        .optional()
+        .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ url, udid }) => {
+  }, async ({ url, udid, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { url };
       if (udid) body.udid = udid;
+      if (include_screen_context) body.include_screen_context = true;
+      if (capture_screenshots) body.capture_screenshots = true;
+      if (settle_delay !== undefined) body.settle_delay = settle_delay;
 
       const data = await apiRequest(
         "POST",

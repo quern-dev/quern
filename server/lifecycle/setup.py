@@ -871,22 +871,68 @@ def check_idb() -> CheckResult:
 
 
 def check_idb_companion() -> CheckResult:
-    """Check for idb_companion daemon (needed for idb CLI)."""
-    tool = _which("idb_companion")
-    if tool:
-        _get_version(["idb_companion", "--help"])
-        msg = "installed"
+    """Check for idb_companion, preferring the patched build in ~/.quern/bin/."""
+    quern_companion = Path.home() / ".quern" / "bin" / "idb_companion"
+    if quern_companion.is_file():
         return CheckResult(
             name="idb_companion",
             status=CheckStatus.OK,
-            message=msg,
+            message=f"installed (patched, {quern_companion})",
+        )
+    system_companion = _which("idb_companion")
+    if system_companion:
+        return CheckResult(
+            name="idb_companion",
+            status=CheckStatus.OK,
+            message=f"installed (system, {system_companion})",
+            detail="Patched build available with improved Group element detection: ./quern setup",
         )
     return CheckResult(
         name="idb_companion",
         status=CheckStatus.MISSING,
-        message="Not installed (needed for idb CLI)",
+        message="Not installed (needed for UI automation)",
         fixable=True,
     )
+
+
+_IDB_COMPANION_URL = (
+    "https://github.com/quern-dev/idb/releases/download/"
+    "idb-companion-v1/idb-companion-patched-arm64.tar.gz"
+)
+
+
+def _install_patched_companion() -> bool:
+    """Download and install the patched idb_companion to ~/.quern/bin/."""
+    import urllib.request
+
+    dest = Path.home() / ".quern" / "bin"
+    dest.mkdir(parents=True, exist_ok=True)
+    tarball = dest / "idb-companion.tar.gz"
+
+    try:
+        print("    Downloading patched idb_companion...")
+        urllib.request.urlretrieve(_IDB_COMPANION_URL, tarball)
+        print("    Extracting...")
+        subprocess.run(
+            ["tar", "xzf", str(tarball), "-C", str(dest)],
+            check=True, stdin=subprocess.DEVNULL,
+        )
+        tarball.unlink(missing_ok=True)
+        # Tarball extracts bin/idb_companion — move it up to dest/
+        nested = dest / "bin" / "idb_companion"
+        companion = dest / "idb_companion"
+        if nested.exists():
+            nested.rename(companion)
+            (dest / "bin").rmdir()
+        if companion.exists():
+            companion.chmod(0o755)
+            _record_install("quern", "idb_companion")
+            return True
+        return False
+    except Exception as exc:
+        print(f"    Download failed: {exc}")
+        tarball.unlink(missing_ok=True)
+        return False
 
 
 def check_vpn() -> CheckResult:
@@ -1402,20 +1448,23 @@ def run_setup() -> int:
 
         idb_companion_result = check_idb_companion()
         if idb_companion_result.status == CheckStatus.MISSING:
-            if _prompt_yn("    idb_companion not found. Install via Homebrew?"):
-                success = _brew_install("facebook/fb/idb-companion")
-                if not success:
-                    success = _brew_install("idb-companion")
-                if success:
-                    idb_companion_result = check_idb_companion()  # re-check
+            if _prompt_yn("    idb_companion not found. Download patched build?"):
+                if _install_patched_companion():
+                    idb_companion_result = check_idb_companion()
                 else:
                     idb_companion_result = CheckResult(
                         name="idb_companion",
                         status=CheckStatus.WARNING,
-                        message="Not installed (UI automation unavailable)",
-                        detail="Try manually: brew tap facebook/fb && brew install idb-companion\n"
-                               "Or see https://fbidb.io for alternative install methods",
+                        message="Download failed (UI automation unavailable)",
+                        detail="Try manually: https://github.com/quern-dev/idb/releases",
                     )
+        elif idb_companion_result.message.startswith("installed (system"):
+            if _prompt_yn(
+                "    Patched idb_companion available "
+                "(fixes Group element detection). Install?"
+            ):
+                if _install_patched_companion():
+                    idb_companion_result = check_idb_companion()
         report.add(idb_companion_result)
 
         idb_result = check_idb()

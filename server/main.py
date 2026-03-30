@@ -465,6 +465,13 @@ def create_app(
     app.state.sim_log_adapters = {}
     app.state.device_log_adapters = {}
 
+    # Screenshot timeline state
+    app.state.active_timeline = None
+
+    # Timeline middleware — must be added before auth so it wraps the action endpoints
+    from server.screenshot_timeline import TimelineMiddleware
+    app.add_middleware(TimelineMiddleware)
+
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
 

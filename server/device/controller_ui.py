@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 from server.device.screenshots import annotate_screenshot
 from server.device.ui_elements import (
@@ -16,6 +18,41 @@ from server.device.ui_elements import (
     parse_elements,
 )
 from server.models import DeviceError, UIElement, WaitCondition
+
+
+def _build_screen_context(elements: list[UIElement]) -> dict:
+    """Build a lightweight screen context dict from an existing elements list.
+
+    Used to enrich error responses so callers know what screen the app is on
+    when an action fails. Uses max_elements=10 for compact output.
+    """
+    try:
+        summary = generate_screen_summary(elements, max_elements=10)
+        return {
+            "screen_title": summary.get("screen_title", ""),
+            "summary": summary.get("summary", ""),
+            "element_count": summary.get("element_count", 0),
+            "interactive_elements": summary.get("interactive_elements", []),
+        }
+    except Exception:
+        return {}  # best-effort — don't mask the original error
+
+
+_SCREENSHOT_DIR = Path("/tmp/quern/screenshots")
+
+
+async def _capture_screenshot(controller, udid: str, label: str) -> str | None:
+    """Best-effort screenshot capture. Returns file path or None."""
+    try:
+        _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+        filename = f"{ts}_{label}.png"
+        filepath = _SCREENSHOT_DIR / filename
+        image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
+        filepath.write_bytes(image_bytes)
+        return str(filepath)
+    except Exception:
+        return None
 
 
 def _effective_filter_label(
@@ -394,6 +431,7 @@ class DeviceControllerUI:
         filter_type: str | None = None,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        mode: str | None = None,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -470,10 +508,18 @@ class DeviceControllerUI:
         if self._is_android(resolved):
             await self._ensure_android_screen_on(resolved)
 
-        raw = await self._ui_backend(resolved).describe_all(
-            resolved, snapshot_depth=snapshot_depth,
-            source_timeout=source_timeout,
-        )
+        backend = self._ui_backend(resolved)
+        if mode == "flat" and hasattr(backend, "describe_all_flat"):
+            raw = await backend.describe_all_flat(
+                resolved, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout,
+            )
+            use_cache = False  # flat mode returns different elements
+        else:
+            raw = await backend.describe_all(
+                resolved, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout,
+            )
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -584,6 +630,7 @@ class DeviceControllerUI:
         timeout: float = 10,
         interval: float = 0.5,
         udid: str | None = None,
+        mode: str | None = None,
     ) -> tuple[dict, str]:
         """Wait for an element to satisfy a condition (server-side polling).
 
@@ -705,12 +752,26 @@ class DeviceControllerUI:
 
                 # Condition not met yet, but fast path worked - check timeout
                 if elapsed >= timeout:
+                    # Best-effort screen context + screenshot for fast-path timeout
+                    try:
+                        ctx_elements, _ = await self.get_ui_elements(
+                            resolved, mode=mode,
+                        )
+                        screen_context = _build_screen_context(ctx_elements)
+                    except Exception:
+                        screen_context = {}
+                    screenshot = await _capture_screenshot(
+                        self, resolved, "wait_timeout",
+                    )
+                    if screenshot:
+                        screen_context["screenshot"] = screenshot
                     return (
                         {
                             "matched": False,
                             "elapsed_seconds": round(elapsed, 2),
                             "polls": polls,
                             "last_state": last_element.model_dump() if last_element else None,
+                            "screen_context": screen_context,
                         },
                         resolved,
                     )
@@ -727,6 +788,7 @@ class DeviceControllerUI:
                 filter_label=filter_label,
                 filter_identifier=identifier,
                 filter_type=element_type,
+                mode=mode,
             )
 
             matches = find_element(
@@ -753,11 +815,26 @@ class DeviceControllerUI:
 
             # Check timeout
             if elapsed >= timeout:
+                # Fetch unfiltered elements for screen context (the polling
+                # loop uses filtered fetches that may return empty)
+                try:
+                    ctx_elements, _ = await self.get_ui_elements(
+                        resolved, mode=mode,
+                    )
+                    screen_context = _build_screen_context(ctx_elements)
+                except Exception:
+                    screen_context = {}
+                screenshot = await _capture_screenshot(
+                    self, resolved, "wait_timeout",
+                )
+                if screenshot:
+                    screen_context["screenshot"] = screenshot
                 return {
                     "matched": False,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "last_state": last_element.model_dump() if last_element else None,
+                    "screen_context": screen_context,
                 }, resolved
 
             # Sleep before next poll
@@ -770,6 +847,7 @@ class DeviceControllerUI:
         snapshot_depth: int | None = None,
         strategy: str | None = None,
         source_timeout: float | None = None,
+        mode: str | None = None,
     ) -> tuple[dict, str]:
         """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
 
@@ -779,6 +857,7 @@ class DeviceControllerUI:
             snapshot_depth: WDA accessibility tree depth (1-50, physical devices only)
             strategy: 'skeleton' to skip /source timeout on complex screens (physical only)
             source_timeout: Override WDA /source timeout in seconds (physical devices only)
+            mode: 'flat' to use flat idb output (for custom companion). Default uses nested.
         """
         resolved = await self.resolve_udid(udid)
         if strategy == "skeleton" and self._is_physical(resolved):
@@ -788,6 +867,7 @@ class DeviceControllerUI:
             elements, resolved = await self.get_ui_elements(
                 udid, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout,
+                mode=mode,
             )
         return generate_screen_summary(elements, max_elements=max_elements), resolved
 
@@ -898,10 +978,25 @@ class DeviceControllerUI:
             )
             if element_type:
                 search_desc += f", type='{element_type}'"
-            raise DeviceError(
-                f"No element found matching {search_desc}",
-                tool="idb",
+            # Fetch full (unfiltered) elements for screen context if we used filters
+            if filter_label or identifier or element_type:
+                try:
+                    all_elements, _ = await self.get_ui_elements(resolved)
+                except Exception:
+                    all_elements = elements
+            else:
+                all_elements = elements
+            screen_context = _build_screen_context(all_elements)
+            screenshot = await _capture_screenshot(
+                self, resolved, "tap_not_found",
             )
+            if screenshot:
+                screen_context["screenshot"] = screenshot
+            return {
+                "status": "not_found",
+                "detail": f"No element found matching {search_desc}",
+                "screen_context": screen_context,
+            }
 
         if len(matches) == 1:
             el = matches[0]
@@ -1151,6 +1246,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         scale: float = 0.5,
         quality: int = 85,
+        grid: int | None = None,
     ) -> tuple[bytes, str]:
         """Capture an annotated screenshot with accessibility overlays.
 
@@ -1164,4 +1260,4 @@ class DeviceControllerUI:
         else:
             raw_png = await self.simctl.screenshot(resolved)
         elements, _ = await self.get_ui_elements(resolved)
-        return annotate_screenshot(raw_png, elements, scale=scale, quality=quality)
+        return annotate_screenshot(raw_png, elements, scale=scale, quality=quality, grid=grid)
