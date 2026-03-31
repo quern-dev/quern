@@ -1080,6 +1080,15 @@ def cli() -> None:
     )
     subparsers.add_parser("disable-local-capture", help="Disable local traffic capture")
 
+    # mcp-install / grant-full-perms (handled in __main__.py, listed here for help)
+    subparsers.add_parser(
+        "mcp-install", help="Install Quern MCP server into AI coding tools",
+    )
+    subparsers.add_parser(
+        "grant-full-perms",
+        help="Allow all quern MCP tools in Claude Code without prompting",
+    )
+
     args, remaining = parser.parse_known_args()
 
     # Backward compat: no subcommand → start --foreground

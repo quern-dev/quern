@@ -108,6 +108,8 @@ quern start -f             # run in the foreground (Ctrl-C to stop)
 quern status               # check status
 quern stop                 # stop
 quern update               # update to latest release and rebuild
+quern grant-full-perms     # allow all quern MCP tools in Claude Code without prompting
+quern mcp-install          # register quern MCP server with AI coding tools
 quern uninstall            # remove Quern and its dependencies
 ```
 
