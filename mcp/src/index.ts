@@ -26,6 +26,7 @@ import { registerBuildTools } from "./tools/build.js";
 import { registerAppStateTools } from "./tools/app-state.js";
 import { registerOslogTools } from "./tools/oslog.js";
 import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
+import { registerLandmarkTools } from "./tools/landmarks.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -87,6 +88,7 @@ registerBuildTools(server);
 registerAppStateTools(server);
 registerOslogTools(server);
 registerAppKnowledgeTools(server);
+registerLandmarkTools(server);
 
 // ---------------------------------------------------------------------------
 // Resources
