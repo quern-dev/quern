@@ -258,6 +258,10 @@ async def get_screen_summary(
         default=None, pattern=r"^(flat)$",
         description="'flat' uses flat idb output with custom companion. Default uses nested.",
     ),
+    identify: bool = Query(
+        default=False,
+        description="Identify screen against loaded landmarks. Adds identified_as/confidence.",
+    ),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
@@ -269,12 +273,13 @@ async def get_screen_summary(
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
     - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
     - mode: 'flat' to use flat idb output with custom companion. Default uses nested.
+    - identify: Match screen against loaded landmarks.
 
     Returns summary with truncated, total_interactive_elements fields.
     """
     controller = _get_controller(request)
     try:
-        summary, resolved_udid = await controller.get_screen_summary(
+        summary, elements, resolved_udid = await controller.get_screen_summary(
             max_elements=max_elements,
             udid=udid,
             snapshot_depth=snapshot_depth,
@@ -283,6 +288,13 @@ async def get_screen_summary(
             mode=mode,
         )
         summary["udid"] = resolved_udid
+
+        if identify:
+            registry = request.app.state.landmark_registry
+            result = registry.identify(elements)
+            summary["identified_as"] = result["matched"]
+            summary["confidence"] = result["confidence"]
+
         return summary
     except DeviceError as e:
         raise _handle_device_error(e)

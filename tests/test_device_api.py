@@ -98,6 +98,7 @@ def mock_controller(app):
                     {"type": "Button", "label": "Maps", "identifier": "Maps"},
                 ],
             },
+            _sample_elements,
             "AAAA-1111",
         )
     )

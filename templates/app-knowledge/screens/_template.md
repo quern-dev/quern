@@ -2,8 +2,13 @@
 screen: ""
 status: documented
 
-# How an agent can confirm it's on this screen.
-# List the most reliable signals first — a unique nav title or element.
+# Machine-evaluable screen identity (identifier-first for locale independence).
+# All landmarks must match for this screen to be recognized.
+# Priority: identifier > element type alone > label (locale-dependent, last resort).
+landmarks:
+  - { element: "", identifier: "" }
+
+# Human-readable identification hints for agents reading the doc.
 identify_by:
   - { element: "", label: "" }
 

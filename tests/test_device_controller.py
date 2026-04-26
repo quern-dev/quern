@@ -394,7 +394,7 @@ class TestGetScreenSummary:
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
 
-        summary, udid = await ctrl.get_screen_summary()
+        summary, _elements, udid = await ctrl.get_screen_summary()
         assert udid == "AAAA-1111"
         assert "summary" in summary
         assert summary["element_count"] == 4
@@ -797,7 +797,7 @@ class TestGetScreenSummaryStrategy:
         )
         ctrl.wda_client.describe_all = AsyncMock()
 
-        summary, udid = await ctrl.get_screen_summary(strategy="skeleton")
+        summary, _elements, udid = await ctrl.get_screen_summary(strategy="skeleton")
         assert udid == "PHYS-0001"
         ctrl.wda_client.build_screen_skeleton.assert_called_once_with("PHYS-0001")
         ctrl.wda_client.describe_all.assert_not_called()
@@ -808,7 +808,7 @@ class TestGetScreenSummaryStrategy:
         ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
         ctrl.wda_client.build_screen_skeleton = AsyncMock()
 
-        summary, udid = await ctrl.get_screen_summary(strategy="skeleton")
+        summary, _elements, udid = await ctrl.get_screen_summary(strategy="skeleton")
         assert udid == "AAAA-1111"
         # Simulator should NOT call build_screen_skeleton
         ctrl.wda_client.build_screen_skeleton.assert_not_called()
@@ -819,7 +819,7 @@ class TestGetScreenSummaryStrategy:
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
 
-        summary, udid = await ctrl.get_screen_summary()
+        summary, _elements, udid = await ctrl.get_screen_summary()
         assert udid == "AAAA-1111"
         assert "summary" in summary
         ctrl.idb.describe_all.assert_called_once()

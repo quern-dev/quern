@@ -37,6 +37,7 @@ from server.api.crashes import router as crashes_router
 from server.api.device import router as device_router
 from server.api.device_pool import router as device_pool_router
 from server.api.device_ui import router as device_ui_router
+from server.api.landmarks import router as landmarks_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
@@ -465,6 +466,10 @@ def create_app(
     app.state.sim_log_adapters = {}
     app.state.device_log_adapters = {}
 
+    # Screen landmarks
+    from server.device.landmarks import LandmarkRegistry
+    app.state.landmark_registry = LandmarkRegistry()
+
     # Screenshot timeline state
     app.state.active_timeline = None
 
@@ -497,6 +502,7 @@ def create_app(
     app.include_router(wda_router)
     app.include_router(build_app_router)
     app.include_router(app_state_router)
+    app.include_router(landmarks_router)
 
     @app.get("/")
     async def root() -> RedirectResponse:

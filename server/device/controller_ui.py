@@ -848,8 +848,10 @@ class DeviceControllerUI:
         strategy: str | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
-    ) -> tuple[dict, str]:
-        """Generate an LLM-optimized screen summary. Returns (summary_dict, resolved_udid).
+    ) -> tuple[dict, list, str]:
+        """Generate an LLM-optimized screen summary.
+
+        Returns (summary_dict, elements, resolved_udid).
 
         Args:
             max_elements: Maximum interactive elements to include (0 = unlimited)
@@ -869,7 +871,7 @@ class DeviceControllerUI:
                 source_timeout=source_timeout,
                 mode=mode,
             )
-        return generate_screen_summary(elements, max_elements=max_elements), resolved
+        return generate_screen_summary(elements, max_elements=max_elements), elements, resolved
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
         """Tap at coordinates. Returns the resolved udid."""

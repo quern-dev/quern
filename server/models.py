@@ -860,6 +860,50 @@ class UIElement(BaseModel):
     custom_actions: list[str] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Screen landmarks
+# ---------------------------------------------------------------------------
+
+
+class Landmark(BaseModel):
+    """A single element selector for screen identification.
+
+    Identifier is the primary match field (locale-independent).
+    Label is a fallback for elements without stable identifiers.
+    """
+
+    element: str  # element type (required, e.g. "navigationBar", "Button")
+    identifier: str | None = None  # primary: exact match, case-sensitive
+    label: str | None = None  # fallback: exact match, case-insensitive
+    label_contains: str | None = None  # fallback: substring match, case-insensitive
+    absent: bool = False  # if True, element must NOT be present
+
+
+class ScreenLandmarks(BaseModel):
+    """Named screen with its identifying landmarks."""
+
+    screen: str  # screen name
+    landmarks: list[Landmark]
+
+
+class LoadLandmarksRequest(BaseModel):
+    """Request body for POST /landmarks/load."""
+
+    app: str  # app identifier (e.g. bundle ID)
+    source: str | None = None  # path to knowledge base directory
+    landmarks: dict[str, list[dict]] | None = None  # inline: screen_name -> landmarks
+
+
+class IdentifyRequest(BaseModel):
+    """Request body for POST /landmarks/identify."""
+
+    app: str | None = None  # scope to specific app (omit = match all)
+    udid: str | None = None
+    mode: str | None = None
+    snapshot_depth: int | None = None
+    source_timeout: float | None = None
+
+
 class TapRequest(BaseModel):
     """Request body for POST /device/ui/tap."""
 

@@ -264,8 +264,12 @@ This is the recommended first step before interacting with UI. Use this to disco
         .enum(["flat"])
         .optional()
         .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Default uses nested mode with probe-based discovery. Simulators only."),
+      identify: z
+        .boolean()
+        .optional()
+        .describe("Match screen against loaded landmarks. Adds identified_as and confidence fields to the response."),
     }),
-  }, async ({ max_elements, udid, snapshot_depth, strategy, source_timeout, mode }) => {
+  }, async ({ max_elements, udid, snapshot_depth, strategy, source_timeout, mode, identify }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/screen-summary", {
         max_elements,
@@ -274,6 +278,7 @@ This is the recommended first step before interacting with UI. Use this to disco
         strategy,
         source_timeout,
         mode,
+        identify,
       });
 
       return {

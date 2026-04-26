@@ -48,7 +48,7 @@ logger = logging.getLogger("quern-debug-server.api")
 async def _capture_screen_context(controller, udid: str) -> dict:
     """Best-effort screen context capture for action responses."""
     try:
-        summary, _ = await controller.get_screen_summary(
+        summary, _elements, _ = await controller.get_screen_summary(
             max_elements=10, udid=udid,
         )
         return {
