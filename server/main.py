@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from server import get_version
 from server.api.app_state import router as app_state_router
 from server.api.build_app import router as build_app_router
 from server.api.builds import router as builds_router
@@ -432,7 +433,7 @@ def create_app(
 
     app = FastAPI(
         title="Quern",
-        version="0.1.0",
+        version=get_version(),
         description="Debug log capture and AI context server",
         lifespan=lifespan,
     )
@@ -579,7 +580,7 @@ fetch('/api/v1/device/list', {
             cache_stats = app.state.device_controller.get_cache_stats()
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": get_version(),
             "tools": tools,
             "ui_cache": cache_stats,
         }
@@ -594,7 +595,7 @@ fetch('/api/v1/device/list', {
             cache_stats = app.state.device_controller.get_cache_stats()
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": get_version(),
             "tools": tools,
             "ui_cache": cache_stats,
         }
@@ -797,7 +798,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     write_state(state_dict)
 
     if args.foreground:
-        print("Quern v0.1.0")
+        print(f"Quern v{get_version()}")
         print(f"  http://{config.host}:{server_port}")
         print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
         print("  API key file: ~/.quern/api-key")
