@@ -1,1 +1,1 @@
-"""Process lifecycle management for Quern Debug Server."""
+"""Process lifecycle management for Quern."""

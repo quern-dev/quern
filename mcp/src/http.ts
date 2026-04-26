@@ -54,10 +54,10 @@ export async function probeServer(): Promise<void> {
     await fetch(new URL("/health", serverUrl).toString(), {
       signal: AbortSignal.timeout(3000),
     });
-    console.error(`Connected to Quern Debug Server at ${serverUrl}`);
+    console.error(`Connected to Quern at ${serverUrl}`);
   } catch {
     console.error(
-      `WARNING: Cannot reach Quern Debug Server at ${serverUrl} — use ensure_server tool to start it`
+      `WARNING: Cannot reach Quern at ${serverUrl} — use ensure_server tool to start it`
     );
   }
 }

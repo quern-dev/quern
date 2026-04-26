@@ -1,4 +1,4 @@
-"""Quern Debug Server — main entry point.
+"""Quern — main entry point.
 
 Usage:
     python3 -m server                  Start in foreground (backward compat)
@@ -431,7 +431,7 @@ def create_app(
         config = ServerConfig()
 
     app = FastAPI(
-        title="Quern Debug Server",
+        title="Quern",
         version="0.1.0",
         description="Debug log capture and AI context server",
         lifespan=lifespan,
@@ -797,7 +797,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     write_state(state_dict)
 
     if args.foreground:
-        print("Quern Debug Server v0.1.0")
+        print("Quern v0.1.0")
         print(f"  http://{config.host}:{server_port}")
         print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
         print("  API key file: ~/.quern/api-key")
@@ -1038,7 +1038,7 @@ def _cmd_disable_local_capture() -> None:
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Quern Debug Server — capture device logs for AI agents",
+        description="Quern — capture device logs for AI agents",
     )
     parser.set_defaults(command=None)
 

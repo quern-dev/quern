@@ -1,4 +1,4 @@
-"""State file management for Quern Debug Server.
+"""State file management for Quern.
 
 The state file (~/.quern/state.json) is the single source of truth
 for discovering a running server instance. Every consumer (CLI, MCP, shell

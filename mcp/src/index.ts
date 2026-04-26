@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Quern Debug Server — MCP Server
+ * Quern — MCP Server
  *
  * Thin wrapper that translates MCP tool calls into HTTP requests
  * to the Python log server running on localhost:9100.

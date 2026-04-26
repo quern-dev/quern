@@ -1268,7 +1268,7 @@ def run_setup() -> int:
             os.environ["PATH"] = venv_bin + ":" + path
 
     print()
-    print("  Quern Debug Server — Setup")
+    print("  Quern — Setup")
     print("  Checking your environment...")
     print()
 
@@ -1745,7 +1745,7 @@ def _brew_uninstall(formula: str) -> bool:
 def run_uninstall() -> int:
     """Remove Quern and its dependencies. Returns 0 on success, 1 on error."""
     print()
-    print("  Quern Debug Server — Uninstall")
+    print("  Quern — Uninstall")
     print()
 
     project_root = _find_project_root()

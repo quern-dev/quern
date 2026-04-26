@@ -1,4 +1,4 @@
-"""Daemon mode for Quern Debug Server.
+"""Daemon mode for Quern.
 
 Spawns the server as a detached background process and waits for it to
 become healthy before the parent exits.
@@ -119,7 +119,7 @@ def _print_status(state: dict) -> None:
 
     key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
 
-    print("Quern Debug Server running")
+    print("Quern running")
     print(f"  PID:        {pid}")
     print(f"  Server:     http://{local_ip}:{port}")
     if proxy_enabled:

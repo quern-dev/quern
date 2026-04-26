@@ -1,10 +1,10 @@
 # Quern Debug MCP Server
 
-MCP (Model Context Protocol) server that wraps the Quern Debug Server HTTP API, letting AI agents query iOS device logs, intercept network traffic, control simulators, and more.
+MCP (Model Context Protocol) server that wraps the Quern HTTP API, letting AI agents query iOS device logs, intercept network traffic, control simulators, and more.
 
 ## Prerequisites
 
-- The Python Quern Debug Server must be running (`quern start`)
+- The Python Quern must be running (`quern start`)
 - Node.js 18+
 
 ## Usage
