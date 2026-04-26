@@ -9,6 +9,11 @@ updates:
     directory: "/mcp"
     schedule:
       interval: "weekly"
+    ignore:
+      # @types/node tracks Node major versions; pin to the engines floor (>=22)
+      # so types don't reference APIs that aren't available at runtime.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
