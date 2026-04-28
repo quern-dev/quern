@@ -468,6 +468,14 @@ class ProxyStatusResponse(BaseModel):
     local_ip: str | None = None
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
+    network_state: dict | None = None
+    """Snapshot of the Mac's network identity from the background monitor —
+    current SSID, current Mac IP, last-changed timestamp, and a small
+    history of recent changes. When the laptop moves between networks, the
+    monitor notices within ~15 seconds and updates this field; combined
+    with the per-device wifi_proxy_stale flag in cert_setup, an agent
+    reading this response sees both *what changed* and *which devices
+    need their proxy reconfigured*."""
 
 
 class SystemProxyInfo(BaseModel):
@@ -858,6 +866,15 @@ class UIElement(BaseModel):
     role_description: str = ""  # "button", "slider", etc.
     help: str | None = None
     custom_actions: list[str] = Field(default_factory=list)
+    extra_attrs: dict[str, str] | None = None
+    """Raw source attributes from the underlying accessibility provider, kept
+    verbatim before the per-platform normalizer collapses them. Useful for
+    debugging the normalizer itself — e.g., checking whether an Android node
+    has selected="true" without reaching for adb shell uiautomator dump.
+    Populated only for Android (uiautomator2 XML attributes); idb output on
+    iOS is already in our canonical shape, so this is None there. Stripped
+    from API responses unless include_raw=true is passed, to keep payloads
+    small in the common case."""
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +894,13 @@ class Landmark(BaseModel):
     label: str | None = None  # fallback: exact match, case-insensitive
     label_contains: str | None = None  # fallback: substring match, case-insensitive
     absent: bool = False  # if True, element must NOT be present
+    selected: bool | None = None
+    """Selection state for selectable elements (RadioButton, Switch, CheckBox,
+    Tab). When set, the element's selection state must match — useful for
+    distinguishing "the Timelines tab is the selected one" from "the
+    Timelines tab is just present." Both iOS and Android backends normalize
+    selection state into UIElement.value as "1" (selected) / "0" (not).
+    Omit to ignore selection state."""
 
 
 class ScreenLandmarks(BaseModel):

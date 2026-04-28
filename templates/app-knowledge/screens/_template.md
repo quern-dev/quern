@@ -5,10 +5,30 @@ status: documented
 # Machine-evaluable screen identity (identifier-first for locale independence).
 # All landmarks must match for this screen to be recognized.
 # Priority: identifier > element type alone > label (locale-dependent, last resort).
+#
+# Re-verify when the UI changes. If `identify_screen` returns
+# `confidence: "none"` for this screen — or `tap_element` calls start failing
+# with `not_found` on identifiers that used to work — the landmarks below are
+# probably stale. Navigate to the screen, call `get_ui_tree`, and re-author
+# from what's actually present. See "Keeping Landmarks in Sync" in the
+# knowledge-base authoring guide.
+#
+# Available fields per landmark:
+#   element          - element type (required, e.g. "navigationBar", "Button")
+#   identifier       - exact-match accessibility identifier (preferred)
+#   label            - exact-match (case-insensitive) label text
+#   label_contains   - substring match for dynamic labels
+#   absent: true     - landmark matches only when the element is NOT present
+#   selected: true   - for tabs/switches/radios/checkboxes — the element must
+#                      be in the selected/on state. Use this to distinguish
+#                      "Timelines tab is the active one" from "a Timelines
+#                      tab exists" when several tabs share the same id pattern.
 landmarks:
   - { element: "", identifier: "" }
 
 # Human-readable identification hints for agents reading the doc.
+# Optional. Leave it out if landmarks above already capture the screen
+# identity clearly.
 identify_by:
   - { element: "", label: "" }
 

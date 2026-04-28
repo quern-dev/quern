@@ -16,7 +16,7 @@ from server.device.simctl import SimctlBackend
 from server.device.u2_client import U2Backend
 from server.device.usbmux import UsbmuxBackend
 from server.device.wda_client import WdaBackend
-from server.lifecycle.state import read_state, update_state
+from server.lifecycle.state import read_active_udid, write_active_udid
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 logger = logging.getLogger("quern-debug-server.device")
@@ -37,13 +37,12 @@ class DeviceController(DeviceControllerUI):
         self.__active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
 
-        # Restore active device from state.json (survives server restarts)
-        state = read_state()
-        if state:
-            devices = state.get("active_devices", [])
-            if devices:
-                self.__active_udid = devices[0]
-                logger.info("Restored active device from state: %s", devices[0][:8])
+        # Restore active device from its sidecar file (lives separately
+        # from state.json so it survives `quern stop` and stop/start cycles).
+        persisted = read_active_udid()
+        if persisted:
+            self.__active_udid = persisted
+            logger.info("Restored active device: %s", persisted[:8])
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
         self._cache_ttl: float = 0.3  # 300ms cache TTL
@@ -63,7 +62,7 @@ class DeviceController(DeviceControllerUI):
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
         self.__active_udid = value
-        update_state(active_devices=[value] if value else [])
+        write_active_udid(value)
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""

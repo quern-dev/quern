@@ -409,6 +409,54 @@ class TestGetUIElements:
             udid="BBBB-2222", snapshot_depth=None, source_timeout=None, mode=None
         )
 
+    async def test_get_ui_elements_strips_extra_attrs_by_default(
+        self, app, auth_headers, mock_controller,
+    ):
+        """Without include_raw, the response should NOT include extra_attrs
+        on each element — it's debug-only data and would inflate every UI
+        tree response with redundant source attributes."""
+        mock_controller.get_ui_elements = AsyncMock(
+            return_value=(
+                [UIElement(
+                    type="Group",
+                    label="Explore",
+                    extra_attrs={"selected": "true", "checkable": "false"},
+                )],
+                "AAAA-1111",
+            ),
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/ui", headers=auth_headers)
+        assert resp.status_code == 200
+        elem = resp.json()["elements"][0]
+        assert "extra_attrs" not in elem
+
+    async def test_get_ui_elements_include_raw_keeps_extra_attrs(
+        self, app, auth_headers, mock_controller,
+    ):
+        """With include_raw=true, extra_attrs survive into the response so
+        agents can debug the normalizer without dropping to adb."""
+        mock_controller.get_ui_elements = AsyncMock(
+            return_value=(
+                [UIElement(
+                    type="Group",
+                    label="Explore",
+                    extra_attrs={"selected": "true", "checkable": "false"},
+                )],
+                "AAAA-1111",
+            ),
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/ui?include_raw=true",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        elem = resp.json()["elements"][0]
+        assert elem["extra_attrs"] == {"selected": "true", "checkable": "false"}
+
     async def test_get_ui_elements_idb_not_found(self, app, auth_headers, mock_controller):
         mock_controller.get_ui_elements = AsyncMock(
             side_effect=DeviceError(

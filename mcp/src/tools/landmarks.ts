@@ -5,7 +5,14 @@ import { strictParams } from "./helpers.js";
 
 export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
-    description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.`,
+    description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.
+
+The response includes a 'skipped' array listing screen files the loader couldn't turn into landmarks, with categorized reasons:
+  - legacy_format: file uses the pre-landmarks 'identify_by:' field. Includes the original entries so an agent can propose a migration to the new schema with user review.
+  - no_landmarks: file has neither field (likely a stub).
+  - no_frontmatter / yaml_error / invalid_entries: file is malformed.
+
+When skipped[] contains legacy_format entries, the recommended workflow is to surface them to the user, propose a per-file migration (see the app-knowledge-guide), and rewrite each file after review.`,
     inputSchema: strictParams({
       app: z
         .string()
@@ -26,6 +33,14 @@ export function registerLandmarkTools(server: McpServer): void {
               label: z.string().optional(),
               label_contains: z.string().optional(),
               absent: z.boolean().optional(),
+              selected: z
+                .boolean()
+                .optional()
+                .describe(
+                  "Selection state for tabs, switches, radios, checkboxes. " +
+                  "true = element must be selected (e.g. the active tab); " +
+                  "false = element must not be selected. Omit to ignore."
+                ),
             })
           )
         )
@@ -60,7 +75,9 @@ export function registerLandmarkTools(server: McpServer): void {
   });
 
   server.registerTool("identify_screen", {
-    description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks.`,
+    description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks.
+
+partial_matches contains EVERY non-fully-matched screen (including zero-match), sorted by descending match count so the best candidate is first. Each entry has a 'landmarks' array with per-landmark match results, so you can debug "why didn't my landmarks match?" without re-running identification — the failing selectors are right there in the response.`,
     inputSchema: strictParams({
       app: z
         .string()

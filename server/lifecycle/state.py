@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 _state_dir = os.environ.get("QUERN_STATE_DIR")
 STATE_FILE = Path(_state_dir) / "state.json" if _state_dir else CONFIG_DIR / "state.json"
 
+# Active device persistence is intentionally separate from STATE_FILE.
+# state.json is server-runtime data and gets deleted on `quern stop`; the
+# active device is user preference and must survive stop/start cycles.
+ACTIVE_DEVICE_FILE = (
+    Path(_state_dir) / "active-device.json" if _state_dir
+    else CONFIG_DIR / "active-device.json"
+)
+
 
 class ServerState(TypedDict, total=False):
     """Schema for state.json."""
@@ -38,7 +46,6 @@ class ServerState(TypedDict, total=False):
     proxy_status: str  # "running", "stopped", "crashed", "disabled"
     started_at: str  # ISO 8601
     api_key: str
-    active_devices: list[str]
     system_proxy_configured: bool
     system_proxy_interface: str | None
     system_proxy_snapshot: dict | None
@@ -86,6 +93,55 @@ def write_state(state: ServerState) -> None:
 def remove_state() -> None:
     """Remove state.json."""
     STATE_FILE.unlink(missing_ok=True)
+
+
+def read_active_udid() -> str | None:
+    """Read the persisted active-device UDID from its sidecar file.
+
+    Lives in a separate file from state.json so it survives server
+    stop/start cycles — `quern stop` deletes state.json, but the active
+    device is user preference, not server runtime.
+
+    Returns None if the file is missing, empty, or holds no UDID.
+    """
+    if not ACTIVE_DEVICE_FILE.exists():
+        return None
+    try:
+        fd = ACTIVE_DEVICE_FILE.open("r")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            content = fd.read()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        if not content.strip():
+            return None
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            return None
+        udid = data.get("udid")
+        return udid if isinstance(udid, str) and udid else None
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to read active-device.json: %s", e)
+        return None
+
+
+def write_active_udid(udid: str | None) -> None:
+    """Persist the active-device UDID to its sidecar file.
+
+    Pass None (or empty string) to clear. Survives `quern stop` —
+    `remove_state()` deletes state.json but does not touch this file.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {"udid": udid} if udid else {}
+    fd = ACTIVE_DEVICE_FILE.open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.write(json.dumps(payload, indent=2))
+        fd.flush()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 def update_state(**updates: Any) -> None:

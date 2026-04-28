@@ -344,11 +344,30 @@ TROUBLESHOOTING — no traffic from a physical device:
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
    - Use the client_ip from the active network config as the filter on query_flows.
      If the device got a new DHCP lease, call record_device_proxy_config again with the
-     updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).`,
-    inputSchema: strictParams({}),
-  }, async () => {
+     updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).
+
+cert_setup is filtered by default to currently-visible devices (deleted simulators and disconnected physical devices are hidden from the routine response). Pass include_offline=true to see the full historical record — useful for debugging "I configured this device last week, where did it go?". The persisted cert-state.json file always retains the full history regardless of this flag.
+
+network_state surfaces the Mac's current Wi-Fi/network identity from a background poll that fires every ~15s. Fields:
+- ssid, local_ip: current values.
+- last_polled_at: how fresh the snapshot is.
+- last_changed_at, previous_ssid, previous_local_ip, last_change_reason: populated when the monitor detected a change since server start. Reason codes: ssid_changed, ip_changed_same_ssid, ssid_and_ip_changed.
+- recent_changes: short ring of recent change events (capped at 10).
+
+When traffic capture suddenly stops working on a physical device, check network_state alongside cert_setup[udid].wifi_proxy_stale: if last_changed_at is recent, the laptop just moved networks (or got a new DHCP lease) and the device's stored proxy_host is now wrong. Update Wi-Fi proxy on the device, then call record_device_proxy_config with the new ssid + client_ip.`,
+    inputSchema: strictParams({
+      include_offline: z
+        .coerce.boolean()
+        .optional()
+        .describe(
+          "Include cert_setup entries for devices that aren't currently visible (default: false)"
+        ),
+    }),
+  }, async ({ include_offline }) => {
     try {
-      const data = await apiRequest("GET", "/api/v1/proxy/status");
+      const params: Record<string, string> = {};
+      if (include_offline !== undefined) params.include_offline = String(include_offline);
+      const data = await apiRequest("GET", "/api/v1/proxy/status", params);
 
       return {
         content: [
@@ -431,13 +450,15 @@ Android emulators: Requires a rootable image (Google APIs, NOT Google Play). Goo
 
 Also auto-configures the HTTP proxy on Android emulators (10.0.2.2:9101).
 
-IMPORTANT: Prefer omitting udid to install on all booted devices in a single call. Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips.`,
+When udid is omitted, resolution order is: (1) the active device set via resolve_device, if any — (2) otherwise, all booted simulators and rootable Android emulators in a single batch call. Do NOT loop over individual UDIDs — the batch path is just as fast and avoids N redundant round-trips.
+
+Physical iOS and Android devices are not eligible for automated install. iOS physicals require manual installation via Settings > General > VPN & Device Management; Android physicals require root access. Calls targeting a physical UDID are rejected with a 400 and guidance.`,
     inputSchema: strictParams({
       udid: z
         .string()
         .optional()
         .describe(
-          "Specific device UDID. If omitted, installs on all booted simulators and rootable Android emulators."
+          "Specific device UDID. If omitted, uses the active device, or falls back to all booted simulators and rootable Android emulators."
         ),
       force: z
         .coerce.boolean()

@@ -50,14 +50,18 @@ Each landmark is a selector with optional fields:
 landmarks:
   - element: "navigationBar"    # element type (required)
     label: "Settings"           # label to match (optional, but almost always used)
+    label_contains: "Set"       # substring match for dynamic labels (optional)
     identifier: "settings_nav"  # accessibility identifier (optional, use when label is ambiguous)
     absent: true                # if true, this element must NOT be present (optional, rare)
+    selected: true              # for tabs/switches/radios/checkboxes — element must be in the on/active state (optional)
 ```
 
 Matching rules:
 - `element` matches against the UI element's type
-- `label` matches as a substring (case-insensitive) against the element's label — exact match is preferred but partial accommodates minor label changes
+- `label` matches case-insensitively against the element's label
+- `label_contains` matches as a case-insensitive substring (use for elements with dynamic content in their label)
 - `identifier` matches exactly against the accessibility identifier
+- `selected: true` requires the element's UI selection state to be on. Both iOS (`AXValue == "1"` from idb) and Android (uiautomator `selected="true"` for tabs, `checked="true"` for checkable widgets) are normalized to `AXValue == "1"` so the same landmark works cross-platform.
 - If multiple fields are specified, all must match (AND)
 - All landmarks for a screen must match (AND across the list)
 
@@ -83,7 +87,9 @@ identify_by:
   - { element: "navigationBar", label: "Settings" }
 ```
 
-During a transition period, both fields coexist. `identify_by` remains as the human-readable hint. `landmarks` is the machine-evaluable version. For most screens they'll be identical. Eventually `identify_by` can be retired.
+Both fields coexist by design. `landmarks` is the machine-evaluable schema that the loader actually reads; `identify_by` is a human-readable hint that the loader ignores at runtime but agents may consult while authoring. For most screens they'll be similar. New screens don't need `identify_by` unless you want a freeform prose note that doesn't fit the structured schema.
+
+**Migrating a legacy knowledge base.** If the screen documents in your KB were authored before April 2026, they only have `identify_by:`. The loader surfaces these in the `skipped[]` array of the `load_landmarks` response with `reason: "legacy_format"` and the original entries echoed back so an agent can propose a per-file migration. The `quern-landmark-migration` agent skill (under `skills/`) automates this with user review at each step.
 
 ### Authoring during the guided tour
 
@@ -161,18 +167,34 @@ Response:
   "matched": "Login",
   "confidence": "exact",
   "matched_landmarks": [
-    {"element": "TextField", "label": "Email", "found": true},
-    {"element": "Button", "label": "Sign In", "found": true}
+    {"landmark": {"element": "TextField", "label": "Email"}, "matched": true},
+    {"landmark": {"element": "Button", "label": "Sign In"}, "matched": true}
   ],
   "partial_matches": [
-    {"screen": "Home", "matched": 0, "total": 1}
+    {
+      "screen": "Home",
+      "matched": 0,
+      "total": 1,
+      "landmarks": [
+        {"landmark": {"element": "navigationBar", "label": "Home"}, "matched": false}
+      ]
+    },
+    {
+      "screen": "Settings",
+      "matched": 0,
+      "total": 1,
+      "landmarks": [
+        {"landmark": {"element": "navigationBar", "label": "Settings"}, "matched": false}
+      ]
+    }
   ]
 }
 ```
 
 - `matched` — the screen whose landmarks all matched, or `null` if no screen matched
 - `confidence` — `"exact"` (one screen matched), `"ambiguous"` (multiple screens matched), or `"none"`
-- `partial_matches` — screens with some but not all landmarks matched, useful for debugging
+- `matched_landmarks` — per-landmark results for the matched screen
+- `partial_matches` — every evaluated non-fully-matched screen (including zero-match), sorted by descending match count so the best candidate is first. Each entry includes a `landmarks` array with per-landmark match results so an agent can debug "why didn't my landmarks match?" without re-running identification. The previous behavior — silently dropping zero-match screens — hid the most useful debugging signal.
 
 ### MCP tool
 
@@ -232,6 +254,16 @@ load_landmarks(path="/Users/dev/myapp/.quern/knowledge/")
 ```
 
 Quern scans screen documents, extracts `landmarks` from frontmatter, and holds them in memory for identification queries.
+
+The response includes:
+- `loaded`: the app identifier
+- `source`: the path that was scanned (or `"inline"` for inline-loaded landmarks)
+- `screens`: the count of successfully loaded screens
+- `skipped`: an array of screen files that couldn't be turned into landmarks, each with a `reason` and (where applicable) the original frontmatter data so the caller can act on it. Reason codes:
+  - `legacy_format` — file has `identify_by:` but no usable `landmarks:`. The original entries are echoed back in `skipped[].identify_by` (verbatim — dict entries can be migrated mechanically; freeform-prose strings need the screen re-visited). The `quern-landmark-migration` skill walks an agent through fixing each one.
+  - `no_landmarks` — file has neither field, likely a stub.
+  - `no_frontmatter` / `yaml_error` / `invalid_entries` — file is malformed; `error` is populated where applicable.
+  - `read_error` — couldn't read the file.
 
 ## Validation tools
 

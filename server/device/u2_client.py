@@ -124,12 +124,24 @@ def _normalize_node(node: ET.Element) -> dict:
     if resource_id:
         identifier = resource_id.split("/", 1)[-1] if "/" in resource_id else resource_id
 
-    # Value: for editable fields use text; for checkable elements use checked state
+    # Value: for editable fields use text; otherwise normalize selection state.
+    # Android exposes selection state via two distinct mechanisms depending on
+    # widget type, both of which we collapse to AXValue "1"/"0" for parity
+    # with iOS (where AXValue serves the same role for switches and radios).
+    #   checkable=true → use the `checked` attribute (Switch, CheckBox,
+    #     RadioButton, ToggleButton — Android's "is this compound button on?")
+    #   selected=true → use the `selected` attribute (BottomNavigationView and
+    #     TabLayout tabs — Android's "is this view the active one in its
+    #     parent?"). Asymmetric on the false side: we don't emit "0" for every
+    #     non-selected element because nearly everything on screen has
+    #     selected="false" by default — that would flood AXValue with noise.
     value = None
     if class_name in _EDITABLE_CLASSES:
         value = text
     elif node.get("checkable") == "true":
         value = "1" if node.get("checked") == "true" else "0"
+    elif node.get("selected") == "true":
+        value = "1"
 
     # Frame from bounds
     bounds = node.get("bounds", "")
@@ -146,6 +158,11 @@ def _normalize_node(node: ET.Element) -> dict:
         "enabled": enabled,
         "role": "",
         "role_description": "",
+        # Preserve raw uiautomator2 XML attributes (verbatim, before the
+        # mappings above collapse them) so the agent can debug the
+        # normalizer without dropping to `adb shell uiautomator dump`. The
+        # API strips this from responses unless include_raw=true.
+        "extra_attrs": dict(node.attrib),
     }
 
 

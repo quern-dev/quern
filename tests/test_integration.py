@@ -405,6 +405,133 @@ async def test_proxy_status_stopped(app, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_proxy_status_filters_offline_devices_by_default(
+    app, auth_headers, tmp_path, monkeypatch,
+):
+    """cert_setup should hide entries for devices not currently visible —
+    deleted simulators and disconnected physical devices clutter the
+    routine response. The persisted file is unchanged; only the response
+    is filtered."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from server.models import DeviceInfo, DeviceState, DeviceType
+
+    # Three persisted entries, only one device currently visible
+    monkeypatch.setattr(
+        "server.proxy.cert_state.read_cert_state",
+        lambda: {
+            "sim-still-here": {
+                "name": "iPhone 17 Pro",
+                "cert_installed": True,
+                "fingerprint": "abc",
+            },
+            "sim-deleted": {
+                "name": "Old iPhone (deleted)",
+                "cert_installed": True,
+                "fingerprint": "def",
+            },
+            "phys-offline": {
+                "name": "J iPhone 15 Pro",
+                "cert_installed": False,
+                "fingerprint": None,
+            },
+        },
+    )
+    controller = MagicMock()
+    controller.list_devices = AsyncMock(return_value=[
+        DeviceInfo(
+            udid="sim-still-here",
+            name="iPhone 17 Pro",
+            state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR,
+        ),
+    ])
+    app.state.device_controller = controller
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/status", headers=auth_headers)
+        assert resp.status_code == 200
+        cert_setup = resp.json()["cert_setup"]
+        assert set(cert_setup) == {"sim-still-here"}
+
+
+@pytest.mark.asyncio
+async def test_proxy_status_include_offline_returns_full_history(
+    app, auth_headers, tmp_path, monkeypatch,
+):
+    """include_offline=true returns every persisted entry — useful for
+    'I configured this device last week, where did it go?'."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from server.models import DeviceInfo, DeviceState, DeviceType
+
+    monkeypatch.setattr(
+        "server.proxy.cert_state.read_cert_state",
+        lambda: {
+            "sim-still-here": {
+                "name": "iPhone 17 Pro",
+                "cert_installed": True,
+                "fingerprint": "abc",
+            },
+            "sim-deleted": {
+                "name": "Old iPhone (deleted)",
+                "cert_installed": True,
+                "fingerprint": "def",
+            },
+        },
+    )
+    controller = MagicMock()
+    controller.list_devices = AsyncMock(return_value=[
+        DeviceInfo(
+            udid="sim-still-here",
+            name="iPhone 17 Pro",
+            state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR,
+        ),
+    ])
+    app.state.device_controller = controller
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/proxy/status?include_offline=true", headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        cert_setup = resp.json()["cert_setup"]
+        assert set(cert_setup) == {"sim-still-here", "sim-deleted"}
+
+
+@pytest.mark.asyncio
+async def test_proxy_status_falls_back_when_list_devices_fails(
+    app, auth_headers, tmp_path, monkeypatch,
+):
+    """If list_devices() throws (simctl unavailable, etc.), the filter
+    must fall back to the unfiltered view rather than hide everything.
+    Filtering should never lose data when device discovery is broken."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.setattr(
+        "server.proxy.cert_state.read_cert_state",
+        lambda: {
+            "sim-a": {"name": "A", "cert_installed": True},
+            "sim-b": {"name": "B", "cert_installed": True},
+        },
+    )
+    controller = MagicMock()
+    controller.list_devices = AsyncMock(side_effect=RuntimeError("simctl boom"))
+    app.state.device_controller = controller
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/status", headers=auth_headers)
+        assert resp.status_code == 200
+        cert_setup = resp.json()["cert_setup"]
+        # Both entries returned despite list_devices failure
+        assert set(cert_setup) == {"sim-a", "sim-b"}
+
+
+@pytest.mark.asyncio
 async def test_proxy_stop_when_not_running(app, auth_headers):
     """Stopping a stopped proxy should return 409."""
     # Need to set up adapter on app state since lifespan doesn't run
