@@ -5,7 +5,7 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-04-28
 
 ### Added
 - **Network change monitor** — a background poll (~15s cadence) detects shifts in the Mac's Wi-Fi SSID and outward-facing IP. Surfaced as `network_state` on the `proxy_status` response with `last_changed_at`, a `last_change_reason` (`ssid_changed` / `ip_changed_same_ssid` / `ssid_and_ip_changed`), and a small ring of recent changes. Combined with the existing per-device `wifi_proxy_stale` flag, an agent reading any routine status call now sees both *what just changed* and *which devices need their proxy reconfigured* — without anyone having to remember to ask after moving between networks.
@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Active device sidecar** — the active UDID set via `resolve_device` now persists in `~/.quern/active-device.json` (separate from `state.json`, which is server-runtime data). Survives `quern stop` and stop/start cycles; the user no longer has to re-resolve their device after every restart.
 - **`udid` parameter on `resolve_device` MCP tool** — the HTTP route already accepted it, but the MCP wrapper's Zod schema didn't expose it. Agents that already know which device they want (e.g., from `list_devices`) can now switch active device without round-tripping through name/os_version matching.
 - **Categorized `skipped[]` on `load_landmarks`** — knowledge bases that pre-date the `landmarks:` schema (April 2026) used the older `identify_by:` field. The loader now returns these in a `skipped` array with reason codes (`legacy_format`, `no_landmarks`, `no_frontmatter`, `yaml_error`, `invalid_entries`). The `legacy_format` entries echo back the original `identify_by` data so an agent can propose a per-file migration with user review.
-- **Migration agent skill** — new `quern-landmark-migration` skill walks an agent through migrating an `identify_by`-era knowledge base file by file, including the `value: "1"` → `selected: true` translation. Auto-installed via `quern setup`.
+- **Migration agent skill** — new `quern-landmark-migration` skill walks an agent through migrating an `identify_by`-era knowledge base. Tiered batching (mechanical / schema-translation / prose) plus a live verification phase that catches drift the YAML rewrite can't see. Auto-installed via `quern setup`.
 - **Per-landmark detail in `identify_screen` failure responses** — `partial_matches` now includes every evaluated non-fully-matched screen (including zero-match), with full per-landmark results so an agent can see which selectors hit and which missed without re-running identification. Sorted by descending match count so the best candidate appears first.
-- **Version visible in `quern start` and `quern status`** — daemon-mode banners now show `Quern v0.11.0 running` instead of just `Quern running`.
+- **Pre-commit checklist hook** — `quern setup` installs a Claude Code `PreToolUse` hook into `~/.claude/settings.json` that surfaces a short checklist whenever an agent runs `git commit` in a project that uses Quern (signaled by a `.quern/knowledge/` directory at the project root). The reminder covers KB drift, landmark verification, identifier consistency, and other discipline that's easy to forget when committing app or KB changes. Stays silent in projects that don't use Quern. Re-installable standalone via `quern install-precommit-hook`.
+- **Version visible in `quern start` and `quern status`** — daemon-mode banners now show `Quern v0.12.0 running` instead of just `Quern running`.
 
 ### Changed
 - **`install_proxy_cert` filters physical devices** — the no-UDID batch path now only runs on simulators and Android emulators, both for the explicit `udid` case (returns 400 with manual-install guidance) and the no-UDID case (silently skips physicals). Physical iOS cert install requires manual installation via Settings > General > VPN & Device Management; Android physicals require root.
@@ -24,8 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`proxy_status` filters offline devices in `cert_setup`** — deleted simulators and disconnected physical devices are hidden from the routine response (the persisted `cert-state.json` is unchanged). Pass `include_offline=true` to see the full historical record.
 
 ### Documentation
-- **Knowledge-base authoring guide** (`docs/app-knowledge-guide.md`) updated to introduce landmarks as the primary identification field, document the `selected:` selector, and walk through migrating a legacy knowledge base.
+- **Knowledge-base authoring guide** (`docs/app-knowledge-guide.md`) updated to introduce landmarks as the primary identification field, document the `selected:` selector, walk through migrating a legacy knowledge base, and explain how to keep landmarks in sync as the app evolves (KB-as-living-artifact framing).
 - **Screen landmark spec** (`docs/screen-landmarks.md`) updated to reflect the shipped `selected:` field, the per-landmark detail in `partial_matches`, and the `skipped[]` response from `load_landmarks`.
+- **Agent guide** (`docs/agent-guide.md`) gets a new "Identifying Screens with Landmarks" workflow section so agents discover the landmark tools at session start rather than stumbling onto them later. Plus a discovery line in the MCP server preamble for the same reason.
+- **Pre-commit checklist** (`docs/agent-precommit-checklist.md`) ships with the repo and is installed alongside the hook.
+
+### Notes
+- All work in this release came out of a focused dogfooding session: rough edges discovered by actually using Quern on a real app surfaced as 19 commits' worth of fixes and quality-of-life improvements, with the skill and the pre-commit hook designed to make the next agent's first session smoother than this one's was.
 
 ## [0.11.0] - 2026-04-26
 
@@ -98,6 +104,7 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
+[0.12.0]: https://github.com/quern-dev/quern/releases/tag/v0.12.0
 [0.11.0]: https://github.com/quern-dev/quern/releases/tag/v0.11.0
 [0.11.0-rc1]: https://github.com/quern-dev/quern/releases/tag/v0.11.0-rc1
 [0.10.2]: https://github.com/quern-dev/quern/releases/tag/v0.10.2
