@@ -48,7 +48,7 @@ If the user just wants Tier A migrated and not Tier B, that's fine — split the
 
 The translation is mechanical, but the *underlying app* may have moved on since the KB was authored. Before applying the batch, check for drift:
 
-- If you have a recent `get_screen_summary` from one of the screens in the batch, eyeball whether the landmark identifiers actually exist on screen. If `add-identity.url-field` is in the YAML but not in the current UI, the legacy data is stale — Tier A migration would silently produce landmarks that never match.
+- If you have a recent `get_screen_summary` from one of the screens in the batch, eyeball whether the landmark identifiers actually exist on screen. If a specific identifier from the legacy YAML (e.g. `feature.somefield`) doesn't appear in the current UI tree at all, the data is stale — Tier A migration would silently produce landmarks that never match.
 - If the KB hasn't been touched in 6+ months, treat the entire batch as drift-suspect.
 
 When drift is suspected, switch to **per-file mode** for the affected files: open the screen, run `get_screen_summary`, re-author landmarks from what's actually there. Don't mechanically translate stale data.
@@ -125,18 +125,19 @@ The `wait_for_element` step is essential — tapping into a new screen often ret
 a transient near-empty UI tree (just the Application element) for ~1–2 seconds
 before content settles. Without it you'll see false `confidence: none` results.
 
-**Common drift patterns to watch for** (from real Metatext migration):
+**Common drift patterns to watch for.** These are general; examples in the table are illustrative, not specific to any one app.
 
 | Pattern | Symptom | Fix |
 |---|---|---|
-| Identifier namespace renamed | Multiple `identifier:` landmarks all miss; the screen's elements use a different prefix | Re-author with the current identifier namespace from `get_ui_tree`. |
-| Documentation placeholder used as a literal | A `label:` landmark with text like `"@username"`, `"<placeholder>"`, or other doc-style content | Drop that landmark; rely on the structural ones (heading, unique button identifier). |
-| Empty-state UI hides the Nav-bar Group | `Group identifier:"X"` lookup returns nothing on a "no data yet" screen, even though it exists when populated | Drop the Group landmark in favor of the Heading; the Heading is present in both states. |
-| Renamed/restyled labels | A `label: "Post"` landmark misses because the app now says "Toot" | Re-author with the current label, or switch to an identifier-based selector. |
+| Identifier namespace renamed | Multiple `identifier:` landmarks all miss; the screen's elements use a different prefix (e.g. a refactor moved `feature.foo` → `screen.foo`) | Re-author with the current identifier namespace from `get_ui_tree`. |
+| Documentation placeholder used as a literal | A `label:` landmark with text like `"@username"`, `"<user>"`, `"{name}"`, `"[email protected]"`, or any value that was a doc convention rather than what the app actually displays | Drop that landmark; rely on the structural ones (heading text, unique button identifier). |
+| Empty-state UI hides a chrome element | `Group identifier:"X"` lookup returns nothing on a "no data yet" screen, even though it exists when the screen has populated content | Pick a landmark that's stable across states (usually the screen Heading). Required-AND landmarks must use elements present in *every* state of the screen. |
+| Renamed/restyled labels | A `label: "Old Label"` landmark misses because the product copy was rewritten | Re-author with the current label, or switch to an identifier-based selector. |
+| Element type changed | Landmark with `element: "Heading"` misses; the same text is now under `StaticText` (or vice versa) | Inspect `get_ui_tree`, update the `element:` value to the current type. |
 
 **What about Tier C screens?** The verify-by-navigation pattern often won't work for:
-- iOS web views (`SFSafariViewController`, `ASWebAuthenticationSession`) — accessibility is shallow inside, identifiers don't carry through.
-- Empty-state secondary screens whose entry points require app data the test environment doesn't have.
+- Embedded web views (iOS: `SFSafariViewController`, `ASWebAuthenticationSession`; Android: `WebView`, Chrome Custom Tabs). Accessibility is shallow inside; identifiers from the website don't carry through to the platform UI tree.
+- Empty-state secondary screens whose entry points require app data the test environment doesn't have (e.g. screens that only appear when a user has X items, when subscribed to a paid tier, or under specific permissions).
 
 For these, document what's *known* about the screen state in the file's prose section and leave `landmarks: []` with a comment explaining why. Don't fabricate landmarks you can't verify.
 
