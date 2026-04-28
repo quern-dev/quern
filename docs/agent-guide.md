@@ -154,6 +154,49 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 **Key insight**: Use summary for quick checks, full tree when you need details.
 
+**Debugging the platform normalizer**: When `tap_element` or a landmark match doesn't behave as expected and you suspect the underlying source attributes aren't surfacing correctly (e.g. an Android tab that doesn't appear `selected`), call `get_ui_tree` with `include_raw=true` to get the raw provider attributes (full uiautomator2 XML on Android) on each element under `extra_attrs`. This is faster than dropping to `adb shell uiautomator dump` and stays inside the Quern API surface.
+
+---
+
+### Identifying Screens with Landmarks
+
+When the question is "what screen am I on right now?" — for verifying navigation, gating actions, or driving recipe-style workflows — landmarks give you a deterministic answer that doesn't depend on label parsing or model swaps.
+
+**Why use landmarks instead of just reading `get_screen_summary`?**
+
+- **Deterministic.** Quern matches the live UI tree against authored selectors and returns `matched: <screen_name>` with `confidence: exact | ambiguous | none`. No prose interpretation.
+- **Cross-platform.** The same landmarks work on iOS (idb) and Android (uiautomator2) — selection state, identifiers, and labels are normalized to a single schema.
+- **Stable across LLMs.** A workflow that asks "is this the cart screen?" gets the same answer regardless of which model is driving.
+- **Authored once, reused everywhere.** The screen knowledge base is the source of truth; agents don't re-discover screen identity on every call.
+
+**Workflow:**
+
+1. Load landmarks from the app's knowledge base:
+   ```
+   load_landmarks(app="org.example.myapp", path="/Users/dev/myapp/.quern/knowledge")
+   ```
+   Or pass landmarks inline (useful for ad-hoc identification):
+   ```
+   load_landmarks(app="...", landmarks={"home-tab": [{"element": "RadioButton", "identifier": "tab.home", "selected": true}]})
+   ```
+2. Call `identify_screen(app="...")` or — more often — pass `identify=true` to `get_screen_summary` to fold identification into a call you were already making.
+3. Read the response. On a match, you get `matched`, `confidence: "exact"`, and `matched_landmarks` with per-landmark hit/miss detail. On no match, `partial_matches` lists every evaluated screen sorted by descending match count, *each with its full per-landmark results* — you can see exactly which selectors failed without re-running.
+
+**Landmark schema** (in screen frontmatter or inline JSON):
+
+| Field | Purpose |
+|---|---|
+| `element` | Element type, required (e.g. `Button`, `RadioButton`, `navigationBar`) |
+| `identifier` | Accessibility identifier, exact match (preferred — locale-independent) |
+| `label` | Label text, case-insensitive exact match |
+| `label_contains` | Substring match for elements with dynamic content in their label |
+| `absent: true` | Element must NOT be present (use sparingly — rare) |
+| `selected: true` | For tabs/switches/radios/checkboxes, element must be in the on/active state. Distinguishes "the Home tab is the selected one" from "a Home tab exists." |
+
+**Working with a legacy knowledge base:** If `load_landmarks` returns `screens: 0` and a populated `skipped[]` array, the KB pre-dates the `landmarks:` schema and uses the older `identify_by:` field. The skip entries are categorized — `legacy_format` includes the original entries so an agent can propose a per-file migration. The `quern-landmark-migration` agent skill walks through the migration with user review at each step (rename `identify_by:` → `landmarks:`, translate `value: "1"` → `selected: true`, drop unsupported fields, flag freeform-prose entries that need re-visiting).
+
+**Validating before relying on landmarks**: Run `validate_landmarks(app="...")` after loading. Reports collisions (two screens whose landmark sets overlap — one could be mistaken for the other) and screens with no landmarks. Fix collisions by adding a distinguishing element to one of the screens.
+
 ---
 
 ### Debugging Crashes
