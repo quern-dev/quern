@@ -118,7 +118,8 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | File | Purpose |
 |------|---------|
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
-| `cert-state.json` | Per-device certificate installation state — persists across restarts |
+| `active-device.json` | UDID of the active device set via `resolve_device` — persists across stop/start so you don't have to re-resolve after every restart |
+| `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture settings and other configuration |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
@@ -205,7 +206,7 @@ quern enable-local-capture MyApp com.apple.WebKit.Networking  # app + WebKit net
 
 The process name is usually the target name in Xcode. You can also update the list at runtime via the `set_local_capture` MCP tool without restarting the server.
 
-**Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` if the stored config no longer matches the current network.
+**Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` per device if the stored config no longer matches the current network, and `network_state` (refreshed by a ~15s background poll) reports the current SSID/IP plus a `last_changed_at` timestamp so the response surfaces *when* the network shifted, not just that it's currently mismatched. When the laptop and physical devices travel together between locations, this lets agents notice the change and prompt for proxy reconfiguration without anyone having to remember to ask.
 
 ### Device Control
 
@@ -263,6 +264,7 @@ quern disable-local-capture  # Disable local capture
 | UI | `take_screenshot`, `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `type_text`, `clear_text`, `press_button` |
 | Config | `set_location`, `grant_permission` |
 | Device Pool | `resolve_device`, `ensure_devices` |
+| Landmarks | `load_landmarks`, `identify_screen`, `list_landmarks`, `unload_landmarks`, `validate_landmarks` |
 | Preview | `preview_device`, `stop_preview`, `preview_status` |
 | Physical Device | `setup_wda`, `start_driver`, `stop_driver` |
 
@@ -358,8 +360,18 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/v1/devices/refresh` | Refresh pool from simctl |
-| POST | `/api/v1/devices/resolve` | Resolve a device by criteria (sets active device) |
+| POST | `/api/v1/devices/resolve` | Resolve a device by criteria *or* by explicit `udid` (sets active device) |
 | POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted |
+
+### Landmarks
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/landmarks/load` | Load landmarks from a knowledge base path or inline JSON. Returns `screens` count and a categorized `skipped[]` array (legacy-format files, stubs, malformed YAML). |
+| POST | `/api/v1/landmarks/identify` | Match the live UI tree against loaded landmarks. Returns matched screen, confidence, and full per-landmark detail in `partial_matches`. |
+| GET | `/api/v1/landmarks/` | List loaded landmark sets per app |
+| DELETE | `/api/v1/landmarks/` | Unload landmarks for an app or all apps |
+| POST | `/api/v1/landmarks/validate` | Detect collisions between screens with overlapping landmark sets |
 
 ## Architecture
 

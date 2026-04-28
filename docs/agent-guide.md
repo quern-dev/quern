@@ -120,6 +120,7 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - `record_device_proxy_config(udid, ssid, client_ip)` — records the config per Wi-Fi network (SSID). Automatically derives the correct Mac interface IP by finding the interface on the same /24 subnet as the device's `client_ip`. This handles multi-interface Macs correctly (e.g. Wi-Fi + Ethernet active simultaneously).
 - Call it again whenever you move to a different network — each SSID is tracked independently, so configs for home and work don't overwrite each other.
 - `proxy_status` shows `wifi_proxy_configs` (keyed by SSID), `wifi_proxy_stale` (true if no stored network's proxy_host matches the current Mac IP), and `active_wifi_network` (the currently matching SSID). If `wifi_proxy_stale: true`, reconfigure the device's Wi-Fi proxy and call `record_device_proxy_config` again.
+- `proxy_status` also includes `network_state` (refreshed by a ~15s background poll) — current SSID/IP, plus `last_changed_at` and `last_change_reason` fields populated when the laptop's network identity shifts. When you see `last_changed_at` is recent and a physical device is in play, expect `wifi_proxy_stale: true` to follow — and run the autonomous reconfiguration flow below.
 - See `docs/physical-device-cert-setup.md` for the full WDA automation script.
 
 **Autonomous proxy reconfiguration (cert already installed)**: When `wifi_proxy_stale: true` or `wifi_proxy_configs: null`, you can update the device's proxy settings fully via WDA without user intervention:
@@ -379,7 +380,7 @@ Mock rules take priority over intercept rules. Clear them with `clear_mocks` whe
 
 Use `ensure_devices` to boot multiple simulators at once, then run different test scenarios on each in parallel. The first device in the result becomes the active device; pass explicit `udid` parameters to target the others.
 
-**Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria or pass an explicit `udid` to any tool.
+**Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria, or pass `udid` directly to `resolve_device` (faster than re-matching by name when you already know the UDID — e.g., from a `list_devices` call). The active device is persisted in `~/.quern/active-device.json` and survives `quern stop` / `quern restart`, so you don't have to re-resolve at the start of every session.
 
 **Default behavior**: `resolve_device` and `ensure_devices` default to `type="simulator"` to prevent accidentally targeting physical devices (which may not have your app installed). Pass `type="device"` explicitly to target physical devices.
 

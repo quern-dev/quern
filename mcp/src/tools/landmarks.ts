@@ -75,7 +75,9 @@ When skipped[] contains legacy_format entries, the recommended workflow is to su
   });
 
   server.registerTool("identify_screen", {
-    description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks.`,
+    description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks.
+
+partial_matches contains EVERY non-fully-matched screen (including zero-match), sorted by descending match count so the best candidate is first. Each entry has a 'landmarks' array with per-landmark match results, so you can debug "why didn't my landmarks match?" without re-running identification — the failing selectors are right there in the response.`,
     inputSchema: strictParams({
       app: z
         .string()
