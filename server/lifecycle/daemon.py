@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 
+from server import get_version
 from server.config import CONFIG_DIR
 from server.lifecycle.state import is_server_healthy, read_state
 
@@ -119,7 +120,7 @@ def _print_status(state: dict) -> None:
 
     key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key
 
-    print("Quern running")
+    print(f"Quern v{get_version()} running")
     print(f"  PID:        {pid}")
     print(f"  Server:     http://{local_ip}:{port}")
     if proxy_enabled:
