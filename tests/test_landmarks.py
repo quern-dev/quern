@@ -322,11 +322,12 @@ class TestParseScreenLandmarks:
             # Login Screen
         """))
         result = parse_screen_landmarks(md)
-        assert result is not None
-        assert result.screen == "Login"
-        assert len(result.landmarks) == 2
-        assert result.landmarks[0].element == "navigationBar"
-        assert result.landmarks[1].identifier == "email_field"
+        assert result.screen is not None
+        assert result.skip is None
+        assert result.screen.screen == "Login"
+        assert len(result.screen.landmarks) == 2
+        assert result.screen.landmarks[0].element == "navigationBar"
+        assert result.screen.landmarks[1].identifier == "email_field"
 
     def test_no_landmarks_field(self, tmp_path):
         md = tmp_path / "home.md"
@@ -338,7 +339,11 @@ class TestParseScreenLandmarks:
 
             # Home
         """))
-        assert parse_screen_landmarks(md) is None
+        result = parse_screen_landmarks(md)
+        assert result.screen is None
+        assert result.skip is not None
+        assert result.skip.reason == "no_landmarks"
+        assert result.skip.screen == "Home"
 
     def test_empty_landmarks(self, tmp_path):
         md = tmp_path / "empty.md"
@@ -350,17 +355,102 @@ class TestParseScreenLandmarks:
 
             # Empty
         """))
-        assert parse_screen_landmarks(md) is None
+        result = parse_screen_landmarks(md)
+        assert result.screen is None
+        assert result.skip is not None
+        assert result.skip.reason == "no_landmarks"
+
+    def test_legacy_format_preserves_freeform_entries(self, tmp_path):
+        """Some legacy KBs use prose-style identify_by entries (strings, not
+        dicts). The skip should preserve them verbatim so an agent can see
+        what's there and reinterpret rather than silently zeroing them."""
+        md = tmp_path / "account-settings.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            screen: "account-settings"
+            identify_by:
+              - "SFSafariViewController showing server settings page"
+            ---
+        """))
+        result = parse_screen_landmarks(md)
+        assert result.skip is not None
+        assert result.skip.reason == "legacy_format"
+        assert result.skip.identify_by == [
+            "SFSafariViewController showing server settings page",
+        ]
+
+    def test_legacy_format_with_identify_by(self, tmp_path):
+        """File from a pre-landmarks knowledge base — has identify_by but no
+        landmarks. The skip should categorize it as legacy_format and
+        include the identify_by entries so an agent can propose a migration."""
+        md = tmp_path / "timelines.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            screen: "timelines"
+            identify_by:
+              - { element: "TabGroup", identifier: "timelines.segment-control" }
+              - { element: "RadioButton", identifier: "tab.timelines", value: "1" }
+            ---
+        """))
+        result = parse_screen_landmarks(md)
+        assert result.screen is None
+        assert result.skip is not None
+        assert result.skip.reason == "legacy_format"
+        assert result.skip.screen == "timelines"
+        assert result.skip.identify_by is not None
+        assert len(result.skip.identify_by) == 2
+        assert result.skip.identify_by[1]["value"] == "1"
+
+    def test_legacy_format_with_both_fields_uses_landmarks(self, tmp_path):
+        """When both identify_by and landmarks are present (the documented
+        coexistence pattern), landmarks wins — file is parsed normally,
+        not flagged as legacy."""
+        md = tmp_path / "settings.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            screen: "Settings"
+            landmarks:
+              - { element: "navigationBar", label: "Settings" }
+            identify_by:
+              - { element: "navigationBar", label: "Settings" }
+            ---
+        """))
+        result = parse_screen_landmarks(md)
+        assert result.screen is not None
+        assert result.skip is None
 
     def test_no_frontmatter(self, tmp_path):
         md = tmp_path / "plain.md"
         md.write_text("# Just a markdown file\n\nNo frontmatter here.\n")
-        assert parse_screen_landmarks(md) is None
+        result = parse_screen_landmarks(md)
+        assert result.screen is None
+        assert result.skip is not None
+        assert result.skip.reason == "no_frontmatter"
 
     def test_malformed_yaml(self, tmp_path):
         md = tmp_path / "bad.md"
         md.write_text("---\n[invalid yaml: {{{\n---\n")
-        assert parse_screen_landmarks(md) is None
+        result = parse_screen_landmarks(md)
+        assert result.screen is None
+        assert result.skip is not None
+        assert result.skip.reason == "yaml_error"
+        assert result.skip.error  # error message populated
+
+    def test_invalid_entries(self, tmp_path):
+        """All landmark entries malformed (missing required 'element')."""
+        md = tmp_path / "bogus.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            screen: "Bogus"
+            landmarks:
+              - { label: "missing element type" }
+              - { identifier: "also missing element" }
+            ---
+        """))
+        result = parse_screen_landmarks(md)
+        assert result.screen is None
+        assert result.skip is not None
+        assert result.skip.reason == "invalid_entries"
 
     def test_derives_screen_name_from_filename(self, tmp_path):
         md = tmp_path / "settings.md"
@@ -372,8 +462,8 @@ class TestParseScreenLandmarks:
             ---
         """))
         result = parse_screen_landmarks(md)
-        assert result is not None
-        assert result.screen == "settings"
+        assert result.screen is not None
+        assert result.screen.screen == "settings"
 
     def test_absent_landmark(self, tmp_path):
         md = tmp_path / "logged-out.md"
@@ -386,8 +476,8 @@ class TestParseScreenLandmarks:
             ---
         """))
         result = parse_screen_landmarks(md)
-        assert result is not None
-        assert result.landmarks[1].absent is True
+        assert result.screen is not None
+        assert result.screen.landmarks[1].absent is True
 
 
 # ---------------------------------------------------------------------------
@@ -422,17 +512,77 @@ class TestScanKnowledgeBase:
             ---
         """))
 
-        results = scan_knowledge_base(tmp_path)
-        assert len(results) == 2
-        names = {s.screen for s in results}
+        scan = scan_knowledge_base(tmp_path)
+        assert len(scan.screens) == 2
+        names = {s.screen for s in scan.screens}
         assert names == {"Login", "Home"}
+        assert scan.skipped == []
 
     def test_scan_empty_dir(self, tmp_path):
         (tmp_path / "screens").mkdir()
-        assert scan_knowledge_base(tmp_path) == []
+        scan = scan_knowledge_base(tmp_path)
+        assert scan.screens == []
+        assert scan.skipped == []
 
     def test_scan_no_screens_dir(self, tmp_path):
-        assert scan_knowledge_base(tmp_path) == []
+        scan = scan_knowledge_base(tmp_path)
+        assert scan.screens == []
+        assert scan.skipped == []
+
+    def test_scan_categorizes_skipped_files(self, tmp_path):
+        """Mixed knowledge base — some valid, some legacy, some stubs.
+        The scan returns categorized skips alongside the parsed screens
+        so agents and operators can act on the gaps."""
+        screens_dir = tmp_path / "screens"
+        screens_dir.mkdir()
+        # Valid (new format)
+        (screens_dir / "login.md").write_text(textwrap.dedent("""\
+            ---
+            screen: "Login"
+            landmarks:
+              - { element: "Button", label: "Sign In" }
+            ---
+        """))
+        # Legacy (identify_by only — typical of pre-landmarks knowledge bases)
+        (screens_dir / "timelines.md").write_text(textwrap.dedent("""\
+            ---
+            screen: "timelines"
+            identify_by:
+              - { element: "TabGroup", identifier: "timelines.segment-control" }
+            ---
+        """))
+        # Stub (neither field)
+        (screens_dir / "about.md").write_text(textwrap.dedent("""\
+            ---
+            screen: "About"
+            status: stub
+            ---
+        """))
+
+        scan = scan_knowledge_base(tmp_path)
+        assert len(scan.screens) == 1
+        assert scan.screens[0].screen == "Login"
+
+        reasons = {s.reason: s for s in scan.skipped}
+        assert set(reasons) == {"legacy_format", "no_landmarks"}
+        assert reasons["legacy_format"].screen == "timelines"
+        assert reasons["legacy_format"].identify_by is not None
+        assert reasons["no_landmarks"].screen == "About"
+
+    def test_scan_skipped_paths_are_relative(self, tmp_path):
+        """The 'file' field on each skipped entry should be a relative path
+        from the knowledge base root, not absolute or just the basename —
+        agents can pass it to read/write tools without further resolution."""
+        screens_dir = tmp_path / "screens"
+        screens_dir.mkdir()
+        (screens_dir / "stub.md").write_text(textwrap.dedent("""\
+            ---
+            screen: "Stub"
+            ---
+        """))
+        scan = scan_knowledge_base(tmp_path)
+        assert len(scan.skipped) == 1
+        assert scan.skipped[0].file == "screens/stub.md"
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +696,33 @@ class TestLandmarkRegistry:
             ---
         """))
         registry = LandmarkRegistry()
-        count = registry.load_from_path("com.example", str(tmp_path))
+        count, skipped = registry.load_from_path("com.example", str(tmp_path))
         assert count == 1
+        assert skipped == []
         assert registry.list_sets() == {"com.example": 1}
+
+    def test_load_from_path_returns_skipped(self, tmp_path):
+        """A knowledge base with mixed valid + legacy files should load the
+        valid screens AND surface the legacy ones to the caller."""
+        screens_dir = tmp_path / "screens"
+        screens_dir.mkdir()
+        (screens_dir / "login.md").write_text(textwrap.dedent("""\
+            ---
+            screen: "Login"
+            landmarks:
+              - { element: "Button", label: "Sign In" }
+            ---
+        """))
+        (screens_dir / "legacy.md").write_text(textwrap.dedent("""\
+            ---
+            screen: "Legacy"
+            identify_by:
+              - { element: "navigationBar", label: "Legacy" }
+            ---
+        """))
+        registry = LandmarkRegistry()
+        count, skipped = registry.load_from_path("com.example", str(tmp_path))
+        assert count == 1
+        assert len(skipped) == 1
+        assert skipped[0].reason == "legacy_format"
+        assert skipped[0].screen == "Legacy"

@@ -4,13 +4,61 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from server.models import Landmark, ScreenLandmarks, UIElement
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SkippedFile:
+    """A screen file that the loader could not turn into landmarks.
+
+    Surfaced in load/validate responses so an agent (or human) can act on it.
+
+    Reasons:
+        legacy_format    — file has identify_by: but no usable landmarks:.
+                           identify_by is included verbatim (entries may be
+                           dicts ready for mechanical migration, or strings /
+                           freeform prose that need agent reinterpretation).
+        no_landmarks     — file has neither field. Likely a stub.
+        no_frontmatter   — file has no '---' YAML block.
+        yaml_error       — frontmatter failed to parse. error is set.
+        invalid_entries  — landmarks: present but all entries are malformed
+                           (missing the required 'element' field).
+        read_error       — couldn't read the file. error is set.
+    """
+
+    file: str
+    reason: str
+    screen: str | None = None
+    identify_by: list[Any] | None = None
+    error: str | None = None
+
+
+@dataclass
+class ParseResult:
+    """Result of parsing a single screen markdown file.
+
+    Either ``screen`` is set (successful parse) or ``skip`` is set
+    (could not extract landmarks; reason in ``skip.reason``).
+    """
+
+    screen: ScreenLandmarks | None = None
+    skip: SkippedFile | None = None
+
+
+@dataclass
+class KnowledgeBaseScan:
+    """Result of scanning a knowledge base directory."""
+
+    screens: list[ScreenLandmarks] = field(default_factory=list)
+    skipped: list[SkippedFile] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -196,38 +244,75 @@ def _landmark_key(lm: Landmark) -> str:
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 
 
-def parse_screen_landmarks(file_path: Path) -> ScreenLandmarks | None:
+def _relative_file_label(file_path: Path, base_path: Path) -> str:
+    """Best-effort relative path from base_path for skipped[] entries."""
+    try:
+        return str(file_path.relative_to(base_path))
+    except ValueError:
+        return file_path.name
+
+
+def parse_screen_landmarks(
+    file_path: Path, *, base_path: Path | None = None,
+) -> ParseResult:
     """Extract landmarks from a screen markdown file's YAML frontmatter.
 
-    Returns None if the file has no landmarks field or empty landmarks.
+    Returns a :class:`ParseResult` — either ``screen`` is populated on
+    success, or ``skip`` is populated with a categorized reason so callers
+    can surface what went wrong (legacy format, malformed YAML, etc.).
     """
+    label = (
+        _relative_file_label(file_path, base_path)
+        if base_path is not None
+        else file_path.name
+    )
+
     try:
         text = file_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as e:
         logger.warning("Could not read %s", file_path)
-        return None
+        return ParseResult(skip=SkippedFile(
+            file=label, reason="read_error", error=str(e),
+        ))
 
     match = _FRONTMATTER_RE.match(text)
     if not match:
-        return None
+        return ParseResult(skip=SkippedFile(
+            file=label, reason="no_frontmatter",
+        ))
 
     try:
         data = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
+    except yaml.YAMLError as e:
         logger.warning("Invalid YAML frontmatter in %s", file_path)
-        return None
+        return ParseResult(skip=SkippedFile(
+            file=label, reason="yaml_error", error=str(e),
+        ))
 
     if not isinstance(data, dict):
-        return None
+        return ParseResult(skip=SkippedFile(
+            file=label, reason="yaml_error",
+            error="frontmatter is not a YAML mapping",
+        ))
 
-    screen_name = data.get("screen", "")
-    if not screen_name:
-        # Try to derive from filename
-        screen_name = file_path.stem
+    screen_name = data.get("screen", "") or file_path.stem
 
     raw_landmarks = data.get("landmarks")
     if not raw_landmarks or not isinstance(raw_landmarks, list):
-        return None
+        # No usable landmarks. Distinguish legacy format (file has
+        # identify_by:) from genuine no-landmarks (stub or unannotated).
+        identify_by = data.get("identify_by")
+        if isinstance(identify_by, list) and identify_by:
+            # Pass entries through verbatim — dict entries can be migrated
+            # mechanically, but strings / freeform prose are also legitimate
+            # legacy content that an agent should see and reinterpret.
+            return ParseResult(skip=SkippedFile(
+                file=label, screen=screen_name, reason="legacy_format",
+                identify_by=list(identify_by),
+            ))
+        return ParseResult(skip=SkippedFile(
+            file=label, screen=screen_name, reason="no_landmarks",
+        ))
 
     landmarks: list[Landmark] = []
     for entry in raw_landmarks:
@@ -236,15 +321,21 @@ def parse_screen_landmarks(file_path: Path) -> ScreenLandmarks | None:
         landmarks.append(Landmark(**entry))
 
     if not landmarks:
-        return None
+        return ParseResult(skip=SkippedFile(
+            file=label, screen=screen_name, reason="invalid_entries",
+        ))
 
-    return ScreenLandmarks(screen=screen_name, landmarks=landmarks)
+    return ParseResult(
+        screen=ScreenLandmarks(screen=screen_name, landmarks=landmarks),
+    )
 
 
-def scan_knowledge_base(path: Path) -> list[ScreenLandmarks]:
+def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
     """Scan a knowledge base directory for screen files with landmarks.
 
     Looks for ``screens/*.md`` files (excluding templates starting with _).
+    Returns a :class:`KnowledgeBaseScan` with both successfully parsed
+    screens and a list of skipped files (with categorized reasons).
     """
     screens_dir = path / "screens"
     if not screens_dir.is_dir():
@@ -252,17 +343,18 @@ def scan_knowledge_base(path: Path) -> list[ScreenLandmarks]:
         if path.is_dir() and any(path.glob("*.md")):
             screens_dir = path
         else:
-            return []
+            return KnowledgeBaseScan()
 
-    results: list[ScreenLandmarks] = []
+    scan = KnowledgeBaseScan()
     for md_file in sorted(screens_dir.glob("*.md")):
         if md_file.name.startswith("_"):
             continue
-        screen = parse_screen_landmarks(md_file)
-        if screen:
-            results.append(screen)
-
-    return results
+        result = parse_screen_landmarks(md_file, base_path=path)
+        if result.screen is not None:
+            scan.screens.append(result.screen)
+        elif result.skip is not None:
+            scan.skipped.append(result.skip)
+    return scan
 
 
 # ---------------------------------------------------------------------------
@@ -284,13 +376,18 @@ class LandmarkRegistry:
         self._sets[app] = screens
         return len(screens)
 
-    def load_from_path(self, app: str, path: str) -> int:
+    def load_from_path(
+        self, app: str, path: str,
+    ) -> tuple[int, list[SkippedFile]]:
         """Scan a knowledge base path and load landmarks for an app.
 
-        Returns the number of screens with landmarks found.
+        Returns a tuple of (count, skipped) — the number of screens loaded
+        and the list of files that could not be turned into landmarks
+        (with categorized reasons in each entry).
         """
-        screens = scan_knowledge_base(Path(path))
-        return self.load(app, screens)
+        scan = scan_knowledge_base(Path(path))
+        count = self.load(app, scan.screens)
+        return count, scan.skipped
 
     def unload(self, app: str | None = None) -> str:
         """Unload landmarks. If app is None, unload all.

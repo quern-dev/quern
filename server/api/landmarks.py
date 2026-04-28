@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 
 from fastapi import APIRouter, Query, Request
 
-from server.device.landmarks import LandmarkRegistry, scan_knowledge_base
+from server.device.landmarks import (
+    LandmarkRegistry,
+    SkippedFile,
+    scan_knowledge_base,
+)
 from server.models import (
     DeviceError,
     IdentifyRequest,
@@ -14,6 +19,14 @@ from server.models import (
     LoadLandmarksRequest,
     ScreenLandmarks,
 )
+
+
+def _serialize_skipped(skipped: list[SkippedFile]) -> list[dict]:
+    """Convert SkippedFile dataclasses to dicts, dropping null fields."""
+    return [
+        {k: v for k, v in asdict(s).items() if v is not None}
+        for s in skipped
+    ]
 
 router = APIRouter(prefix="/api/v1/landmarks", tags=["landmarks"])
 logger = logging.getLogger("quern-debug-server.api")
@@ -38,8 +51,13 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
     registry = _get_registry(request)
 
     if body.source:
-        count = registry.load_from_path(body.app, body.source)
-        return {"loaded": body.app, "source": body.source, "screens": count}
+        count, skipped = registry.load_from_path(body.app, body.source)
+        return {
+            "loaded": body.app,
+            "source": body.source,
+            "screens": count,
+            "skipped": _serialize_skipped(skipped),
+        }
 
     if body.landmarks:
         screens: list[ScreenLandmarks] = []
@@ -47,7 +65,12 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             landmarks = [Landmark(**lm) for lm in lm_list]
             screens.append(ScreenLandmarks(screen=screen_name, landmarks=landmarks))
         count = registry.load(body.app, screens)
-        return {"loaded": body.app, "source": "inline", "screens": count}
+        return {
+            "loaded": body.app,
+            "source": "inline",
+            "screens": count,
+            "skipped": [],
+        }
 
     return {"error": "Provide either 'source' path or 'landmarks' inline data"}
 
@@ -127,15 +150,20 @@ async def validate_landmarks(
 
     if source:
         from pathlib import Path
-        screens = scan_knowledge_base(Path(source))
-        if not screens:
+        scan = scan_knowledge_base(Path(source))
+        skipped_payload = _serialize_skipped(scan.skipped)
+        if not scan.screens:
             return {
                 "collisions": [],
                 "no_landmarks": [],
                 "total_screens": 0,
+                "skipped": skipped_payload,
                 "error": "no_screens_found",
             }
         from server.device.landmarks import detect_collisions
-        return detect_collisions(screens)
+        result = detect_collisions(scan.screens)
+        if skipped_payload:
+            result["skipped"] = skipped_payload
+        return result
 
     return registry.validate(app=app)

@@ -5,7 +5,14 @@ import { strictParams } from "./helpers.js";
 
 export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
-    description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.`,
+    description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.
+
+The response includes a 'skipped' array listing screen files the loader couldn't turn into landmarks, with categorized reasons:
+  - legacy_format: file uses the pre-landmarks 'identify_by:' field. Includes the original entries so an agent can propose a migration to the new schema with user review.
+  - no_landmarks: file has neither field (likely a stub).
+  - no_frontmatter / yaml_error / invalid_entries: file is malformed.
+
+When skipped[] contains legacy_format entries, the recommended workflow is to surface them to the user, propose a per-file migration (see the app-knowledge-guide), and rewrite each file after review.`,
     inputSchema: strictParams({
       app: z
         .string()
