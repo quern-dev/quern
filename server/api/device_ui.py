@@ -64,6 +64,17 @@ async def get_ui_elements(
         default=None, pattern=r"^(flat)$",
         description="'flat' uses flat idb output with custom companion. Default uses nested.",
     ),
+    include_raw: bool = Query(
+        default=False,
+        description=(
+            "Include the raw source attributes (extra_attrs) from the underlying "
+            "accessibility provider on each element. Useful for debugging the "
+            "normalizer when you want to see what got collapsed (e.g., Android "
+            "selected= or checkable= attributes that map into our value field). "
+            "Stripped by default to keep payloads small. Currently only Android "
+            "populates extra_attrs; iOS responses are unchanged either way."
+        ),
+    ),
 ):
     """Get all UI accessibility elements from the current screen.
 
@@ -97,8 +108,9 @@ async def get_ui_elements(
 
         end = time.perf_counter()
         logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
+        dump_kwargs = {} if include_raw else {"exclude": {"extra_attrs"}}
         return {
-            "elements": [e.model_dump() for e in elements],
+            "elements": [e.model_dump(**dump_kwargs) for e in elements],
             "element_count": len(elements),
             "udid": resolved_udid,
         }

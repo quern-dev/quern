@@ -858,6 +858,15 @@ class UIElement(BaseModel):
     role_description: str = ""  # "button", "slider", etc.
     help: str | None = None
     custom_actions: list[str] = Field(default_factory=list)
+    extra_attrs: dict[str, str] | None = None
+    """Raw source attributes from the underlying accessibility provider, kept
+    verbatim before the per-platform normalizer collapses them. Useful for
+    debugging the normalizer itself — e.g., checking whether an Android node
+    has selected="true" without reaching for adb shell uiautomator dump.
+    Populated only for Android (uiautomator2 XML attributes); idb output on
+    iOS is already in our canonical shape, so this is None there. Stripped
+    from API responses unless include_raw=true is passed, to keep payloads
+    small in the common case."""
 
 
 # ---------------------------------------------------------------------------

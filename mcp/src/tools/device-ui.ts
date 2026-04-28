@@ -5,7 +5,9 @@ import { strictParams } from "./helpers.js";
 
 export function registerDeviceUITools(server: McpServer): void {
   server.registerTool("get_ui_tree", {
-    description: `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of. Requires idb.`,
+    description: `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of. Requires idb.
+
+Pass include_raw=true when debugging the platform normalizer itself — e.g., to see whether an Android node carries selected="true" or some other source attribute that didn't make it into our canonical fields. Each element gains an extra_attrs dict of the raw source attributes from the underlying provider (uiautomator2 XML on Android; iOS not yet populated). Default false to keep payloads small.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -35,8 +37,14 @@ export function registerDeviceUITools(server: McpServer): void {
         .enum(["flat"])
         .optional()
         .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Default uses nested mode with probe-based discovery. Simulators only."),
+      include_raw: z
+        .coerce.boolean()
+        .optional()
+        .describe(
+          "Include raw source attributes (extra_attrs) on each element — useful when debugging the normalizer to see what the underlying provider actually emitted. Default false. Currently only Android populates extra_attrs."
+        ),
     }),
-  }, async ({ udid, children_of, snapshot_depth, strategy, source_timeout, mode }) => {
+  }, async ({ udid, children_of, snapshot_depth, strategy, source_timeout, mode, include_raw }) => {
     try {
       const params: Record<string, string> = {};
       if (udid) params.udid = udid;
@@ -45,6 +53,7 @@ export function registerDeviceUITools(server: McpServer): void {
       if (strategy) params.strategy = strategy;
       if (source_timeout !== undefined) params.source_timeout = String(source_timeout);
       if (mode) params.mode = mode;
+      if (include_raw) params.include_raw = "true";
       const data = await apiRequest("GET", "/api/v1/device/ui", params);
 
       return {

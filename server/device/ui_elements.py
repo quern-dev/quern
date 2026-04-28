@@ -114,6 +114,7 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
             role_description=role_desc_val,
             help=item.get("help"),
             custom_actions=custom_actions_val,
+            extra_attrs=item.get("extra_attrs"),
         ))
         parsed_count += 1
 

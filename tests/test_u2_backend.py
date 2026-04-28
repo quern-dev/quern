@@ -184,6 +184,34 @@ class TestNormalizeNode:
         )
         assert _normalize_node(node)["AXValue"] is None
 
+    def test_extra_attrs_preserves_raw_xml_attributes(self):
+        """The raw uiautomator XML attributes survive the normalizer so an
+        agent can debug 'why didn't my landmark match?' without dropping
+        to `adb shell uiautomator dump`. Includes attributes the
+        normalizer maps (class, text, etc.) and ones it doesn't yet map
+        (focused, scrollable, etc.) — agents see the source as-is."""
+        node = self._make_node(
+            **{
+                "class": "android.widget.FrameLayout",
+                "text": "",
+                "resource-id": "",
+                "content-desc": "Explore",
+                "bounds": "[0,2000][270,2080]",
+                "enabled": "true",
+                "checkable": "false",
+                "checked": "false",
+                "selected": "true",
+                "focused": "false",
+                "scrollable": "false",
+            }
+        )
+        result = _normalize_node(node)
+        assert result["extra_attrs"]["selected"] == "true"
+        assert result["extra_attrs"]["checkable"] == "false"
+        assert result["extra_attrs"]["focused"] == "false"
+        assert result["extra_attrs"]["class"] == "android.widget.FrameLayout"
+        assert result["extra_attrs"]["content-desc"] == "Explore"
+
     def test_checked_takes_precedence_over_selected(self):
         """If a node is both checkable and selected (rare — e.g. a CheckBox
         in a selected list row), the checkable branch wins. The widget's

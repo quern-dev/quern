@@ -158,6 +158,11 @@ def _normalize_node(node: ET.Element) -> dict:
         "enabled": enabled,
         "role": "",
         "role_description": "",
+        # Preserve raw uiautomator2 XML attributes (verbatim, before the
+        # mappings above collapse them) so the agent can debug the
+        # normalizer without dropping to `adb shell uiautomator dump`. The
+        # API strips this from responses unless include_raw=true.
+        "extra_attrs": dict(node.attrib),
     }
 
 
