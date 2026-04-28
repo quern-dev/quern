@@ -30,8 +30,12 @@ tools/ios-preview
 docs/bugs/
 docs/test-results/
 
-# Local AI
-.claude/
+# Local AI — gitignore the directory's contents but commit the shared
+# project-level settings (so the pre-commit checklist hook ships with the
+# repo). Personal overrides go in .claude/settings.local.json which
+# remains ignored.
+.claude/*
+!.claude/settings.json
 CLAUDE.md
 
 idb-companion-*.tar.gz
