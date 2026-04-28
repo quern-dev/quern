@@ -468,6 +468,14 @@ class ProxyStatusResponse(BaseModel):
     local_ip: str | None = None
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
+    network_state: dict | None = None
+    """Snapshot of the Mac's network identity from the background monitor —
+    current SSID, current Mac IP, last-changed timestamp, and a small
+    history of recent changes. When the laptop moves between networks, the
+    monitor notices within ~15 seconds and updates this field; combined
+    with the per-device wifi_proxy_stale flag in cert_setup, an agent
+    reading this response sees both *what changed* and *which devices
+    need their proxy reconfigured*."""
 
 
 class SystemProxyInfo(BaseModel):

@@ -346,7 +346,15 @@ TROUBLESHOOTING — no traffic from a physical device:
      If the device got a new DHCP lease, call record_device_proxy_config again with the
      updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).
 
-cert_setup is filtered by default to currently-visible devices (deleted simulators and disconnected physical devices are hidden from the routine response). Pass include_offline=true to see the full historical record — useful for debugging "I configured this device last week, where did it go?". The persisted cert-state.json file always retains the full history regardless of this flag.`,
+cert_setup is filtered by default to currently-visible devices (deleted simulators and disconnected physical devices are hidden from the routine response). Pass include_offline=true to see the full historical record — useful for debugging "I configured this device last week, where did it go?". The persisted cert-state.json file always retains the full history regardless of this flag.
+
+network_state surfaces the Mac's current Wi-Fi/network identity from a background poll that fires every ~15s. Fields:
+- ssid, local_ip: current values.
+- last_polled_at: how fresh the snapshot is.
+- last_changed_at, previous_ssid, previous_local_ip, last_change_reason: populated when the monitor detected a change since server start. Reason codes: ssid_changed, ip_changed_same_ssid, ssid_and_ip_changed.
+- recent_changes: short ring of recent change events (capped at 10).
+
+When traffic capture suddenly stops working on a physical device, check network_state alongside cert_setup[udid].wifi_proxy_stale: if last_changed_at is recent, the laptop just moved networks (or got a new DHCP lease) and the device's stored proxy_host is now wrong. Update Wi-Fi proxy on the device, then call record_device_proxy_config with the new ssid + client_ip.`,
     inputSchema: strictParams({
       include_offline: z
         .coerce.boolean()

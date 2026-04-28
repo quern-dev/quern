@@ -363,6 +363,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         pass
 
+    # Network-change monitor — polls every ~15s so the server notices
+    # SSID/IP changes proactively. Lets proxy_status surface "the network
+    # just changed" without anyone having to ask.
+    from server.lifecycle.network_monitor import (
+        NetworkState,
+        network_monitor_loop,
+        update_network_state,
+    )
+    app.state.network_state = NetworkState()
+    update_network_state(app.state.network_state)  # establish baseline immediately
+    network_monitor_task = asyncio.create_task(
+        network_monitor_loop(app.state.network_state),
+    )
+    logger.info(
+        "Network monitor started: ssid=%r local_ip=%r",
+        app.state.network_state.ssid,
+        app.state.network_state.local_ip,
+    )
+    # Subsequent SSID/IP shifts get logged at INFO by network_monitor_loop.
+
     logger.info(
         "Server started on http://%s:%d — API key: %s...%s",
         config.host,
@@ -374,7 +394,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
-    for task in (watchdog_task, update_check_task):
+    for task in (watchdog_task, update_check_task, network_monitor_task):
         if task and not task.done():
             task.cancel()
             try:
@@ -466,6 +486,7 @@ def create_app(
     app.state.scrcpy_preview = None
     app.state.sim_log_adapters = {}
     app.state.device_log_adapters = {}
+    app.state.network_state = None  # populated when the lifespan starts the monitor
 
     # Screen landmarks
     from server.device.landmarks import LandmarkRegistry

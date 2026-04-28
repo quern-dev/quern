@@ -167,6 +167,11 @@ async def _get_proxy_status(
 
     local_capture = getattr(request.app.state, "local_capture_processes", [])
 
+    # Background network-monitor snapshot — populated by lifespan; None
+    # in test apps that don't run lifespan.
+    monitor_state = getattr(request.app.state, "network_state", None)
+    network_state_dict = monitor_state.as_dict() if monitor_state else None
+
     if adapter is None:
         return ProxyStatusResponse(
             status="stopped",
@@ -174,6 +179,7 @@ async def _get_proxy_status(
             local_ip=local_ip,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
+            network_state=network_state_dict,
         )
 
     if adapter._error:
@@ -191,6 +197,7 @@ async def _get_proxy_status(
             local_ip=local_ip,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
+            network_state=network_state_dict,
         )
 
     if adapter.is_running:
@@ -208,6 +215,7 @@ async def _get_proxy_status(
             local_ip=local_ip,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
+            network_state=network_state_dict,
         )
 
     return ProxyStatusResponse(
@@ -219,6 +227,7 @@ async def _get_proxy_status(
         local_ip=local_ip,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,
+        network_state=network_state_dict,
     )
 
 
