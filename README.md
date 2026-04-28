@@ -74,7 +74,13 @@ Other things you can ask:
 curl -fsSL https://quern.dev/install.sh | bash
 ```
 
-This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, and adds `quern` to `~/.local/bin` on your PATH.
+This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, installs a Claude Code pre-commit checklist hook (see below), and adds `quern` to `~/.local/bin` on your PATH.
+
+#### Pre-commit checklist hook
+
+Setup also installs a Claude Code `PreToolUse` hook into `~/.claude/settings.json` that surfaces a short checklist whenever an agent runs `git commit` in a project that uses Quern (signaled by a `.quern/knowledge/` directory at the project root). The reminder covers KB drift, landmark verification, and other discipline that's easy to forget when committing app or KB changes. It stays silent in projects that don't use Quern.
+
+To re-install or refresh the hook (for example after updating Quern), run `quern install-precommit-hook`. To disable it, remove the matching entry from `~/.claude/settings.json` under `hooks.PreToolUse`.
 
 <details>
 <summary>Manual install</summary>

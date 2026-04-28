@@ -1,65 +1,77 @@
-# Pre-Commit Checklist
+# Pre-Commit Checklist (Quern-using project)
 
-This checklist is surfaced as a system reminder before any `git commit` in
-this repo (configured in `.claude/settings.json` → `scripts/agent-precommit-checklist.sh`).
-Walk it before finalizing the commit. Items are conditional — only the
-ones relevant to the change need attention.
+This checklist is surfaced as a system reminder before any `git commit`
+in a project that uses Quern (signaled by a `.quern/` directory at the
+repo root). Installed globally by `quern setup`. Walk it before
+finalizing the commit — items are conditional, only the relevant ones
+need attention.
+
+## If you changed app code that affects the UI
+
+- **Accessibility identifiers**: did you rename, remove, or add any
+  `accessibilityIdentifier` values? If yes, the corresponding
+  `.quern/knowledge/screens/*.md` files need a matching update — call
+  `identify_screen` (or `get_screen_summary?identify=true`) on the
+  affected screens and re-author the landmarks block to match the new
+  identifiers. Stale landmarks silently fail to match, breaking
+  downstream automation.
+- **Visible labels**: did you change a button's title, a heading, an
+  accessibility label? Same drill — landmarks that pin on those labels
+  may now miss. Especially common after copy reviews and localization
+  passes.
+- **New screens**: does the screen have a `.quern/knowledge/screens/`
+  document? If you added a new screen to the app, add a corresponding
+  KB file (use `templates/_template.md` from the Quern repo as a
+  starting point, or copy an existing screen file as a template).
+- **Removed screens**: drop the corresponding KB file *and* update
+  `reachable_from` / `leads_to` references in neighboring screen
+  files that pointed at it.
+
+## If you changed knowledge base files (`.quern/knowledge/`)
+
+- **Verify against the live app**: run `load_landmarks` and
+  `identify_screen` (or `get_screen_summary?identify=true`) on the
+  screens you touched. `confidence: "exact"` confirms the landmarks
+  match reality. `confidence: "none"` means you're committing
+  landmarks that don't match the actual UI.
+- **Validator clean**: `validate_landmarks` should report no
+  collisions. Two screens with overlapping landmark sets will fight
+  for identification — fix by adding a distinguishing element to one.
+- **No legacy `identify_by:` left over**: if you migrated from the
+  pre-landmarks schema, the `identify_by:` field is now optional
+  human-readable hint material. Ensure it doesn't lie about the
+  current schema (e.g., reference fields the loader doesn't read).
+
+## If you added or modified tests
+
+- **Tests pass locally** before the hook runs — your existing
+  pre-commit hook (or your test runner of choice) will catch regressions
+  but only after the commit attempt. Better to know now than after a
+  hook rejection.
+- **New behavior has new tests** — existing tests passing isn't
+  enough if the new path isn't covered.
 
 ## Always
 
-- **Tests pass.** The pre-commit hook (ruff + pytest) runs automatically,
-  but if you edited code without re-running locally first, expect a hook
-  rejection. Better to run `.venv/bin/python -m pytest tests/` yourself
-  before invoking `git commit`.
-- **New behavior has new tests.** Existing tests passing isn't enough if
-  the new path isn't covered.
-- **Commit message focuses on the *why*.** A future reader (you, an
-  agent, a code reviewer) needs to understand what motivated the change,
+- **Commit message focuses on the *why*** — a future reader (you,
+  an agent, a reviewer) needs to understand what motivated the change,
   not just what got typed where.
+- **No stray debug code** — `print` / `console.log` / `NSLog` left in
+  code that wasn't there before, hard-coded credentials in test
+  scaffolding, etc. Quick scan of the diff.
 
-## If the change touches MCP tool behavior
+## When in doubt
 
-- **Tool descriptions in `mcp/src/tools/*.ts` reflect the change.** New
-  params, response shape, semantics. Agents read these descriptions cold;
-  stale ones silently mislead the next session.
-- **`docs/agent-guide.md` updated** when the change introduces a new
-  workflow or significantly changes an existing one. The agent guide is
-  the practical workflow surface; the MCP tool descriptions are reference.
-
-## If the change touches API endpoints, request/response shapes, or persisted state
-
-- **README's API endpoints table updated.**
-- **README's `~/.quern/` files table updated** when a new sidecar file
-  or persisted state is introduced.
-- **MCP tool descriptions match.** API and MCP descriptions diverging is
-  a common silent drift.
-
-## If the change touches landmark schema, knowledge base loader, or screen-summary output
-
-- **`docs/screen-landmarks.md`** (the spec doc) reflects the change.
-- **`docs/app-knowledge-guide.md`** (the authoring guide) reflects new
-  schema fields, validation behavior, or maintenance considerations.
-- **`templates/app-knowledge/screens/_template.md`** updated if new
-  fields belong in fresh screen documents.
-- **Migration impact**: if downstream knowledge bases need to change, add
-  a CHANGELOG note about the migration path. Consider whether the
-  `quern-landmark-migration` skill needs updates.
-
-## If the change adds, removes, or changes any user-facing behavior
-
-- **`CHANGELOG.md` `[Unreleased]` section** has an entry. Group under
-  `Added` / `Changed` / `Fixed` / `Documentation` per Keep a Changelog
-  conventions.
-
-## Before pushing
-
-- **Branch in shape for PR.** If this is the last commit before a PR, do
-  one final pass: tests pass on the whole branch, docs match shipped
-  behavior, no stray debug prints / placeholder TODOs that were meant to
-  be addressed.
+If a Quern automated workflow you've built (a recipe, an agent task,
+a script that drives `tap_element` and friends) suddenly stops working
+after a commit, the most likely cause is landmark drift. Re-run the
+verification step above on the affected screens. The `quern-landmark-
+migration` agent skill walks the per-file workflow for catching
+multiple drifted screens at once.
 
 ---
 
-*This checklist is project-shipped. Personal additions to your
-pre-commit reminder belong in `.claude/settings.local.json` rather than
-modifications to this file.*
+*This checklist is project-default, installed by `quern setup`. To
+add personal items, edit `~/.claude/settings.local.json` (Claude Code's
+per-user override location). To remove this hook entirely, delete the
+matching entry from `~/.claude/settings.json`.*
