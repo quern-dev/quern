@@ -148,7 +148,10 @@ def identify_screen(
     - matched: screen name or None
     - confidence: "exact" (one match), "ambiguous" (multiple), "none"
     - matched_landmarks: per-landmark results for the matched screen
-    - partial_matches: screens with some but not all landmarks matched
+    - partial_matches: every evaluated screen that did NOT fully match,
+      including zero-match screens, sorted by descending match count.
+      Each entry includes per-landmark results so callers can see which
+      selectors hit and which missed without re-running identification.
     """
     full_matches: list[tuple[str, list[dict]]] = []
     partial_matches: list[dict] = []
@@ -160,12 +163,19 @@ def identify_screen(
         matched_count = sum(1 for r in results if r["matched"])
         if all_matched:
             full_matches.append((screen.screen, results))
-        elif matched_count > 0:
+        else:
+            # Surface every non-fully-matched screen, including zero-match,
+            # so that "none" responses still tell the caller what was
+            # evaluated and how each landmark fared.
             partial_matches.append({
                 "screen": screen.screen,
                 "matched": matched_count,
                 "total": len(screen.landmarks),
+                "landmarks": results,
             })
+
+    # Best candidate first; deterministic tie-break by screen name.
+    partial_matches.sort(key=lambda p: (-p["matched"], p["screen"]))
 
     if len(full_matches) == 1:
         name, results = full_matches[0]

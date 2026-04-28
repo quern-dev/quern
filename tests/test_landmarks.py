@@ -280,6 +280,73 @@ class TestIdentifyScreen:
         assert len(result["partial_matches"]) == 1
         assert result["partial_matches"][0]["screen"] == "Login"
         assert result["partial_matches"][0]["matched"] == 1
+        # Per-landmark detail is included so callers can debug without
+        # a follow-up call.
+        landmarks = result["partial_matches"][0]["landmarks"]
+        assert len(landmarks) == 2
+        # First landmark (navigationBar/Login) hit; second (TextField) didn't.
+        assert landmarks[0]["matched"] is True
+        assert landmarks[1]["matched"] is False
+
+    def test_partial_matches_includes_zero_match_screens(self):
+        """When ALL of a screen's landmarks miss, the screen should still
+        appear in partial_matches — that's the case an agent most needs to
+        debug ('I authored these landmarks, why didn't anything match?').
+        Previously these were silently dropped."""
+        elements = [_el("navigationBar", "Home")]
+        screens = [
+            ScreenLandmarks(
+                screen="Login",
+                landmarks=[
+                    Landmark(element="Button", label="Sign In"),
+                    Landmark(element="TextField", identifier="email"),
+                ],
+            ),
+        ]
+        result = identify_screen(elements, screens)
+        assert result["matched"] is None
+        assert len(result["partial_matches"]) == 1
+        assert result["partial_matches"][0]["screen"] == "Login"
+        assert result["partial_matches"][0]["matched"] == 0
+        assert result["partial_matches"][0]["total"] == 2
+        # Per-landmark results show both as not matched
+        landmarks = result["partial_matches"][0]["landmarks"]
+        assert all(lm["matched"] is False for lm in landmarks)
+
+    def test_partial_matches_sorted_by_match_count_desc(self):
+        """Best candidate should appear first so the most likely intended
+        screen is easy to spot in a long list."""
+        elements = [
+            _el("navigationBar", "Home"),
+            _el("Button", "Compose"),
+        ]
+        screens = [
+            # 0 matches — should sort last
+            ScreenLandmarks(
+                screen="ZeroMatch",
+                landmarks=[Landmark(element="navigationBar", label="Settings")],
+            ),
+            # 2 matches — should sort first
+            ScreenLandmarks(
+                screen="TwoMatches",
+                landmarks=[
+                    Landmark(element="navigationBar", label="Home"),
+                    Landmark(element="Button", label="Compose"),
+                    Landmark(element="TextField", identifier="search"),
+                ],
+            ),
+            # 1 match — should sort middle
+            ScreenLandmarks(
+                screen="OneMatch",
+                landmarks=[
+                    Landmark(element="navigationBar", label="Home"),
+                    Landmark(element="TextField", identifier="search"),
+                ],
+            ),
+        ]
+        result = identify_screen(elements, screens)
+        names = [p["screen"] for p in result["partial_matches"]]
+        assert names == ["TwoMatches", "OneMatch", "ZeroMatch"]
 
     def test_empty_screens(self):
         result = identify_screen([_el("Button", "OK")], [])
