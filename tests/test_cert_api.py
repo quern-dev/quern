@@ -535,3 +535,112 @@ class TestCertInstall:
         assert data["failed"] == 1
         assert data["devices"][0]["status"] == "failed"
         assert "simctl failed" in data["devices"][0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_cert_install_excludes_physical_devices(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """No-UDID install must skip physical iOS/Android in the booted set.
+
+        Physical iOS devices report DeviceState.BOOTED whenever connected
+        (including wifi-only pairing). Without filtering, the no-UDID batch
+        path would fall into simctl keychain on physicals, which fails with
+        a cryptic 'Invalid device'.
+        """
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="sim-1",
+                    name="iPhone 16 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                ),
+                DeviceInfo(
+                    udid="phys-1",
+                    name="J iPhone 15 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                ),
+                DeviceInfo(
+                    udid="emu-1",
+                    name="Pixel_7_API33",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.ANDROID_EMULATOR,
+                ),
+                DeviceInfo(
+                    udid="and-phys-1",
+                    name="Pixel 8 (USB)",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.ANDROID_DEVICE,
+                ),
+            ]
+        )
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            response = client.post(
+                "/api/v1/proxy/cert/install",
+                json={},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        installed_udids = {d["udid"] for d in data["devices"]}
+        assert installed_udids == {"sim-1", "emu-1"}
+        assert mock_install.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cert_install_explicit_physical_udid_rejected(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """Explicit physical-device UDID gets a clear 400, not simctl noise."""
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="phys-1",
+                    name="J iPhone 15 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                ),
+            ]
+        )
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            response = client.post(
+                "/api/v1/proxy/cert/install",
+                json={"udid": "phys-1"},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 400
+        assert "VPN & Device Management" in response.json()["detail"]
+        mock_install.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cert_install_no_eligible_devices(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """No-UDID install with only physicals booted returns 400, not 200."""
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="phys-1",
+                    name="J iPhone 15 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                ),
+            ]
+        )
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            response = client.post(
+                "/api/v1/proxy/cert/install",
+                json={},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 400
+        assert "Physical devices are not eligible" in response.json()["detail"]
+        mock_install.assert_not_called()
