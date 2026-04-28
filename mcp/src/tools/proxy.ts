@@ -431,13 +431,15 @@ Android emulators: Requires a rootable image (Google APIs, NOT Google Play). Goo
 
 Also auto-configures the HTTP proxy on Android emulators (10.0.2.2:9101).
 
-IMPORTANT: Prefer omitting udid to install on all booted devices in a single call. Do NOT loop over individual UDIDs — the batch call is just as fast and avoids N redundant round-trips.`,
+When udid is omitted, resolution order is: (1) the active device set via resolve_device, if any — (2) otherwise, all booted simulators and rootable Android emulators in a single batch call. Do NOT loop over individual UDIDs — the batch path is just as fast and avoids N redundant round-trips.
+
+Physical iOS and Android devices are not eligible for automated install. iOS physicals require manual installation via Settings > General > VPN & Device Management; Android physicals require root access. Calls targeting a physical UDID are rejected with a 400 and guidance.`,
     inputSchema: strictParams({
       udid: z
         .string()
         .optional()
         .describe(
-          "Specific device UDID. If omitted, installs on all booted simulators and rootable Android emulators."
+          "Specific device UDID. If omitted, uses the active device, or falls back to all booted simulators and rootable Android emulators."
         ),
       force: z
         .coerce.boolean()

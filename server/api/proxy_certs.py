@@ -349,7 +349,9 @@ async def _verify_physical_device(
 
 
 @router.post("/cert/install")
-async def install_cert(request: Request, body: CertInstallRequest) -> dict:
+async def install_cert(
+    request: Request, body: CertInstallRequest | None = None,
+) -> dict:
     """Install mitmproxy CA certificate on simulator(s) and emulator(s).
 
     Idempotent - skips devices that already have the cert installed
@@ -359,14 +361,22 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
     flows are manual (iOS: Settings > VPN & Device Management; Android:
     system partition modification) and not handled by this endpoint.
 
+    Resolution order when no UDID is supplied:
+        1. Active device (set via resolve_device) → install on it.
+        2. Otherwise → install on all booted simulators and Android
+           emulators (physical devices are filtered out).
+
     Args:
-        body.udid: Specific device UDID. If None, installs on all booted
-            simulators and Android emulators (physical devices are filtered out).
+        body.udid: Specific device UDID. If None, follows the resolution
+            order above.
         body.force: Force reinstall even if already present.
 
     Returns:
         Installation results per device.
     """
+    if body is None:
+        body = CertInstallRequest()
+
     controller = request.app.state.device_controller
     if controller is None:
         raise HTTPException(status_code=503, detail="Device controller not initialized")
@@ -380,14 +390,21 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
     device_name_map = {d.udid: d.name for d in all_devices}
     device_type_map = {d.udid: d.device_type for d in all_devices}
 
+    # Resolution order: explicit UDID → active device → all booted installable.
+    target_udid: str | None = body.udid
+    if target_udid is None:
+        active = getattr(controller, "_active_udid", None)
+        if active is not None:
+            target_udid = active
+
     # Determine which devices to install on
-    if body.udid:
-        # Explicit UDID — if we know it's a physical device, refuse early with
-        # a clear message rather than letting it fall into a cryptic simctl
-        # "Invalid device" error.
-        explicit_type = device_type_map.get(body.udid)
-        if explicit_type is not None and explicit_type not in _INSTALLABLE_CERT_TYPES:
-            if explicit_type == DeviceType.DEVICE:
+    if target_udid is not None:
+        # Single target — if we know its type and it's not installable, refuse
+        # early with a clear message rather than letting it fall into a cryptic
+        # simctl "Invalid device" error.
+        target_type = device_type_map.get(target_udid)
+        if target_type is not None and target_type not in _INSTALLABLE_CERT_TYPES:
+            if target_type == DeviceType.DEVICE:
                 guidance = (
                     "Automated cert install is not supported for physical iOS "
                     "devices. Install the cert manually: Settings > General > "
@@ -404,7 +421,7 @@ async def install_cert(request: Request, body: CertInstallRequest) -> dict:
                     "the cert at the app level via networkSecurityConfig."
                 )
             raise HTTPException(status_code=400, detail=guidance)
-        udids = [body.udid]
+        udids = [target_udid]
     else:
         from server.models import DeviceState
 

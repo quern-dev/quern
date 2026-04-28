@@ -16,8 +16,11 @@ def app():
     """Create a test FastAPI app with test API key."""
     config = ServerConfig(api_key="test-key-12345")
     app = create_app(config=config, enable_oslog=False, enable_crash=False, enable_proxy=False)
-    # Mock the device controller
+    # Mock the device controller. Set _active_udid to None explicitly —
+    # without this, MagicMock attribute access returns a truthy mock, which
+    # breaks code paths that check for an active device.
     app.state.device_controller = MagicMock()
+    app.state.device_controller._active_udid = None
     app.state.proxy_adapter = None
     app.state.flow_store = None
     return app
@@ -611,6 +614,117 @@ class TestCertInstall:
             response = client.post(
                 "/api/v1/proxy/cert/install",
                 json={"udid": "phys-1"},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 400
+        assert "VPN & Device Management" in response.json()["detail"]
+        mock_install.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cert_install_no_args_does_not_422(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """No-args POST must not 422 — body is optional.
+
+        The MCP wrapper omits the body when no fields are passed; the route
+        previously required a body and rejected this with HTTP 422.
+        """
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="sim-1",
+                    name="iPhone 16 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                ),
+            ]
+        )
+        # No active device set (fixture default)
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            response = client.post(
+                "/api/v1/proxy/cert/install",
+                headers=auth_headers,
+                # No json= argument at all
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cert_install_uses_active_device(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """No-UDID call should use the active device when one is set.
+
+        Matches the convention used by tap_element/take_screenshot/etc.
+        """
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="sim-active",
+                    name="iPhone 17 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                ),
+                DeviceInfo(
+                    udid="sim-other",
+                    name="iPhone 16",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                ),
+            ]
+        )
+        app.state.device_controller._active_udid = "sim-active"
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            response = client.post(
+                "/api/v1/proxy/cert/install",
+                json={},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["devices"][0]["udid"] == "sim-active"
+        # Should not have touched the other booted simulator
+        mock_install.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cert_install_active_physical_device_rejected(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """If the active device is a physical iOS device, refuse with the
+        same clear guidance as the explicit-UDID case — don't silently fall
+        back to all-booted, since the user explicitly chose this target.
+        """
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="phys-1",
+                    name="J iPhone 15 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.DEVICE,
+                ),
+                DeviceInfo(
+                    udid="sim-1",
+                    name="iPhone 16 Pro",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.SIMULATOR,
+                ),
+            ]
+        )
+        app.state.device_controller._active_udid = "phys-1"
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            response = client.post(
+                "/api/v1/proxy/cert/install",
+                json={},
                 headers=auth_headers,
             )
 
