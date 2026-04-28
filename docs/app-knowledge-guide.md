@@ -182,6 +182,36 @@ For `legacy_format` entries that are strings rather than dicts (freeform prose l
 
 Always review proposed migrations with the human user before rewriting files — landmarks may need adjustment for app changes since the legacy KB was authored. (See the agent migration skill for the per-file workflow.)
 
+### Keeping Landmarks in Sync
+
+The knowledge base is a living artifact, not a one-time setup. App teams ship UI changes — accessibility identifiers get renamed during refactors, copy gets rewritten, screens get redesigned — and landmarks that were correct last quarter can silently fail to match today. Mechanical correctness in YAML is no guarantee that the underlying app still exposes those elements.
+
+**Signs that drift has occurred:**
+
+- `identify_screen` (or `get_screen_summary?identify=true`) returns `confidence: "none"` for a screen you expect to match. Inspect `partial_matches` — if the screen you're on is sitting at 0/N or 1/N matched, the landmarks for it are stale.
+- An agent's automation suddenly starts failing on screens that used to work — often surfacing as `tap_element` not_found errors with the legacy identifier.
+- `validate_landmarks` reports collisions where there were none before — a sibling screen got redesigned and now overlaps with this one.
+
+**How to fix drift:**
+
+The procedure is identical to the migration skill's verification phase:
+
+1. Navigate to the affected screen (use `reachable_from` from the screen file as the recipe).
+2. `wait_for_element` on a likely-stable element to handle mid-transition states.
+3. Call `get_ui_tree` (with `include_raw=true` if you need to debug the platform normalizer) to see what the screen actually exposes now.
+4. Re-author the `landmarks:` block — drop selectors that no longer exist, swap in current identifiers, prefer structural elements (nav title, unique button identifier) over copy-dependent labels.
+5. Re-run `load_landmarks` and `identify_screen` to confirm `confidence: "exact"`.
+
+Drop the legacy `identify_by:` block at the same time, or update it alongside `landmarks:` — leaving it pointing at stale identifiers misleads anyone reading the file.
+
+**Cadence and triggers:**
+
+- After every major app release (a refactor, a redesign, a copy pass).
+- Whenever an agent reports a sudden batch of `tap_element not_found` failures across screens that used to work.
+- Whenever you're already touching a screen for another reason — opportunistic re-verification keeps drift small and easy to fix.
+
+There's no scheduled audit or calendar-based heuristic; drift surfaces through the agent's normal use of `identify_screen`. When `confidence: "none"` appears, treat it as a maintenance signal, not a transient bug to ignore.
+
 ### Identifier Reliability
 
 Accessibility identifiers in real apps are frequently misleading, reused, or missing. This is the biggest source of silent agent failures. Be defensive:

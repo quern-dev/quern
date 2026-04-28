@@ -6,6 +6,13 @@ status: documented
 # All landmarks must match for this screen to be recognized.
 # Priority: identifier > element type alone > label (locale-dependent, last resort).
 #
+# Re-verify when the UI changes. If `identify_screen` returns
+# `confidence: "none"` for this screen — or `tap_element` calls start failing
+# with `not_found` on identifiers that used to work — the landmarks below are
+# probably stale. Navigate to the screen, call `get_ui_tree`, and re-author
+# from what's actually present. See "Keeping Landmarks in Sync" in the
+# knowledge-base authoring guide.
+#
 # Available fields per landmark:
 #   element          - element type (required, e.g. "navigationBar", "Button")
 #   identifier       - exact-match accessibility identifier (preferred)
