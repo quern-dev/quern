@@ -777,9 +777,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # Auto-fix developer dir before any tool checks
     developer_dir_msg = _fix_developer_dir()
 
-    # Write state file (preserve active_devices across restarts)
-    prev_state = read_state()
-    prev_active = prev_state.get("active_devices", []) if prev_state else []
+    # Write state file. The active device persists across restarts via its
+    # own sidecar file (server/lifecycle/state.py:ACTIVE_DEVICE_FILE) — no
+    # need to round-trip it through state.json, which gets deleted on stop.
     state_dict = {
         "pid": os.getpid(),
         "server_host": args.host,
@@ -791,7 +791,6 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "local_capture": local_capture_processes,
         "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
-        "active_devices": prev_active,
     }
     if developer_dir_msg:
         state_dict["developer_dir_note"] = developer_dir_msg
