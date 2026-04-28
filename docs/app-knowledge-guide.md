@@ -123,7 +123,7 @@ A stub is a minimal screen file that records "this screen exists and I know how 
 **When to create a stub:**
 
 1. You're documenting Screen A and find it leads to Screen B.
-2. Before creating a stub for Screen B, check if a file already exists for it — search existing screen docs by name and `identify_by` fields.
+2. Before creating a stub for Screen B, check if a file already exists for it — search existing screen docs by name and `landmarks` (or `identify_by` on legacy files).
 3. If no match exists, create a stub: `screens/screen-b.md` with `status: stub`, the `reachable_from` edge you just discovered, and whatever you can infer about the screen name.
 4. If a match exists (stub or documented), just add the new `reachable_from` edge to the existing file.
 
@@ -146,10 +146,41 @@ The `init_app_knowledge` tool reports stub vs. documented counts so you can gaug
 
 Copy `screens/_template.md` and fill it in. Key principles:
 
-- **`identify_by` is the most important field.** An agent lost in the app will check this to figure out where it is. Use the most unique, stable signals.
+- **`landmarks` is the most important field.** Quern evaluates it server-side against the live UI tree to answer "what screen am I on?" — it's the foundation of `identify_screen`, `get_screen_summary?identify=true`, and any future automation that needs to recognize where the agent is. Use the most unique, stable elements (nav bar titles, screen-specific identifiers).
+- **`identify_by` is a human-readable hint and is optional.** Older screens have it; new screens don't need it unless you want a freeform prose note that doesn't fit the structured schema. The loader ignores it for matching. If you have both, they should agree.
 - **Include actual quern tool calls.** Don't write "tap the login button" — write `tap_element label="Sign In" element_type="button"`. The agent will copy-paste these.
 - **Be precise about element types.** Use the exact types from `get_ui_tree` — don't guess. See "Common iOS Element Types" above.
 - **Document failure modes.** What alerts, errors, or unexpected states can occur? How should the agent recover?
+
+### Choosing Landmarks
+
+A landmark is an element selector that must be present (or absent) for a screen to be recognized. All landmarks for a screen must match — they're AND'd together. Pick the smallest set that uniquely identifies the screen. In order of reliability:
+
+1. **Accessibility identifier** — locale-independent and usually stable across app versions. Strongest signal when one exists.
+2. **Navigation bar title or unique button identifier** — one per screen, rarely changes.
+3. **Tab bar selection state** — when a screen lives behind a tab, `{ element: "RadioButton", identifier: "tab.foo", selected: true }` distinguishes "this screen is active" from "this tab merely exists." Required when several screens share the same tab.* identifier pattern.
+4. **Unique label text** — works for screens with no stable identifier. Locale-dependent; flag with a comment if the app is localized.
+5. **`absent: true`** — sometimes the cleanest disambiguator is "the parent screen's compose button is *not* present." Use sparingly.
+
+After authoring, run `validate_landmarks` (or the `quern validate` HTTP endpoint) on the knowledge base to catch overlapping landmarks. Two screens whose landmark sets are subsets of each other will collide — at least one needs a distinguishing element.
+
+### Migrating a Legacy Knowledge Base
+
+If `load_landmarks` returns `screens: 0` with a populated `skipped[]` array, the knowledge base predates the landmarks schema (PR #22, April 2026) and uses the older `identify_by:` field. The loader categorizes each skipped file with a `reason` so you (or an agent) can act on it:
+
+- `legacy_format` — file has structured `identify_by:` entries that can be migrated. The original entries are echoed back in `skipped[].identify_by`.
+- `no_landmarks` — file is a stub or unannotated. Add landmarks during the next visit.
+- `yaml_error` / `no_frontmatter` / `invalid_entries` — file is malformed. Inspect manually.
+
+For `legacy_format` files with structured dict entries, the migration is mostly mechanical:
+
+- Rename the `identify_by:` key to `landmarks:`.
+- Translate any `value: "1"` (legacy "selected") to `selected: true`. Drop `value: "0"` entries unless you specifically want a `selected: false` landmark.
+- Drop fields that are not part of the new schema (`role_description`, etc.) — these were freeform hints that the loader ignored.
+
+For `legacy_format` entries that are strings rather than dicts (freeform prose like `"SFSafariViewController showing server settings page"`), the original author was describing a state the schema couldn't express. Re-visit the screen with `get_screen_summary` and pick concrete landmarks that fit the structured schema; the prose is a starting point, not a 1:1 mapping.
+
+Always review proposed migrations with the human user before rewriting files — landmarks may need adjustment for app changes since the legacy KB was authored. (See the agent migration skill for the per-file workflow.)
 
 ### Identifier Reliability
 
@@ -189,7 +220,7 @@ Some UI doesn't fit neatly into "screen" or "alert" categories: map pin summary 
 **Document these inside the parent screen's doc** under a dedicated `## Overlay Panels` section. For each panel:
 
 - How to trigger it (e.g., "tap a map pin")
-- How to identify it (`identify_by` elements)
+- How to identify it (`landmarks` for the panel, evaluated against the live UI tree)
 - Key elements within the panel
 - Navigation edges (e.g., "tapping the panel title navigates to [[screens/cache-detail]]")
 - How to dismiss it (swipe down, tap outside, back button)
