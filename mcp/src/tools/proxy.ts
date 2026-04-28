@@ -344,11 +344,22 @@ TROUBLESHOOTING — no traffic from a physical device:
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
    - Use the client_ip from the active network config as the filter on query_flows.
      If the device got a new DHCP lease, call record_device_proxy_config again with the
-     updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).`,
-    inputSchema: strictParams({}),
-  }, async () => {
+     updated client_ip (visible in Settings > Wi-Fi > (network) > IP Address).
+
+cert_setup is filtered by default to currently-visible devices (deleted simulators and disconnected physical devices are hidden from the routine response). Pass include_offline=true to see the full historical record — useful for debugging "I configured this device last week, where did it go?". The persisted cert-state.json file always retains the full history regardless of this flag.`,
+    inputSchema: strictParams({
+      include_offline: z
+        .coerce.boolean()
+        .optional()
+        .describe(
+          "Include cert_setup entries for devices that aren't currently visible (default: false)"
+        ),
+    }),
+  }, async ({ include_offline }) => {
     try {
-      const data = await apiRequest("GET", "/api/v1/proxy/status");
+      const params: Record<string, string> = {};
+      if (include_offline !== undefined) params.include_offline = String(include_offline);
+      const data = await apiRequest("GET", "/api/v1/proxy/status", params);
 
       return {
         content: [

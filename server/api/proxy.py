@@ -51,12 +51,37 @@ router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 from server.lifecycle.state import detect_local_ip as _detect_local_ip  # noqa: E402
 
 
-def _get_proxy_status(request: Request) -> ProxyStatusResponse:
-    """Build a ProxyStatusResponse from current app state."""
+async def _get_proxy_status(
+    request: Request, *, include_offline: bool = False,
+) -> ProxyStatusResponse:
+    """Build a ProxyStatusResponse from current app state.
+
+    cert_setup is filtered by default to only include devices currently
+    visible to ``list_devices()`` — simulators that have been deleted and
+    physical devices that aren't connected (USB or wifi) drop out of the
+    routine response. The persisted cert-state.json file is unchanged;
+    pass ``include_offline=True`` to see the full historical record.
+    """
     from server.lifecycle.state import read_state
 
     adapter = request.app.state.proxy_adapter
     flow_store = request.app.state.flow_store
+
+    # Resolve the set of currently-visible UDIDs once. If list_devices()
+    # fails (simctl unavailable, etc.), fall back to showing everything —
+    # filtering should never hide data when device discovery is broken.
+    known_udids: set[str] | None = None
+    if not include_offline:
+        controller = getattr(request.app.state, "device_controller", None)
+        if controller is not None:
+            try:
+                devices = await controller.list_devices()
+                known_udids = {d.udid for d in devices}
+            except Exception as e:
+                _proxy_logger.debug(
+                    "list_devices() failed during proxy_status filtering, "
+                    "falling back to unfiltered view: %s", e,
+                )
 
     # Read cert setup from persistent cert-state.json and system proxy from state.json
     cert_setup = None
@@ -69,6 +94,8 @@ def _get_proxy_status(request: Request) -> ProxyStatusResponse:
             current_ssid = detect_current_ssid()
             cert_setup = {}
             for udid, cert_data in device_certs.items():
+                if known_udids is not None and udid not in known_udids:
+                    continue
                 configs: dict = cert_data.get("wifi_proxy_configs") or {}
 
                 wifi_proxy_stale = True
@@ -209,9 +236,21 @@ def _require_running_proxy(request: Request):
 
 
 @router.get("/status", response_model=ProxyStatusResponse)
-async def proxy_status(request: Request) -> ProxyStatusResponse:
+async def proxy_status(
+    request: Request,
+    include_offline: bool = Query(
+        default=False,
+        description=(
+            "Include cert_setup entries for devices that aren't currently "
+            "visible (deleted simulators, offline physical devices). "
+            "Default false — the routine response only shows currently "
+            "reachable devices. The persisted cert-state.json file always "
+            "retains the full history regardless of this flag."
+        ),
+    ),
+) -> ProxyStatusResponse:
     """Get current proxy status and configuration."""
-    return _get_proxy_status(request)
+    return await _get_proxy_status(request, include_offline=include_offline)
 
 
 @router.post("/start", response_model=ProxyStatusResponse)
@@ -264,7 +303,7 @@ async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatus
         except Exception:
             _proxy_logger.warning("Failed to configure system proxy", exc_info=True)
 
-    resp = _get_proxy_status(request)
+    resp = await _get_proxy_status(request)
     resp.system_proxy = system_proxy_info
     return resp
 
@@ -314,7 +353,7 @@ async def stop_proxy(request: Request) -> dict:
     except Exception:
         _proxy_logger.warning("Failed to restore system proxy", exc_info=True)
 
-    resp = _get_proxy_status(request).model_dump()
+    resp = (await _get_proxy_status(request)).model_dump()
     resp["system_proxy_restore"] = restore_info.model_dump() if restore_info else None
     return resp
 
@@ -743,4 +782,4 @@ async def set_local_capture(request: Request, body: dict) -> ProxyStatusResponse
     except Exception:
         _proxy_logger.debug("Could not update state file", exc_info=True)
 
-    return _get_proxy_status(request)
+    return await _get_proxy_status(request)
