@@ -143,6 +143,67 @@ class TestNormalizeNode:
         )
         assert _normalize_node(node)["AXValue"] == "0"
 
+    def test_selected_tab_value_is_one(self):
+        """BottomNavigationView / TabLayout tabs use `selected` not `checked`.
+        The selected tab should normalize to AXValue "1" so it can match a
+        landmark with `selected: true` (parity with iOS RadioButton tabs)."""
+        # The actual Maps Explore tab pattern observed on a Pixel_8_API35:
+        # FrameLayout, not checkable, selected=true.
+        node = self._make_node(
+            **{
+                "class": "android.widget.FrameLayout",
+                "text": "",
+                "resource-id": "",
+                "content-desc": "Explore",
+                "bounds": "[0,2000][270,2080]",
+                "enabled": "true",
+                "checkable": "false",
+                "checked": "false",
+                "selected": "true",
+            }
+        )
+        assert _normalize_node(node)["AXValue"] == "1"
+
+    def test_unselected_tab_value_is_none(self):
+        """Non-selected tabs (and most other on-screen elements) should NOT
+        emit AXValue "0" — almost every element on screen has selected=false
+        by default, and emitting "0" would flood AXValue with meaningless
+        noise. selected=false → AXValue None is the right asymmetry."""
+        node = self._make_node(
+            **{
+                "class": "android.widget.FrameLayout",
+                "text": "",
+                "resource-id": "",
+                "content-desc": "Go",
+                "bounds": "[270,2000][540,2080]",
+                "enabled": "true",
+                "checkable": "false",
+                "checked": "false",
+                "selected": "false",
+            }
+        )
+        assert _normalize_node(node)["AXValue"] is None
+
+    def test_checked_takes_precedence_over_selected(self):
+        """If a node is both checkable and selected (rare — e.g. a CheckBox
+        in a selected list row), the checkable branch wins. The widget's
+        compound-button state is the more specific signal."""
+        node = self._make_node(
+            **{
+                "class": "android.widget.CheckBox",
+                "text": "Item",
+                "resource-id": "",
+                "content-desc": "",
+                "bounds": "[0,0][100,100]",
+                "enabled": "true",
+                "checkable": "true",
+                "checked": "false",   # not checked
+                "selected": "true",   # but parent row is selected
+            }
+        )
+        # checked=false wins over selected=true → AXValue "0"
+        assert _normalize_node(node)["AXValue"] == "0"
+
     def test_content_desc_fallback(self):
         node = self._make_node(
             **{
