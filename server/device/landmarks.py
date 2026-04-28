@@ -69,9 +69,10 @@ class KnowledgeBaseScan:
 def match_landmark(elements: list[UIElement], landmark: Landmark) -> bool:
     """Check if a single landmark matches against a UI element list.
 
-    Uses AND logic: all specified fields (element type, identifier, label)
-    must match on the same element.  When ``absent=True``, the result is
-    inverted — the landmark matches only if the element is NOT found.
+    Uses AND logic: all specified fields (element type, identifier, label,
+    selection state) must match on the same element.  When ``absent=True``,
+    the result is inverted — the landmark matches only if the element is
+    NOT found.
     """
     candidates = elements
 
@@ -90,6 +91,15 @@ def match_landmark(elements: list[UIElement], landmark: Landmark) -> bool:
     elif landmark.label_contains is not None:
         lower_sub = landmark.label_contains.lower()
         candidates = [e for e in candidates if lower_sub in e.label.lower()]
+
+    # Filter by selection state (for tabs, switches, radios, checkboxes).
+    # Both iOS and Android backends serialize selection state as UIElement
+    # value = "1" (selected) / "0" (not selected).
+    if landmark.selected is not None:
+        if landmark.selected:
+            candidates = [e for e in candidates if e.value == "1"]
+        else:
+            candidates = [e for e in candidates if e.value != "1"]
 
     found = len(candidates) > 0
     return (not found) if landmark.absent else found

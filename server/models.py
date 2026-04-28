@@ -877,6 +877,13 @@ class Landmark(BaseModel):
     label: str | None = None  # fallback: exact match, case-insensitive
     label_contains: str | None = None  # fallback: substring match, case-insensitive
     absent: bool = False  # if True, element must NOT be present
+    selected: bool | None = None
+    """Selection state for selectable elements (RadioButton, Switch, CheckBox,
+    Tab). When set, the element's selection state must match — useful for
+    distinguishing "the Timelines tab is the selected one" from "the
+    Timelines tab is just present." Both iOS and Android backends normalize
+    selection state into UIElement.value as "1" (selected) / "0" (not).
+    Omit to ignore selection state."""
 
 
 class ScreenLandmarks(BaseModel):

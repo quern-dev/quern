@@ -116,6 +116,56 @@ class TestMatchLandmark:
         lm = Landmark(element="Button", absent=True)
         assert match_landmark([], lm) is True
 
+    # selected: true / false — for tabs, switches, radios, checkboxes.
+    # Both backends serialize selection state as UIElement.value "1"/"0".
+
+    def test_selected_true_matches_value_1(self):
+        elements = [
+            _el("RadioButton", identifier="tab.timelines", value="1"),
+            _el("RadioButton", identifier="tab.explore", value="0"),
+        ]
+        lm = Landmark(element="RadioButton", identifier="tab.timelines", selected=True)
+        assert match_landmark(elements, lm) is True
+
+    def test_selected_true_rejects_unselected(self):
+        elements = [_el("RadioButton", identifier="tab.timelines", value="0")]
+        lm = Landmark(element="RadioButton", identifier="tab.timelines", selected=True)
+        assert match_landmark(elements, lm) is False
+
+    def test_selected_false_matches_unselected(self):
+        elements = [_el("RadioButton", identifier="tab.timelines", value="0")]
+        lm = Landmark(element="RadioButton", identifier="tab.timelines", selected=False)
+        assert match_landmark(elements, lm) is True
+
+    def test_selected_false_rejects_selected(self):
+        elements = [_el("RadioButton", identifier="tab.timelines", value="1")]
+        lm = Landmark(element="RadioButton", identifier="tab.timelines", selected=False)
+        assert match_landmark(elements, lm) is False
+
+    def test_selected_disambiguates_two_radios_with_same_id(self):
+        """The motivating use case: tabs that all expose tab.* identifiers
+        but only one is selected. Without `selected`, all four tabs would
+        match every screen's tab landmarks — defeating identification."""
+        elements = [
+            _el("RadioButton", identifier="tab.timelines", value="1"),
+            _el("RadioButton", identifier="tab.explore", value="0"),
+            _el("RadioButton", identifier="tab.notifications", value="0"),
+            _el("RadioButton", identifier="tab.messages", value="0"),
+        ]
+        # Authored for the timelines screen
+        lm = Landmark(element="RadioButton", identifier="tab.timelines", selected=True)
+        assert match_landmark(elements, lm) is True
+        # Authored for the explore screen — should fail on this UI tree
+        lm_wrong = Landmark(element="RadioButton", identifier="tab.explore", selected=True)
+        assert match_landmark(elements, lm_wrong) is False
+
+    def test_selected_omitted_ignores_state(self):
+        """Backwards-compatible: existing landmarks without `selected` set
+        should match regardless of value."""
+        elements = [_el("RadioButton", identifier="tab.timelines", value="0")]
+        lm = Landmark(element="RadioButton", identifier="tab.timelines")
+        assert match_landmark(elements, lm) is True
+
 
 # ---------------------------------------------------------------------------
 # match_landmarks
@@ -478,6 +528,21 @@ class TestParseScreenLandmarks:
         result = parse_screen_landmarks(md)
         assert result.screen is not None
         assert result.screen.landmarks[1].absent is True
+
+    def test_selected_landmark_parses(self, tmp_path):
+        """The new `selected: true|false` field round-trips through YAML."""
+        md = tmp_path / "timelines.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            screen: "timelines"
+            landmarks:
+              - { element: "TabGroup", identifier: "timelines.segment-control" }
+              - { element: "RadioButton", identifier: "tab.timelines", selected: true }
+            ---
+        """))
+        result = parse_screen_landmarks(md)
+        assert result.screen is not None
+        assert result.screen.landmarks[1].selected is True
 
 
 # ---------------------------------------------------------------------------

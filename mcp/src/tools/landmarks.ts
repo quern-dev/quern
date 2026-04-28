@@ -33,6 +33,14 @@ When skipped[] contains legacy_format entries, the recommended workflow is to su
               label: z.string().optional(),
               label_contains: z.string().optional(),
               absent: z.boolean().optional(),
+              selected: z
+                .boolean()
+                .optional()
+                .describe(
+                  "Selection state for tabs, switches, radios, checkboxes. " +
+                  "true = element must be selected (e.g. the active tab); " +
+                  "false = element must not be selected. Omit to ignore."
+                ),
             })
           )
         )
