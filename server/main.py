@@ -290,6 +290,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.device_controller = device_controller
     tools = await device_controller.check_tools()
     logger.info("Device tools: %s", tools)
+    device_controller._sim_bridge_ok = tools.get("sim_bridge", False)
+    if tools.get("sim_bridge"):
+        logger.info("sim-bridge available — using native simulator UI backend")
+    else:
+        logger.info("sim-bridge not available — using idb for simulator UI")
 
     # Warn about missing tools
     if not tools.get("simctl"):
@@ -299,10 +304,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Fix with: sudo xcode-select -s /path/to/Xcode.app/Contents/Developer  "
             "Otherwise install Xcode Command Line Tools: xcode-select --install"
         )
-    if not tools.get("idb"):
+    if not tools.get("idb") and not tools.get("sim_bridge"):
         logger.warning(
-            "idb not available — UI automation (tap, swipe, accessibility tree) disabled. "
-            "Install with: pip install fb-idb && brew install idb-companion"
+            "Neither sim-bridge nor idb available — simulator UI automation "
+            "(tap, swipe, accessibility tree) disabled. "
+            "sim-bridge requires Xcode 26+ with Apple Silicon. "
+            "idb fallback: pip install fb-idb && brew install idb-companion"
         )
     if not tools.get("adb"):
         logger.info(

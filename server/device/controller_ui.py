@@ -124,12 +124,14 @@ class DeviceControllerUI:
         """Return the appropriate UI automation backend for a device.
 
         Android devices use U2Backend; iOS physical devices use WdaBackend;
-        iOS simulators use IdbBackend.
+        iOS simulators use SimBridgeBackend (preferred) or IdbBackend (fallback).
         """
         if self._is_android(udid):
             return self.u2
         if self._is_physical(udid):
             return self.wda_client
+        if self._sim_bridge_ok:
+            return self.sim_bridge
         return self.idb
 
     async def _get_screen_dimensions(self, udid: str) -> dict | None:

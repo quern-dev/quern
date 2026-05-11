@@ -12,6 +12,7 @@ from server.device.devicectl import DevicectlBackend
 from server.device.idb import IdbBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
+from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
 from server.device.simctl import SimctlBackend
 from server.device.u2_client import U2Backend
 from server.device.usbmux import UsbmuxBackend
@@ -34,6 +35,9 @@ class DeviceController(DeviceControllerUI):
         self.wda_client = WdaBackend()
         self.adb = AdbBackend()
         self.u2 = U2Backend()
+        self.sim_bridge_manager = SimBridgeManager()
+        self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
+        self._sim_bridge_ok = False
         self.__active_udid: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
 
@@ -76,6 +80,7 @@ class DeviceController(DeviceControllerUI):
             "pymobiledevice3": await self.pmd3.is_available(),
             "tunneld": await is_tunneld_running(),
             "adb": await self.adb.is_available(),
+            "sim_bridge": await self.sim_bridge_manager.is_available(),
         }
 
     def _device_type(self, udid: str) -> DeviceType:
