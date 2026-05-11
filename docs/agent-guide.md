@@ -120,6 +120,7 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - `record_device_proxy_config(udid, ssid, client_ip)` — records the config per Wi-Fi network (SSID). Automatically derives the correct Mac interface IP by finding the interface on the same /24 subnet as the device's `client_ip`. This handles multi-interface Macs correctly (e.g. Wi-Fi + Ethernet active simultaneously).
 - Call it again whenever you move to a different network — each SSID is tracked independently, so configs for home and work don't overwrite each other.
 - `proxy_status` shows `wifi_proxy_configs` (keyed by SSID), `wifi_proxy_stale` (true if no stored network's proxy_host matches the current Mac IP), and `active_wifi_network` (the currently matching SSID). If `wifi_proxy_stale: true`, reconfigure the device's Wi-Fi proxy and call `record_device_proxy_config` again.
+- `proxy_status` also includes `network_state` (refreshed by a ~15s background poll) — current SSID/IP, plus `last_changed_at` and `last_change_reason` fields populated when the laptop's network identity shifts. When you see `last_changed_at` is recent and a physical device is in play, expect `wifi_proxy_stale: true` to follow — and run the autonomous reconfiguration flow below.
 - See `docs/physical-device-cert-setup.md` for the full WDA automation script.
 
 **Autonomous proxy reconfiguration (cert already installed)**: When `wifi_proxy_stale: true` or `wifi_proxy_configs: null`, you can update the device's proxy settings fully via WDA without user intervention:
@@ -152,6 +153,51 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 4. If the result is unexpected, use `get_ui_tree` (optionally scoped with `children_of`) to inspect the full hierarchy
 
 **Key insight**: Use summary for quick checks, full tree when you need details.
+
+**Debugging the platform normalizer**: When `tap_element` or a landmark match doesn't behave as expected and you suspect the underlying source attributes aren't surfacing correctly (e.g. an Android tab that doesn't appear `selected`), call `get_ui_tree` with `include_raw=true` to get the raw provider attributes (full uiautomator2 XML on Android) on each element under `extra_attrs`. This is faster than dropping to `adb shell uiautomator dump` and stays inside the Quern API surface.
+
+---
+
+### Identifying Screens with Landmarks
+
+When the question is "what screen am I on right now?" — for verifying navigation, gating actions, or driving recipe-style workflows — landmarks give you a deterministic answer that doesn't depend on label parsing or model swaps.
+
+**Why use landmarks instead of just reading `get_screen_summary`?**
+
+- **Deterministic.** Quern matches the live UI tree against authored selectors and returns `matched: <screen_name>` with `confidence: exact | ambiguous | none`. No prose interpretation.
+- **Cross-platform.** The same landmarks work on iOS (idb) and Android (uiautomator2) — selection state, identifiers, and labels are normalized to a single schema.
+- **Stable across LLMs.** A workflow that asks "is this the cart screen?" gets the same answer regardless of which model is driving.
+- **Authored once, reused everywhere.** The screen knowledge base is the source of truth; agents don't re-discover screen identity on every call.
+
+**Workflow:**
+
+1. Load landmarks from the app's knowledge base:
+   ```
+   load_landmarks(app="org.example.myapp", path="/Users/dev/myapp/.quern/knowledge")
+   ```
+   Or pass landmarks inline (useful for ad-hoc identification):
+   ```
+   load_landmarks(app="...", landmarks={"home-tab": [{"element": "RadioButton", "identifier": "tab.home", "selected": true}]})
+   ```
+2. Call `identify_screen(app="...")` or — more often — pass `identify=true` to `get_screen_summary` to fold identification into a call you were already making.
+3. Read the response. On a match, you get `matched`, `confidence: "exact"`, and `matched_landmarks` with per-landmark hit/miss detail. On no match, `partial_matches` lists every evaluated screen sorted by descending match count, *each with its full per-landmark results* — you can see exactly which selectors failed without re-running.
+
+**Landmark schema** (in screen frontmatter or inline JSON):
+
+| Field | Purpose |
+|---|---|
+| `element` | Element type, required (e.g. `Button`, `RadioButton`, `navigationBar`) |
+| `identifier` | Accessibility identifier, exact match (preferred — locale-independent) |
+| `label` | Label text, case-insensitive exact match |
+| `label_contains` | Substring match for elements with dynamic content in their label |
+| `absent: true` | Element must NOT be present (use sparingly — rare) |
+| `selected: true` | For tabs/switches/radios/checkboxes, element must be in the on/active state. Distinguishes "the Home tab is the selected one" from "a Home tab exists." |
+
+**Working with a legacy knowledge base:** If `load_landmarks` returns `screens: 0` and a populated `skipped[]` array, the KB pre-dates the `landmarks:` schema and uses the older `identify_by:` field. The skip entries are categorized — `legacy_format` includes the original entries so an agent can propose a per-file migration. The `quern-landmark-migration` agent skill walks through the migration with user review at each step (rename `identify_by:` → `landmarks:`, translate `value: "1"` → `selected: true`, drop unsupported fields, flag freeform-prose entries that need re-visiting).
+
+**Validating before relying on landmarks**: Run `validate_landmarks(app="...")` after loading. Reports collisions (two screens whose landmark sets overlap — one could be mistaken for the other) and screens with no landmarks. Fix collisions by adding a distinguishing element to one of the screens.
+
+**When `confidence: "none"` on a known-good screen**: the landmarks are likely stale — the app has shipped UI changes since the knowledge base was authored. Surface this to the user before continuing; downstream automation built on top of stale landmarks will silently produce wrong results (you'll act on the wrong screen and misreport state). The fix is to navigate to the screen, run `get_ui_tree`, and re-author the landmarks block from what's actually there. See "Keeping Landmarks in Sync" in the knowledge-base authoring guide.
 
 ---
 
@@ -379,7 +425,7 @@ Mock rules take priority over intercept rules. Clear them with `clear_mocks` whe
 
 Use `ensure_devices` to boot multiple simulators at once, then run different test scenarios on each in parallel. The first device in the result becomes the active device; pass explicit `udid` parameters to target the others.
 
-**Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria or pass an explicit `udid` to any tool.
+**Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria, or pass `udid` directly to `resolve_device` (faster than re-matching by name when you already know the UDID — e.g., from a `list_devices` call). The active device is persisted in `~/.quern/active-device.json` and survives `quern stop` / `quern restart`, so you don't have to re-resolve at the start of every session.
 
 **Default behavior**: `resolve_device` and `ensure_devices` default to `type="simulator"` to prevent accidentally targeting physical devices (which may not have your app installed). Pass `type="device"` explicitly to target physical devices.
 

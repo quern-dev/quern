@@ -508,6 +508,106 @@ def _install_skills(project_root: Path) -> CheckResult:
     )
 
 
+# Marker we use to identify our PreToolUse hook entry inside
+# ~/.claude/settings.json. Stable string included in the command path so
+# re-running setup updates rather than duplicates the entry.
+_PRECOMMIT_HOOK_MARKER = "agent-precommit-checklist.sh"
+
+
+def _install_precommit_hook(project_root: Path) -> CheckResult:
+    """Install a Claude Code pre-commit checklist hook into ~/.claude.
+
+    Copies the checklist script + content out of the Quern source tree
+    into ~/.quern/ (so they survive a source-tree move/uninstall), then
+    deep-merges a PreToolUse:Bash hook into ~/.claude/settings.json that
+    runs the script. The script self-gates on a `.quern/` directory
+    being present in the agent's cwd, so the hook stays silent in
+    projects that don't use Quern.
+
+    Idempotent — re-running setup updates an existing entry in place
+    rather than duplicating it.
+    """
+    import json
+    import shutil
+
+    src_script = project_root / "scripts" / "agent-precommit-checklist.sh"
+    src_checklist = project_root / "docs" / "agent-precommit-checklist.md"
+    if not src_script.exists() or not src_checklist.exists():
+        return CheckResult(
+            name="Claude Code pre-commit hook",
+            status=CheckStatus.OK,
+            message="Source files not found — skipped",
+        )
+
+    claude_dir = Path.home() / ".claude"
+    if not claude_dir.exists():
+        return CheckResult(
+            name="Claude Code pre-commit hook",
+            status=CheckStatus.OK,
+            message="Skipped (no ~/.claude directory)",
+        )
+
+    # Install the script and checklist content into ~/.quern/. The script
+    # resolves the checklist path relative to its own location ($0/..),
+    # so the layout is: ~/.quern/bin/agent-precommit-checklist.sh and
+    # ~/.quern/agent-precommit-checklist.md.
+    quern_dir = Path.home() / ".quern"
+    bin_dir = quern_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    dest_script = bin_dir / "agent-precommit-checklist.sh"
+    dest_checklist = quern_dir / "agent-precommit-checklist.md"
+    shutil.copy2(src_script, dest_script)
+    shutil.copy2(src_checklist, dest_checklist)
+    dest_script.chmod(0o755)
+
+    # Deep-merge the hook config into ~/.claude/settings.json.
+    settings_path = claude_dir / "settings.json"
+    if settings_path.exists():
+        try:
+            config = json.loads(settings_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            return CheckResult(
+                name="Claude Code pre-commit hook",
+                status=CheckStatus.WARNING,
+                message=f"Skipped: {settings_path} contains invalid JSON",
+            )
+    else:
+        config = {}
+
+    hooks_root = config.setdefault("hooks", {})
+    pre_tool_use = hooks_root.setdefault("PreToolUse", [])
+    new_command = str(dest_script)
+
+    # If our hook is already installed (identified by the marker string
+    # in the command path), update its command in place. Otherwise add a
+    # new top-level entry. Preserves any other hooks the user may have.
+    found = False
+    for entry in pre_tool_use:
+        for h in entry.get("hooks", []):
+            if _PRECOMMIT_HOOK_MARKER in h.get("command", ""):
+                h["command"] = new_command
+                found = True
+                break
+        if found:
+            break
+
+    if not found:
+        pre_tool_use.append({
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": new_command}],
+        })
+
+    settings_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    verb = "Updated" if found else "Installed"
+    return CheckResult(
+        name="Claude Code pre-commit hook",
+        status=CheckStatus.OK,
+        message=f"{verb} pre-commit checklist hook in {settings_path}",
+        detail=f"Script: {dest_script}",
+    )
+
+
 # ── Individual checks ─────────────────────────────────────────────────────
 
 def _find_project_root() -> Path | None:
@@ -1268,7 +1368,7 @@ def run_setup() -> int:
             os.environ["PATH"] = venv_bin + ":" + path
 
     print()
-    print("  Quern Debug Server — Setup")
+    print("  Quern — Setup")
     print("  Checking your environment...")
     print()
 
@@ -1709,6 +1809,11 @@ def run_setup() -> int:
     if project_root:
         report.add(_install_skills(project_root))
 
+    # ── Claude Code pre-commit checklist hook ──
+
+    if project_root:
+        report.add(_install_precommit_hook(project_root))
+
     # ── Build MCP server ──
     # Build the TypeScript MCP server so it's ready when Claude Code connects.
     # Without this, the MCP shows as broken until the first `quern start`.
@@ -1745,7 +1850,7 @@ def _brew_uninstall(formula: str) -> bool:
 def run_uninstall() -> int:
     """Remove Quern and its dependencies. Returns 0 on success, 1 on error."""
     print()
-    print("  Quern Debug Server — Uninstall")
+    print("  Quern — Uninstall")
     print()
 
     project_root = _find_project_root()

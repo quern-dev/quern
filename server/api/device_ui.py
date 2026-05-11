@@ -64,6 +64,17 @@ async def get_ui_elements(
         default=None, pattern=r"^(flat)$",
         description="'flat' uses flat idb output with custom companion. Default uses nested.",
     ),
+    include_raw: bool = Query(
+        default=False,
+        description=(
+            "Include the raw source attributes (extra_attrs) from the underlying "
+            "accessibility provider on each element. Useful for debugging the "
+            "normalizer when you want to see what got collapsed (e.g., Android "
+            "selected= or checkable= attributes that map into our value field). "
+            "Stripped by default to keep payloads small. Currently only Android "
+            "populates extra_attrs; iOS responses are unchanged either way."
+        ),
+    ),
 ):
     """Get all UI accessibility elements from the current screen.
 
@@ -97,8 +108,9 @@ async def get_ui_elements(
 
         end = time.perf_counter()
         logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
+        dump_kwargs = {} if include_raw else {"exclude": {"extra_attrs"}}
         return {
-            "elements": [e.model_dump() for e in elements],
+            "elements": [e.model_dump(**dump_kwargs) for e in elements],
             "element_count": len(elements),
             "udid": resolved_udid,
         }
@@ -258,6 +270,10 @@ async def get_screen_summary(
         default=None, pattern=r"^(flat)$",
         description="'flat' uses flat idb output with custom companion. Default uses nested.",
     ),
+    identify: bool = Query(
+        default=False,
+        description="Identify screen against loaded landmarks. Adds identified_as/confidence.",
+    ),
 ):
     """Get an LLM-optimized screen description with smart truncation.
 
@@ -269,12 +285,13 @@ async def get_screen_summary(
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
     - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
     - mode: 'flat' to use flat idb output with custom companion. Default uses nested.
+    - identify: Match screen against loaded landmarks.
 
     Returns summary with truncated, total_interactive_elements fields.
     """
     controller = _get_controller(request)
     try:
-        summary, resolved_udid = await controller.get_screen_summary(
+        summary, elements, resolved_udid = await controller.get_screen_summary(
             max_elements=max_elements,
             udid=udid,
             snapshot_depth=snapshot_depth,
@@ -283,6 +300,13 @@ async def get_screen_summary(
             mode=mode,
         )
         summary["udid"] = resolved_udid
+
+        if identify:
+            registry = request.app.state.landmark_registry
+            result = registry.identify(elements)
+            summary["identified_as"] = result["matched"]
+            summary["confidence"] = result["confidence"]
+
         return summary
     except DeviceError as e:
         raise _handle_device_error(e)

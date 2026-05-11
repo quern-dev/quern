@@ -8,8 +8,19 @@ export function registerDevicePoolTools(server: McpServer): void {
     description: `Smartly find a device matching criteria. This is the preferred way to get a
 device — it handles booting automatically. The resolved device becomes the
 active device, so subsequent tools (take_screenshot, tap, etc.) use it by
-default without needing to pass udid.`,
+default without needing to pass udid.
+
+Pass udid directly when you already know which device you want — e.g., from
+a previous list_devices call or from cert_setup. The udid path bypasses
+matching and just sets the device active (booting it first if needed and
+auto_boot is enabled).`,
     inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe(
+          "Specific device UDID. When provided, name/os_version/device_family/type are ignored — the device is set active directly (booting it first if shutdown and auto_boot is true)."
+        ),
       name: z
         .string()
         .optional()
@@ -35,9 +46,10 @@ default without needing to pass udid.`,
           "Boot a matching shutdown device if no booted ones available (default: true)"
         ),
     }),
-  }, async ({ name, os_version, device_family, type, auto_boot }) => {
+  }, async ({ udid, name, os_version, device_family, type, auto_boot }) => {
       try {
         const body: Record<string, unknown> = {};
+        if (udid) body.udid = udid;
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
         if (device_family) body.device_family = device_family;

@@ -285,6 +285,34 @@ def _cmd_grant_full_perms() -> int:
     return 0
 
 
+def _cmd_install_precommit_hook() -> int:
+    """Install the pre-commit checklist hook into ~/.claude/settings.json.
+
+    Standalone subcommand for re-running the install (e.g. after updating
+    Quern, or to refresh the script content). The same install runs
+    automatically as part of `quern setup`.
+    """
+    project_root = _find_project_root()
+    if project_root is None:
+        print("Error: could not find project root (no pyproject.toml in ancestors)")
+        return 1
+
+    from server.lifecycle.setup import CheckStatus, _install_precommit_hook
+
+    result = _install_precommit_hook(project_root)
+    icon = {
+        CheckStatus.OK: "✓",
+        CheckStatus.WARNING: "⚠",
+        CheckStatus.ERROR: "✗",
+        CheckStatus.MISSING: "?",
+        CheckStatus.SKIPPED: "—",
+    }.get(result.status, "?")
+    print(f"  {icon} {result.message}")
+    if result.detail:
+        print(f"    {result.detail}")
+    return 0 if result.status != CheckStatus.ERROR else 1
+
+
 def _cmd_mcp_install() -> int:
     """Add quern-debug MCP server to one or more AI tool configs."""
     import argparse
@@ -354,22 +382,13 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
-def _get_version() -> str:
-    """Read version from pyproject.toml (single source of truth)."""
-    project_root = _find_project_root()
-    if project_root:
-        for line in (project_root / "pyproject.toml").read_text().splitlines():
-            if line.startswith("version"):
-                return line.split('"')[1]
-    return "unknown"
-
-
 def main() -> None:
     _maybe_reexec_in_venv()
 
     # Version flag — handle before anything else
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V", "version"):
-        print(f"quern {_get_version()}")
+        from server import get_version
+        print(f"quern {get_version()}")
         sys.exit(0)
 
     # Lightweight commands — handle without heavy imports
@@ -386,6 +405,9 @@ def main() -> None:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
         sys.exit(_cmd_grant_full_perms())
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "install-precommit-hook":
+        sys.exit(_cmd_install_precommit_hook())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import run_update

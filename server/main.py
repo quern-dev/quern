@@ -1,4 +1,4 @@
-"""Quern Debug Server — main entry point.
+"""Quern — main entry point.
 
 Usage:
     python3 -m server                  Start in foreground (backward compat)
@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from server import get_version
 from server.api.app_state import router as app_state_router
 from server.api.build_app import router as build_app_router
 from server.api.builds import router as builds_router
@@ -37,6 +38,7 @@ from server.api.crashes import router as crashes_router
 from server.api.device import router as device_router
 from server.api.device_pool import router as device_pool_router
 from server.api.device_ui import router as device_ui_router
+from server.api.landmarks import router as landmarks_router
 from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
@@ -368,6 +370,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         pass
 
+    # Network-change monitor — polls every ~15s so the server notices
+    # SSID/IP changes proactively. Lets proxy_status surface "the network
+    # just changed" without anyone having to ask.
+    from server.lifecycle.network_monitor import (
+        NetworkState,
+        network_monitor_loop,
+        update_network_state,
+    )
+    app.state.network_state = NetworkState()
+    update_network_state(app.state.network_state)  # establish baseline immediately
+    network_monitor_task = asyncio.create_task(
+        network_monitor_loop(app.state.network_state),
+    )
+    logger.info(
+        "Network monitor started: ssid=%r local_ip=%r",
+        app.state.network_state.ssid,
+        app.state.network_state.local_ip,
+    )
+    # Subsequent SSID/IP shifts get logged at INFO by network_monitor_loop.
+
     logger.info(
         "Server started on http://%s:%d — API key: %s...%s",
         config.host,
@@ -379,7 +401,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
-    for task in (watchdog_task, update_check_task):
+    for task in (watchdog_task, update_check_task, network_monitor_task):
         if task and not task.done():
             task.cancel()
             try:
@@ -437,8 +459,8 @@ def create_app(
         config = ServerConfig()
 
     app = FastAPI(
-        title="Quern Debug Server",
-        version="0.1.0",
+        title="Quern",
+        version=get_version(),
         description="Debug log capture and AI context server",
         lifespan=lifespan,
     )
@@ -471,6 +493,11 @@ def create_app(
     app.state.scrcpy_preview = None
     app.state.sim_log_adapters = {}
     app.state.device_log_adapters = {}
+    app.state.network_state = None  # populated when the lifespan starts the monitor
+
+    # Screen landmarks
+    from server.device.landmarks import LandmarkRegistry
+    app.state.landmark_registry = LandmarkRegistry()
 
     # Screenshot timeline state
     app.state.active_timeline = None
@@ -504,6 +531,7 @@ def create_app(
     app.include_router(wda_router)
     app.include_router(build_app_router)
     app.include_router(app_state_router)
+    app.include_router(landmarks_router)
 
     @app.get("/")
     async def root() -> RedirectResponse:
@@ -580,7 +608,7 @@ fetch('/api/v1/device/list', {
             cache_stats = app.state.device_controller.get_cache_stats()
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": get_version(),
             "tools": tools,
             "ui_cache": cache_stats,
         }
@@ -595,7 +623,7 @@ fetch('/api/v1/device/list', {
             cache_stats = app.state.device_controller.get_cache_stats()
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": get_version(),
             "tools": tools,
             "ui_cache": cache_stats,
         }
@@ -777,9 +805,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # Auto-fix developer dir before any tool checks
     developer_dir_msg = _fix_developer_dir()
 
-    # Write state file (preserve active_devices across restarts)
-    prev_state = read_state()
-    prev_active = prev_state.get("active_devices", []) if prev_state else []
+    # Write state file. The active device persists across restarts via its
+    # own sidecar file (server/lifecycle/state.py:ACTIVE_DEVICE_FILE) — no
+    # need to round-trip it through state.json, which gets deleted on stop.
     state_dict = {
         "pid": os.getpid(),
         "server_host": args.host,
@@ -791,14 +819,13 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "local_capture": local_capture_processes,
         "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
-        "active_devices": prev_active,
     }
     if developer_dir_msg:
         state_dict["developer_dir_note"] = developer_dir_msg
     write_state(state_dict)
 
     if args.foreground:
-        print("Quern Debug Server v0.1.0")
+        print(f"Quern v{get_version()}")
         print(f"  http://{config.host}:{server_port}")
         print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
         print("  API key file: ~/.quern/api-key")
@@ -1039,7 +1066,7 @@ def _cmd_disable_local_capture() -> None:
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Quern Debug Server — capture device logs for AI agents",
+        description="Quern — capture device logs for AI agents",
     )
     parser.set_defaults(command=None)
 
