@@ -1,5 +1,14 @@
 # Screen Identification in Action Responses
 
+> **Status (v0.13):** the underlying landmark engine — `LandmarkRegistry`,
+> `identify_screen`, `get_screen_summary?identify=true` — is shipped (v0.11
+> with v0.12 refinements). The narrower work this doc proposes is **not**:
+> `_capture_screen_context` does not call `registry.identify()`, and the
+> `expected_screen` request parameter / `matched_expected` response field
+> are not present in the codebase. This remains a forward-looking spec
+> for bundling identification into action responses (`tap_element`,
+> `type_text`, `swipe`, `press_button`) in a single round-trip.
+
 ## Problem
 
 The `feature/screen-landmarks` branch ships landmarks (declarative, structured screen identifiers) and exposes identification through `GET /ui/summary?identify=true`. That's useful, but it requires a follow-up call: an agent has to act, then call `get_screen_summary` separately to confirm where they landed.
