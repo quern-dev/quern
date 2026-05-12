@@ -760,34 +760,46 @@ func doButton(udid: String, name: String) -> Bool {
     guard let client = ensureHIDClient(udid: udid) else { return false }
     let holdUs: UInt32 = 100_000
 
-    switch name {
+    // Normalize: lowercase, drop underscores/hyphens so "SIDE_BUTTON",
+    // "side-button", "sideButton" all resolve. Matches idb's name set
+    // (HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY) plus our existing names.
+    let n = name.lowercased()
+        .replacingOccurrences(of: "_", with: "")
+        .replacingOccurrences(of: "-", with: "")
+
+    switch n {
     case "home":
-        guard let bfn = buttonFn else { return false }
-        guard let down = bfn(0x0, 1, 0x33) else { return false }
-        sendHIDMessage(down, to: client)
-        usleep(holdUs)
-        guard let up = bfn(0x0, 2, 0x33) else { return false }
-        sendHIDMessage(up, to: client)
-        return true
-
-    case "lock":
-        guard let bfn = buttonFn else { return false }
-        guard let down = bfn(0x1, 1, 0x33) else { return false }
-        sendHIDMessage(down, to: client)
-        usleep(holdUs)
-        guard let up = bfn(0x1, 2, 0x33) else { return false }
-        sendHIDMessage(up, to: client)
-        return true
-
-    case "volumeUp":
+        return pressIndigoButton(code: 0x0, holdUs: holdUs, client: client)
+    case "lock", "sidebutton":
+        return pressIndigoButton(code: 0x1, holdUs: holdUs, client: client)
+    case "siri":
+        // Long-press side button — the Siri gesture on Face ID iPhones.
+        // Simulators generally don't run Siri, but the event matches idb's behavior.
+        return pressIndigoButton(code: 0x1, holdUs: 1_500_000, client: client)
+    case "applepay":
+        // Double-press side/lock button.
+        guard pressIndigoButton(code: 0x1, holdUs: 80_000, client: client) else { return false }
+        usleep(120_000)
+        return pressIndigoButton(code: 0x1, holdUs: 80_000, client: client)
+    case "volumeup":
         return pressArbitraryHID(page: 12, usage: 233, holdUs: holdUs, client: client)
-    case "volumeDown":
+    case "volumedown":
         return pressArbitraryHID(page: 12, usage: 234, holdUs: holdUs, client: client)
 
     default:
         logErr("[hid] unknown button: \(name)")
         return false
     }
+}
+
+func pressIndigoButton(code: UInt32, holdUs: UInt32, client: AnyObject) -> Bool {
+    guard let bfn = buttonFn else { return false }
+    guard let down = bfn(code, 1, 0x33) else { return false }
+    sendHIDMessage(down, to: client)
+    usleep(holdUs)
+    guard let up = bfn(code, 2, 0x33) else { return false }
+    sendHIDMessage(up, to: client)
+    return true
 }
 
 func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyObject) -> Bool {
@@ -904,6 +916,8 @@ func decomposeCharacter(_ c: Character) -> (UInt32, [UInt32])? {
         0x09: (0x2B, false), // tab
         0x0A: (0x28, false), // newline -> enter
         0x0D: (0x28, false), // carriage return -> enter
+        0x08: (0x2A, false), // backspace -> delete
+        0x7F: (0x2A, false), // DEL -> delete
     ]
 
     if let (usage, shifted) = punctuation[v] {
