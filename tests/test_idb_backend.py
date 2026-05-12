@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from server.device import probing
 from server.device.idb import IdbBackend
 from server.models import DeviceError
 
@@ -379,15 +380,15 @@ class TestDescribePoint:
 class TestIsProbeableContainer:
     def test_nav_bar_empty(self):
         item = {"type": "Group", "role_description": "Nav bar", "children": []}
-        assert IdbBackend._is_probeable_container(item) is True
+        assert probing.is_probeable_container(item) is True
 
     def test_tab_bar_by_label(self):
         item = {"type": "Group", "AXLabel": "Tab Bar", "role_description": "group", "children": []}
-        assert IdbBackend._is_probeable_container(item) is True
+        assert probing.is_probeable_container(item) is True
 
     def test_toolbar_empty(self):
         item = {"type": "Group", "role_description": "Toolbar", "children": []}
-        assert IdbBackend._is_probeable_container(item) is True
+        assert probing.is_probeable_container(item) is True
 
     def test_container_with_children_not_probeable(self):
         item = {
@@ -395,20 +396,20 @@ class TestIsProbeableContainer:
             "role_description": "Nav bar",
             "children": [{"type": "Button", "AXLabel": "Back"}],
         }
-        assert IdbBackend._is_probeable_container(item) is False
+        assert probing.is_probeable_container(item) is False
 
     def test_regular_group_not_probeable(self):
         item = {"type": "Group", "AXLabel": "Content", "role_description": "group", "children": []}
-        assert IdbBackend._is_probeable_container(item) is False
+        assert probing.is_probeable_container(item) is False
 
     def test_button_not_probeable(self):
         item = {"type": "Button", "AXLabel": "Submit", "children": []}
-        assert IdbBackend._is_probeable_container(item) is False
+        assert probing.is_probeable_container(item) is False
 
     def test_no_children_key_is_probeable(self):
         """Container with no children key at all (missing, not empty list)."""
         item = {"type": "Group", "role_description": "Nav bar"}
-        assert IdbBackend._is_probeable_container(item) is True
+        assert probing.is_probeable_container(item) is True
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +420,7 @@ class TestIsProbeableContainer:
 class TestFindEmptyContainers:
     def test_finds_containers_in_nested_tree(self):
         data = json.loads((FIXTURES / "idb_describe_all_nested_output.json").read_text())
-        containers = IdbBackend._find_empty_containers(data)
+        containers = probing.find_empty_containers(data)
         assert len(containers) == 2
         # Nav bar
         assert containers[0]["role_description"] == "Nav bar"
@@ -428,7 +429,7 @@ class TestFindEmptyContainers:
 
     def test_no_containers_in_flat_list(self):
         data = json.loads((FIXTURES / "idb_describe_all_output.json").read_text())
-        containers = IdbBackend._find_empty_containers(data)
+        containers = probing.find_empty_containers(data)
         assert len(containers) == 0
 
     def test_deeply_nested_container(self):
@@ -452,7 +453,7 @@ class TestFindEmptyContainers:
                 ],
             }
         ]
-        containers = IdbBackend._find_empty_containers(data)
+        containers = probing.find_empty_containers(data)
         assert len(containers) == 1
         assert containers[0]["role_description"] == "Toolbar"
 
@@ -481,7 +482,7 @@ class TestProbeContainer:
             return None
 
         with patch.object(backend, "describe_point", side_effect=mock_describe_point):
-            await backend._probe_container("AAAA-1111", container)
+            await probing.probe_container("AAAA-1111", container, backend.describe_point)
 
         assert len(call_xs) == 5
         assert call_xs == [10.0, 30.0, 50.0, 70.0, 90.0]
@@ -504,7 +505,7 @@ class TestProbeContainer:
         }
 
         with patch.object(backend, "describe_point", return_value=element):
-            discovered = await backend._probe_container("X", container)
+            discovered = await probing.probe_container("X", container, backend.describe_point)
 
         # Should be deduplicated to 1 element even though 5 probes hit it
         assert len(discovered) == 1
@@ -528,7 +529,7 @@ class TestProbeContainer:
         }
 
         with patch.object(backend, "describe_point", return_value=container_hit):
-            discovered = await backend._probe_container("X", container)
+            discovered = await probing.probe_container("X", container, backend.describe_point)
 
         assert len(discovered) == 0
 
@@ -565,7 +566,7 @@ class TestProbeContainer:
             }  # container itself
 
         with patch.object(backend, "describe_point", side_effect=mock_describe_point):
-            discovered = await backend._probe_container("X", container)
+            discovered = await probing.probe_container("X", container, backend.describe_point)
 
         assert len(discovered) == 2
         labels = {d["AXLabel"] for d in discovered}
@@ -582,14 +583,14 @@ class TestProbeContainer:
         }
 
         with patch.object(backend, "describe_point", return_value=None):
-            discovered = await backend._probe_container("X", container)
+            discovered = await probing.probe_container("X", container, backend.describe_point)
 
         assert len(discovered) == 0
 
     async def test_no_frame_returns_empty(self):
         backend = IdbBackend()
         container = {"type": "Group", "role_description": "Nav bar"}
-        discovered = await backend._probe_container("X", container)
+        discovered = await probing.probe_container("X", container, backend.describe_point)
         assert discovered == []
 
     async def test_probes_at_vertical_center(self):
@@ -609,7 +610,7 @@ class TestProbeContainer:
             return None
 
         with patch.object(backend, "describe_point", side_effect=mock_describe_point):
-            await backend._probe_container("X", container)
+            await probing.probe_container("X", container, backend.describe_point)
 
         # y_center = 56 + 44/2 = 78.0
         assert all(y == 78.0 for y in call_ys)
@@ -649,7 +650,7 @@ class TestDescribeAllWithProbing:
             "frame": {"x": 160, "y": 791, "width": 80, "height": 83},
         }
 
-        async def mock_probe(udid, container):
+        async def mock_probe(udid, container, _describe_point):
             role_desc = container.get("role_description", "")
             if role_desc == "Nav bar":
                 return [gear_btn]
@@ -657,7 +658,7 @@ class TestDescribeAllWithProbing:
                 return [home_tab, profile_tab]
 
         with patch("asyncio.create_subprocess_exec", return_value=proc):
-            with patch.object(backend, "_probe_container", side_effect=mock_probe):
+            with patch("server.device.probing.probe_container", side_effect=mock_probe):
                 result = await backend.describe_all("AAAA-1111")
 
         # Fixture has: Application, Nav bar, StaticText, Button(Submit), Tab Bar = 5 elements
@@ -677,7 +678,7 @@ class TestDescribeAllWithProbing:
         proc = _mock_proc(stdout=fixture_data)
 
         with patch("asyncio.create_subprocess_exec", return_value=proc):
-            with patch.object(backend, "_probe_container") as mock_probe:
+            with patch("server.device.probing.probe_container") as mock_probe:
                 result = await backend.describe_all("AAAA-1111")
 
         # No containers to probe
@@ -722,11 +723,11 @@ class TestDescribeAllWithProbing:
             "frame": {"x": 351, "y": 56, "width": 43, "height": 44},
         }
 
-        async def mock_probe(udid, container):
+        async def mock_probe(udid, container, _describe_point):
             return [duplicate]
 
         with patch("asyncio.create_subprocess_exec", return_value=proc):
-            with patch.object(backend, "_probe_container", side_effect=mock_probe):
+            with patch("server.device.probing.probe_container", side_effect=mock_probe):
                 result = await backend.describe_all("X")
 
         # Application + Nav bar + Existing button = 3 (no duplicate)

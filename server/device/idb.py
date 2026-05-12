@@ -10,17 +10,10 @@ import shutil
 import sys
 from pathlib import Path
 
+from server.device import probing
 from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.idb")
-
-# Container role_descriptions whose children are often missing from describe-all
-_PROBEABLE_ROLES = frozenset({
-    "Nav bar", "Tab bar", "Toolbar", "Navigation bar",
-})
-
-# Probe interval in points — smaller than iOS minimum tap target (44pt)
-_PROBE_STEP = 20
 
 
 class IdbBackend:
@@ -197,11 +190,11 @@ class IdbBackend:
             )
 
         # Find empty containers before flattening (which pops children)
-        empty_containers = self._find_empty_containers(data)
+        empty_containers = probing.find_empty_containers(data)
 
         # Before flatten
         t5 = time.perf_counter()
-        flat = self._flatten_nested(data)
+        flat = probing.flatten_nested(data)
         t6 = time.perf_counter()
         logger.info(
             f"[PERF] idb.describe_all: flattened to "
@@ -217,7 +210,10 @@ class IdbBackend:
                 f"(+{(t7-t6)*1000:.1f}ms)"
             )
 
-            probe_tasks = [self._probe_container(udid, c) for c in empty_containers]
+            probe_tasks = [
+                probing.probe_container(udid, c, self.describe_point)
+                for c in empty_containers
+            ]
             probe_results = await asyncio.gather(*probe_tasks)
             probed_elements = [el for batch in probe_results for el in batch]
 
@@ -228,26 +224,7 @@ class IdbBackend:
                 f"(+{(t8-t7)*1000:.1f}ms)"
             )
 
-            # Merge probed elements, deduplicating against existing
-            if probed_elements:
-                existing_frames: set[tuple[int, int, int, int]] = set()
-                for item in flat:
-                    f = item.get("frame")
-                    if f:
-                        existing_frames.add((
-                            int(f.get("x", 0)), int(f.get("y", 0)),
-                            int(f.get("width", 0)), int(f.get("height", 0)),
-                        ))
-                for el in probed_elements:
-                    f = el.get("frame")
-                    if f:
-                        key = (
-                            int(f.get("x", 0)), int(f.get("y", 0)),
-                            int(f.get("width", 0)), int(f.get("height", 0)),
-                        )
-                        if key not in existing_frames:
-                            flat.append(el)
-                            existing_frames.add(key)
+            probing.merge_probed_into_flat(flat, probed_elements)
 
         end = time.perf_counter()
         logger.info(
@@ -375,103 +352,6 @@ class IdbBackend:
         except (DeviceError, json.JSONDecodeError):
             return None
 
-    @staticmethod
-    def _is_probeable_container(item: dict) -> bool:
-        """Check if an item is an interactive container with no children."""
-        children = item.get("children", [])
-        if children:
-            return False  # Has children, no need to probe
-
-        role_desc = item.get("role_description", "")
-        if role_desc in _PROBEABLE_ROLES:
-            return True
-
-        label = item.get("AXLabel") or ""
-        if item.get("type") == "Group" and "tab bar" in label.lower():
-            return True
-
-        return False
-
-    @staticmethod
-    def _find_empty_containers(items: list[dict]) -> list[dict]:
-        """Walk the nested tree and find containers that need probing."""
-        containers: list[dict] = []
-        for item in items:
-            if IdbBackend._is_probeable_container(item):
-                containers.append(item)
-            children = item.get("children", [])
-            if children:
-                containers.extend(IdbBackend._find_empty_containers(children))
-        return containers
-
-    async def _probe_container(self, udid: str, container: dict) -> list[dict]:
-        """Probe across a container to discover hidden child elements.
-
-        Sends describe-point calls at regular intervals across the container's
-        width, at its vertical center. Deduplicates results by frame position
-        and filters out hits that match the container itself.
-        """
-        frame = container.get("frame")
-        if not frame:
-            return []
-
-        x_start = float(frame.get("x", 0))
-        y_center = float(frame.get("y", 0)) + float(frame.get("height", 0)) / 2
-        width = float(frame.get("width", 0))
-
-        # Generate probe X positions across the container
-        probe_xs: list[float] = []
-        x = x_start + _PROBE_STEP / 2  # Start half a step in
-        while x < x_start + width:
-            probe_xs.append(x)
-            x += _PROBE_STEP
-
-        if not probe_xs:
-            return []
-
-        # Run all probes concurrently
-        tasks = [self.describe_point(udid, px, y_center) for px in probe_xs]
-        results = await asyncio.gather(*tasks)
-
-        # Deduplicate by frame position
-        container_frame_key = (
-            int(frame.get("x", 0)), int(frame.get("y", 0)),
-            int(frame.get("width", 0)), int(frame.get("height", 0)),
-        )
-        seen_frames: set[tuple[int, int, int, int]] = set()
-        discovered: list[dict] = []
-
-        for element in results:
-            if element is None:
-                continue
-            el_frame = element.get("frame")
-            if not el_frame:
-                continue
-            frame_key = (
-                int(el_frame.get("x", 0)), int(el_frame.get("y", 0)),
-                int(el_frame.get("width", 0)), int(el_frame.get("height", 0)),
-            )
-            # Skip if it's the container itself
-            if frame_key == container_frame_key:
-                continue
-            # Skip if already seen
-            if frame_key in seen_frames:
-                continue
-            seen_frames.add(frame_key)
-            discovered.append(element)
-
-        return discovered
-
-    @staticmethod
-    def _flatten_nested(items: list[dict]) -> list[dict]:
-        """Recursively flatten a nested idb element tree into a flat list."""
-        result: list[dict] = []
-        for item in items:
-            children = item.pop("children", [])
-            result.append(item)
-            if children:
-                result.extend(IdbBackend._flatten_nested(children))
-        return result
 
     async def tap(self, udid: str, x: float, y: float) -> None:
         """Tap at coordinates. Runs: idb ui tap <x> <y> --duration 0.05 --udid <udid>

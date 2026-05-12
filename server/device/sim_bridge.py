@@ -15,7 +15,10 @@ import base64
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
+
+from server.device import probing
 
 logger = logging.getLogger("quern-debug-server.sim-bridge")
 
@@ -255,26 +258,49 @@ class SimBridgeBackend:
         self, udid: str, *, snapshot_depth: int | None = None,
         source_timeout: float | None = None,
     ) -> list[dict]:
-        """Return flat list of UI elements (no children key)."""
-        result = await self._send({
-            "cmd": "describe-ui",
-            "udid": udid,
-            "nested": False,
-        })
-        tree = result.get("tree", [])
-        if isinstance(tree, list):
-            return tree
-        # If it's a single dict (shouldn't happen for non-nested), wrap it
-        return [tree]
+        """Return flat list of UI elements.
+
+        Fetches the nested tree, finds containers that the static walk
+        reports as childless (tab bars, nav bars, toolbars with hidden
+        SwiftUI subviews), probes each via server-side AXPTranslator
+        hit-tests, then flattens and merges. Mirrors the behavior of
+        `IdbBackend.describe_all` so downstream consumers don't need to
+        care which backend is active.
+        """
+        start = time.perf_counter()
+
+        nested = await self._fetch_nested(udid)
+        empty_containers = probing.find_empty_containers(nested)
+        flat = probing.flatten_nested(nested)
+
+        if empty_containers:
+            logger.info(
+                "[PERF] sim-bridge.describe_all: probing %d empty containers",
+                len(empty_containers),
+            )
+            probe_tasks = [
+                probing.probe_container(udid, c, self.describe_point)
+                for c in empty_containers
+            ]
+            probe_results = await asyncio.gather(*probe_tasks)
+            probed = [el for batch in probe_results for el in batch]
+            probing.merge_probed_into_flat(flat, probed)
+
+        logger.info(
+            "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms elements=%d",
+            (time.perf_counter() - start) * 1000, len(flat),
+        )
+        return flat
 
     async def describe_all_nested(
         self, udid: str, *, snapshot_depth: int | None = None,
     ) -> list[dict]:
-        """Return nested tree with children arrays preserved."""
+        """Return nested tree with children arrays preserved (no probing)."""
+        return await self._fetch_nested(udid)
+
+    async def _fetch_nested(self, udid: str) -> list[dict]:
         result = await self._send({
-            "cmd": "describe-ui",
-            "udid": udid,
-            "nested": True,
+            "cmd": "describe-ui", "udid": udid, "nested": True,
         })
         tree = result.get("tree")
         if isinstance(tree, dict):
@@ -287,21 +313,35 @@ class SimBridgeBackend:
         self, udid: str, *, snapshot_depth: int | None = None,
         source_timeout: float | None = None,
     ) -> list[dict]:
-        """Same as describe_all — sim-bridge always returns flat for non-nested."""
+        """Same as describe_all — sim-bridge has only one tree-fetch path."""
         return await self.describe_all(udid, snapshot_depth=snapshot_depth,
                                        source_timeout=source_timeout)
 
     async def describe_point(
         self, udid: str, x: float, y: float,
     ) -> dict | None:
-        """Return the element at a specific point."""
-        result = await self._send({
-            "cmd": "describe-ui",
-            "udid": udid,
-            "x": x,
-            "y": y,
+        """Server-side hit-test via AXPTranslator's objectAtPoint.
+
+        Returns the deepest accessibility element at the given device-point
+        coordinate. Unlike a client-side tree hit-test, this can return
+        elements that the tree walk missed (the SwiftUI tab-bar case), so
+        it's the foundation for `probing.probe_container`.
+
+        Misses (no element under the point) return None rather than raising.
+        """
+        result = await self._mgr.send({
+            "cmd": "probe-point", "udid": udid,
+            "x": float(x), "y": float(y), "nested": False,
         })
-        return result.get("element")
+        if not result.get("ok"):
+            return None
+        tree = result.get("tree")
+        # nested=false yields a flat list whose first entry is the hit element.
+        if isinstance(tree, list):
+            return tree[0] if tree else None
+        if isinstance(tree, dict):
+            return tree
+        return None
 
     async def tap(self, udid: str, x: float, y: float) -> None:
         await self._send({"cmd": "tap", "udid": udid, "x": x, "y": y})

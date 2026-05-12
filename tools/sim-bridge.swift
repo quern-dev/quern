@@ -359,6 +359,19 @@ struct AXFrameTransform {
             height: macFrame.size.height * scale
         )
     }
+
+    /// Invert: device point -> Mac AX point. AXPTranslator's
+    /// objectAtPoint expects Mac coordinates, not device points.
+    func unmap(_ devicePoint: CGPoint) -> CGPoint {
+        guard rootFrame.width > 0, rootFrame.height > 0,
+              pointSize.width > 0, pointSize.height > 0 else { return devicePoint }
+        let scale = pointSize.width / rootFrame.width
+        let yOffset = (pointSize.height - rootFrame.height * scale) / 2
+        return CGPoint(
+            x: devicePoint.x / scale + rootFrame.origin.x,
+            y: (devicePoint.y - yOffset) / scale + rootFrame.origin.y
+        )
+    }
 }
 
 // MARK: - AX Tree Walking
@@ -489,6 +502,31 @@ func macPlatformElement(translator: NSObject, translation: NSObject) -> NSObject
     return unsafeBitCast(imp, to: Fn.self)(translator, sel, translation) as? NSObject
 }
 
+/// Server-side hit-test via AXPTranslator. Returns the AXPTranslationObject
+/// at the given Mac AX point, or nil if nothing is there.
+///
+/// idb uses this same selector
+/// (`FBSimulatorAccessibilityCommands.m`:885) to drive its describe-point
+/// path. The token is passed as a parameter — not via the dispatcher's
+/// pre-set bridge delegate — which sidesteps the chicken/egg that the
+/// upstream baguette implementation hit.
+func objectAtPointOnTranslator(
+    translator: NSObject, point: CGPoint, displayId: UInt32, token: String
+) -> NSObject? {
+    let sel = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
+    guard translator.responds(to: sel),
+          let imp = class_getMethodImplementation(type(of: translator), sel) else {
+        logErr("[ax] -objectAtPoint:displayId:bridgeDelegateToken: not found")
+        return nil
+    }
+    typealias Fn = @convention(c) (
+        AnyObject, Selector, CGPoint, UInt32, AnyObject
+    ) -> AnyObject?
+    return unsafeBitCast(imp, to: Fn.self)(
+        translator, sel, point, displayId, token as NSString
+    ) as? NSObject
+}
+
 func describeUI(udid: String, nested: Bool, hitX: Double? = nil, hitY: Double? = nil) -> Any? {
     guard sharedTranslator != nil else {
         logErr("[ax] translator not available")
@@ -537,6 +575,73 @@ func describeUI(udid: String, nested: Bool, hitX: Double? = nil, hitY: Double? =
         return tree
     } else {
         return flattenTree(tree)
+    }
+}
+
+/// Server-side point probe: hit-test via AXPTranslator's objectAtPoint
+/// rather than walking a static tree. Used to discover elements inside
+/// containers that AXP's tree walk reports as childless (e.g. SwiftUI
+/// tab bars). Coordinates are device points; converted to Mac AX coords
+/// for the underlying API call, and projected back to device points
+/// in the returned dict.
+func probePoint(udid: String, x: Double, y: Double, nested: Bool) -> Any? {
+    guard sharedTranslator != nil else {
+        logErr("[ax] translator not available")
+        return nil
+    }
+    guard let device = resolveDevice(udid: udid) else {
+        logErr("[ax] device not found: \(udid)")
+        return nil
+    }
+
+    let token = UUID().uuidString
+    currentToken = token
+    let deadline = Date().addingTimeInterval(xpcTimeout)
+    sharedDispatcher.register(device: device, token: token, deadline: deadline)
+    defer {
+        sharedDispatcher.unregister(token: token)
+        currentToken = ""
+    }
+
+    guard let translator = sharedTranslator else { return nil }
+
+    // We need the frontmost app's root frame to invert device-point -> Mac.
+    guard let frontmost = frontmostApplication(translator: translator, token: token) else {
+        logErr("[ax] no frontmost application for udid=\(udid)")
+        return nil
+    }
+    stampTranslation(token: token, on: frontmost)
+    guard let frontmostRoot = macPlatformElement(translator: translator, translation: frontmost) else {
+        logErr("[ax] no mac platform element for frontmost translation")
+        return nil
+    }
+    let pointSize = devicePointSize(for: device)
+    let rootFrame = axFrame(of: frontmostRoot)
+    let transform = AXFrameTransform(rootFrame: rootFrame, pointSize: pointSize)
+
+    let macPoint = transform.unmap(CGPoint(x: x, y: y))
+
+    guard let hitTranslation = objectAtPointOnTranslator(
+        translator: translator, point: macPoint, displayId: 0, token: token
+    ) else {
+        logErr("[ax] objectAtPoint returned nil for device=(\(x),\(y)) mac=(\(macPoint.x),\(macPoint.y))")
+        return nil
+    }
+    stampTranslation(token: token, on: hitTranslation)
+    guard let hitElement = macPlatformElement(translator: translator, translation: hitTranslation) else {
+        logErr("[ax] no mac platform element for hit translation")
+        return nil
+    }
+    stampElementTranslation(token: token, on: hitElement)
+    stampSubtree(hitElement, token: token)
+
+    let subtree = walkElement(hitElement, transform: transform, depth: 0,
+                              deadline: deadline, nested: true)
+
+    if nested {
+        return subtree
+    } else {
+        return flattenTree(subtree)
     }
 }
 
@@ -1028,6 +1133,20 @@ func handleCommand(_ dict: [String: Any]) {
     switch cmd {
     case "list":
         respond(["ok": true, "devices": listDevices()])
+
+    case "probe-point":
+        guard let udid = dict["udid"] as? String,
+              let x = dict["x"] as? Double,
+              let y = dict["y"] as? Double else {
+            respond(["ok": false, "error": "missing 'udid', 'x', or 'y'"])
+            return
+        }
+        let nested = dict["nested"] as? Bool ?? false
+        if let result = probePoint(udid: udid, x: x, y: y, nested: nested) {
+            respond(["ok": true, "tree": result])
+        } else {
+            respond(["ok": false, "error": "probe-point returned nil"])
+        }
 
     case "describe-ui":
         guard let udid = dict["udid"] as? String else {
