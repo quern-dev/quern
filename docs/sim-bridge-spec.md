@@ -1,5 +1,13 @@
 # sim-bridge: Native Simulator Control for Quern
 
+> **Status: shipped in v0.13.** This doc is the original design spec — kept
+> for the rationale and the technique notes (private-framework dlopen,
+> token dispatcher pattern, IOHIDDigitizer path). The implementation lives
+> in `tools/sim-bridge.swift` and `server/device/sim_bridge.py`. Behavior
+> notes (button name normalization, server-side `objectAtPoint` probing,
+> RadioButton/CheckBox in summaries, installer skip on Xcode 26+) accrued
+> after the spec was written — see `CHANGELOG.md` for the running list.
+
 ## Problem
 
 Quern currently depends on Meta's `idb` (idb_companion) for all simulator UI automation:
