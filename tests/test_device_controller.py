@@ -108,6 +108,7 @@ class TestCheckTools:
         ctrl.devicectl.is_available = AsyncMock(return_value=True)
         ctrl.pmd3.is_available = AsyncMock(return_value=True)
         ctrl.adb.is_available = AsyncMock(return_value=True)
+        ctrl.sim_bridge_manager.is_available = AsyncMock(return_value=True)
         with patch("server.device.tunneld.is_tunneld_running", return_value=True):
             tools = await ctrl.check_tools()
         assert tools == {
@@ -117,6 +118,7 @@ class TestCheckTools:
             "pymobiledevice3": True,
             "tunneld": True,
             "adb": True,
+            "sim_bridge": True,
         }
 
     async def test_simctl_only(self):
@@ -126,6 +128,7 @@ class TestCheckTools:
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
         ctrl.adb.is_available = AsyncMock(return_value=False)
+        ctrl.sim_bridge_manager.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools == {
@@ -135,6 +138,7 @@ class TestCheckTools:
             "pymobiledevice3": False,
             "tunneld": False,
             "adb": False,
+            "sim_bridge": False,
         }
 
     async def test_none_available(self):
@@ -144,6 +148,7 @@ class TestCheckTools:
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
         ctrl.adb.is_available = AsyncMock(return_value=False)
+        ctrl.sim_bridge_manager.is_available = AsyncMock(return_value=False)
         with patch("server.device.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools == {
@@ -153,6 +158,7 @@ class TestCheckTools:
             "pymobiledevice3": False,
             "tunneld": False,
             "adb": False,
+            "sim_bridge": False,
         }
 
 

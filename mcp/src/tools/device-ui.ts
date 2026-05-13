@@ -5,7 +5,7 @@ import { strictParams } from "./helpers.js";
 
 export function registerDeviceUITools(server: McpServer): void {
   server.registerTool("get_ui_tree", {
-    description: `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of. Requires idb.
+    description: `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of.
 
 Pass include_raw=true when debugging the platform normalizer itself — e.g., to see whether an Android node carries selected="true" or some other source attribute that didn't make it into our canonical fields. Each element gains an extra_attrs dict of the raw source attributes from the underlying provider (uiautomator2 XML on Android; iOS not yet populated). Default false to keep payloads small.`,
     inputSchema: strictParams({
@@ -36,7 +36,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       mode: z
         .enum(["flat"])
         .optional()
-        .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Default uses nested mode with probe-based discovery. Simulators only."),
+        .describe("Use 'flat' to engage the patched idb companion's flat-mode output (idb backend only). Rarely needed: the default path (sim-bridge on Xcode 26+/Apple Silicon, idb elsewhere) already probes hidden tab-bar/nav-bar children. Simulators only."),
       include_raw: z
         .coerce.boolean()
         .optional()
@@ -75,7 +75,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("get_element_state", {
-    description: `Get a single element's state without fetching the entire UI tree. More efficient than get_ui_tree when you only need to check one element. Returns the element with its current state (enabled, value, etc.). If multiple elements match, returns the first with a match_count field. Requires idb.`,
+    description: `Get a single element's state without fetching the entire UI tree. More efficient than get_ui_tree when you only need to check one element. Returns the element with its current state (enabled, value, etc.). If multiple elements match, returns the first with a match_count field.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -132,7 +132,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("wait_for_element", {
-    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. Requires idb.`,
+    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -184,7 +184,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       mode: z
         .enum(["flat"])
         .optional()
-        .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Simulators only."),
+        .describe("Use 'flat' to engage the patched idb companion's flat-mode output (idb backend only). Rarely needed now — the default path probes hidden tab-bar/nav-bar children automatically. Simulators only."),
     }),
   }, async ({
     label,
@@ -241,7 +241,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("get_screen_summary", {
-    description: `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit. Requires idb.
+    description: `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit.
 
 This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.`,
     inputSchema: strictParams({
@@ -272,7 +272,7 @@ This is the recommended first step before interacting with UI. Use this to disco
       mode: z
         .enum(["flat"])
         .optional()
-        .describe("Use 'flat' for enhanced element discovery with the custom idb companion. Default uses nested mode with probe-based discovery. Simulators only."),
+        .describe("Use 'flat' to engage the patched idb companion's flat-mode output (idb backend only). Rarely needed: the default path (sim-bridge on Xcode 26+/Apple Silicon, idb elsewhere) already probes hidden tab-bar/nav-bar children. Simulators only."),
       identify: z
         .boolean()
         .optional()
@@ -309,7 +309,7 @@ This is the recommended first step before interacting with UI. Use this to disco
   });
 
   server.registerTool("tap", {
-    description: `Tap at specific screen coordinates on the simulator. Requires idb.
+    description: `Tap at specific screen coordinates on the simulator.
 
 PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element.
 
@@ -353,7 +353,7 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
   });
 
   server.registerTool("tap_element", {
-    description: `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results. Requires idb.
+    description: `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results.
 
 This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.
 
@@ -452,7 +452,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("swipe", {
-    description: `Perform a swipe gesture from one point to another. Requires idb.`,
+    description: `Perform a swipe gesture from one point to another.`,
     inputSchema: strictParams({
       start_x: z.coerce.number().describe("Starting X coordinate"),
       start_y: z.coerce.number().describe("Starting Y coordinate"),
@@ -504,7 +504,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("type_text", {
-    description: `Type text into the currently focused input field. Requires idb.`,
+    description: `Type text into the currently focused input field.`,
     inputSchema: strictParams({
       text: z.string().describe("Text to type"),
       udid: z
@@ -560,7 +560,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("clear_text", {
-    description: `Clear all text in the currently focused input field (select-all + delete). Use this before type_text when a field has pre-existing content you want to replace. Note: Secure text fields (passwords) may not support select-all. Requires idb.`,
+    description: `Clear all text in the currently focused input field (select-all + delete). Use this before type_text when a field has pre-existing content you want to replace. Note: Secure text fields (passwords) may not support select-all.`,
     inputSchema: strictParams({
       udid: z
         .string()

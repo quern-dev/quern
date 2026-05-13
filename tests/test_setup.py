@@ -15,9 +15,12 @@ from server.lifecycle.setup import (
     SetupReport,
     _diagnose_developer_dir,
     _fix_developer_dir_for_setup,
+    _is_apple_silicon,
     _read_manifest,
     _record_install,
+    _sim_bridge_supported,
     _write_manifest,
+    _xcode_major_version,
     check_booted_simulators,
     check_homebrew,
     check_libimobiledevice,
@@ -312,6 +315,60 @@ class TestCheckLibimobiledevice:
 
 
 # ── Xcode CLI Tools check ───────────────────────────────────────────────
+
+
+class TestXcodeMajorVersion:
+    def test_parses_xcode_26(self):
+        out = "Xcode 26.0\nBuild version 17A1234\n"
+        with _patch_run(_mock_run(stdout=out, returncode=0)):
+            assert _xcode_major_version() == 26
+
+    def test_parses_older_xcode(self):
+        out = "Xcode 15.4\nBuild version 15F31d\n"
+        with _patch_run(_mock_run(stdout=out, returncode=0)):
+            assert _xcode_major_version() == 15
+
+    def test_missing_xcodebuild_returns_none(self):
+        with _patch_run(_mock_run(stdout="", returncode=127)):
+            assert _xcode_major_version() is None
+
+    def test_unrecognized_output_returns_none(self):
+        with _patch_run(_mock_run(stdout="something else\n", returncode=0)):
+            assert _xcode_major_version() is None
+
+
+class TestSimBridgeSupported:
+    def test_xcode_26_apple_silicon(self):
+        with patch("server.lifecycle.setup._is_apple_silicon", return_value=True):
+            with patch(
+                "server.lifecycle.setup._xcode_major_version", return_value=26
+            ):
+                assert _sim_bridge_supported() is True
+
+    def test_xcode_25_apple_silicon(self):
+        with patch("server.lifecycle.setup._is_apple_silicon", return_value=True):
+            with patch(
+                "server.lifecycle.setup._xcode_major_version", return_value=25
+            ):
+                assert _sim_bridge_supported() is False
+
+    def test_intel_mac_with_xcode_26(self):
+        with patch("server.lifecycle.setup._is_apple_silicon", return_value=False):
+            with patch(
+                "server.lifecycle.setup._xcode_major_version", return_value=26
+            ):
+                assert _sim_bridge_supported() is False
+
+    def test_xcodebuild_missing(self):
+        with patch("server.lifecycle.setup._is_apple_silicon", return_value=True):
+            with patch(
+                "server.lifecycle.setup._xcode_major_version", return_value=None
+            ):
+                assert _sim_bridge_supported() is False
+
+    def test_real_platform_machine_call_does_not_crash(self):
+        # Sanity check on the actual host — we just want this not to raise.
+        assert isinstance(_is_apple_silicon(), bool)
 
 
 class TestCheckXcodeCliTools:

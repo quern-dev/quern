@@ -248,8 +248,13 @@ def get_tap_point(element: UIElement) -> tuple[float, float]:
     return get_center(element)
 
 
-# Element types considered interactive for screen summaries
-_INTERACTIVE_TYPES = {"button", "textfield", "switch", "slider", "link", "searchfield"}
+# Element types considered interactive for screen summaries.
+# RadioButton covers iOS tab-bar items and form radio selections;
+# CheckBox covers toggle-like selections that aren't UISwitch.
+_INTERACTIVE_TYPES = {
+    "button", "textfield", "switch", "slider", "link", "searchfield",
+    "radiobutton", "checkbox",
+}
 
 
 def _is_navigation_chrome(el: UIElement) -> bool:
@@ -259,6 +264,7 @@ def _is_navigation_chrome(el: UIElement) -> bool:
     always be included in summaries regardless of truncation limits.
     """
     el_type_lower = el.type.lower()
+    role_desc_lower = (el.role_description or "").lower()
     # Common navigation types
     if el_type_lower in {"tabbar", "navigationbar", "toolbar", "navbar"}:
         return True
@@ -267,6 +273,9 @@ def _is_navigation_chrome(el: UIElement) -> bool:
         return True
     # Tab bar items
     if "tab" in el_type_lower:
+        return True
+    # iOS tab buttons exposed as RadioButton with role_description="AXTabButton"
+    if el_type_lower == "radiobutton" and "tabbutton" in role_desc_lower.replace(" ", ""):
         return True
     return False
 
@@ -282,16 +291,16 @@ def _prioritize_element(el: UIElement) -> int:
     """
     el_type_lower = el.type.lower()
 
-    # Buttons with identifiers = primary actions
-    if el_type_lower == "button" and el.identifier:
+    # Buttons / radio / checkboxes with identifiers = primary actions
+    if el_type_lower in {"button", "radiobutton", "checkbox"} and el.identifier:
         return 60
 
     # Form inputs
     if el_type_lower in {"textfield", "switch", "slider", "searchfield", "picker"}:
         return 40
 
-    # Buttons without identifiers
-    if el_type_lower == "button":
+    # Buttons / radio / checkboxes without identifiers
+    if el_type_lower in {"button", "radiobutton", "checkbox"}:
         return 20
 
     # Everything else (static text, labels)

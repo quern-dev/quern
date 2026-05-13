@@ -165,7 +165,7 @@ When the question is "what screen am I on right now?" — for verifying navigati
 **Why use landmarks instead of just reading `get_screen_summary`?**
 
 - **Deterministic.** Quern matches the live UI tree against authored selectors and returns `matched: <screen_name>` with `confidence: exact | ambiguous | none`. No prose interpretation.
-- **Cross-platform.** The same landmarks work on iOS (idb) and Android (uiautomator2) — selection state, identifiers, and labels are normalized to a single schema.
+- **Cross-platform.** The same landmarks work on iOS (sim-bridge / idb / WDA depending on device) and Android (uiautomator2) — selection state, identifiers, and labels are normalized to a single schema.
 - **Stable across LLMs.** A workflow that asks "is this the cart screen?" gets the same answer regardless of which model is driving.
 - **Authored once, reused everywhere.** The screen knowledge base is the source of truth; agents don't re-discover screen identity on every call.
 
@@ -222,7 +222,7 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 ### Working with Physical Devices
 
-Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. The key difference from simulators is that UI automation uses WebDriverAgent (WDA) instead of idb.
+Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. The key difference from simulators is that UI automation uses WebDriverAgent (WDA) instead of the simulator backend (sim-bridge / idb).
 
 **First-time setup**: Call `setup_wda` with the device UDID. This builds and installs WDA on the device, which requires a valid Apple Developer signing identity. If multiple identities exist, the tool returns a list — call again with the chosen `team_id`. The app appears on the device as **Quern Driver**.
 
@@ -455,7 +455,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **Using mock when you need intercept (or vice versa)** — Mocks return instant synthetic responses for stable test fixtures. Intercept pauses real requests for ad-hoc inspection and modification. Mock rules take priority over intercept.
 
-**Not checking idb availability** — Device management and screenshots use `simctl` (always available with Xcode). Simulator UI automation (`get_ui_tree`, `tap`, `swipe`, `type_text`, `clear_text`, `press_button`) requires `idb`. Physical device UI automation uses WDA (auto-started). Check `list_devices` response for tool availability.
+**Not checking simulator backend availability** — Device management and screenshots use `simctl` (always available with Xcode). Simulator UI automation (`get_ui_tree`, `tap`, `swipe`, `type_text`, `clear_text`, `press_button`) requires either sim-bridge (Xcode 26+ / Apple Silicon, preferred) or idb (fallback). Physical device UI automation uses WDA (auto-started). Check `list_devices` response for tool availability.
 
 **Not using per-simulator flow filtering** — When local capture is enabled, flows are tagged with the originating simulator's UDID. Always pass `simulator_udid` when querying flows during parallel testing — otherwise you'll see traffic from all simulators mixed together.
 

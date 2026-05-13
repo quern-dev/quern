@@ -110,6 +110,45 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _is_apple_silicon() -> bool:
+    """True on arm64 Macs (Apple Silicon). Sim-bridge requires it."""
+    import platform
+    return platform.machine() == "arm64"
+
+
+def _xcode_major_version() -> int | None:
+    """Return Xcode's major version (e.g. 26 for Xcode 26.0), or None.
+
+    Parses the first line of `xcodebuild -version`, which reads
+    `Xcode <major>.<minor>`. Returns None if xcodebuild is missing,
+    fails, or the output is unrecognized.
+    """
+    rc, stdout, _ = _run(["xcodebuild", "-version"], timeout=5)
+    if rc != 0 or not stdout:
+        return None
+    first_line = stdout.splitlines()[0]
+    parts = first_line.split()
+    if len(parts) >= 2 and parts[0] == "Xcode":
+        try:
+            return int(parts[1].split(".")[0])
+        except ValueError:
+            return None
+    return None
+
+
+def _sim_bridge_supported() -> bool:
+    """True when sim-bridge can run — i.e. idb is not required.
+
+    Sim-bridge needs Apple Silicon and Xcode 26+ (for the SimulatorKit /
+    CoreSimulator private symbols it dlopens). When both hold, simulator
+    UI automation runs natively and idb is redundant.
+    """
+    if not _is_apple_silicon():
+        return False
+    major = _xcode_major_version()
+    return major is not None and major >= 26
+
+
 def _fix_developer_dir_for_setup() -> str | None:
     """Auto-fix DEVELOPER_DIR if xcode-select doesn't provide simctl.
 
@@ -1544,66 +1583,86 @@ def run_setup() -> int:
                     )
         report.add(ideviceinstaller_result)
 
-        # idb (for simulator UI automation)
+        # Simulator UI automation:
+        #   - Xcode 26+ on Apple Silicon → sim-bridge runs natively, idb not needed
+        #   - Older Xcode or Intel → fall back to the patched idb + fb-idb
 
-        idb_companion_result = check_idb_companion()
-        if idb_companion_result.status == CheckStatus.MISSING:
-            if _prompt_yn("    idb_companion not found. Download patched build?"):
-                if _install_patched_companion():
-                    idb_companion_result = check_idb_companion()
-                else:
-                    idb_companion_result = CheckResult(
-                        name="idb_companion",
-                        status=CheckStatus.WARNING,
-                        message="Download failed (UI automation unavailable)",
-                        detail="Try manually: https://github.com/quern-dev/idb/releases",
-                    )
-        elif idb_companion_result.message.startswith("installed (system"):
-            if _prompt_yn(
-                "    Patched idb_companion available "
-                "(fixes Group element detection). Install?"
-            ):
-                if _install_patched_companion():
-                    idb_companion_result = check_idb_companion()
-        report.add(idb_companion_result)
-
-        idb_result = check_idb()
-        if idb_result.status == CheckStatus.MISSING:
-            print("    idb CLI not found. This is the Python client for idb_companion.")
-            if _prompt_yn("    Install fb-idb via pip?"):
-                if sys.prefix != sys.base_prefix:
-                    pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
-                else:
-                    pip_cmd = "pip" if _which("pip") else "pip3"
-                print("    Installing fb-idb...")
-                try:
-                    result = subprocess.run(
-                        [pip_cmd, "install", "fb-idb"],
-                        stdin=subprocess.DEVNULL, timeout=120,
-                    )
-                    if result.returncode == 0:
-                        _record_install("pip", "fb-idb")
-                        if _which("pyenv"):
-                            subprocess.run(
-                                ["pyenv", "rehash"],
-                                stdin=subprocess.DEVNULL, timeout=10,
-                            )
-                        idb_result = check_idb()  # re-check
+        if _sim_bridge_supported():
+            print(
+                "    Xcode 26+ on Apple Silicon detected — "
+                "sim-bridge handles simulator UI natively. Skipping idb."
+            )
+            report.add(CheckResult(
+                name="idb_companion",
+                status=CheckStatus.SKIPPED,
+                message="Not required (sim-bridge active)",
+                detail="Xcode 26+ on Apple Silicon: simulator UI runs through "
+                       "sim-bridge. Existing idb installs still work as a fallback.",
+            ))
+            report.add(CheckResult(
+                name="idb (fb-idb)",
+                status=CheckStatus.SKIPPED,
+                message="Not required (sim-bridge active)",
+            ))
+        else:
+            idb_companion_result = check_idb_companion()
+            if idb_companion_result.status == CheckStatus.MISSING:
+                if _prompt_yn("    idb_companion not found. Download patched build?"):
+                    if _install_patched_companion():
+                        idb_companion_result = check_idb_companion()
                     else:
+                        idb_companion_result = CheckResult(
+                            name="idb_companion",
+                            status=CheckStatus.WARNING,
+                            message="Download failed (UI automation unavailable)",
+                            detail="Try manually: https://github.com/quern-dev/idb/releases",
+                        )
+            elif idb_companion_result.message.startswith("installed (system"):
+                if _prompt_yn(
+                    "    Patched idb_companion available "
+                    "(fixes Group element detection). Install?"
+                ):
+                    if _install_patched_companion():
+                        idb_companion_result = check_idb_companion()
+            report.add(idb_companion_result)
+
+            idb_result = check_idb()
+            if idb_result.status == CheckStatus.MISSING:
+                print("    idb CLI not found. This is the Python client for idb_companion.")
+                if _prompt_yn("    Install fb-idb via pip?"):
+                    if sys.prefix != sys.base_prefix:
+                        pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
+                    else:
+                        pip_cmd = "pip" if _which("pip") else "pip3"
+                    print("    Installing fb-idb...")
+                    try:
+                        result = subprocess.run(
+                            [pip_cmd, "install", "fb-idb"],
+                            stdin=subprocess.DEVNULL, timeout=120,
+                        )
+                        if result.returncode == 0:
+                            _record_install("pip", "fb-idb")
+                            if _which("pyenv"):
+                                subprocess.run(
+                                    ["pyenv", "rehash"],
+                                    stdin=subprocess.DEVNULL, timeout=10,
+                                )
+                            idb_result = check_idb()  # re-check
+                        else:
+                            idb_result = CheckResult(
+                                name="idb (fb-idb)",
+                                status=CheckStatus.ERROR,
+                                message="pip install failed",
+                                detail="Try manually: pip install fb-idb",
+                            )
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
                         idb_result = CheckResult(
                             name="idb (fb-idb)",
                             status=CheckStatus.ERROR,
                             message="pip install failed",
                             detail="Try manually: pip install fb-idb",
                         )
-                except (FileNotFoundError, subprocess.TimeoutExpired):
-                    idb_result = CheckResult(
-                        name="idb (fb-idb)",
-                        status=CheckStatus.ERROR,
-                        message="pip install failed",
-                        detail="Try manually: pip install fb-idb",
-                    )
-        report.add(idb_result)
+            report.add(idb_result)
 
         # Physical device support (pymobiledevice3 + tunneld)
 
