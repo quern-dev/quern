@@ -1,6 +1,6 @@
 {
   "name": "quern-debug-mcp",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "MCP server for Quern — thin wrapper over HTTP API",
   "type": "module",
   "main": "dist/index.js",

@@ -5,7 +5,7 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] - 2026-05-13
 
 ### Added
 - **sim-bridge — native simulator control** — a new Swift helper binary that replaces idb for simulator UI automation on Xcode 26+ Apple Silicon hosts. Talks to `CoreSimulator` / `SimulatorKit` / `AccessibilityPlatformTranslation` directly via `dlopen`, runs as a long-lived subprocess over JSON-Lines on stdin/stdout (same pattern as `ios-preview`), and auto-compiles on first use. Removes the `idb_companion` daemon, the per-call subprocess spawn, and the simctl detour for screenshots. idb stays as the automatic fallback when sim-bridge can't be built (Intel Macs, pre-Xcode-26). See [`docs/sim-bridge-spec.md`](docs/sim-bridge-spec.md).
