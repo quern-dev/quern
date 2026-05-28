@@ -209,6 +209,40 @@ def _read_manifest() -> dict:
         return {"brew": [], "pip": [], "pipx": [], "pipx_global": []}
 
 
+def _maybe_remove_user_pmd3(pipx_bin: str) -> None:
+    """After a successful global install, offer to remove the per-user copy.
+
+    pipx's `ensurepath` puts ~/.local/bin ahead of /usr/local/bin in the
+    user's PATH, so a per-user `pymobiledevice3` keeps shadowing the global
+    one we just installed. Removing the per-user copy clears the shadow;
+    LaunchDaemons run as root and don't inherit the user's PATH, so they
+    would already see the global one — but `shutil.which` from a user
+    shell wouldn't, which is what `check_pymobiledevice3()` calls.
+    """
+    user_venv = Path.home() / ".local" / "pipx" / "venvs" / "pymobiledevice3"
+    if not user_venv.exists():
+        return
+    if not _prompt_yn(
+        "    Per-user pymobiledevice3 still installed at "
+        f"{user_venv}. Remove it so the system-wide copy is used?",
+    ):
+        return
+    try:
+        subprocess.run(
+            [pipx_bin, "uninstall", "pymobiledevice3"],
+            stdin=subprocess.DEVNULL, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("    Warning: pipx uninstall pymobiledevice3 failed")
+        return
+    # Clean up the manifest entry if setup originally tracked the per-user
+    # install. Safe to skip if the user installed it themselves outside setup.
+    manifest = _read_manifest()
+    if "pymobiledevice3" in manifest.get("pipx", []):
+        manifest["pipx"].remove("pymobiledevice3")
+        _write_manifest(manifest)
+
+
 def _home_is_on_external() -> bool:
     """True iff the current user's home resolves under /Volumes/.
 
@@ -1777,6 +1811,8 @@ def run_setup() -> int:
                                 "pipx_global" if wants_global else "pipx",
                                 "pymobiledevice3",
                             )
+                            if wants_global:
+                                _maybe_remove_user_pmd3(pipx_bin)
                             pmd3_result = check_pymobiledevice3()  # re-check
                         else:
                             detail = (

@@ -266,9 +266,16 @@ class TestInstalledPlistFreshness:
             assert installed_plist_is_current() is False
 
     def test_current_plist_reports_current(self, tmp_path):
+        binary = Path("/usr/bin/pymobiledevice3")
         plist_file = tmp_path / "com.quern.tunneld.plist"
-        plist_file.write_text(generate_plist(Path("/usr/bin/pymobiledevice3")))
-        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+        plist_file.write_text(generate_plist(binary))
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=binary,
+            ),
+        ):
             assert installed_plist_log_path() == LOG_PATH
             assert installed_plist_is_current() is True
 
@@ -285,6 +292,57 @@ class TestInstalledPlistFreshness:
             assert installed_plist_log_path() == Path(
                 "/Users/somebody/.quern/tunneld.log",
             )
+            assert installed_plist_is_current() is False
+
+    def test_binary_path_drift_reports_outdated(self, tmp_path):
+        # Regression: after `sudo pipx install --global pymobiledevice3` adds
+        # a binary at /usr/local/bin/, the plist still bakes in the old
+        # per-user pipx path. Detection must catch this so the existing
+        # migration prompt fires.
+        binary_in_plist = Path(
+            "/Volumes/Home/jham/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+        )
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(generate_plist(binary_in_plist))
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/local/bin/pymobiledevice3"),
+            ),
+        ):
+            assert installed_plist_is_current() is False
+
+    def test_missing_binary_with_no_alternative_reports_outdated(self, tmp_path):
+        # If the plist program path doesn't exist AND nothing else is
+        # discoverable, we should still flag — the daemon will crash-loop.
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(
+            generate_plist(Path("/nonexistent/pymobiledevice3")),
+        )
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=None,
+            ),
+        ):
+            assert installed_plist_is_current() is False
+
+    def test_missing_binary_with_discoverable_one_uses_discovered(self, tmp_path):
+        # When find_pymobiledevice3_binary returns a different path than the
+        # plist's program, plist is outdated regardless of whether the plist's
+        # program exists on disk.
+        binary_in_plist = Path("/usr/bin/pymobiledevice3")
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(generate_plist(binary_in_plist))
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/local/bin/pymobiledevice3"),
+            ),
+        ):
             assert installed_plist_is_current() is False
 
     def test_unparseable_plist_reports_outdated(self, tmp_path):

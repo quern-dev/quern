@@ -170,30 +170,58 @@ def generate_plist(binary_path: Path) -> str:
     """)
 
 
-def installed_plist_log_path() -> Path | None:
-    """Return the StandardOutPath recorded in the installed plist, or None.
-
-    Returns None when the plist isn't installed or can't be parsed.
-    """
+def _read_installed_plist() -> dict | None:
+    """Parse the installed plist, or None if missing/unparseable."""
     if not PLIST_PATH.exists():
         return None
     try:
         with open(PLIST_PATH, "rb") as f:
-            data = plistlib.load(f)
-        out = data.get("StandardOutPath")
-        return Path(out) if out else None
+            return plistlib.load(f)
     except Exception:
         return None
 
 
-def installed_plist_is_current() -> bool:
-    """True iff the installed plist's log path matches the current LOG_PATH.
+def installed_plist_log_path() -> Path | None:
+    """Return the StandardOutPath recorded in the installed plist, or None."""
+    data = _read_installed_plist()
+    if data is None:
+        return None
+    out = data.get("StandardOutPath")
+    return Path(out) if out else None
 
-    Returns False when the plist is missing, unparseable, or references the
-    old user-home log path. Callers use this to detect installs that pre-date
-    the move to /Library/Logs/ and prompt the user to reinstall.
+
+def installed_plist_program() -> Path | None:
+    """Return ProgramArguments[0] from the installed plist, or None."""
+    data = _read_installed_plist()
+    if data is None:
+        return None
+    args = data.get("ProgramArguments") or []
+    return Path(args[0]) if args else None
+
+
+def installed_plist_is_current() -> bool:
+    """True iff the installed plist matches what we'd generate now.
+
+    Checks two things:
+      - StandardOutPath equals the current LOG_PATH (the migration from
+        ~/.quern/tunneld.log → /Library/Logs/com.quern.tunneld.log).
+      - ProgramArguments[0] equals the currently-discovered pymobiledevice3
+        binary, or — when no binary is discoverable now — at least exists on
+        disk. This catches drift from things like `sudo pipx install --global`
+        creating a new binary at /usr/local/bin/ while the plist still bakes
+        in the old per-user pipx path.
     """
-    return installed_plist_log_path() == LOG_PATH
+    if installed_plist_log_path() != LOG_PATH:
+        return False
+    program = installed_plist_program()
+    if program is None:
+        return False
+    current = find_pymobiledevice3_binary()
+    if current is None:
+        # Can't discover a binary now — only flag if what's in the plist is
+        # broken on disk. Avoids false positives in odd states.
+        return program.exists()
+    return program == current
 
 
 def install_daemon() -> int:
