@@ -15,10 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Plist permissions normalized to `644`** — `NamedTemporaryFile` produces mode `600`, which `cp` preserves. `600` worked but isn't Apple-recommended; install now `chmod 644`s after copy.
 - **Hung launchctl no longer crashes the install script** — `subprocess.TimeoutExpired` and `OSError` are caught with a warning instead of propagating as an unhandled traceback.
 
+### Added
+- **`./quern setup` detects when `$HOME` is on an external volume** (e.g. `/Volumes/Home/<user>`) and prefers `sudo pipx install --global pymobiledevice3` over the per-user install. The default user-pipx path puts the binary under `/Volumes/<vol>/<user>/.local/pipx/`, which isn't reachable at boot before the volume mounts — meaning the tunneld LaunchDaemon can't start until login completes. `--global` lands the binary at `/usr/local/bin/pymobiledevice3` on the internal disk, where it's always available. The new `pipx_global` manifest category is also tracked for `./quern uninstall` (which removes those entries with `sudo pipx uninstall --global`).
+- **`check_pymobiledevice3()` flags existing installs that live under an external home volume** and points at the global-install fix. Affects users who installed via per-user pipx before this release; setup will prompt to reinstall system-wide on the next run.
+
 ### Migration
 - Existing installs are detected automatically. `./quern setup`, `./quern status`, `./quern start`, and `./quern tunneld status` all surface a warning when the installed plist still references the old user-home log path.
 - To migrate: run `./quern tunneld install` (or accept the prompt in `./quern setup`). The command unconditionally overwrites the plist, sets root ownership, and reloads the daemon.
 - The orphaned old log file at `~/.quern/tunneld.log` is left in place — delete manually if desired.
+- **Home-on-external users**: after accepting the global pymobiledevice3 reinstall, run `pipx uninstall pymobiledevice3` (your old per-user copy) and `./quern tunneld install` once more to rebake the plist against `/usr/local/bin/pymobiledevice3`.
 
 ## [0.13.0] - 2026-05-13
 
