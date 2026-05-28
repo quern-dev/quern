@@ -5,6 +5,16 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **tunneld log path moved to `/Library/Logs/com.quern.tunneld.log`** — previously the LaunchDaemon plist baked `~/.quern/tunneld.log` (resolved to an absolute path at install time) into `StandardOutPath` / `StandardErrorPath`. For users whose home directory lived on an external volume, launchd would pre-create the home-directory path at boot before the volume mounted, blocking the real volume from mounting under its expected name (it would mount as `Home 1` instead, breaking login). The daemon now logs to a system-owned location that always exists at boot and never touches the user home.
+
+### Migration
+- Existing installs are detected automatically. `./quern setup`, `./quern status`, `./quern start`, and `./quern tunneld status` all surface a warning when the installed plist still references the old user-home log path.
+- To migrate: run `./quern tunneld install` (or accept the prompt in `./quern setup`). The command unconditionally overwrites the plist, sets root ownership, and reloads the daemon.
+- The orphaned old log file at `~/.quern/tunneld.log` is left in place — delete manually if desired.
+
 ## [0.13.0] - 2026-05-13
 
 ### Added

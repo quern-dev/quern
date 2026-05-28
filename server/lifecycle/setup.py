@@ -1171,7 +1171,13 @@ def check_pymobiledevice3() -> CheckResult:
 
 def check_tunneld() -> CheckResult:
     """Check if the tunneld LaunchDaemon is installed and running."""
-    from server.device.tunneld import PLIST_PATH, TUNNELD_URL
+    from server.device.tunneld import (
+        LOG_PATH,
+        PLIST_PATH,
+        TUNNELD_URL,
+        installed_plist_is_current,
+        installed_plist_log_path,
+    )
 
     if not PLIST_PATH.exists():
         return CheckResult(
@@ -1182,19 +1188,35 @@ def check_tunneld() -> CheckResult:
                    "Required for physical device screenshots.",
         )
 
+    plist_outdated = not installed_plist_is_current()
+
     # Check if running
+    running = False
     try:
         import urllib.request
         req = urllib.request.Request(TUNNELD_URL, method="GET")
         with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status == 200:
-                return CheckResult(
-                    name="tunneld",
-                    status=CheckStatus.OK,
-                    message=f"Running on {TUNNELD_URL}",
-                )
+            running = resp.status == 200
     except Exception:
         pass
+
+    if plist_outdated:
+        old = installed_plist_log_path()
+        return CheckResult(
+            name="tunneld",
+            status=CheckStatus.WARNING,
+            message=f"Plist outdated (log path: {old})",
+            detail=f"Log path moved to {LOG_PATH}. The old location under the "
+                   "user home caused boot-time races for home-on-external-volume "
+                   "setups. Reinstall with: ./quern tunneld install",
+        )
+
+    if running:
+        return CheckResult(
+            name="tunneld",
+            status=CheckStatus.OK,
+            message=f"Running on {TUNNELD_URL}",
+        )
 
     return CheckResult(
         name="tunneld",
@@ -1713,13 +1735,29 @@ def run_setup() -> int:
         report.add(pmd3_result)
 
         tunneld_result = check_tunneld()
-        if (tunneld_result.status == CheckStatus.WARNING
-                and "Not installed" in (tunneld_result.message or "")):
+        msg = tunneld_result.message or ""
+        needs_install = (
+            tunneld_result.status == CheckStatus.WARNING
+            and "Not installed" in msg
+        )
+        needs_migration = (
+            tunneld_result.status == CheckStatus.WARNING
+            and "Plist outdated" in msg
+        )
+        if needs_install or needs_migration:
             if pmd3_result.status == CheckStatus.OK:
-                if _prompt_yn(
-                    "    tunneld not installed. Install LaunchDaemon "
-                    "now (requires sudo)?",
-                ):
+                if needs_migration:
+                    prompt = (
+                        "    tunneld plist references the old log path under "
+                        "the user home (caused boot races on external-home "
+                        "setups). Reinstall LaunchDaemon now (requires sudo)?"
+                    )
+                else:
+                    prompt = (
+                        "    tunneld not installed. Install LaunchDaemon "
+                        "now (requires sudo)?"
+                    )
+                if _prompt_yn(prompt):
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
@@ -1743,7 +1781,7 @@ def run_setup() -> int:
                             message="Installation failed",
                             detail="Try manually: ./quern tunneld install",
                         )
-            else:
+            elif needs_install:
                 tunneld_result = CheckResult(
                     name="tunneld",
                     status=CheckStatus.WARNING,

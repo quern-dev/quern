@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -28,6 +29,10 @@ logger = logging.getLogger("quern-debug-server.tunneld")
 TUNNELD_LABEL = "com.quern.tunneld"
 TUNNELD_URL = "http://127.0.0.1:49151"
 PLIST_PATH = Path("/Library/LaunchDaemons/com.quern.tunneld.plist")
+# System-owned location — never references the user's home directory, so the
+# daemon can boot before login (or before an external home volume mounts) without
+# launchd auto-creating ghost directories under /Volumes/<HomeVolume>/.
+LOG_PATH = Path("/Library/Logs/com.quern.tunneld.log")
 
 # Cache: CoreDevice UUID → pymobiledevice3 UDID
 _tunnel_udid_cache: dict[str, str] = {}
@@ -138,9 +143,6 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
 
 def generate_plist(binary_path: Path) -> str:
     """Generate the LaunchDaemon plist XML for tunneld."""
-    log_dir = Path.home() / ".quern"
-    log_path = log_dir / "tunneld.log"
-
     return textwrap.dedent(f"""\
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -160,25 +162,51 @@ def generate_plist(binary_path: Path) -> str:
             <key>KeepAlive</key>
             <true/>
             <key>StandardOutPath</key>
-            <string>{log_path}</string>
+            <string>{LOG_PATH}</string>
             <key>StandardErrorPath</key>
-            <string>{log_path}</string>
+            <string>{LOG_PATH}</string>
         </dict>
         </plist>
     """)
 
 
+def installed_plist_log_path() -> Path | None:
+    """Return the StandardOutPath recorded in the installed plist, or None.
+
+    Returns None when the plist isn't installed or can't be parsed.
+    """
+    if not PLIST_PATH.exists():
+        return None
+    try:
+        with open(PLIST_PATH, "rb") as f:
+            data = plistlib.load(f)
+        out = data.get("StandardOutPath")
+        return Path(out) if out else None
+    except Exception:
+        return None
+
+
+def installed_plist_is_current() -> bool:
+    """True iff the installed plist's log path matches the current LOG_PATH.
+
+    Returns False when the plist is missing, unparseable, or references the
+    old user-home log path. Callers use this to detect installs that pre-date
+    the move to /Library/Logs/ and prompt the user to reinstall.
+    """
+    return installed_plist_log_path() == LOG_PATH
+
+
 def install_daemon() -> int:
-    """Install the tunneld LaunchDaemon. Returns 0 on success."""
+    """Install the tunneld LaunchDaemon. Returns 0 on success.
+
+    Safe to re-run as a repair tool: overwrites the existing plist and reloads
+    the daemon, picking up any schema changes (e.g. the LOG_PATH migration).
+    """
     binary = find_pymobiledevice3_binary()
     if not binary:
         print("Error: pymobiledevice3 not found.")
         print("Install it: pipx install pymobiledevice3")
         return 1
-
-    # Ensure log directory exists
-    log_dir = Path.home() / ".quern"
-    log_dir.mkdir(parents=True, exist_ok=True)
 
     plist_content = generate_plist(binary)
 
@@ -229,7 +257,7 @@ def install_daemon() -> int:
                 print("  The daemon may already be loaded. Check: ./quern tunneld status")
 
         print("tunneld LaunchDaemon installed successfully.")
-        print("  Logs: ~/.quern/tunneld.log")
+        print(f"  Logs: {LOG_PATH}")
         print("  Check status: ./quern tunneld status")
         return 0
     finally:
@@ -275,6 +303,10 @@ def _print_status() -> int:
     print("  " + "─" * 40)
     print(f"  Binary:    {binary or 'not found'}")
     print(f"  Plist:     {'installed' if plist_installed else 'not installed'}")
+    if plist_installed and not installed_plist_is_current():
+        old = installed_plist_log_path()
+        print(f"  Plist log: {old} (outdated — expected {LOG_PATH})")
+        print("             Reinstall to migrate: ./quern tunneld install")
 
     # Check if daemon is running (sync version)
     running = False

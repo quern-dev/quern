@@ -9,12 +9,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from server.device.tunneld import (
+    LOG_PATH,
     TUNNELD_LABEL,
     _tunnel_udid_cache,
     cli_tunneld,
     find_pymobiledevice3_binary,
     generate_plist,
     get_tunneld_devices,
+    installed_plist_is_current,
+    installed_plist_log_path,
     is_tunneld_running,
     resolve_tunnel_udid,
 )
@@ -235,7 +238,59 @@ class TestGeneratePlist:
         assert "<string>tunneld</string>" in plist
         assert "<key>RunAtLoad</key>" in plist
         assert "<key>KeepAlive</key>" in plist
-        assert "tunneld.log" in plist
+        assert str(LOG_PATH) in plist
+
+    def test_log_path_is_system_location(self):
+        # Regression: the log path must NOT reference the user's home directory.
+        # A user-home path baked into the plist caused launchd to pre-create
+        # /Volumes/<HomeVolume>/... at boot for users whose home lived on an
+        # external volume, blocking the real volume from mounting at its name.
+        plist = generate_plist(Path("/usr/bin/pymobiledevice3"))
+        assert "/Users/" not in plist
+        assert "/Volumes/" not in plist
+        assert "/.quern/" not in plist
+        assert str(LOG_PATH).startswith("/Library/Logs/")
+
+
+# ---------------------------------------------------------------------------
+# installed_plist_is_current / installed_plist_log_path
+# ---------------------------------------------------------------------------
+
+
+class TestInstalledPlistFreshness:
+    def test_missing_plist_reports_outdated(self, tmp_path):
+        with patch("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist"):
+            assert installed_plist_log_path() is None
+            assert installed_plist_is_current() is False
+
+    def test_current_plist_reports_current(self, tmp_path):
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(generate_plist(Path("/usr/bin/pymobiledevice3")))
+        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+            assert installed_plist_log_path() == LOG_PATH
+            assert installed_plist_is_current() is True
+
+    def test_legacy_plist_reports_outdated(self, tmp_path):
+        # Simulate the pre-migration plist that pointed StandardOutPath at the
+        # user home. After upgrade, installed_plist_is_current() should be
+        # False so setup / status surface the reinstall prompt.
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        legacy = generate_plist(Path("/usr/bin/pymobiledevice3")).replace(
+            str(LOG_PATH), "/Users/somebody/.quern/tunneld.log",
+        )
+        plist_file.write_text(legacy)
+        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+            assert installed_plist_log_path() == Path(
+                "/Users/somebody/.quern/tunneld.log",
+            )
+            assert installed_plist_is_current() is False
+
+    def test_unparseable_plist_reports_outdated(self, tmp_path):
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text("not a real plist")
+        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+            assert installed_plist_log_path() is None
+            assert installed_plist_is_current() is False
 
 
 # ---------------------------------------------------------------------------
