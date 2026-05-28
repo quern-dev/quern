@@ -411,6 +411,69 @@ class TestIsProbeableContainer:
         item = {"type": "Group", "role_description": "Nav bar"}
         assert probing.is_probeable_container(item) is True
 
+    def test_swiftui_pushed_nav_group_via_identifier_and_geometry(self):
+        """Empty Group at nav-bar y/height with an identifier is probeable.
+
+        SwiftUI's `UIHostingController` in a `UINavigationController` exposes
+        the nav-bar accessibility container as an AXGroup with empty
+        role_description, an identifier set to the screen's nav title, and no
+        enumerated children. ToolbarItems live inside but are invisible
+        unless we probe.
+        """
+        item = {
+            "type": "Group",
+            "AXLabel": "",
+            "identifier": "My Lodestones",
+            "role_description": "",
+            "frame": {"x": 0, "y": 62, "width": 402, "height": 54},
+            "children": [],
+        }
+        assert probing.is_probeable_container(item) is True
+
+    def test_swiftui_pushed_nav_group_via_axuniqueid(self):
+        """Same case but identifier is exposed under AXUniqueId."""
+        item = {
+            "type": "Group",
+            "AXLabel": "",
+            "AXUniqueId": "Shareables",
+            "role_description": "",
+            "frame": {"x": 0, "y": 62, "width": 402, "height": 54},
+            "children": [],
+        }
+        assert probing.is_probeable_container(item) is True
+
+    def test_top_group_without_identifier_not_probeable(self):
+        """Identical geometry but no identifier — likely just a layout group, skip."""
+        item = {
+            "type": "Group",
+            "role_description": "",
+            "frame": {"x": 0, "y": 62, "width": 402, "height": 54},
+            "children": [],
+        }
+        assert probing.is_probeable_container(item) is False
+
+    def test_group_with_identifier_outside_nav_bar_zone_not_probeable(self):
+        """Group with identifier but below the nav-bar zone — content card, skip."""
+        item = {
+            "type": "Group",
+            "identifier": "Some Card",
+            "role_description": "",
+            "frame": {"x": 0, "y": 400, "width": 402, "height": 54},
+            "children": [],
+        }
+        assert probing.is_probeable_container(item) is False
+
+    def test_group_with_identifier_too_tall_not_probeable(self):
+        """Group near top but too tall to be a nav bar — full-screen overlay, skip."""
+        item = {
+            "type": "Group",
+            "identifier": "Modal",
+            "role_description": "",
+            "frame": {"x": 0, "y": 0, "width": 402, "height": 600},
+            "children": [],
+        }
+        assert probing.is_probeable_container(item) is False
+
 
 # ---------------------------------------------------------------------------
 # _find_empty_containers
