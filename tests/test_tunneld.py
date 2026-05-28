@@ -408,6 +408,7 @@ class TestInstallDaemonUpgradePath:
             ),
             patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
             patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),  # speed up the test
         ):
             assert install_daemon() == 0
 
@@ -434,16 +435,45 @@ class TestInstallDaemonUpgradePath:
                 "server.device.tunneld._run_sudo",
                 side_effect=lambda args, timeout: (calls.append(args), True)[1],
             ),
+            patch("server.device.tunneld.time.sleep"),
         ):
             assert install_daemon() == 0
 
         assert ["chmod", "644", str(tmp_path / "tunneld.plist")] in calls
 
-    def test_bootstrap_failure_returns_nonzero(self, tmp_path):
-        """If bootstrap genuinely fails after bootout, surface a diagnostic
-        message and return 1 instead of silently kickstarting."""
+    def test_bootstrap_retry_recovers_after_eio_race(self, tmp_path):
+        """Regression: macOS 26 (Tahoe) launchd briefly races bootout/bootstrap
+        and returns EIO 5 on the first bootstrap. install_daemon must retry
+        once after a settle delay before giving up."""
+        bootstrap_attempts = [0]
+
         def fake_run_sudo(args, timeout):
-            # bootstrap fails; everything else succeeds
+            if args[:3] == ["launchctl", "bootstrap", "system"]:
+                bootstrap_attempts[0] += 1
+                # First bootstrap fails (the race); second succeeds.
+                return bootstrap_attempts[0] > 1
+            return True
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),
+        ):
+            assert install_daemon() == 0
+
+        # Both bootstrap attempts must have actually happened.
+        assert bootstrap_attempts[0] == 2
+
+    def test_bootstrap_failure_after_retry_returns_nonzero(self, tmp_path):
+        """If bootstrap still fails after the settle retry, surface a
+        diagnostic message and return 1 — don't silently fall back to
+        anything destructive."""
+        def fake_run_sudo(args, timeout):
+            # bootstrap fails every time; everything else succeeds.
             return "bootstrap" not in args
 
         with (
@@ -453,6 +483,7 @@ class TestInstallDaemonUpgradePath:
             ),
             patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
             patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),
         ):
             assert install_daemon() == 1
 

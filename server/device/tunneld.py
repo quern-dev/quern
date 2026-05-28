@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 
 import httpx
@@ -273,13 +274,26 @@ def install_daemon() -> int:
         if not _run_sudo(["chmod", "644", str(PLIST_PATH)], timeout=10):
             print("Warning: Failed to set plist permissions")
 
-        if not _run_sudo(
-            ["launchctl", "bootstrap", "system", str(PLIST_PATH)], timeout=30,
-        ):
-            print("Error: launchctl bootstrap failed.")
-            print("  Diagnose with: sudo launchctl print system/com.quern.tunneld")
-            print("  Validate plist: sudo plutil -lint " + str(PLIST_PATH))
-            return 1
+        # macOS 26 (Tahoe) launchd needs a brief settle after bootout before
+        # bootstrap will accept a fresh load — otherwise the second call
+        # fails with `Bootstrap failed: 5: Input/output error`. Manual
+        # bootstrap-after-sleep succeeds reliably; we replicate that here,
+        # and retry once with a longer delay if the first attempt still
+        # races. The delays are short enough to be invisible in practice.
+        time.sleep(1.5)
+        bootstrap_cmd = ["launchctl", "bootstrap", "system", str(PLIST_PATH)]
+        if not _run_sudo(bootstrap_cmd, timeout=30):
+            print("  bootstrap raced launchd state, retrying after settle...")
+            time.sleep(3)
+            if not _run_sudo(bootstrap_cmd, timeout=30):
+                print("Error: launchctl bootstrap failed.")
+                print(
+                    "  Diagnose with: sudo launchctl print system/com.quern.tunneld",
+                )
+                print(
+                    "  Validate plist: sudo plutil -lint " + str(PLIST_PATH),
+                )
+                return 1
 
         print("tunneld LaunchDaemon installed successfully.")
         print(f"  Logs: {LOG_PATH}")
