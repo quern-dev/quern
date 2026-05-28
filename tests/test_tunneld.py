@@ -9,12 +9,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from server.device.tunneld import (
+    LOG_PATH,
     TUNNELD_LABEL,
+    _run_sudo,
     _tunnel_udid_cache,
     cli_tunneld,
     find_pymobiledevice3_binary,
     generate_plist,
     get_tunneld_devices,
+    install_daemon,
+    installed_plist_is_current,
+    installed_plist_log_path,
     is_tunneld_running,
     resolve_tunnel_udid,
 )
@@ -235,7 +240,252 @@ class TestGeneratePlist:
         assert "<string>tunneld</string>" in plist
         assert "<key>RunAtLoad</key>" in plist
         assert "<key>KeepAlive</key>" in plist
-        assert "tunneld.log" in plist
+        assert str(LOG_PATH) in plist
+
+    def test_log_path_is_system_location(self):
+        # Regression: the log path must NOT reference the user's home directory.
+        # A user-home path baked into the plist caused launchd to pre-create
+        # /Volumes/<HomeVolume>/... at boot for users whose home lived on an
+        # external volume, blocking the real volume from mounting at its name.
+        plist = generate_plist(Path("/usr/bin/pymobiledevice3"))
+        assert "/Users/" not in plist
+        assert "/Volumes/" not in plist
+        assert "/.quern/" not in plist
+        assert str(LOG_PATH).startswith("/Library/Logs/")
+
+
+# ---------------------------------------------------------------------------
+# installed_plist_is_current / installed_plist_log_path
+# ---------------------------------------------------------------------------
+
+
+class TestInstalledPlistFreshness:
+    def test_missing_plist_reports_outdated(self, tmp_path):
+        with patch("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist"):
+            assert installed_plist_log_path() is None
+            assert installed_plist_is_current() is False
+
+    def test_current_plist_reports_current(self, tmp_path):
+        binary = Path("/usr/bin/pymobiledevice3")
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(generate_plist(binary))
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=binary,
+            ),
+        ):
+            assert installed_plist_log_path() == LOG_PATH
+            assert installed_plist_is_current() is True
+
+    def test_legacy_plist_reports_outdated(self, tmp_path):
+        # Simulate the pre-migration plist that pointed StandardOutPath at the
+        # user home. After upgrade, installed_plist_is_current() should be
+        # False so setup / status surface the reinstall prompt.
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        legacy = generate_plist(Path("/usr/bin/pymobiledevice3")).replace(
+            str(LOG_PATH), "/Users/somebody/.quern/tunneld.log",
+        )
+        plist_file.write_text(legacy)
+        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+            assert installed_plist_log_path() == Path(
+                "/Users/somebody/.quern/tunneld.log",
+            )
+            assert installed_plist_is_current() is False
+
+    def test_binary_path_drift_reports_outdated(self, tmp_path):
+        # Regression: after `sudo pipx install --global pymobiledevice3` adds
+        # a binary at /usr/local/bin/, the plist still bakes in the old
+        # per-user pipx path. Detection must catch this so the existing
+        # migration prompt fires.
+        binary_in_plist = Path(
+            "/Volumes/Home/jham/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+        )
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(generate_plist(binary_in_plist))
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/local/bin/pymobiledevice3"),
+            ),
+        ):
+            assert installed_plist_is_current() is False
+
+    def test_missing_binary_with_no_alternative_reports_outdated(self, tmp_path):
+        # If the plist program path doesn't exist AND nothing else is
+        # discoverable, we should still flag — the daemon will crash-loop.
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(
+            generate_plist(Path("/nonexistent/pymobiledevice3")),
+        )
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=None,
+            ),
+        ):
+            assert installed_plist_is_current() is False
+
+    def test_missing_binary_with_discoverable_one_uses_discovered(self, tmp_path):
+        # When find_pymobiledevice3_binary returns a different path than the
+        # plist's program, plist is outdated regardless of whether the plist's
+        # program exists on disk.
+        binary_in_plist = Path("/usr/bin/pymobiledevice3")
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text(generate_plist(binary_in_plist))
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/local/bin/pymobiledevice3"),
+            ),
+        ):
+            assert installed_plist_is_current() is False
+
+    def test_unparseable_plist_reports_outdated(self, tmp_path):
+        plist_file = tmp_path / "com.quern.tunneld.plist"
+        plist_file.write_text("not a real plist")
+        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+            assert installed_plist_log_path() is None
+            assert installed_plist_is_current() is False
+
+
+# ---------------------------------------------------------------------------
+# _run_sudo + install_daemon upgrade path
+# ---------------------------------------------------------------------------
+
+
+class TestRunSudo:
+    def test_returns_true_on_zero_exit(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert _run_sudo(["ls"], timeout=5) is True
+            mock_run.assert_called_once()
+            args, kwargs = mock_run.call_args
+            assert args[0] == ["sudo", "ls"]
+            assert kwargs["timeout"] == 5
+
+    def test_returns_false_on_nonzero_exit(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            assert _run_sudo(["ls"], timeout=5) is False
+
+    def test_returns_false_on_timeout_without_raising(self, capsys):
+        import subprocess as sp
+        with patch(
+            "subprocess.run",
+            side_effect=sp.TimeoutExpired(cmd=["sudo", "ls"], timeout=5),
+        ):
+            # Regression: previously a hung launchctl would raise
+            # TimeoutExpired all the way to main() and dump a traceback.
+            assert _run_sudo(["ls"], timeout=5) is False
+        assert "timed out" in capsys.readouterr().out
+
+    def test_returns_false_on_oserror(self, capsys):
+        with patch("subprocess.run", side_effect=OSError("no sudo for you")):
+            assert _run_sudo(["ls"], timeout=5) is False
+        assert "no sudo for you" in capsys.readouterr().out
+
+
+class TestInstallDaemonUpgradePath:
+    def test_unloads_existing_before_bootstrap(self, tmp_path):
+        """Regression: bootstrap-over-loaded returns EIO 5 and the previous
+        kickstart -k fallback hung launchctl. The upgrade path must call
+        bootout *before* bootstrap and skip kickstart entirely."""
+        calls: list[list[str]] = []
+
+        def fake_run_sudo(args, timeout):
+            calls.append(args)
+            return True
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),  # speed up the test
+        ):
+            assert install_daemon() == 0
+
+        operations = [a[0] for a in calls]
+        assert operations == ["launchctl", "cp", "chown", "chmod", "launchctl"]
+        # bootout must come first; bootstrap last; no kickstart anywhere.
+        assert calls[0] == ["launchctl", "bootout", f"system/{TUNNELD_LABEL}"]
+        assert calls[-1][:3] == ["launchctl", "bootstrap", "system"]
+        for call in calls:
+            assert "kickstart" not in call
+
+    def test_chmods_plist_to_644(self, tmp_path):
+        """LaunchDaemon plists should be mode 644 (Apple convention).
+        NamedTemporaryFile produces 600 and `cp` preserves that."""
+        calls: list[list[str]] = []
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch(
+                "server.device.tunneld._run_sudo",
+                side_effect=lambda args, timeout: (calls.append(args), True)[1],
+            ),
+            patch("server.device.tunneld.time.sleep"),
+        ):
+            assert install_daemon() == 0
+
+        assert ["chmod", "644", str(tmp_path / "tunneld.plist")] in calls
+
+    def test_bootstrap_retry_recovers_after_eio_race(self, tmp_path):
+        """Regression: macOS 26 (Tahoe) launchd briefly races bootout/bootstrap
+        and returns EIO 5 on the first bootstrap. install_daemon must retry
+        once after a settle delay before giving up."""
+        bootstrap_attempts = [0]
+
+        def fake_run_sudo(args, timeout):
+            if args[:3] == ["launchctl", "bootstrap", "system"]:
+                bootstrap_attempts[0] += 1
+                # First bootstrap fails (the race); second succeeds.
+                return bootstrap_attempts[0] > 1
+            return True
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),
+        ):
+            assert install_daemon() == 0
+
+        # Both bootstrap attempts must have actually happened.
+        assert bootstrap_attempts[0] == 2
+
+    def test_bootstrap_failure_after_retry_returns_nonzero(self, tmp_path):
+        """If bootstrap still fails after the settle retry, surface a
+        diagnostic message and return 1 — don't silently fall back to
+        anything destructive."""
+        def fake_run_sudo(args, timeout):
+            # bootstrap fails every time; everything else succeeds.
+            return "bootstrap" not in args
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),
+        ):
+            assert install_daemon() == 1
 
 
 # ---------------------------------------------------------------------------

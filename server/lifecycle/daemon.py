@@ -142,6 +142,16 @@ def _print_status(state: dict) -> None:
             prefix = "  Note: " if i == 0 else "        "
             print(f"{prefix}{line}")
 
+    try:
+        from server.device.tunneld import PLIST_PATH, installed_plist_is_current
+        if PLIST_PATH.exists() and not installed_plist_is_current():
+            print(
+                "  Warning:    tunneld plist is outdated "
+                "(old user-home log path). Run: ./quern tunneld install",
+            )
+    except Exception:
+        pass  # never let an opportunistic check block the banner
+
 
 def install_signal_handlers(cleanup_fn) -> None:
     """Install SIGTERM/SIGINT handlers that run cleanup before exit.

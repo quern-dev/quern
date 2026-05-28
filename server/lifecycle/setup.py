@@ -206,7 +206,53 @@ def _read_manifest() -> dict:
     try:
         return json.loads(INSTALL_MANIFEST.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"brew": [], "pip": [], "pipx": []}
+        return {"brew": [], "pip": [], "pipx": [], "pipx_global": []}
+
+
+def _maybe_remove_user_pmd3(pipx_bin: str) -> None:
+    """After a successful global install, offer to remove the per-user copy.
+
+    pipx's `ensurepath` puts ~/.local/bin ahead of /usr/local/bin in the
+    user's PATH, so a per-user `pymobiledevice3` keeps shadowing the global
+    one we just installed. Removing the per-user copy clears the shadow;
+    LaunchDaemons run as root and don't inherit the user's PATH, so they
+    would already see the global one — but `shutil.which` from a user
+    shell wouldn't, which is what `check_pymobiledevice3()` calls.
+    """
+    user_venv = Path.home() / ".local" / "pipx" / "venvs" / "pymobiledevice3"
+    if not user_venv.exists():
+        return
+    if not _prompt_yn(
+        "    Per-user pymobiledevice3 still installed at "
+        f"{user_venv}. Remove it so the system-wide copy is used?",
+    ):
+        return
+    try:
+        subprocess.run(
+            [pipx_bin, "uninstall", "pymobiledevice3"],
+            stdin=subprocess.DEVNULL, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("    Warning: pipx uninstall pymobiledevice3 failed")
+        return
+    # Clean up the manifest entry if setup originally tracked the per-user
+    # install. Safe to skip if the user installed it themselves outside setup.
+    manifest = _read_manifest()
+    if "pymobiledevice3" in manifest.get("pipx", []):
+        manifest["pipx"].remove("pymobiledevice3")
+        _write_manifest(manifest)
+
+
+def _home_is_on_external() -> bool:
+    """True iff the current user's home resolves under /Volumes/.
+
+    Detects the common "moved my home folder to an external drive" setup,
+    where per-user pipx installs end up in /Volumes/<vol>/<user>/.local/pipx/
+    — a path that doesn't exist pre-login. We use this to prefer
+    `sudo pipx install --global` for tools that need to be reachable by
+    LaunchDaemons (currently just pymobiledevice3 for tunneld).
+    """
+    return str(Path.home().resolve()).startswith("/Volumes/")
 
 
 def _write_manifest(data: dict) -> None:
@@ -1149,29 +1195,52 @@ def check_mitmproxy_cert() -> CheckResult:
 
 
 def check_pymobiledevice3() -> CheckResult:
-    """Check if pymobiledevice3 is installed (needed for physical device screenshots)."""
+    """Check if pymobiledevice3 is installed (needed for physical device screenshots).
+
+    Also flags installs that live under an external home volume — those work
+    while the user is logged in but won't be reachable at boot, which means
+    the tunneld LaunchDaemon can't start until login completes.
+    """
     from server.device.tunneld import find_pymobiledevice3_binary
 
     binary = find_pymobiledevice3_binary()
-    if binary:
-        rc, stdout, _ = _run([str(binary), "version"])
-        version = stdout.strip() if rc == 0 else "installed"
+    if not binary:
         return CheckResult(
             name="pymobiledevice3",
-            status=CheckStatus.OK,
-            message=version,
+            status=CheckStatus.WARNING,
+            message="Not installed (needed for physical device screenshots)",
+            detail="Install with: pipx install pymobiledevice3",
         )
+
+    rc, stdout, _ = _run([str(binary), "version"])
+    version = stdout.strip() if rc == 0 else "installed"
+
+    if _home_is_on_external() and str(binary).startswith("/Volumes/"):
+        return CheckResult(
+            name="pymobiledevice3",
+            status=CheckStatus.WARNING,
+            message=f"{version} — installed under external home ({binary})",
+            detail="Binary lives on an external volume, so the tunneld "
+                   "LaunchDaemon can't reach it pre-login. Reinstall "
+                   "system-wide with: sudo pipx install --global pymobiledevice3",
+        )
+
     return CheckResult(
         name="pymobiledevice3",
-        status=CheckStatus.WARNING,
-        message="Not installed (needed for physical device screenshots)",
-        detail="Install with: pipx install pymobiledevice3",
+        status=CheckStatus.OK,
+        message=version,
     )
 
 
 def check_tunneld() -> CheckResult:
     """Check if the tunneld LaunchDaemon is installed and running."""
-    from server.device.tunneld import PLIST_PATH, TUNNELD_URL
+    from server.device.tunneld import (
+        LOG_PATH,
+        PLIST_PATH,
+        TUNNELD_URL,
+        installed_plist_is_current,
+        installed_plist_log_path,
+    )
 
     if not PLIST_PATH.exists():
         return CheckResult(
@@ -1182,19 +1251,35 @@ def check_tunneld() -> CheckResult:
                    "Required for physical device screenshots.",
         )
 
+    plist_outdated = not installed_plist_is_current()
+
     # Check if running
+    running = False
     try:
         import urllib.request
         req = urllib.request.Request(TUNNELD_URL, method="GET")
         with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status == 200:
-                return CheckResult(
-                    name="tunneld",
-                    status=CheckStatus.OK,
-                    message=f"Running on {TUNNELD_URL}",
-                )
+            running = resp.status == 200
     except Exception:
         pass
+
+    if plist_outdated:
+        old = installed_plist_log_path()
+        return CheckResult(
+            name="tunneld",
+            status=CheckStatus.WARNING,
+            message=f"Plist outdated (log path: {old})",
+            detail=f"Log path moved to {LOG_PATH}. The old location under the "
+                   "user home caused boot-time races for home-on-external-volume "
+                   "setups. Reinstall with: ./quern tunneld install",
+        )
+
+    if running:
+        return CheckResult(
+            name="tunneld",
+            status=CheckStatus.OK,
+            message=f"Running on {TUNNELD_URL}",
+        )
 
     return CheckResult(
         name="tunneld",
@@ -1685,23 +1770,62 @@ def run_setup() -> int:
                             except (FileNotFoundError, subprocess.TimeoutExpired):
                                 pass
             pipx_bin = _find_brew_binary("pipx")
-            if pipx_bin:
-                if _prompt_yn("    pymobiledevice3 not found. Install via pipx?"):
-                    print("    Installing pymobiledevice3 via pipx...")
+            msg = pmd3_result.message or ""
+            wants_global = _home_is_on_external()
+            misplaced = "external home" in msg
+            if pipx_bin and (misplaced or "Not installed" in msg
+                             or "needed for physical" in msg):
+                if misplaced:
+                    prompt = (
+                        "    pymobiledevice3 is installed under your external "
+                        "home volume — won't be reachable at boot. Reinstall "
+                        "system-wide via `sudo pipx install --global` "
+                        "(requires sudo)?"
+                    )
+                elif wants_global:
+                    prompt = (
+                        "    pymobiledevice3 not found. Install system-wide "
+                        "via `sudo pipx install --global` (your home is on an "
+                        "external volume, requires sudo)?"
+                    )
+                else:
+                    prompt = "    pymobiledevice3 not found. Install via pipx?"
+                if _prompt_yn(prompt):
+                    if wants_global:
+                        # Inherit stdin so sudo can prompt for the password.
+                        cmd = ["sudo", pipx_bin, "install", "--global",
+                               "pymobiledevice3"]
+                        run_kwargs = {"timeout": 300}
+                        print("    Installing pymobiledevice3 via "
+                              "`sudo pipx install --global`...")
+                    else:
+                        cmd = [pipx_bin, "install", "pymobiledevice3"]
+                        run_kwargs = {
+                            "stdin": subprocess.DEVNULL, "timeout": 300,
+                        }
+                        print("    Installing pymobiledevice3 via pipx...")
                     try:
-                        result = subprocess.run(
-                            [pipx_bin, "install", "pymobiledevice3"],
-                            stdin=subprocess.DEVNULL, timeout=300,
-                        )
+                        result = subprocess.run(cmd, **run_kwargs)
                         if result.returncode == 0:
-                            _record_install("pipx", "pymobiledevice3")
+                            _record_install(
+                                "pipx_global" if wants_global else "pipx",
+                                "pymobiledevice3",
+                            )
+                            if wants_global:
+                                _maybe_remove_user_pmd3(pipx_bin)
                             pmd3_result = check_pymobiledevice3()  # re-check
                         else:
+                            detail = (
+                                "Try manually: sudo pipx install --global "
+                                "pymobiledevice3"
+                                if wants_global
+                                else "Try manually: pipx install pymobiledevice3"
+                            )
                             pmd3_result = CheckResult(
                                 name="pymobiledevice3",
                                 status=CheckStatus.ERROR,
                                 message="pipx install failed",
-                                detail="Try manually: pipx install pymobiledevice3",
+                                detail=detail,
                             )
                     except (FileNotFoundError, subprocess.TimeoutExpired):
                         pmd3_result = CheckResult(
@@ -1713,13 +1837,29 @@ def run_setup() -> int:
         report.add(pmd3_result)
 
         tunneld_result = check_tunneld()
-        if (tunneld_result.status == CheckStatus.WARNING
-                and "Not installed" in (tunneld_result.message or "")):
+        msg = tunneld_result.message or ""
+        needs_install = (
+            tunneld_result.status == CheckStatus.WARNING
+            and "Not installed" in msg
+        )
+        needs_migration = (
+            tunneld_result.status == CheckStatus.WARNING
+            and "Plist outdated" in msg
+        )
+        if needs_install or needs_migration:
             if pmd3_result.status == CheckStatus.OK:
-                if _prompt_yn(
-                    "    tunneld not installed. Install LaunchDaemon "
-                    "now (requires sudo)?",
-                ):
+                if needs_migration:
+                    prompt = (
+                        "    tunneld plist references the old log path under "
+                        "the user home (caused boot races on external-home "
+                        "setups). Reinstall LaunchDaemon now (requires sudo)?"
+                    )
+                else:
+                    prompt = (
+                        "    tunneld not installed. Install LaunchDaemon "
+                        "now (requires sudo)?"
+                    )
+                if _prompt_yn(prompt):
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
@@ -1743,7 +1883,7 @@ def run_setup() -> int:
                             message="Installation failed",
                             detail="Try manually: ./quern tunneld install",
                         )
-            else:
+            elif needs_install:
                 tunneld_result = CheckResult(
                     name="tunneld",
                     status=CheckStatus.WARNING,
@@ -1916,6 +2056,7 @@ def run_uninstall() -> int:
     manifest = _read_manifest()
     brew_packages = manifest.get("brew", [])
     pipx_packages = manifest.get("pipx", [])
+    pipx_global_packages = manifest.get("pipx_global", [])
 
     # ── Confirmation ──
 
@@ -1926,6 +2067,11 @@ def run_uninstall() -> int:
         print("    • Homebrew packages: (none tracked — setup didn't install any)")
     if pipx_packages:
         print(f"    • pipx packages: {', '.join(pipx_packages)}")
+    if pipx_global_packages:
+        print(
+            f"    • pipx --global packages (requires sudo): "
+            f"{', '.join(pipx_global_packages)}",
+        )
     print("    • The quern wrapper script (~/.local/bin/quern)")
     print("    • The Python virtual environment (.venv/)")
     print("    • MCP server registrations (claude-code, claude-desktop, cursor, opencode, codex)")
@@ -1969,6 +2115,23 @@ def run_uninstall() -> int:
                 result = subprocess.run(
                     ["pipx", "uninstall", pkg],
                     stdin=subprocess.DEVNULL, timeout=60,
+                )
+                if result.returncode != 0:
+                    print(f"    Warning: failed to uninstall {pkg}")
+                    errors += 1
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                print(f"    Warning: failed to uninstall {pkg}")
+                errors += 1
+
+    if pipx_global_packages and _which("pipx"):
+        print()
+        for pkg in pipx_global_packages:
+            print(f"  Removing {pkg} (sudo pipx --global)...")
+            try:
+                # Inherit stdin so sudo can prompt for the password.
+                result = subprocess.run(
+                    ["sudo", "pipx", "uninstall", "--global", pkg],
+                    timeout=60,
                 )
                 if result.returncode != 0:
                     print(f"    Warning: failed to uninstall {pkg}")

@@ -5,6 +5,29 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **tunneld log path moved to `/Library/Logs/com.quern.tunneld.log`** — previously the LaunchDaemon plist baked `~/.quern/tunneld.log` (resolved to an absolute path at install time) into `StandardOutPath` / `StandardErrorPath`. For users whose home directory lived on an external volume, launchd would pre-create the home-directory path at boot before the volume mounted, blocking the real volume from mounting under its expected name (it would mount as `Home 1` instead, breaking login). The daemon now logs to a system-owned location that always exists at boot and never touches the user home.
+
+### Fixed
+- **`./quern tunneld install` correctly upgrades an already-loaded daemon** — the previous flow ran `launchctl bootstrap` against a loaded service (returns EIO 5) and fell back to `kickstart -k`, which sent SIGKILL to the running process and hung launchctl on macOS 15. Install now does `bootout → cp → chown → chmod 644 → bootstrap`, matching Apple's documented plist-swap dance.
+- **macOS 26 (Tahoe) launchd race handled** — bootstrap immediately after bootout fails with `Bootstrap failed: 5: Input/output error` on Tahoe (launchd needs a moment to fully release the unloaded service before accepting a new bootstrap). `install_daemon` now sleeps 1.5s after bootout and retries once with a longer delay if the first bootstrap still races.
+- **Plist permissions normalized to `644`** — `NamedTemporaryFile` produces mode `600`, which `cp` preserves. `600` worked but isn't Apple-recommended; install now `chmod 644`s after copy.
+- **Hung launchctl no longer crashes the install script** — `subprocess.TimeoutExpired` and `OSError` are caught with a warning instead of propagating as an unhandled traceback.
+
+### Added
+- **`./quern setup` detects when `$HOME` is on an external volume** (e.g. `/Volumes/Home/<user>`) and prefers `sudo pipx install --global pymobiledevice3` over the per-user install. The default user-pipx path puts the binary under `/Volumes/<vol>/<user>/.local/pipx/`, which isn't reachable at boot before the volume mounts — meaning the tunneld LaunchDaemon can't start until login completes. `--global` lands the venv under `/opt/pipx/venvs/pymobiledevice3/` on the internal disk, where it's always available. The new `pipx_global` manifest category is also tracked for `./quern uninstall` (which removes those entries with `sudo pipx uninstall --global`).
+- **`check_pymobiledevice3()` flags existing installs that live under an external home volume** and points at the global-install fix. Affects users who installed via per-user pipx before this release; setup will prompt to reinstall system-wide on the next run.
+- **Post-global-install cleanup prompt** — after `sudo pipx install --global pymobiledevice3` succeeds, setup detects if a per-user pipx copy of pymobiledevice3 also exists and offers to remove it. pipx's `ensurepath` puts `~/.local/bin` ahead of `/usr/local/bin` in user shells, so leaving the per-user copy in place keeps it shadowing the system-wide install for any tool that calls `shutil.which` — including `check_pymobiledevice3()`, which would otherwise keep reporting the misplaced install on every setup run.
+- **`installed_plist_is_current()` also checks the binary path** — previously only the log path was compared. Now also verifies that `ProgramArguments[0]` matches `find_pymobiledevice3_binary()`, so the existing migration prompt fires when the plist bakes in a stale per-user pipx path while a global install has replaced it.
+
+### Migration
+- Existing installs are detected automatically. `./quern setup`, `./quern status`, `./quern start`, and `./quern tunneld status` all surface a warning when the installed plist still references the old user-home log path.
+- To migrate: run `./quern tunneld install` (or accept the prompt in `./quern setup`). The command unconditionally overwrites the plist, sets root ownership, and reloads the daemon.
+- The orphaned old log file at `~/.quern/tunneld.log` is left in place — delete manually if desired.
+- **Home-on-external users**: after accepting the global pymobiledevice3 reinstall, run `pipx uninstall pymobiledevice3` (your old per-user copy) and `./quern tunneld install` once more to rebake the plist against `/usr/local/bin/pymobiledevice3`.
+
 ## [0.13.0] - 2026-05-13
 
 ### Added

@@ -15,6 +15,7 @@ from server.lifecycle.setup import (
     SetupReport,
     _diagnose_developer_dir,
     _fix_developer_dir_for_setup,
+    _home_is_on_external,
     _is_apple_silicon,
     _read_manifest,
     _record_install,
@@ -28,6 +29,7 @@ from server.lifecycle.setup import (
     check_mitmproxy_cert,
     check_node,
     check_platform,
+    check_pymobiledevice3,
     check_python,
     check_venv,
     check_vpn,
@@ -697,6 +699,93 @@ class TestCheckBootedSimulators:
             assert check_booted_simulators() == []
 
 
+# ── Home-on-external detection + pymobiledevice3 location check ─────────
+
+
+class TestHomeOnExternal:
+    def test_standard_home_is_not_external(self):
+        with patch(
+            "server.lifecycle.setup.Path.home",
+            return_value=Path("/Users/alice"),
+        ):
+            assert _home_is_on_external() is False
+
+    def test_volumes_home_is_external(self):
+        # The motivating case: macOS user with home moved to an external drive.
+        fake_home = MagicMock()
+        fake_home.resolve.return_value = Path("/Volumes/Home/jham")
+        with patch("server.lifecycle.setup.Path.home", return_value=fake_home):
+            assert _home_is_on_external() is True
+
+
+class TestCheckPymobiledevice3:
+    def test_not_installed_returns_warning(self):
+        with patch(
+            "server.device.tunneld.find_pymobiledevice3_binary",
+            return_value=None,
+        ):
+            result = check_pymobiledevice3()
+            assert result.status == CheckStatus.WARNING
+            assert "Not installed" in result.message
+
+    def test_installed_under_normal_home_is_ok(self):
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path(
+                    "/Users/alice/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+                ),
+            ),
+            patch("server.lifecycle.setup._run", return_value=(0, "9.15.1\n", "")),
+            patch(
+                "server.lifecycle.setup._home_is_on_external",
+                return_value=False,
+            ),
+        ):
+            result = check_pymobiledevice3()
+            assert result.status == CheckStatus.OK
+
+    def test_installed_under_external_home_is_flagged(self):
+        # Regression: a binary on /Volumes/... is unreachable pre-login,
+        # so the tunneld LaunchDaemon can't reach it at boot. Setup needs
+        # to surface this so it can offer `sudo pipx install --global`.
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path(
+                    "/Volumes/Home/jham/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+                ),
+            ),
+            patch("server.lifecycle.setup._run", return_value=(0, "9.15.1\n", "")),
+            patch(
+                "server.lifecycle.setup._home_is_on_external",
+                return_value=True,
+            ),
+        ):
+            result = check_pymobiledevice3()
+            assert result.status == CheckStatus.WARNING
+            assert "external home" in result.message
+            assert "--global" in (result.detail or "")
+
+    def test_installed_under_usr_local_is_ok_even_with_external_home(self):
+        # `sudo pipx install --global` lands at /usr/local — always on the
+        # internal disk. That's the resolution we want users to land on,
+        # so the check must not flag it.
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/local/bin/pymobiledevice3"),
+            ),
+            patch("server.lifecycle.setup._run", return_value=(0, "9.15.1\n", "")),
+            patch(
+                "server.lifecycle.setup._home_is_on_external",
+                return_value=True,
+            ),
+        ):
+            result = check_pymobiledevice3()
+            assert result.status == CheckStatus.OK
+
+
 # ── Simulator cert install ───────────────────────────────────────────────
 
 
@@ -764,7 +853,7 @@ class TestInstallManifest:
     def test_read_missing_manifest(self, tmp_path):
         with patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "nope.json"):
             data = _read_manifest()
-            assert data == {"brew": [], "pip": [], "pipx": []}
+            assert data == {"brew": [], "pip": [], "pipx": [], "pipx_global": []}
 
     def test_write_and_read(self, tmp_path):
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
