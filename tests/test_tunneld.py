@@ -11,11 +11,13 @@ import httpx
 from server.device.tunneld import (
     LOG_PATH,
     TUNNELD_LABEL,
+    _run_sudo,
     _tunnel_udid_cache,
     cli_tunneld,
     find_pymobiledevice3_binary,
     generate_plist,
     get_tunneld_devices,
+    install_daemon,
     installed_plist_is_current,
     installed_plist_log_path,
     is_tunneld_running,
@@ -291,6 +293,110 @@ class TestInstalledPlistFreshness:
         with patch("server.device.tunneld.PLIST_PATH", plist_file):
             assert installed_plist_log_path() is None
             assert installed_plist_is_current() is False
+
+
+# ---------------------------------------------------------------------------
+# _run_sudo + install_daemon upgrade path
+# ---------------------------------------------------------------------------
+
+
+class TestRunSudo:
+    def test_returns_true_on_zero_exit(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert _run_sudo(["ls"], timeout=5) is True
+            mock_run.assert_called_once()
+            args, kwargs = mock_run.call_args
+            assert args[0] == ["sudo", "ls"]
+            assert kwargs["timeout"] == 5
+
+    def test_returns_false_on_nonzero_exit(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            assert _run_sudo(["ls"], timeout=5) is False
+
+    def test_returns_false_on_timeout_without_raising(self, capsys):
+        import subprocess as sp
+        with patch(
+            "subprocess.run",
+            side_effect=sp.TimeoutExpired(cmd=["sudo", "ls"], timeout=5),
+        ):
+            # Regression: previously a hung launchctl would raise
+            # TimeoutExpired all the way to main() and dump a traceback.
+            assert _run_sudo(["ls"], timeout=5) is False
+        assert "timed out" in capsys.readouterr().out
+
+    def test_returns_false_on_oserror(self, capsys):
+        with patch("subprocess.run", side_effect=OSError("no sudo for you")):
+            assert _run_sudo(["ls"], timeout=5) is False
+        assert "no sudo for you" in capsys.readouterr().out
+
+
+class TestInstallDaemonUpgradePath:
+    def test_unloads_existing_before_bootstrap(self, tmp_path):
+        """Regression: bootstrap-over-loaded returns EIO 5 and the previous
+        kickstart -k fallback hung launchctl. The upgrade path must call
+        bootout *before* bootstrap and skip kickstart entirely."""
+        calls: list[list[str]] = []
+
+        def fake_run_sudo(args, timeout):
+            calls.append(args)
+            return True
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+        ):
+            assert install_daemon() == 0
+
+        operations = [a[0] for a in calls]
+        assert operations == ["launchctl", "cp", "chown", "chmod", "launchctl"]
+        # bootout must come first; bootstrap last; no kickstart anywhere.
+        assert calls[0] == ["launchctl", "bootout", f"system/{TUNNELD_LABEL}"]
+        assert calls[-1][:3] == ["launchctl", "bootstrap", "system"]
+        for call in calls:
+            assert "kickstart" not in call
+
+    def test_chmods_plist_to_644(self, tmp_path):
+        """LaunchDaemon plists should be mode 644 (Apple convention).
+        NamedTemporaryFile produces 600 and `cp` preserves that."""
+        calls: list[list[str]] = []
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch(
+                "server.device.tunneld._run_sudo",
+                side_effect=lambda args, timeout: (calls.append(args), True)[1],
+            ),
+        ):
+            assert install_daemon() == 0
+
+        assert ["chmod", "644", str(tmp_path / "tunneld.plist")] in calls
+
+    def test_bootstrap_failure_returns_nonzero(self, tmp_path):
+        """If bootstrap genuinely fails after bootout, surface a diagnostic
+        message and return 1 instead of silently kickstarting."""
+        def fake_run_sudo(args, timeout):
+            # bootstrap fails; everything else succeeds
+            return "bootstrap" not in args
+
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/usr/bin/pymobiledevice3"),
+            ),
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+        ):
+            assert install_daemon() == 1
 
 
 # ---------------------------------------------------------------------------

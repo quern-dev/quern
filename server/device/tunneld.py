@@ -224,37 +224,34 @@ def install_daemon() -> int:
         print(f"  Plist:  {PLIST_PATH}")
         print()
 
-        # Copy plist to /Library/LaunchDaemons/
-        result = subprocess.run(
-            ["sudo", "cp", tmp_path, str(PLIST_PATH)],
-            timeout=30,
-        )
-        if result.returncode != 0:
+        # Unload any already-loaded definition first. Without this, bootstrap
+        # against a loaded service returns EIO 5, and the only escape used to
+        # be kickstart -k — which sends SIGKILL to the running process and
+        # hung launchctl on macOS 15 in practice. bootout is the documented
+        # way to swap a plist; failure here (e.g. service not loaded) is
+        # fine and expected on a fresh install.
+        _run_sudo(["launchctl", "bootout", f"system/{TUNNELD_LABEL}"], timeout=30)
+
+        if not _run_sudo(["cp", tmp_path, str(PLIST_PATH)], timeout=30):
             print("Error: Failed to copy plist (sudo cp failed)")
             return 1
 
-        # Set ownership
-        result = subprocess.run(
-            ["sudo", "chown", "root:wheel", str(PLIST_PATH)],
-            timeout=10,
-        )
-        if result.returncode != 0:
+        if not _run_sudo(["chown", "root:wheel", str(PLIST_PATH)], timeout=10):
             print("Warning: Failed to set plist ownership")
 
-        # Bootstrap (load) the daemon
-        result = subprocess.run(
-            ["sudo", "launchctl", "bootstrap", "system", str(PLIST_PATH)],
-            timeout=30,
-        )
-        if result.returncode != 0:
-            # May already be loaded — try kickstart instead
-            result = subprocess.run(
-                ["sudo", "launchctl", "kickstart", "-k", f"system/{TUNNELD_LABEL}"],
-                timeout=30,
-            )
-            if result.returncode != 0:
-                print("Warning: launchctl bootstrap/kickstart failed")
-                print("  The daemon may already be loaded. Check: ./quern tunneld status")
+        # NamedTemporaryFile produces mode 600; LaunchDaemons should be 644
+        # (root-writable, world-readable). 600 has historically worked but is
+        # not what Apple recommends.
+        if not _run_sudo(["chmod", "644", str(PLIST_PATH)], timeout=10):
+            print("Warning: Failed to set plist permissions")
+
+        if not _run_sudo(
+            ["launchctl", "bootstrap", "system", str(PLIST_PATH)], timeout=30,
+        ):
+            print("Error: launchctl bootstrap failed.")
+            print("  Diagnose with: sudo launchctl print system/com.quern.tunneld")
+            print("  Validate plist: sudo plutil -lint " + str(PLIST_PATH))
+            return 1
 
         print("tunneld LaunchDaemon installed successfully.")
         print(f"  Logs: {LOG_PATH}")
@@ -262,6 +259,24 @@ def install_daemon() -> int:
         return 0
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _run_sudo(args: list[str], timeout: int) -> bool:
+    """Run a sudo command and return True on exit 0.
+
+    Wraps subprocess timeout so a hung launchctl can't crash the install
+    script with an unhandled TimeoutExpired. Returns False on any failure
+    (non-zero exit, timeout, OS error) without propagating exceptions.
+    """
+    try:
+        result = subprocess.run(["sudo", *args], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"Warning: `sudo {' '.join(args)}` timed out after {timeout}s")
+        return False
+    except OSError as exc:
+        print(f"Warning: `sudo {' '.join(args)}` failed: {exc}")
+        return False
+    return result.returncode == 0
 
 
 def uninstall_daemon() -> int:

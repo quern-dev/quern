@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **tunneld log path moved to `/Library/Logs/com.quern.tunneld.log`** — previously the LaunchDaemon plist baked `~/.quern/tunneld.log` (resolved to an absolute path at install time) into `StandardOutPath` / `StandardErrorPath`. For users whose home directory lived on an external volume, launchd would pre-create the home-directory path at boot before the volume mounted, blocking the real volume from mounting under its expected name (it would mount as `Home 1` instead, breaking login). The daemon now logs to a system-owned location that always exists at boot and never touches the user home.
 
+### Fixed
+- **`./quern tunneld install` correctly upgrades an already-loaded daemon** — the previous flow ran `launchctl bootstrap` against a loaded service (returns EIO 5) and fell back to `kickstart -k`, which sent SIGKILL to the running process and hung launchctl on macOS 15. Install now does `bootout → cp → chown → chmod 644 → bootstrap`, matching Apple's documented plist-swap dance.
+- **Plist permissions normalized to `644`** — `NamedTemporaryFile` produces mode `600`, which `cp` preserves. `600` worked but isn't Apple-recommended; install now `chmod 644`s after copy.
+- **Hung launchctl no longer crashes the install script** — `subprocess.TimeoutExpired` and `OSError` are caught with a warning instead of propagating as an unhandled traceback.
+
 ### Migration
 - Existing installs are detected automatically. `./quern setup`, `./quern status`, `./quern start`, and `./quern tunneld status` all surface a warning when the installed plist still references the old user-home log path.
 - To migrate: run `./quern tunneld install` (or accept the prompt in `./quern setup`). The command unconditionally overwrites the plist, sets root ownership, and reloads the daemon.
