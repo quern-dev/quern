@@ -5,6 +5,11 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-05-28
+
+### Fixed
+- **SwiftUI toolbar items on pushed nav controllers are now discovered** — when a SwiftUI view in a `UIHostingController` is pushed onto a `UINavigationController`, the nav-bar accessibility container exposes as a plain `AXGroup` with an empty `role_description`, an identifier set to the screen's nav title, and no enumerated children. Its `.topBarTrailing` / `.topBarLeading` toolbar buttons never appeared in `describe_all` output, even with an explicit `.accessibilityIdentifier(...)`. `is_probeable_container` now also probes top-of-screen `AXGroup`s (y < 120pt, height ≤ 80pt) that carry an identifier (`identifier` or `AXUniqueId`) and have no children — the SwiftUI pushed-nav-bar signature — so `find_empty_containers` hit-tests them and surfaces the toolbar items. Verified live against an iOS 26.5 simulator (Geocaching app): the Profile screen's gear icon, Friends button, and a list's "+" toolbar item all surface without coordinate-based fallbacks. Adds 5 unit tests covering positive (`identifier` / `AXUniqueId`) and negative (no identifier, below the nav-bar zone, too tall) cases.
+
 ## [0.13.1] - 2026-05-28
 
 ### Changed
