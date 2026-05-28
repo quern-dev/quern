@@ -26,6 +26,13 @@ PROBEABLE_ROLES = frozenset({
 # Probe interval in points — smaller than iOS minimum tap target (44pt)
 PROBE_STEP = 20
 
+# Geometry thresholds for recognizing nav-bar-shaped Groups whose
+# role_description is empty (SwiftUI pushed-nav screens hit this case).
+# A standard iOS nav bar sits below the safe-area top (~44-100pt y) with a
+# height of 44-60pt; we allow some slack on both ends.
+NAV_BAR_MAX_Y = 120
+NAV_BAR_MAX_HEIGHT = 80
+
 
 def is_probeable_container(item: dict) -> bool:
     """Check if an item is an interactive container with no enumerated children."""
@@ -40,6 +47,19 @@ def is_probeable_container(item: dict) -> bool:
     label = item.get("AXLabel") or ""
     if item.get("type") == "Group" and "tab bar" in label.lower():
         return True
+
+    # SwiftUI pushed-nav screens (`UIHostingController` inside a
+    # `UINavigationController`) expose their nav-bar accessibility container
+    # as a plain `AXGroup` with empty role_description but a non-empty
+    # identifier (set to the screen's nav title), and report no enumerated
+    # children. Recognize it by the nav-bar geometry so toolbar items inside
+    # get probed.
+    if item.get("type") == "Group" and (item.get("AXUniqueId") or item.get("identifier")):
+        frame = item.get("frame") or {}
+        y = frame.get("y", 0)
+        height = frame.get("height", 0)
+        if y < NAV_BAR_MAX_Y and 0 < height <= NAV_BAR_MAX_HEIGHT:
+            return True
 
     return False
 
