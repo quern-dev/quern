@@ -662,6 +662,8 @@ typealias AppendEventFn = @convention(c) (CFTypeRef, CFTypeRef, UInt32) -> Void
 typealias TrackpadWrapFn = @convention(c) (UnsafeRawPointer) -> UnsafeMutableRawPointer?
 typealias ButtonFn = @convention(c) (UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
 typealias HIDArbitraryFn = @convention(c) (UInt32, UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
+typealias KeyboardArbitraryFn = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
+typealias ModifierKeyBitFn = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
 typealias ServiceFn = @convention(c) () -> UnsafeMutableRawPointer?
 
 nonisolated(unsafe) var createDigitizerFn: CreateDigitizerFn?
@@ -670,6 +672,8 @@ nonisolated(unsafe) var appendEventFn: AppendEventFn?
 nonisolated(unsafe) var trackpadWrapFn: TrackpadWrapFn?
 nonisolated(unsafe) var buttonFn: ButtonFn?
 nonisolated(unsafe) var hidArbFn: HIDArbitraryFn?
+nonisolated(unsafe) var keyboardArbFn: KeyboardArbitraryFn?
+nonisolated(unsafe) var modifierBitFn: ModifierKeyBitFn?
 nonisolated(unsafe) var createPointerSvc: ServiceFn?
 nonisolated(unsafe) var createMouseSvc: ServiceFn?
 nonisolated(unsafe) var hidSymbolsResolved = false
@@ -702,6 +706,8 @@ func resolveHIDSymbols() -> Bool {
     trackpadWrapFn    = unsafeBitCast(pWrap, to: TrackpadWrapFn.self)
     buttonFn = dlsym(kit, "IndigoHIDMessageForButton").map { unsafeBitCast($0, to: ButtonFn.self) }
     hidArbFn = dlsym(kit, "IndigoHIDMessageForHIDArbitrary").map { unsafeBitCast($0, to: HIDArbitraryFn.self) }
+    keyboardArbFn = dlsym(kit, "IndigoHIDMessageForKeyboardArbitrary").map { unsafeBitCast($0, to: KeyboardArbitraryFn.self) }
+    modifierBitFn = dlsym(kit, "IndigoHIDMessageForModifierKeyBit").map { unsafeBitCast($0, to: ModifierKeyBitFn.self) }
     createPointerSvc = dlsym(kit, "IndigoHIDMessageToCreatePointerService").map { unsafeBitCast($0, to: ServiceFn.self) }
     createMouseSvc = dlsym(kit, "IndigoHIDMessageToCreateMouseService").map { unsafeBitCast($0, to: ServiceFn.self) }
     hidSymbolsResolved = true
@@ -919,8 +925,72 @@ func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyO
 
 // Text typing — decompose ASCII to HID keycodes
 
+/// NSEvent modifier-flag bit index for a HID modifier usage (page 7).
+/// IndigoHIDMessageForModifierKeyBit accepts bits 16-20:
+/// 16 = caps lock, 17 = shift, 18 = control, 19 = option, 20 = command.
+func modifierBit(forUsage usage: UInt32) -> UInt32? {
+    switch usage {
+    case 0xE1, 0xE5: return 17 // left/right shift
+    case 0xE0, 0xE4: return 18 // left/right control
+    case 0xE2, 0xE6: return 19 // left/right option
+    case 0xE3, 0xE7: return 20 // left/right command
+    case 0x39:       return 16 // caps lock
+    default:         return nil
+    }
+}
+
 func doTypeText(udid: String, text: String) -> Bool {
     guard let client = ensureHIDClient(udid: udid) else { return false }
+
+    // Preferred path: dedicated keyboard messages (same class Simulator.app's own
+    // keyboard passthrough emits). The generic HIDArbitrary path drops modifier
+    // state on freshly-booted or heavily-loaded simulators — keys land unshifted.
+    if keyboardArbFn != nil && modifierBitFn != nil {
+        return typeTextViaKeyboardMessages(text: text, client: client)
+    }
+    return typeTextViaArbitraryHID(text: text, client: client)
+}
+
+func typeTextViaKeyboardMessages(text: String, client: AnyObject) -> Bool {
+    guard let keyFn = keyboardArbFn, let modFn = modifierBitFn else { return false }
+
+    for c in text {
+        guard let (keyUsage, modifiers) = decomposeCharacter(c) else {
+            logErr("[hid] unsupported character: \(c)")
+            continue
+        }
+        let modifierBits = modifiers.compactMap { modifierBit(forUsage: $0) }
+
+        // Modifier-down (stateful modifier bit, survives event batching)
+        for bit in modifierBits {
+            guard let down = modFn(bit, 1) else { continue }
+            sendHIDMessage(down, to: client)
+        }
+        if !modifierBits.isEmpty {
+            usleep(10_000)
+        }
+
+        // Key down
+        guard let keyDown = keyFn(keyUsage, 1) else { continue }
+        sendHIDMessage(keyDown, to: client)
+        usleep(20_000)
+
+        // Key up
+        guard let keyUp = keyFn(keyUsage, 2) else { continue }
+        sendHIDMessage(keyUp, to: client)
+
+        // Modifier-up (reverse order)
+        for bit in modifierBits.reversed() {
+            guard let up = modFn(bit, 0) else { continue }
+            sendHIDMessage(up, to: client)
+        }
+
+        usleep(30_000) // 30ms between characters
+    }
+    return true
+}
+
+func typeTextViaArbitraryHID(text: String, client: AnyObject) -> Bool {
     guard let kfn = hidArbFn else {
         logErr("[hid] IndigoHIDMessageForHIDArbitrary unresolved")
         return false
