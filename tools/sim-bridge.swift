@@ -717,8 +717,81 @@ func resolveHIDSymbols() -> Bool {
 // Per-device HID client cache
 nonisolated(unsafe) var hidClients: [String: AnyObject] = [:]
 
+final class HIDSendResult {
+    let semaphore = DispatchSemaphore(value: 0)
+    var error: NSError?
+}
+
+/// Send a message and wait for delivery confirmation. Returns false when the
+/// client's connection is dead (e.g. the device rebooted after the client was
+/// created) or no completion arrives in time.
+func sendHIDMessageChecked(_ message: UnsafeMutableRawPointer,
+                           to client: AnyObject,
+                           timeout: TimeInterval = 1.0) -> Bool {
+    let sel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
+    guard let cls = object_getClass(client),
+          let imp = class_getMethodImplementation(cls, sel) else { return false }
+
+    let result = HIDSendResult()
+    let completion: @convention(block) (NSError?) -> Void = { error in
+        result.error = error
+        result.semaphore.signal()
+    }
+    typealias Fn = @convention(c) (
+        AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool,
+        AnyObject?, (@convention(block) (NSError?) -> Void)?
+    ) -> Void
+    unsafeBitCast(imp, to: Fn.self)(
+        client, sel, message, ObjCBool(true),
+        DispatchQueue.global(qos: .userInitiated), completion
+    )
+    if result.semaphore.wait(timeout: .now() + timeout) == .timedOut {
+        logErr("[hid] checked send timed out")
+        return false
+    }
+    if let error = result.error {
+        logErr("[hid] checked send failed: \(error)")
+        return false
+    }
+    return true
+}
+
+/// Verify a cached client still reaches the device's current boot.
+/// Re-sending a create-pointer-service message is harmless (it is already
+/// sent at client init) and round-trips through the device connection.
+func isHIDClientAlive(_ client: AnyObject) -> Bool {
+    guard let create = createPointerSvc, let probe = create() else {
+        return true // cannot probe — keep legacy behavior
+    }
+    return sendHIDMessageChecked(probe, to: client)
+}
+
+/// Prime the keyboard event path. backboardd creates the keyboard service
+/// lazily on the first KEY event; modifier-bit messages sent before that are
+/// silently discarded (observed as the first shifted character of a fresh
+/// client losing its shift). A bare shift keypress creates the service
+/// without producing any text. Called from the typing path only — keyboard
+/// events flip the simulator into hardware-keyboard mode (hiding the soft
+/// keyboard and surfacing the AutoFill bar), so taps must stay free of them.
+func primeKeyboardService(_ client: AnyObject) {
+    guard let keyFn = keyboardArbFn else { return }
+    if let down = keyFn(0xE1, 1) {
+        _ = sendHIDMessageChecked(down, to: client, timeout: 0.5)
+    }
+    if let up = keyFn(0xE1, 2) {
+        _ = sendHIDMessageChecked(up, to: client, timeout: 0.5)
+    }
+    usleep(20_000)
+}
+
 func ensureHIDClient(udid: String) -> AnyObject? {
-    if let existing = hidClients[udid] { return existing }
+    if let existing = hidClients[udid] {
+        if isHIDClientAlive(existing) {
+            return existing
+        }
+        logErr("[hid] cached client for \(udid) is stale (device rebooted?) — recreating")
+        hidClients.removeValue(forKey: udid)
+    }
     guard resolveHIDSymbols() else {
         logErr("[hid] symbol resolution failed")
         return nil
@@ -953,6 +1026,8 @@ func doTypeText(udid: String, text: String) -> Bool {
 
 func typeTextViaKeyboardMessages(text: String, client: AnyObject) -> Bool {
     guard let keyFn = keyboardArbFn, let modFn = modifierBitFn else { return false }
+
+    primeKeyboardService(client)
 
     for c in text {
         guard let (keyUsage, modifiers) = decomposeCharacter(c) else {
