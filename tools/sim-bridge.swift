@@ -996,6 +996,36 @@ func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyO
     return true
 }
 
+// Hardware keyboard toggle
+
+/// Attach or detach the simulated hardware keyboard. Same CoreSimulator call
+/// Simulator.app's "Connect Hardware Keyboard" (shift-cmd-K) toggle uses.
+/// With the hardware keyboard enabled the software keyboard stays hidden;
+/// disabling it restores the software keyboard for focused text fields.
+func setHardwareKeyboard(udid: String, enabled: Bool) -> Bool {
+    guard let device = resolveDevice(udid: udid) else {
+        logErr("[kb] device not found: \(udid)")
+        return false
+    }
+    let sel = NSSelectorFromString("setHardwareKeyboardEnabled:keyboardType:error:")
+    guard device.responds(to: sel),
+          let cls = object_getClass(device),
+          let imp = class_getMethodImplementation(cls, sel) else {
+        logErr("[kb] SimDevice does not respond to setHardwareKeyboardEnabled:keyboardType:error:")
+        return false
+    }
+    typealias Fn = @convention(c) (
+        AnyObject, Selector, ObjCBool, UInt32,
+        AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> ObjCBool
+    var err: NSError?
+    let ok = unsafeBitCast(imp, to: Fn.self)(device, sel, ObjCBool(enabled), 0, &err)
+    if ok.boolValue == false, let err {
+        logErr("[kb] setHardwareKeyboardEnabled failed: \(err)")
+    }
+    return ok.boolValue
+}
+
 // Text typing — decompose ASCII to HID keycodes
 
 /// NSEvent modifier-flag bit index for a HID modifier usage (page 7).
@@ -1364,6 +1394,18 @@ func handleCommand(_ dict: [String: Any]) {
             respond(["ok": true])
         } else {
             respond(["ok": false, "error": "button '\(name)' failed"])
+        }
+
+    case "set-hardware-keyboard":
+        guard let udid = dict["udid"] as? String,
+              let enabled = dict["enabled"] as? Bool else {
+            respond(["ok": false, "error": "missing 'udid' or 'enabled'"])
+            return
+        }
+        if setHardwareKeyboard(udid: udid, enabled: enabled) {
+            respond(["ok": true, "enabled": enabled])
+        } else {
+            respond(["ok": false, "error": "set-hardware-keyboard failed"])
         }
 
     case "screenshot":

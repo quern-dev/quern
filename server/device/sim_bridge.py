@@ -365,6 +365,11 @@ class SimBridgeBackend:
     async def press_button(self, udid: str, button: str) -> None:
         await self._send({"cmd": "button", "udid": udid, "name": button})
 
+    async def set_hardware_keyboard(self, udid: str, enabled: bool) -> None:
+        await self._send({
+            "cmd": "set-hardware-keyboard", "udid": udid, "enabled": enabled,
+        })
+
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
         element_type: str | None = None,
