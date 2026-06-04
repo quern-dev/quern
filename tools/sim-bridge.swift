@@ -1045,6 +1045,14 @@ func modifierBit(forUsage usage: UInt32) -> UInt32? {
 func doTypeText(udid: String, text: String) -> Bool {
     guard let client = ensureHIDClient(udid: udid) else { return false }
 
+    // backboardd only honors modifier state while the simulated hardware
+    // keyboard is attached; with it detached (the default on a fresh boot),
+    // shifted characters silently lose their modifier. Attach before typing —
+    // the same call Simulator.app makes when its window takes focus. Side
+    // effect: the software keyboard hides; callers that need it visible
+    // afterward can detach via the set-hardware-keyboard command.
+    _ = setHardwareKeyboard(udid: udid, enabled: true)
+
     // Preferred path: dedicated keyboard messages (same class Simulator.app's own
     // keyboard passthrough emits). The generic HIDArbitrary path drops modifier
     // state on freshly-booted or heavily-loaded simulators — keys land unshifted.

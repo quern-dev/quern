@@ -504,7 +504,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("type_text", {
-    description: `Type text into the currently focused input field.`,
+    description: `Type text into the currently focused input field. On iOS simulators this attaches the simulated hardware keyboard before typing (required for shifted characters to retain their modifier), which hides the software keyboard — use set_hardware_keyboard with enabled=false afterward if a later step expects the software keyboard to be visible.`,
     inputSchema: strictParams({
       text: z.string().describe("Text to type"),
       udid: z
