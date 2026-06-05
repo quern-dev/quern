@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import socket
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -525,23 +524,32 @@ async def record_device_proxy_config_endpoint(
 @router.get("/setup-guide")
 async def setup_guide(request: Request) -> dict:
     """Get device proxy setup instructions with auto-detected local IP and network interface."""
+    from server.lifecycle.state import enumerate_local_interfaces
+
     adapter = request.app.state.proxy_adapter
     port = adapter.listen_port if adapter else 9101
 
-    # Auto-detect local IP
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        local_ip = "127.0.0.1"
+    # Enumerate all active interfaces so we can advertise every Mac IP a
+    # device might need to reach (Wi-Fi + Ethernet on different subnets is
+    # common). The default-route entry is what `local_ip` reflects.
+    interfaces = enumerate_local_interfaces()
+    default_iface = next((i for i in interfaces if i["is_default_route"]), None)
+    local_ip = default_iface["ip"] if default_iface else (
+        interfaces[0]["ip"] if interfaces else "127.0.0.1"
+    )
 
     # Auto-detect active network interface name (macOS networksetup name)
     active_interface = _detect_active_interface()
 
     # Detect VPN and other potential issues
     warnings = _detect_proxy_warnings()
+
+    # Flag multi-interface ambiguity so callers know not to trust a single
+    # IP. Mirrors the warning in proxy_status.
+    distinct_subnets = {i["subnet"] for i in interfaces if i["subnet"]}
+    multi_interface = len(distinct_subnets) >= 2
+    if multi_interface:
+        warnings.append("multi_interface_active")
 
     # Get cert status for booted devices from persistent state
     cert_status_by_device = {}
@@ -585,9 +593,27 @@ async def setup_guide(request: Request) -> dict:
             "route -n get default | grep interface, then "
             "networksetup -listallhardwareports | grep -B1 <device>"
         )
+    if multi_interface:
+        iface_summary = ", ".join(
+            f"{i['interface']}={i['ip']}"
+            + (f" (Wi-Fi: {i['ssid']})" if i.get('ssid') else "")
+            + (" [default route]" if i['is_default_route'] else "")
+            for i in interfaces
+        )
+        multi_iface_note = (
+            "1. Multiple network interfaces are active on different subnets — "
+            f"{iface_summary}. The proxy server listens on 0.0.0.0:" + str(port)
+            + " so it's reachable on any of them, but a physical device must "
+            "use the Mac IP on its OWN subnet. See the physical-device steps "
+            "for guidance; for system-proxy mode on the Mac itself, pick the "
+            "interface you actually want to capture from."
+        )
+    else:
+        multi_iface_note = (
+            "1. (Only one interface is active — no ambiguity here.)"
+        )
     simulator_steps.extend([
-        "1. If you have multiple network interfaces active (e.g. Wi-Fi + Ethernet), "
-        "disable the one you're NOT using to avoid routing ambiguity.",
+        multi_iface_note,
         f"2. Set proxy on the Mac's active network interface (NOT in simulator settings): "
         f"{set_proxy_cmd}",
         "3. Install the CA certificate into the simulator keychain: "
@@ -611,10 +637,32 @@ async def setup_guide(request: Request) -> dict:
     api_port = request.app.state.config.port
     cert_url = f"http://{local_ip}:{api_port}/api/v1/proxy/cert"
 
+    # Physical-device step 5: when multiple interfaces are active, the
+    # user has to pick the Mac IP on the same subnet as the device. Spell
+    # the options out instead of advertising a single (possibly wrong) IP.
+    if multi_interface:
+        iface_lines = []
+        for i in interfaces:
+            label = i["interface"]
+            if i.get("ssid"):
+                label += f" (Wi-Fi: {i['ssid']})"
+            if i["is_default_route"]:
+                label += " [default route]"
+            iface_lines.append(f"     - {i['ip']} on {label}")
+        step_5 = (
+            f"5. Set Server to the Mac IP on the same subnet as this device "
+            f"(check Settings > Wi-Fi > (network) > IP Address on the device). "
+            f"Port: {port}.\n   Active Mac interfaces:\n"
+            + "\n".join(iface_lines)
+        )
+    else:
+        step_5 = f"5. Set Server: {local_ip}, Port: {port}"
+
     return {
         "proxy_host": local_ip,
         "proxy_port": port,
         "active_interface": active_interface,
+        "interfaces": interfaces,
         "warnings": warnings,
         "cert_install_url": cert_url,
         "cert_status": cert_status_by_device,
@@ -635,7 +683,7 @@ async def setup_guide(request: Request) -> dict:
                     "3. Trust the certificate — Settings > General > About > "
                     "Certificate Trust Settings",
                     "4. Go to Settings > Wi-Fi > (your network) > Configure Proxy > Manual",
-                    f"5. Set Server: {local_ip}, Port: {port}",
+                    step_5,
                 ],
             },
         ],

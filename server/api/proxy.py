@@ -11,7 +11,12 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from server.lifecycle.state import detect_current_ssid, detect_host_ip_for_subnet, update_state
+from server.lifecycle.state import (
+    detect_current_ssid,
+    detect_host_ip_for_subnet,
+    enumerate_local_interfaces,
+    update_state,
+)
 from server.models import (
     CaptureStartRequest,
     CaptureStartResponse,
@@ -23,6 +28,7 @@ from server.models import (
     FlowQueryResponse,
     FlowRecord,
     FlowSummaryResponse,
+    InterfaceInfo,
     ProxyStatusResponse,
     SystemProxyInfo,
     SystemProxyRestoreInfo,
@@ -87,6 +93,14 @@ async def _get_proxy_status(
     cert_setup = None
     system_proxy_info: SystemProxyInfo | None = None
     local_ip = _detect_local_ip()
+    local_ips = [InterfaceInfo(**entry) for entry in enumerate_local_interfaces()]
+    warnings: list[str] = []
+    # Flag multi-interface ambiguity: more than one distinct /24 means
+    # `local_ip` alone can't tell a caller which IP to point a physical
+    # device at. The full list in `local_ips` is the right answer.
+    distinct_subnets = {iface.subnet for iface in local_ips if iface.subnet}
+    if len(distinct_subnets) >= 2:
+        warnings.append("multi_interface_active")
     try:
         from server.proxy.cert_state import read_cert_state, strip_noncanonical_fields
         device_certs = read_cert_state()
@@ -177,6 +191,8 @@ async def _get_proxy_status(
             status="stopped",
             local_capture=local_capture,
             local_ip=local_ip,
+            local_ips=local_ips,
+            warnings=warnings,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
             network_state=network_state_dict,
@@ -195,6 +211,8 @@ async def _get_proxy_status(
             bypass_patterns=adapter.get_bypass_patterns(),
             local_capture=local_capture,
             local_ip=local_ip,
+            local_ips=local_ips,
+            warnings=warnings,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
             network_state=network_state_dict,
@@ -213,6 +231,8 @@ async def _get_proxy_status(
             bypass_patterns=adapter.get_bypass_patterns(),
             local_capture=local_capture,
             local_ip=local_ip,
+            local_ips=local_ips,
+            warnings=warnings,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
             network_state=network_state_dict,
@@ -225,6 +245,8 @@ async def _get_proxy_status(
         flows_captured=flow_store.size if flow_store else 0,
         local_capture=local_capture,
         local_ip=local_ip,
+        local_ips=local_ips,
+        warnings=warnings,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,
         network_state=network_state_dict,

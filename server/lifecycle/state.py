@@ -220,6 +220,101 @@ def detect_host_ip_for_subnet(device_ip: str) -> str | None:
     return None
 
 
+def enumerate_local_interfaces() -> list[dict]:
+    """Enumerate active Mac network interfaces with IPv4 addresses, the
+    default-route flag, and the Wi-Fi SSID when applicable.
+
+    Each entry: ``{"interface", "ip", "subnet", "is_default_route", "ssid"}``.
+    Loopback (127.0.0.0/8) is excluded. ``subnet`` is a /24 string; ``ssid``
+    is set only for Wi-Fi interfaces that are currently associated.
+
+    Used by ``proxy_status`` and ``proxy_setup_guide`` to disambiguate which
+    Mac IP to advertise when multiple interfaces are active on different
+    subnets — the single ``local_ip`` field (default-route only) is wrong
+    in that scenario for any device not on the default-route subnet.
+    """
+    import ipaddress
+    import subprocess
+
+    entries: list[dict] = []
+    try:
+        result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+
+    current_iface: str | None = None
+    for raw in result.stdout.splitlines():
+        # Interface header lines start at column 0 ("en0: flags=...");
+        # `inet` lines are indented. Track the most-recent header so we can
+        # attach each address to the right BSD device.
+        if raw and not raw[0].isspace():
+            if ":" in raw:
+                current_iface = raw.split(":", 1)[0]
+            continue
+        stripped = raw.strip()
+        if not current_iface or not stripped.startswith("inet ") or stripped.startswith("inet6"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        ip = parts[1]
+        # Skip loopback (127.0.0.0/8) and link-local autoconfig
+        # (APIPA, 169.254.0.0/16). Link-local addresses appear on
+        # interfaces that never got a DHCP lease — they're not reachable
+        # from devices on any real subnet, so they'd only add noise to
+        # the multi-interface ambiguity check.
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        try:
+            subnet = str(ipaddress.ip_network(f"{ip}/24", strict=False))
+        except ValueError:
+            subnet = None
+        entries.append({
+            "interface": current_iface,
+            "ip": ip,
+            "subnet": subnet,
+            "is_default_route": False,
+            "ssid": None,
+        })
+
+    if not entries:
+        return entries
+
+    # Annotate default-route interface. Import locally to avoid a module
+    # cycle with server.proxy.system_proxy (which already imports state).
+    try:
+        from server.proxy.system_proxy import get_default_route_device
+        default_iface = get_default_route_device()
+    except Exception:
+        default_iface = None
+    if default_iface:
+        for entry in entries:
+            if entry["interface"] == default_iface:
+                entry["is_default_route"] = True
+
+    # Best-effort per-interface SSID lookup. networksetup -getairportnetwork
+    # errors out on non-Wi-Fi interfaces; we treat any non-match as None.
+    for entry in entries:
+        entry["ssid"] = _get_interface_ssid(entry["interface"])
+
+    return entries
+
+
+def _get_interface_ssid(interface: str) -> str | None:
+    """Return the SSID for a Wi-Fi interface, or None if not Wi-Fi or not connected."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["networksetup", "-getairportnetwork", interface],
+            capture_output=True, text=True, timeout=3,
+        )
+    except Exception:
+        return None
+    if "Current Wi-Fi Network:" in result.stdout:
+        return result.stdout.split("Current Wi-Fi Network:", 1)[1].strip()
+    return None
+
+
 def detect_current_ssid() -> str | None:
     """Return the current Wi-Fi SSID, or None if not connected / not detectable."""
     import subprocess

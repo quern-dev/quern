@@ -450,6 +450,24 @@ class WaitForFlowResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class InterfaceInfo(BaseModel):
+    """One active Mac network interface with its IPv4 address.
+
+    Returned in ``ProxyStatusResponse.local_ips`` to disambiguate which Mac
+    IP to advertise when the host has multiple interfaces on different
+    subnets (Wi-Fi + Ethernet to different networks). The default-route
+    interface — what ``local_ip`` reflects — is correct for outbound
+    traffic but not necessarily reachable from a physical device on the
+    *other* interface's subnet.
+    """
+
+    interface: str  # BSD device name (e.g. "en0", "en10")
+    ip: str  # IPv4 address
+    subnet: str | None = None  # /24 containing `ip`, e.g. "192.168.31.0/24"
+    is_default_route: bool = False  # OS default-route interface (matches `local_ip`)
+    ssid: str | None = None  # Wi-Fi SSID when the interface is associated, else None
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -466,6 +484,19 @@ class ProxyStatusResponse(BaseModel):
     error: str | None = None
     local_capture: list[str] = Field(default_factory=list)
     local_ip: str | None = None
+    """OS default-route IP — one entry from ``local_ips``. Convenient when
+    there's only one interface; misleading in dual-interface setups. Prefer
+    ``local_ips`` and per-device subnet matching when configuring a
+    physical device's manual proxy."""
+    local_ips: list[InterfaceInfo] = Field(default_factory=list)
+    """Every active non-loopback IPv4 interface on the Mac. Pick the entry
+    whose ``subnet`` matches the device's LAN IP when configuring a
+    physical device's Wi-Fi proxy — the device must be on the same subnet
+    as the Mac IP it talks to."""
+    warnings: list[str] = Field(default_factory=list)
+    """Network-state warnings the agent should surface. Currently:
+    ``"multi_interface_active"`` — more than one interface is on a distinct
+    /24, so ``local_ip`` is not the right answer for every device."""
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
     network_state: dict | None = None

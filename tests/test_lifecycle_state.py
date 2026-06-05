@@ -198,3 +198,139 @@ def test_write_creates_config_dir(tmp_path):
 
     assert nested.exists()
     assert state_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Multi-interface enumeration (proxy_status / setup_guide disambiguation)
+# ---------------------------------------------------------------------------
+
+
+_IFCONFIG_DUAL_INTERFACE = """\
+lo0: flags=8049<UP,LOOPBACK> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING> mtu 1500
+\tinet 192.168.31.243 netmask 0xffffff00 broadcast 192.168.31.255
+en10: flags=8863<UP,BROADCAST,SMART,RUNNING> mtu 1500
+\tinet 192.168.200.98 netmask 0xfffffe00 broadcast 192.168.201.255
+en14: flags=8863<UP,BROADCAST,SMART,RUNNING> mtu 1500
+\tinet 169.254.128.252 netmask 0xffff0000 broadcast 169.254.255.255
+utun0: flags=8051<UP,POINTOPOINT,RUNNING> mtu 1500
+"""
+
+
+def _mock_subprocess_run(ifconfig_stdout, ssid_responses=None):
+    """Return a subprocess.run double that maps ifconfig and networksetup."""
+    ssid_responses = ssid_responses or {}
+
+    def fake_run(cmd, *args, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        if cmd[0] == "ifconfig":
+            result.stdout = ifconfig_stdout
+        elif cmd[0] == "networksetup" and cmd[1] == "-getairportnetwork":
+            iface = cmd[2]
+            ssid = ssid_responses.get(iface)
+            result.stdout = (
+                f"Current Wi-Fi Network: {ssid}\n" if ssid
+                else "You are not associated with an AirPort network.\n"
+            )
+        else:
+            result.stdout = ""
+        return result
+    return fake_run
+
+
+def test_enumerate_local_interfaces_parses_ifconfig_and_excludes_loopback():
+    from server.lifecycle import state as state_mod
+
+    with (
+        patch.object(
+            state_mod.subprocess if hasattr(state_mod, "subprocess") else __import__("subprocess"),
+            "run",
+            side_effect=_mock_subprocess_run(_IFCONFIG_DUAL_INTERFACE),
+        ),
+        patch(
+            "server.proxy.system_proxy.get_default_route_device",
+            return_value="en10",
+        ),
+    ):
+        entries = state_mod.enumerate_local_interfaces()
+
+    # Loopback (127.x) and link-local (169.254.x) are excluded; en0 and en10 remain.
+    ips = {e["ip"] for e in entries}
+    assert ips == {"192.168.31.243", "192.168.200.98"}
+
+
+def test_enumerate_local_interfaces_marks_default_route():
+    from server.lifecycle import state as state_mod
+
+    with (
+        patch(
+            "subprocess.run",
+            side_effect=_mock_subprocess_run(_IFCONFIG_DUAL_INTERFACE),
+        ),
+        patch(
+            "server.proxy.system_proxy.get_default_route_device",
+            return_value="en10",
+        ),
+    ):
+        entries = state_mod.enumerate_local_interfaces()
+
+    default = [e for e in entries if e["is_default_route"]]
+    assert len(default) == 1
+    assert default[0]["interface"] == "en10"
+    assert default[0]["ip"] == "192.168.200.98"
+
+
+def test_enumerate_local_interfaces_attaches_ssid_for_wifi():
+    from server.lifecycle import state as state_mod
+
+    with (
+        patch(
+            "subprocess.run",
+            side_effect=_mock_subprocess_run(
+                _IFCONFIG_DUAL_INTERFACE,
+                ssid_responses={"en0": "Lilypad"},
+            ),
+        ),
+        patch(
+            "server.proxy.system_proxy.get_default_route_device",
+            return_value="en10",
+        ),
+    ):
+        entries = state_mod.enumerate_local_interfaces()
+
+    by_iface = {e["interface"]: e for e in entries}
+    assert by_iface["en0"]["ssid"] == "Lilypad"
+    # en10 is Ethernet — no SSID
+    assert by_iface["en10"]["ssid"] is None
+
+
+def test_enumerate_local_interfaces_computes_subnet():
+    from server.lifecycle import state as state_mod
+
+    with (
+        patch(
+            "subprocess.run",
+            side_effect=_mock_subprocess_run(_IFCONFIG_DUAL_INTERFACE),
+        ),
+        patch(
+            "server.proxy.system_proxy.get_default_route_device",
+            return_value=None,
+        ),
+    ):
+        entries = state_mod.enumerate_local_interfaces()
+
+    by_ip = {e["ip"]: e for e in entries}
+    assert by_ip["192.168.31.243"]["subnet"] == "192.168.31.0/24"
+    assert by_ip["192.168.200.98"]["subnet"] == "192.168.200.0/24"
+
+
+def test_enumerate_local_interfaces_handles_ifconfig_failure():
+    """If ifconfig itself blows up, return an empty list rather than raising."""
+    from server.lifecycle import state as state_mod
+
+    with patch("subprocess.run", side_effect=OSError("no ifconfig")):
+        entries = state_mod.enumerate_local_interfaces()
+
+    assert entries == []
