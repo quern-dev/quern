@@ -90,10 +90,29 @@ def _check_via_quern_dev(head_sha: str) -> bool | None:
         return None
 
 
+# The git branch that ships releases. Compared against directly when
+# answering "is there a Quern update available", regardless of which
+# branch the user happens to have checked out. Hardcoded for now; the
+# channels work (#41) will make this configurable so users can opt into
+# a `release/beta` track without leaving the install path they have.
+RELEASE_BRANCH = "main"
+
+
 def _check_via_git(project_root: Path) -> tuple[bool, str, int] | None:
     """Fall back to git fetch to check for updates.
 
-    Returns (has_updates, branch, behind_count) or None on failure.
+    Always compares HEAD against ``origin/<RELEASE_BRANCH>``, not against
+    the current branch's tracking ref — closes #40. A user on a non-
+    release branch (e.g. a developer hacking on a feature) was previously
+    told "already up to date" when the only thing that was up-to-date was
+    their feature branch vs its own remote; new releases on main were
+    silently ignored.
+
+    Returns ``(has_updates, current_branch, behind_count)`` or None on
+    failure. ``has_updates`` and ``behind_count`` are always measured
+    against ``origin/<RELEASE_BRANCH>``; ``current_branch`` is reported
+    so the caller can decide whether to actually pull (only safe on the
+    release branch) or just warn (any other branch).
     """
     result = subprocess.run(
         ["git", "fetch", "origin"],
@@ -117,31 +136,26 @@ def _check_via_git(project_root: Path) -> tuple[bool, str, int] | None:
     if result.returncode != 0:
         print("Error: could not determine current branch")
         return None
-    branch = result.stdout.strip()
+    current_branch = result.stdout.strip()
 
-    # Count commits behind
+    # Count commits behind origin/<RELEASE_BRANCH> — always, regardless
+    # of which branch is currently checked out.
     result = subprocess.run(
-        ["git", "rev-list", f"HEAD..origin/{branch}", "--count"],
+        ["git", "rev-list", f"HEAD..origin/{RELEASE_BRANCH}", "--count"],
         cwd=str(project_root),
         capture_output=True,
         text=True,
         timeout=10,
     )
     if result.returncode != 0:
-        result = subprocess.run(
-            ["git", "rev-list", "HEAD..origin/main", "--count"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=10,
+        print(
+            f"Error: could not compare HEAD against origin/{RELEASE_BRANCH} "
+            f"({result.stderr.strip()})"
         )
-        if result.returncode != 0:
-            print("Error: could not compare with remote (no tracking branch)")
-            return None
-        branch = "main"
+        return None
 
     behind_count = int(result.stdout.strip())
-    return (behind_count > 0, branch, behind_count)
+    return (behind_count > 0, current_branch, behind_count)
 
 
 def _update_via_git(project_root: Path) -> int:
@@ -170,6 +184,31 @@ def _update_via_git(project_root: Path) -> int:
         return 1
 
     has_updates, branch, behind_count = git_check
+
+    # Approach (A) from #40: when the user is on a non-release branch
+    # (typical for dev clones), the commit count is now truthful about
+    # `origin/<RELEASE_BRANCH>`, but pulling here would be wrong — `git
+    # pull --ff-only` tracks the current branch's upstream, not the
+    # release branch. So we report what's available and let the user
+    # decide whether to switch.
+    if branch != RELEASE_BRANCH:
+        if has_updates:
+            plural = "s" if behind_count != 1 else ""
+            print(
+                f"You're on branch `{branch}`. "
+                f"`origin/{RELEASE_BRANCH}` is {behind_count} commit{plural} ahead. "
+                f"Switch with `git checkout {RELEASE_BRANCH}` and rerun "
+                f"`quern update` to apply — or stay on `{branch}` "
+                f"if you're working on Quern itself."
+            )
+        else:
+            print(
+                f"You're on branch `{branch}` "
+                f"(not the release branch `{RELEASE_BRANCH}`). "
+                f"No new commits on `origin/{RELEASE_BRANCH}`."
+            )
+        return 2  # Skip rebuild — current workspace isn't pull-able
+
     if not has_updates:
         print("Already up to date.")
         return 2  # No update needed
