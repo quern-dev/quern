@@ -43,6 +43,7 @@ from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
+from server.api.system import router as system_router
 from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
 from server.config import ServerConfig, get_local_capture_processes, set_local_capture_processes
@@ -532,6 +533,7 @@ def create_app(
     app.include_router(build_app_router)
     app.include_router(app_state_router)
     app.include_router(landmarks_router)
+    app.include_router(system_router)
 
     @app.get("/")
     async def root() -> RedirectResponse:

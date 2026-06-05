@@ -25,6 +25,26 @@ export function registerLogTools(server: McpServer): void {
                 signal: AbortSignal.timeout(5000),
               });
               if (resp.ok) {
+                // Best-effort: surface the cached update-check result so
+                // Claude can mention "v0.13.5 is available" inline. The
+                // endpoint never blocks; if it errors we just omit the
+                // field. update_available=false is intentionally elided
+                // to keep the response quiet on the happy path.
+                let updateAvailable: unknown = undefined;
+                try {
+                  const upd = (await apiRequest(
+                    "GET",
+                    "/api/v1/system/update-status",
+                    undefined,
+                    undefined,
+                    2000,
+                  )) as { update_available?: boolean } | null;
+                  if (upd && upd.update_available) {
+                    updateAvailable = upd;
+                  }
+                } catch {
+                  // Older server or transient failure — skip silently.
+                }
                 return {
                   content: [
                     {
@@ -39,6 +59,9 @@ export function registerLogTools(server: McpServer): void {
                           api_key: state.api_key,
                           started_at: state.started_at,
                           pid: state.pid,
+                          ...(updateAvailable
+                            ? { update_available: updateAvailable }
+                            : {}),
                         },
                         null,
                         2
