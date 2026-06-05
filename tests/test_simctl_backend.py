@@ -439,3 +439,28 @@ class TestScreenshot:
             result = await backend.screenshot("AAAA-1111")
 
         assert result == fake_png
+
+
+# ---------------------------------------------------------------------------
+# Xcode-availability gate
+# ---------------------------------------------------------------------------
+
+
+class TestXcodeGate:
+    """On a no-Xcode Mac, simctl methods short-circuit without invoking
+    xcrun. The macOS install dialog fires before xcrun returns, so the
+    backend can't recover after the fact — see server/device/_xcode.py."""
+
+    async def test_is_available_returns_false_without_invoking_xcrun(self, monkeypatch):
+        monkeypatch.setattr("server.device.simctl.xcode_available", lambda: False)
+        backend = SimctlBackend()
+        with patch("asyncio.create_subprocess_exec") as exec_mock:
+            assert await backend.is_available() is False
+        assert exec_mock.call_count == 0
+
+    async def test_list_devices_returns_empty_without_invoking_xcrun(self, monkeypatch):
+        monkeypatch.setattr("server.device.simctl.xcode_available", lambda: False)
+        backend = SimctlBackend()
+        with patch("asyncio.create_subprocess_exec") as exec_mock:
+            assert await backend.list_devices() == []
+        assert exec_mock.call_count == 0

@@ -1055,3 +1055,63 @@ class TestRunUninstall:
             run_uninstall()
             output = capsys.readouterr().out
             assert "none were installed by setup" in output
+
+
+# ---------------------------------------------------------------------------
+# Xcode-availability gate
+# ---------------------------------------------------------------------------
+
+
+class TestXcodeGate:
+    """On a no-Xcode Mac, the setup checks short-circuit without invoking
+    xcrun — otherwise the macOS install dialog fires during ./quern setup."""
+
+    def test_check_xcode_cli_tools_reports_missing_without_invoking_xcrun(
+        self, monkeypatch,
+    ):
+        import server.lifecycle.setup as setup_mod
+        monkeypatch.setattr("server.lifecycle.setup.xcode_available", lambda: False)
+        # /usr/bin/xcrun ships on every modern macOS as an install-prompt
+        # stub, so `which xcrun` returns a path even on no-CLT machines —
+        # let the test see that path, then verify we don't actually run it.
+        monkeypatch.setattr(
+            "server.lifecycle.setup._which",
+            lambda name: "/usr/bin/xcrun" if name == "xcrun" else None,
+        )
+        with patch.object(setup_mod, "_run") as run_mock:
+            result = setup_mod.check_xcode_cli_tools()
+        assert result.status.name == "MISSING"
+        assert run_mock.call_count == 0
+
+    def test_check_booted_simulators_returns_empty_without_invoking_xcrun(
+        self, monkeypatch,
+    ):
+        import server.lifecycle.setup as setup_mod
+        monkeypatch.setattr("server.lifecycle.setup.xcode_available", lambda: False)
+        with patch.object(setup_mod, "_run") as run_mock:
+            assert setup_mod.check_booted_simulators() == []
+        assert run_mock.call_count == 0
+
+    def test_fix_developer_dir_skips_simctl_probe_when_no_xcode(
+        self, monkeypatch,
+    ):
+        """Without a developer dir, the initial `xcrun simctl help` probe
+        would trigger the install dialog. We should jump straight to
+        scanning /Applications instead."""
+        import server.lifecycle.setup as setup_mod
+        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        monkeypatch.setattr("server.lifecycle.setup.xcode_available", lambda: False)
+
+        # /Applications has no Xcode → function returns None without ever
+        # running xcrun.
+        monkeypatch.setattr("pathlib.Path.glob", lambda self, pattern: [])
+
+        # _run returns (rc, stdout, stderr); xcode-select -p is called
+        # for the diagnostic message — stub it with a non-xcrun result.
+        with patch.object(setup_mod, "_run", return_value=(1, "", "")) as run_mock:
+            result = setup_mod._fix_developer_dir_for_setup()
+        assert result is None
+        # No xcrun invocation — the initial probe was gated.
+        for call in run_mock.call_args_list:
+            args = call.args[0]
+            assert args[0] != "xcrun", f"unexpected xcrun call: {args}"

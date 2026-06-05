@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from server.device._xcode import xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.simctl")
@@ -57,7 +58,14 @@ class SimctlBackend:
         return stdout.decode(), stderr.decode()
 
     async def is_available(self) -> bool:
-        """Check if xcrun simctl is available and working."""
+        """Check if xcrun simctl is available and working.
+
+        Preflights via xcode-select so a no-Xcode machine never triggers
+        the macOS "install developer tools" dialog (which fires before
+        xcrun returns, so try/except on the subprocess can't suppress it).
+        """
+        if not xcode_available():
+            return False
         try:
             proc = await asyncio.create_subprocess_exec(
                 "xcrun", "simctl", "help",
@@ -81,7 +89,13 @@ class SimctlBackend:
             return False
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List all simulators by parsing simctl list devices --json."""
+        """List all simulators by parsing simctl list devices --json.
+
+        Short-circuits when Xcode isn't installed so the macOS "install
+        developer tools" dialog doesn't fire. See server/device/_xcode.py.
+        """
+        if not xcode_available():
+            return []
         stdout, _ = await self._run_simctl("list", "devices", "--json")
         data = json.loads(stdout)
         devices: list[DeviceInfo] = []
