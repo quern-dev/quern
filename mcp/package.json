@@ -3,12 +3,12 @@
   "version": "0.13.3",
   "description": "MCP server for Quern — thin wrapper over HTTP API",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/launcher.cjs",
   "bin": {
-    "quern-debug-mcp": "dist/index.js"
+    "quern-debug-mcp": "dist/launcher.cjs"
   },
   "scripts": {
-    "build": "tsc && chmod 755 dist/index.js",
+    "build": "tsc && cp src/launcher.cjs dist/launcher.cjs && chmod 755 dist/launcher.cjs dist/index.js",
     "dev": "tsc --watch"
   },
   "files": [
