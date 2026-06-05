@@ -802,6 +802,27 @@ Examples:
     }
   });
 
+  server.registerTool("set_hardware_keyboard", {
+    description: `Attach or detach the simulated hardware keyboard on an iOS simulator — the same switch as Simulator.app's "Connect Hardware Keyboard" (shift-cmd-K) toggle. enabled=true hides the software keyboard (smaller UI trees, unobstructed screenshots during form filling); enabled=false restores the software keyboard for focused text fields. NOTE: type_text flips the simulator into hardware-keyboard mode as a side effect of sending key events — call this with enabled=false afterward if a later step expects the software keyboard to be visible.`,
+    inputSchema: strictParams({
+      enabled: z.boolean().describe("true = attach hardware keyboard (software keyboard hidden), false = detach (software keyboard shows for focused fields)"),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ enabled, udid }) => {
+    try {
+      const body: Record<string, unknown> = { enabled };
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest("POST", "/api/v1/device/keyboard", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("set_font_scale", {
     description: `Set the font scale on an Android device or emulator. Takes effect immediately. Standard values: 0.85 (small), 1.0 (default), 1.15 (large), 1.30 (largest). Any float value is accepted.`,
     inputSchema: strictParams({

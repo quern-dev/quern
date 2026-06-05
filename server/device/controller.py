@@ -549,6 +549,27 @@ class DeviceController(DeviceControllerUI):
             )
         return resolved
 
+    async def set_hardware_keyboard(
+        self, enabled: bool, udid: str | None = None,
+    ) -> str:
+        """Attach/detach the simulated hardware keyboard. Returns the resolved udid.
+
+        iOS simulators only; requires the sim-bridge backend. While the
+        hardware keyboard is attached the software keyboard stays hidden,
+        which keeps UI trees small and screenshots unobstructed. Detaching
+        restores the software keyboard for focused text fields.
+        """
+        resolved = await self.resolve_udid(udid)
+        self._require_simulator(resolved, "Set hardware keyboard")
+        if not self._sim_bridge_ok:
+            raise DeviceError(
+                "set_hardware_keyboard requires the sim-bridge backend "
+                "(Xcode with SimulatorKit private frameworks)",
+                tool="sim-bridge",
+            )
+        await self.sim_bridge.set_hardware_keyboard(resolved, enabled)
+        return resolved
+
     async def set_font_scale(
         self, scale: float, udid: str | None = None,
     ) -> str:

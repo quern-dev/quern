@@ -82,6 +82,7 @@ from REST paths in non-obvious ways — this reference gives you the correct map
 | `shutdown_device` | POST | `/api/v1/device/shutdown` |
 | `grant_permission` | POST | `/api/v1/device/permission` |
 | `set_locale` | POST | `/api/v1/device/locale` |
+| `set_hardware_keyboard` | POST | `/api/v1/device/keyboard` |
 | `set_location` | POST | `/api/v1/device/location` |
 | `set_display_density` | POST | `/api/v1/device/display-density` |
 | `set_font_scale` | POST | `/api/v1/device/font-scale` |

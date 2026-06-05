@@ -21,6 +21,7 @@ from server.models import (
     PreviewStopRequest,
     SetDisplayDensityRequest,
     SetFontScaleRequest,
+    SetHardwareKeyboardRequest,
     SetLocaleRequest,
     SetLocationRequest,
     ShutdownDeviceRequest,
@@ -509,6 +510,19 @@ async def set_locale(request: Request, body: SetLocaleRequest):
         )
         locale_tag = f"{body.lang}-{body.country}" if body.country else body.lang
         return {"status": "ok", "udid": udid, "locale": locale_tag}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/keyboard")
+async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardRequest):
+    """Attach or detach the simulated hardware keyboard (iOS simulators only)."""
+    controller = _get_controller(request)
+    try:
+        udid = await controller.set_hardware_keyboard(
+            enabled=body.enabled, udid=body.udid,
+        )
+        return {"status": "ok", "udid": udid, "hardware_keyboard": body.enabled}
     except DeviceError as e:
         raise _handle_device_error(e)
 

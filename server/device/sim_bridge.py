@@ -28,6 +28,12 @@ _SOURCE_CANDIDATES = [
     Path(__file__).resolve().parent.parent.parent / "tools" / "sim-bridge.swift",
 ]
 
+# Max length of one stdout JSON line from the subprocess. asyncio's default
+# StreamReader limit is 64 KiB; a describe-ui response for a dense screen
+# (e.g. a map with hundreds of annotations) easily exceeds that, which made
+# readline() raise LimitOverrunError and killed the reader task.
+STREAM_LIMIT = 32 * 1024 * 1024
+
 
 def _find_source() -> Path | None:
     for p in _SOURCE_CANDIDATES:
@@ -43,6 +49,7 @@ class SimBridgeManager:
         self._process: asyncio.subprocess.Process | None = None
         self._ready = asyncio.Event()
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._binary_path = QUERN_BIN_DIR / BINARY_NAME
         self._pending_response: asyncio.Future | None = None
@@ -133,8 +140,10 @@ class SimBridgeManager:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=STREAM_LIMIT,
         )
         self._reader_task = asyncio.create_task(self._stdout_reader())
+        self._stderr_task = asyncio.create_task(self._stderr_reader())
 
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=15.0)
@@ -164,7 +173,34 @@ class SimBridgeManager:
         except Exception:
             logger.exception("sim-bridge stdout reader error")
         finally:
+            # The subprocess itself is usually still healthy when the reader
+            # dies (e.g. an oversized line). Kill it before dropping our
+            # reference — otherwise each respawn leaks an orphaned binary.
+            await self._kill_process()
             self._cleanup_state()
+
+    async def _stderr_reader(self) -> None:
+        """Background task: drains subprocess stderr into the debug log.
+
+        The Swift helper writes [PERF]/[ax]/[hid] diagnostics to stderr; if
+        nobody reads the pipe, the 64 KiB buffer eventually fills and the
+        subprocess blocks mid-write, hanging every subsequent command.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if text.startswith("[sim-bridge] "):
+                    text = text[len("[sim-bridge] "):]
+                logger.debug("sim-bridge stderr: %s", text)
+        except Exception:
+            logger.debug("sim-bridge stderr reader stopped", exc_info=True)
 
     def _dispatch(self, msg: dict) -> None:
         """Route a parsed JSON message from the subprocess."""
@@ -231,6 +267,9 @@ class SimBridgeManager:
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
         self._reader_task = None
+        if self._stderr_task and not self._stderr_task.done():
+            self._stderr_task.cancel()
+        self._stderr_task = None
         self._process = None
         self._ready.clear()
         if self._pending_response and not self._pending_response.done():
@@ -364,6 +403,11 @@ class SimBridgeBackend:
 
     async def press_button(self, udid: str, button: str) -> None:
         await self._send({"cmd": "button", "udid": udid, "name": button})
+
+    async def set_hardware_keyboard(self, udid: str, enabled: bool) -> None:
+        await self._send({
+            "cmd": "set-hardware-keyboard", "udid": udid, "enabled": enabled,
+        })
 
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,

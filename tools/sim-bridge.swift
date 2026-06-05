@@ -662,6 +662,8 @@ typealias AppendEventFn = @convention(c) (CFTypeRef, CFTypeRef, UInt32) -> Void
 typealias TrackpadWrapFn = @convention(c) (UnsafeRawPointer) -> UnsafeMutableRawPointer?
 typealias ButtonFn = @convention(c) (UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
 typealias HIDArbitraryFn = @convention(c) (UInt32, UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
+typealias KeyboardArbitraryFn = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
+typealias ModifierKeyBitFn = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
 typealias ServiceFn = @convention(c) () -> UnsafeMutableRawPointer?
 
 nonisolated(unsafe) var createDigitizerFn: CreateDigitizerFn?
@@ -670,6 +672,8 @@ nonisolated(unsafe) var appendEventFn: AppendEventFn?
 nonisolated(unsafe) var trackpadWrapFn: TrackpadWrapFn?
 nonisolated(unsafe) var buttonFn: ButtonFn?
 nonisolated(unsafe) var hidArbFn: HIDArbitraryFn?
+nonisolated(unsafe) var keyboardArbFn: KeyboardArbitraryFn?
+nonisolated(unsafe) var modifierBitFn: ModifierKeyBitFn?
 nonisolated(unsafe) var createPointerSvc: ServiceFn?
 nonisolated(unsafe) var createMouseSvc: ServiceFn?
 nonisolated(unsafe) var hidSymbolsResolved = false
@@ -702,6 +706,8 @@ func resolveHIDSymbols() -> Bool {
     trackpadWrapFn    = unsafeBitCast(pWrap, to: TrackpadWrapFn.self)
     buttonFn = dlsym(kit, "IndigoHIDMessageForButton").map { unsafeBitCast($0, to: ButtonFn.self) }
     hidArbFn = dlsym(kit, "IndigoHIDMessageForHIDArbitrary").map { unsafeBitCast($0, to: HIDArbitraryFn.self) }
+    keyboardArbFn = dlsym(kit, "IndigoHIDMessageForKeyboardArbitrary").map { unsafeBitCast($0, to: KeyboardArbitraryFn.self) }
+    modifierBitFn = dlsym(kit, "IndigoHIDMessageForModifierKeyBit").map { unsafeBitCast($0, to: ModifierKeyBitFn.self) }
     createPointerSvc = dlsym(kit, "IndigoHIDMessageToCreatePointerService").map { unsafeBitCast($0, to: ServiceFn.self) }
     createMouseSvc = dlsym(kit, "IndigoHIDMessageToCreateMouseService").map { unsafeBitCast($0, to: ServiceFn.self) }
     hidSymbolsResolved = true
@@ -711,8 +717,81 @@ func resolveHIDSymbols() -> Bool {
 // Per-device HID client cache
 nonisolated(unsafe) var hidClients: [String: AnyObject] = [:]
 
+final class HIDSendResult {
+    let semaphore = DispatchSemaphore(value: 0)
+    var error: NSError?
+}
+
+/// Send a message and wait for delivery confirmation. Returns false when the
+/// client's connection is dead (e.g. the device rebooted after the client was
+/// created) or no completion arrives in time.
+func sendHIDMessageChecked(_ message: UnsafeMutableRawPointer,
+                           to client: AnyObject,
+                           timeout: TimeInterval = 1.0) -> Bool {
+    let sel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
+    guard let cls = object_getClass(client),
+          let imp = class_getMethodImplementation(cls, sel) else { return false }
+
+    let result = HIDSendResult()
+    let completion: @convention(block) (NSError?) -> Void = { error in
+        result.error = error
+        result.semaphore.signal()
+    }
+    typealias Fn = @convention(c) (
+        AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool,
+        AnyObject?, (@convention(block) (NSError?) -> Void)?
+    ) -> Void
+    unsafeBitCast(imp, to: Fn.self)(
+        client, sel, message, ObjCBool(true),
+        DispatchQueue.global(qos: .userInitiated), completion
+    )
+    if result.semaphore.wait(timeout: .now() + timeout) == .timedOut {
+        logErr("[hid] checked send timed out")
+        return false
+    }
+    if let error = result.error {
+        logErr("[hid] checked send failed: \(error)")
+        return false
+    }
+    return true
+}
+
+/// Verify a cached client still reaches the device's current boot.
+/// Re-sending a create-pointer-service message is harmless (it is already
+/// sent at client init) and round-trips through the device connection.
+func isHIDClientAlive(_ client: AnyObject) -> Bool {
+    guard let create = createPointerSvc, let probe = create() else {
+        return true // cannot probe — keep legacy behavior
+    }
+    return sendHIDMessageChecked(probe, to: client)
+}
+
+/// Prime the keyboard event path. backboardd creates the keyboard service
+/// lazily on the first KEY event; modifier-bit messages sent before that are
+/// silently discarded (observed as the first shifted character of a fresh
+/// client losing its shift). A bare shift keypress creates the service
+/// without producing any text. Called from the typing path only — keyboard
+/// events flip the simulator into hardware-keyboard mode (hiding the soft
+/// keyboard and surfacing the AutoFill bar), so taps must stay free of them.
+func primeKeyboardService(_ client: AnyObject) {
+    guard let keyFn = keyboardArbFn else { return }
+    if let down = keyFn(0xE1, 1) {
+        _ = sendHIDMessageChecked(down, to: client, timeout: 0.5)
+    }
+    if let up = keyFn(0xE1, 2) {
+        _ = sendHIDMessageChecked(up, to: client, timeout: 0.5)
+    }
+    usleep(20_000)
+}
+
 func ensureHIDClient(udid: String) -> AnyObject? {
-    if let existing = hidClients[udid] { return existing }
+    if let existing = hidClients[udid] {
+        if isHIDClientAlive(existing) {
+            return existing
+        }
+        logErr("[hid] cached client for \(udid) is stale (device rebooted?) — recreating")
+        hidClients.removeValue(forKey: udid)
+    }
     guard resolveHIDSymbols() else {
         logErr("[hid] symbol resolution failed")
         return nil
@@ -917,10 +996,114 @@ func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyO
     return true
 }
 
+// Hardware keyboard toggle
+
+/// Attach or detach the simulated hardware keyboard. Same CoreSimulator call
+/// Simulator.app's "Connect Hardware Keyboard" (shift-cmd-K) toggle uses.
+/// With the hardware keyboard enabled the software keyboard stays hidden;
+/// disabling it restores the software keyboard for focused text fields.
+func setHardwareKeyboard(udid: String, enabled: Bool) -> Bool {
+    guard let device = resolveDevice(udid: udid) else {
+        logErr("[kb] device not found: \(udid)")
+        return false
+    }
+    let sel = NSSelectorFromString("setHardwareKeyboardEnabled:keyboardType:error:")
+    guard device.responds(to: sel),
+          let cls = object_getClass(device),
+          let imp = class_getMethodImplementation(cls, sel) else {
+        logErr("[kb] SimDevice does not respond to setHardwareKeyboardEnabled:keyboardType:error:")
+        return false
+    }
+    typealias Fn = @convention(c) (
+        AnyObject, Selector, ObjCBool, UInt32,
+        AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> ObjCBool
+    var err: NSError?
+    let ok = unsafeBitCast(imp, to: Fn.self)(device, sel, ObjCBool(enabled), 0, &err)
+    if ok.boolValue == false, let err {
+        logErr("[kb] setHardwareKeyboardEnabled failed: \(err)")
+    }
+    return ok.boolValue
+}
+
 // Text typing — decompose ASCII to HID keycodes
+
+/// NSEvent modifier-flag bit index for a HID modifier usage (page 7).
+/// IndigoHIDMessageForModifierKeyBit accepts bits 16-20:
+/// 16 = caps lock, 17 = shift, 18 = control, 19 = option, 20 = command.
+func modifierBit(forUsage usage: UInt32) -> UInt32? {
+    switch usage {
+    case 0xE1, 0xE5: return 17 // left/right shift
+    case 0xE0, 0xE4: return 18 // left/right control
+    case 0xE2, 0xE6: return 19 // left/right option
+    case 0xE3, 0xE7: return 20 // left/right command
+    case 0x39:       return 16 // caps lock
+    default:         return nil
+    }
+}
 
 func doTypeText(udid: String, text: String) -> Bool {
     guard let client = ensureHIDClient(udid: udid) else { return false }
+
+    // backboardd only honors modifier state while the simulated hardware
+    // keyboard is attached; with it detached (the default on a fresh boot),
+    // shifted characters silently lose their modifier. Attach before typing —
+    // the same call Simulator.app makes when its window takes focus. Side
+    // effect: the software keyboard hides; callers that need it visible
+    // afterward can detach via the set-hardware-keyboard command.
+    _ = setHardwareKeyboard(udid: udid, enabled: true)
+
+    // Preferred path: dedicated keyboard messages (same class Simulator.app's own
+    // keyboard passthrough emits). The generic HIDArbitrary path drops modifier
+    // state on freshly-booted or heavily-loaded simulators — keys land unshifted.
+    if keyboardArbFn != nil && modifierBitFn != nil {
+        return typeTextViaKeyboardMessages(text: text, client: client)
+    }
+    return typeTextViaArbitraryHID(text: text, client: client)
+}
+
+func typeTextViaKeyboardMessages(text: String, client: AnyObject) -> Bool {
+    guard let keyFn = keyboardArbFn, let modFn = modifierBitFn else { return false }
+
+    primeKeyboardService(client)
+
+    for c in text {
+        guard let (keyUsage, modifiers) = decomposeCharacter(c) else {
+            logErr("[hid] unsupported character: \(c)")
+            continue
+        }
+        let modifierBits = modifiers.compactMap { modifierBit(forUsage: $0) }
+
+        // Modifier-down (stateful modifier bit, survives event batching)
+        for bit in modifierBits {
+            guard let down = modFn(bit, 1) else { continue }
+            sendHIDMessage(down, to: client)
+        }
+        if !modifierBits.isEmpty {
+            usleep(10_000)
+        }
+
+        // Key down
+        guard let keyDown = keyFn(keyUsage, 1) else { continue }
+        sendHIDMessage(keyDown, to: client)
+        usleep(20_000)
+
+        // Key up
+        guard let keyUp = keyFn(keyUsage, 2) else { continue }
+        sendHIDMessage(keyUp, to: client)
+
+        // Modifier-up (reverse order)
+        for bit in modifierBits.reversed() {
+            guard let up = modFn(bit, 0) else { continue }
+            sendHIDMessage(up, to: client)
+        }
+
+        usleep(30_000) // 30ms between characters
+    }
+    return true
+}
+
+func typeTextViaArbitraryHID(text: String, client: AnyObject) -> Bool {
     guard let kfn = hidArbFn else {
         logErr("[hid] IndigoHIDMessageForHIDArbitrary unresolved")
         return false
@@ -1219,6 +1402,18 @@ func handleCommand(_ dict: [String: Any]) {
             respond(["ok": true])
         } else {
             respond(["ok": false, "error": "button '\(name)' failed"])
+        }
+
+    case "set-hardware-keyboard":
+        guard let udid = dict["udid"] as? String,
+              let enabled = dict["enabled"] as? Bool else {
+            respond(["ok": false, "error": "missing 'udid' or 'enabled'"])
+            return
+        }
+        if setHardwareKeyboard(udid: udid, enabled: enabled) {
+            respond(["ok": true, "enabled": enabled])
+        } else {
+            respond(["ok": false, "error": "set-hardware-keyboard failed"])
         }
 
     case "screenshot":

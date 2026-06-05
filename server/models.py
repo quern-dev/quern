@@ -1031,6 +1031,13 @@ class SetLocaleRequest(BaseModel):
     udid: str | None = None
 
 
+class SetHardwareKeyboardRequest(BaseModel):
+    """Request body for POST /device/keyboard."""
+
+    enabled: bool
+    udid: str | None = None
+
+
 class SetFontScaleRequest(BaseModel):
     """Request body for POST /device/font-scale."""
 
