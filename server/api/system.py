@@ -14,9 +14,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from server.config import (
+    VALID_UPDATE_CHANNELS,
+    channel_to_release_branch,
+    get_update_channel,
+    set_update_channel,
+)
 from server.lifecycle.update_check import read_update_info
 
 logger = logging.getLogger("quern-debug-server.system")
@@ -37,6 +43,20 @@ class UpdateStatusResponse(BaseModel):
     latest_version: str | None = None
     checked_at: str | None = None
     message: str | None = None
+    channel: str = "stable"  # The user's configured update channel (#41)
+    release_branch: str = "release/stable"  # Branch the channel tracks
+
+
+class UpdateChannelResponse(BaseModel):
+    """Current update channel preference."""
+
+    channel: str  # "stable" | "beta"
+    release_branch: str  # The git branch this channel tracks
+    valid_channels: list[str]
+
+
+class SetUpdateChannelRequest(BaseModel):
+    channel: str  # "stable" | "beta"
 
 
 class UpdateTriggerResponse(BaseModel):
@@ -57,16 +77,56 @@ async def update_status() -> UpdateStatusResponse:
     Cached in ``~/.quern/update-info.json``; refreshed by the background
     task every 24 hours (see ``server/lifecycle/update_check.py``). Cheap
     to call — no network round-trip.
+
+    Also includes the configured update channel and the git branch it
+    tracks so MCP clients can mention things like *"you're on stable;
+    beta has 0.13.5-beta.2 available"* once the channels work is wired
+    end-to-end.
     """
+    channel = get_update_channel()
+    release_branch = channel_to_release_branch(channel)
     info = read_update_info()
     if info is None:
-        return UpdateStatusResponse()
+        return UpdateStatusResponse(channel=channel, release_branch=release_branch)
     return UpdateStatusResponse(
         update_available=bool(info.get("update_available")),
         current_version=info.get("current_version"),
         latest_version=info.get("latest_version"),
         checked_at=info.get("checked_at"),
         message=info.get("message"),
+        channel=channel,
+        release_branch=release_branch,
+    )
+
+
+@router.get("/channel", response_model=UpdateChannelResponse)
+async def get_channel() -> UpdateChannelResponse:
+    """Return the user's current update channel preference."""
+    channel = get_update_channel()
+    return UpdateChannelResponse(
+        channel=channel,
+        release_branch=channel_to_release_branch(channel),
+        valid_channels=list(VALID_UPDATE_CHANNELS),
+    )
+
+
+@router.put("/channel", response_model=UpdateChannelResponse)
+async def put_channel(body: SetUpdateChannelRequest) -> UpdateChannelResponse:
+    """Set the update channel preference.
+
+    Persists to ``~/.quern/config.json``. Does not switch git branches
+    or apply an immediate update — that's a separate call to ``POST
+    /update`` once the user is ready (and, for dev clones, has
+    explicitly switched their branch).
+    """
+    try:
+        set_update_channel(body.channel)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return UpdateChannelResponse(
+        channel=body.channel,
+        release_branch=channel_to_release_branch(body.channel),
+        valid_channels=list(VALID_UPDATE_CHANNELS),
     )
 
 

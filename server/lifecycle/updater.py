@@ -90,30 +90,35 @@ def _check_via_quern_dev(head_sha: str) -> bool | None:
         return None
 
 
-# The git branch that ships releases. Compared against directly when
-# answering "is there a Quern update available", regardless of which
-# branch the user happens to have checked out. Hardcoded for now; the
-# channels work (#41) will make this configurable so users can opt into
-# a `release/beta` track without leaving the install path they have.
-RELEASE_BRANCH = "main"
+def _get_release_branch() -> str:
+    """Return the branch the user's update channel tracks.
+
+    Reads ``update_channel`` from ``~/.quern/config.json`` (#41). Default
+    is ``stable`` → ``release/stable``; opt-in to ``beta`` → ``release/
+    beta`` via ``quern set-channel beta``. Maintainers fast-forward
+    these branches on each release cut.
+    """
+    from server.config import channel_to_release_branch, get_update_channel
+    return channel_to_release_branch(get_update_channel())
 
 
 def _check_via_git(project_root: Path) -> tuple[bool, str, int] | None:
     """Fall back to git fetch to check for updates.
 
-    Always compares HEAD against ``origin/<RELEASE_BRANCH>``, not against
-    the current branch's tracking ref — closes #40. A user on a non-
-    release branch (e.g. a developer hacking on a feature) was previously
-    told "already up to date" when the only thing that was up-to-date was
-    their feature branch vs its own remote; new releases on main were
-    silently ignored.
+    Always compares HEAD against ``origin/<release_branch>``, where the
+    release branch is determined by the user's configured channel
+    (``stable`` → ``release/stable``, ``beta`` → ``release/beta``).
+    Closes #40 (the original bug used the current branch's tracking ref,
+    silently missing real releases for users on a feature branch) and
+    introduces the channel selection from #41.
 
     Returns ``(has_updates, current_branch, behind_count)`` or None on
     failure. ``has_updates`` and ``behind_count`` are always measured
-    against ``origin/<RELEASE_BRANCH>``; ``current_branch`` is reported
+    against ``origin/<release_branch>``; ``current_branch`` is reported
     so the caller can decide whether to actually pull (only safe on the
     release branch) or just warn (any other branch).
     """
+    release_branch = _get_release_branch()
     result = subprocess.run(
         ["git", "fetch", "origin"],
         cwd=str(project_root),
@@ -138,10 +143,10 @@ def _check_via_git(project_root: Path) -> tuple[bool, str, int] | None:
         return None
     current_branch = result.stdout.strip()
 
-    # Count commits behind origin/<RELEASE_BRANCH> — always, regardless
+    # Count commits behind origin/<release_branch> — always, regardless
     # of which branch is currently checked out.
     result = subprocess.run(
-        ["git", "rev-list", f"HEAD..origin/{RELEASE_BRANCH}", "--count"],
+        ["git", "rev-list", f"HEAD..origin/{release_branch}", "--count"],
         cwd=str(project_root),
         capture_output=True,
         text=True,
@@ -149,7 +154,7 @@ def _check_via_git(project_root: Path) -> tuple[bool, str, int] | None:
     )
     if result.returncode != 0:
         print(
-            f"Error: could not compare HEAD against origin/{RELEASE_BRANCH} "
+            f"Error: could not compare HEAD against origin/{release_branch} "
             f"({result.stderr.strip()})"
         )
         return None
@@ -184,28 +189,29 @@ def _update_via_git(project_root: Path) -> int:
         return 1
 
     has_updates, branch, behind_count = git_check
+    release_branch = _get_release_branch()
 
     # Approach (A) from #40: when the user is on a non-release branch
     # (typical for dev clones), the commit count is now truthful about
-    # `origin/<RELEASE_BRANCH>`, but pulling here would be wrong — `git
+    # `origin/<release_branch>`, but pulling here would be wrong — `git
     # pull --ff-only` tracks the current branch's upstream, not the
     # release branch. So we report what's available and let the user
     # decide whether to switch.
-    if branch != RELEASE_BRANCH:
+    if branch != release_branch:
         if has_updates:
             plural = "s" if behind_count != 1 else ""
             print(
                 f"You're on branch `{branch}`. "
-                f"`origin/{RELEASE_BRANCH}` is {behind_count} commit{plural} ahead. "
-                f"Switch with `git checkout {RELEASE_BRANCH}` and rerun "
+                f"`origin/{release_branch}` is {behind_count} commit{plural} ahead. "
+                f"Switch with `git checkout {release_branch}` and rerun "
                 f"`quern update` to apply — or stay on `{branch}` "
                 f"if you're working on Quern itself."
             )
         else:
             print(
                 f"You're on branch `{branch}` "
-                f"(not the release branch `{RELEASE_BRANCH}`). "
-                f"No new commits on `origin/{RELEASE_BRANCH}`."
+                f"(not the release branch `{release_branch}`). "
+                f"No new commits on `origin/{release_branch}`."
             )
         return 2  # Skip rebuild — current workspace isn't pull-able
 

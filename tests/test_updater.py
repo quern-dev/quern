@@ -43,7 +43,24 @@ def _make_subprocess_dispatcher(responses: dict):
 
 
 # ---------------------------------------------------------------------------
-# _check_via_git — compares against origin/<RELEASE_BRANCH>, not the
+# Channel → release branch mapping
+# ---------------------------------------------------------------------------
+
+
+def test_get_release_branch_defaults_to_stable(monkeypatch):
+    from server.lifecycle import updater
+    monkeypatch.setattr("server.config.get_update_channel", lambda: "stable")
+    assert updater._get_release_branch() == "release/stable"
+
+
+def test_get_release_branch_respects_beta_channel(monkeypatch):
+    from server.lifecycle import updater
+    monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+    assert updater._get_release_branch() == "release/beta"
+
+
+# ---------------------------------------------------------------------------
+# _check_via_git — compares against origin/<release_branch>, not the
 # current branch's upstream
 # ---------------------------------------------------------------------------
 
@@ -58,7 +75,7 @@ def test_check_via_git_compares_to_release_branch_not_current_branch():
         ("git", "rev-parse", "--abbrev-ref", "HEAD"): _make_run(
             0, stdout="feat/something\n",
         ),
-        ("git", "rev-list", "HEAD..origin/main", "--count"): _make_run(
+        ("git", "rev-list", "HEAD..origin/release/stable", "--count"): _make_run(
             0, stdout="3\n",
         ),
     }
@@ -77,7 +94,7 @@ def test_check_via_git_compares_to_release_branch_not_current_branch():
     ]
     assert len(rev_list_calls) == 1
     assert rev_list_calls[0].args[0] == [
-        "git", "rev-list", "HEAD..origin/main", "--count",
+        "git", "rev-list", "HEAD..origin/release/stable", "--count",
     ]
 
 
@@ -89,7 +106,7 @@ def test_check_via_git_returns_zero_when_no_new_commits_on_release_branch():
         ("git", "rev-parse", "--abbrev-ref", "HEAD"): _make_run(
             0, stdout="main\n",
         ),
-        ("git", "rev-list", "HEAD..origin/main", "--count"): _make_run(
+        ("git", "rev-list", "HEAD..origin/release/stable", "--count"): _make_run(
             0, stdout="0\n",
         ),
     }
@@ -146,7 +163,7 @@ def test_update_via_git_on_feature_branch_with_updates_warns_and_skips_pull(
         ("git", "rev-parse", "--abbrev-ref", "HEAD"): _make_run(
             0, stdout="feat/foo\n",
         ),
-        ("git", "rev-list", "HEAD..origin/main", "--count"): _make_run(
+        ("git", "rev-list", "HEAD..origin/release/stable", "--count"): _make_run(
             0, stdout="3\n",
         ),
     }
@@ -159,8 +176,8 @@ def test_update_via_git_on_feature_branch_with_updates_warns_and_skips_pull(
     assert rc == 2  # Skip rebuild
     captured = capsys.readouterr()
     assert "feat/foo" in captured.out
-    assert "`origin/main` is 3 commits ahead" in captured.out
-    assert "git checkout main" in captured.out
+    assert "`origin/release/stable` is 3 commits ahead" in captured.out
+    assert "git checkout release/stable" in captured.out
 
     # Critically: `git pull` must NOT have been invoked.
     pull_calls = [
@@ -184,7 +201,7 @@ def test_update_via_git_on_feature_branch_with_no_updates_notes_and_skips(
         ("git", "rev-parse", "--abbrev-ref", "HEAD"): _make_run(
             0, stdout="feat/foo\n",
         ),
-        ("git", "rev-list", "HEAD..origin/main", "--count"): _make_run(
+        ("git", "rev-list", "HEAD..origin/release/stable", "--count"): _make_run(
             0, stdout="0\n",
         ),
     }
@@ -197,15 +214,16 @@ def test_update_via_git_on_feature_branch_with_no_updates_notes_and_skips(
     assert rc == 2
     captured = capsys.readouterr()
     assert "feat/foo" in captured.out
-    assert "release branch `main`" in captured.out
+    assert "release branch `release/stable`" in captured.out
     assert "No new commits" in captured.out
 
 
-def test_update_via_git_on_main_with_updates_still_pulls(
+def test_update_via_git_on_release_branch_with_updates_still_pulls(
     capsys, stub_quern_dev_no_signal, monkeypatch,
 ):
-    """Regression guard: the happy path (on main, behind, pull-and-rebuild)
-    must still work after the #40 rewrite."""
+    """Regression guard: the happy path (on the configured release
+    branch, behind, pull-and-rebuild) must still work after the
+    channels rewrite."""
     from server.lifecycle import updater
 
     monkeypatch.setattr(updater, "_read_local_version", lambda root: "0.13.5")
@@ -214,9 +232,9 @@ def test_update_via_git_on_main_with_updates_still_pulls(
         ("git", "rev-parse", "HEAD"): _make_run(0, stdout="deadbeef\n"),
         ("git", "fetch", "origin"): _make_run(0),
         ("git", "rev-parse", "--abbrev-ref", "HEAD"): _make_run(
-            0, stdout="main\n",
+            0, stdout="release/stable\n",
         ),
-        ("git", "rev-list", "HEAD..origin/main", "--count"): _make_run(
+        ("git", "rev-list", "HEAD..origin/release/stable", "--count"): _make_run(
             0, stdout="2\n",
         ),
         ("git", "pull", "--ff-only"): _make_run(0, stdout="Updating ...\n"),

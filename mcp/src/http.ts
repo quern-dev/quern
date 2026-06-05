@@ -1,7 +1,7 @@
 import { discoverServer } from "./config.js";
 
 export async function apiRequest(
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   params?: Record<string, string | number | boolean | string[] | undefined>,
   body?: unknown,

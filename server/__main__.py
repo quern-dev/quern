@@ -285,6 +285,45 @@ def _cmd_grant_full_perms() -> int:
     return 0
 
 
+def _cmd_set_channel(args: list[str]) -> int:
+    """Persist the update channel preference (``stable`` or ``beta``).
+
+    Usage:
+        quern set-channel <name>
+        quern set-channel            # print the current channel
+
+    Setting the channel only updates ``~/.quern/config.json``; it does
+    not switch git branches or apply an update. Run ``quern update``
+    afterwards (and, on a dev clone, switch branches manually) to pick
+    up the new channel's content.
+    """
+    from server.config import (
+        VALID_UPDATE_CHANNELS,
+        channel_to_release_branch,
+        get_update_channel,
+        set_update_channel,
+    )
+
+    if not args:
+        current = get_update_channel()
+        branch = channel_to_release_branch(current)
+        print(f"Current update channel: {current} (tracks origin/{branch})")
+        print(f"Valid channels: {', '.join(VALID_UPDATE_CHANNELS)}")
+        return 0
+
+    target = args[0]
+    try:
+        set_update_channel(target)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    branch = channel_to_release_branch(target)
+    print(f"Update channel set to: {target} (tracks origin/{branch})")
+    print("Run `quern update` to apply changes from this channel.")
+    return 0
+
+
 def _cmd_install_precommit_hook() -> int:
     """Install the pre-commit checklist hook into ~/.claude/settings.json.
 
@@ -412,6 +451,9 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import run_update
         sys.exit(run_update())
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
+        sys.exit(_cmd_set_channel(sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
         from server.device.tunneld import cli_tunneld
