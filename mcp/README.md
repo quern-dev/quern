@@ -5,7 +5,7 @@ MCP (Model Context Protocol) server that wraps the Quern HTTP API, letting AI ag
 ## Prerequisites
 
 - The Python Quern must be running (`quern start`)
-- Node.js 18+
+- Node.js 22+
 
 ## Usage
 
@@ -43,8 +43,10 @@ Add to your MCP settings:
 cd mcp
 npm install
 npm run build
-node dist/index.js
+node dist/launcher.cjs
 ```
+
+The launcher is a tiny CommonJS file that checks the Node version and prints a clear error if it's too old, then dynamically imports the ESM entry. Both `dist/launcher.cjs` and `dist/index.js` are executable; the launcher is the recommended entry because it survives being invoked by an old Node binary (e.g. Claude Desktop sometimes picks the lowest-versioned `node` from `~/.nvm`).
 
 ## Configuration
 
