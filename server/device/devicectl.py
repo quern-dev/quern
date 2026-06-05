@@ -8,6 +8,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+from server.device._xcode import xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.devicectl")
@@ -65,7 +66,14 @@ class DevicectlBackend:
         return stdout_bytes.decode(), stderr_bytes.decode()
 
     async def is_available(self) -> bool:
-        """Check if xcrun devicectl is available."""
+        """Check if xcrun devicectl is available.
+
+        Preflights via xcode-select so a no-Xcode machine never triggers
+        the macOS "install developer tools" dialog (which fires before
+        xcrun returns, so try/except on the subprocess can't suppress it).
+        """
+        if not xcode_available():
+            return False
         try:
             proc = await asyncio.create_subprocess_exec(
                 "xcrun", "devicectl", "list", "devices", "--help",
@@ -78,7 +86,13 @@ class DevicectlBackend:
             return False
 
     async def list_devices(self) -> list[DeviceInfo]:
-        """List connected physical devices by parsing devicectl list devices output."""
+        """List connected physical devices by parsing devicectl list devices output.
+
+        Short-circuits when Xcode isn't installed so the macOS "install
+        developer tools" dialog doesn't fire. See server/device/_xcode.py.
+        """
+        if not xcode_available():
+            return []
         try:
             stdout, _ = await self._run_devicectl(
                 "list", "devices", json_output=True,

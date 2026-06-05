@@ -318,3 +318,27 @@ class TestRunDevicectl:
 
             stdout, _ = await backend._run_devicectl("list", "devices", json_output=True)
             assert stdout == expected_json
+
+
+# ---------------------------------------------------------------------------
+# Xcode-availability gate
+# ---------------------------------------------------------------------------
+
+
+class TestXcodeGate:
+    """On a no-Xcode Mac, devicectl methods short-circuit without invoking
+    xcrun. See server/device/_xcode.py."""
+
+    async def test_is_available_returns_false_without_invoking_xcrun(self, monkeypatch):
+        monkeypatch.setattr("server.device.devicectl.xcode_available", lambda: False)
+        backend = DevicectlBackend()
+        with patch("asyncio.create_subprocess_exec") as exec_mock:
+            assert await backend.is_available() is False
+        assert exec_mock.call_count == 0
+
+    async def test_list_devices_returns_empty_without_invoking_xcrun(self, monkeypatch):
+        monkeypatch.setattr("server.device.devicectl.xcode_available", lambda: False)
+        backend = DevicectlBackend()
+        with patch("asyncio.create_subprocess_exec") as exec_mock:
+            assert await backend.list_devices() == []
+        assert exec_mock.call_count == 0

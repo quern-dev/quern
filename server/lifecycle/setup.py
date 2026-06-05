@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from server.device._xcode import xcode_available
+
 # ── Result types ──────────────────────────────────────────────────────────
 
 class CheckStatus(Enum):
@@ -154,16 +156,26 @@ def _fix_developer_dir_for_setup() -> str | None:
 
     Sets the DEVELOPER_DIR env var for this process so subsequent xcrun
     calls work. Returns a message describing the fix, or None if not needed.
+
+    Skips the initial ``xcrun simctl help`` probe when no developer dir is
+    configured — that probe triggers the macOS install dialog on a clean
+    machine. We can still find an Xcode in ``/Applications`` and set
+    DEVELOPER_DIR ourselves; the dialog is only avoided in the no-dev-dir
+    case.
     """
     if os.environ.get("DEVELOPER_DIR"):
         return None
 
-    # Check if simctl already works
-    rc, _, _ = _run(["xcrun", "simctl", "help"])
-    if rc == 0:
-        return None
+    # Only probe simctl if a developer dir is configured. Without one,
+    # xcrun would trigger the macOS install dialog before returning.
+    if xcode_available():
+        rc, _, _ = _run(["xcrun", "simctl", "help"])
+        if rc == 0:
+            return None
 
-    # simctl broken — find a working Xcode
+    # No working simctl — find a usable Xcode in /Applications and point
+    # DEVELOPER_DIR at it. Once DEVELOPER_DIR is set, xcrun uses it
+    # directly and won't trigger the dialog even on a clean machine.
     rc, current_dir, _ = _run(["xcode-select", "-p"])
     current_dir = current_dir.strip() if rc == 0 else "(unknown)"
 
@@ -171,6 +183,7 @@ def _fix_developer_dir_for_setup() -> str | None:
         candidate = xcode_app / "Contents" / "Developer"
         if candidate.exists():
             os.environ["DEVELOPER_DIR"] = str(candidate)
+            xcode_available.cache_clear()
             rc, _, _ = _run(["xcrun", "simctl", "help"])
             if rc == 0:
                 return (
@@ -179,6 +192,7 @@ def _fix_developer_dir_for_setup() -> str | None:
                     f"To make this permanent: sudo xcode-select -s '{candidate}'"
                 )
             del os.environ["DEVELOPER_DIR"]
+            xcode_available.cache_clear()
 
     return None
 
@@ -959,6 +973,22 @@ def check_xcode_cli_tools() -> CheckResult:
             message="Not installed",
             detail="Install with: xcode-select --install",
         )
+    # /usr/bin/xcrun ships on every modern macOS as an install-prompt stub
+    # even when no CLT is present, so `which xcrun` returning a path isn't
+    # proof anything works. Gate on xcode-select reporting an actual
+    # developer dir before invoking xcrun — otherwise we'd trigger the
+    # macOS install dialog here on Android-only machines.
+    if not xcode_available():
+        return CheckResult(
+            name="Xcode CLI Tools",
+            status=CheckStatus.MISSING,
+            message="Not installed (no developer directory configured)",
+            detail=(
+                "Install Xcode or the Command Line Tools to enable iOS support. "
+                "If you only need Android, this is safe to ignore — Quern will "
+                "skip the iOS toolchain. Install with: xcode-select --install"
+            ),
+        )
     # Verify simctl works
     rc, stdout, _ = _run(["xcrun", "simctl", "help"])
     if rc == 0:
@@ -1342,6 +1372,10 @@ def configure_crash_reporter_dialog() -> CheckResult:
 
 def check_booted_simulators() -> list[dict[str, str]]:
     """Return a list of booted simulators [{name, udid}]."""
+    # Skip the simctl probe when there's no developer dir — would trigger
+    # the macOS install dialog otherwise.
+    if not xcode_available():
+        return []
     rc, stdout, _ = _run(["xcrun", "simctl", "list", "devices", "--json"])
     if rc != 0:
         return []

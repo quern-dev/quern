@@ -1,5 +1,6 @@
 """Global test fixtures — runs before any test module is imported."""
 
+import functools
 import os
 import tempfile
 from pathlib import Path
@@ -26,3 +27,25 @@ def _reset_active_device_sidecar():
     yield
     if sidecar.exists():
         sidecar.unlink()
+
+
+@pytest.fixture(autouse=True)
+def _default_xcode_available(monkeypatch):
+    """Default xcode_available() to True so existing iOS-backend tests work
+    regardless of whether the CI runner has Xcode installed. Each consumer
+    holds its own local reference (`from server.device._xcode import
+    xcode_available`), so we patch every import site. Tests verifying the
+    no-Xcode gate can monkeypatch the same names to ``lambda: False``.
+
+    The replacement is lru_cached so callers that invoke ``.cache_clear()``
+    (e.g. ``_fix_developer_dir_for_setup`` after it mutates DEVELOPER_DIR)
+    don't blow up on a bare ``lambda``.
+    """
+    def _make_stub():
+        return functools.lru_cache(maxsize=1)(lambda: True)
+    for path in (
+        "server.device.simctl.xcode_available",
+        "server.device.devicectl.xcode_available",
+        "server.lifecycle.setup.xcode_available",
+    ):
+        monkeypatch.setattr(path, _make_stub())
