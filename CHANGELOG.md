@@ -5,6 +5,24 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-06-05
+
+### Fixed
+- **Shift-drop bug on synthetic typing eliminated** — `type_text` was silently dropping shifted/uppercase characters on simulators (mixed-case usernames typed as lowercase, exclamation marks typed as `1`). Deterministic on fresh-boot iOS 17.5, intermittent on iOS 26.5 under parallel-fleet load. Root cause: `backboardd` only honors modifier state from synthetic keyboard events while CoreSimulator's `hardwareKeyboardEnabled` is `true`. On a freshly booted simulator that flag defaults to `false`, so every shifted character lost its modifier — regardless of HID message class, delays, or priming. `doTypeText` now attaches the hardware keyboard before sending key events, matching the call Simulator.app makes. (This is why GUI-touched simulators typed correctly while untouched ones mangled — Simulator.app and the old `osascript Cmd+V` workaround were both attaching the keyboard as a side effect of focus.)
+- **Switched typing to dedicated keyboard HID messages** — `IndigoHIDMessageForKeyboardArbitrary` (keys) and `IndigoHIDMessageForModifierKeyBit` (modifiers) replace the generic `IndigoHIDMessageForHIDArbitrary` path, which `backboardd` was dropping on freshly-booted sims even under hardware-keyboard mode. Same message class Simulator.app's Mac-keyboard passthrough uses; the previous generic-HID path is retained as a fallback when the keyboard symbols can't be resolved.
+- **Stale `SimDeviceLegacyHIDClient` after a device reboot is now detected and recreated** — the cached HID client held a connection to the boot session it was created under. After a device reboot the mach port was dead and every subsequent tap/type was silently dropped (the prior `sendHIDMessage` call passed `completion: nil`, so nothing noticed). `ensureHIDClient` now probes the cached client with a harmless message before returning it; on `machPortInvalid` (or timeout) the client is dropped and recreated. New `sendHIDMessageChecked` waits up to 1s for delivery confirmation.
+- **Keyboard service primed at start of each type command** — `backboardd` creates the keyboard HID service lazily on the first KEY event, and modifier-bit messages sent before that were silently discarded. The first shifted character typed by a fresh client lost its shift (`First_A!` → `first_A!`). A bare shift keypress now creates the service without producing text. The prime lives in the typing path, not in client creation, because keyboard events flip the simulator into hardware-keyboard mode (hiding the soft keyboard) which must not happen as a side effect of taps.
+- **Oversized sim-bridge stdout lines no longer kill the reader** — the subprocess was created without a stream limit, inheriting asyncio's 64 KiB default. A `describe-ui` response for a dense screen (~120 KiB / 436 elements) raised `LimitOverrunError`, the reader task died, and every UI endpoint returned 500 until the app left that screen. Now passes `limit=STREAM_LIMIT` (32 MiB) to `create_subprocess_exec`.
+- **Reader death no longer leaks sim-bridge subprocesses** — the reader's cleanup path dropped the process reference without killing the (still healthy) subprocess. Each respawn left a zombie behind (nine concurrent sim-bridge processes observed after a session of crash loops, all holding competing HID clients). The reader's `finally` block now kills the process before cleanup.
+- **sim-bridge stderr is now drained** — the Swift helper logs `[PERF]` / `[ax]` / `[hid]` diagnostics to stderr; once the 64 KiB pipe buffer filled, the subprocess blocked mid-write and every command timed out. A new drain task forwards stderr lines to debug logging.
+
+### Added
+- **`set_hardware_keyboard` MCP tool / `POST /api/v1/device/keyboard` endpoint** — exposes CoreSimulator's `-[SimDevice setHardwareKeyboardEnabled:keyboardType:error:]` (the same call behind Simulator.app's "Connect Hardware Keyboard" / shift-cmd-K toggle). Use cases: restore the software keyboard after `type_text` when a later step asserts keyboard visibility; suppress the software keyboard during form filling for smaller UI trees and unobstructed screenshots; exercise hardware-keyboard layouts. Simulator-only, requires the sim-bridge backend.
+
+### Notes
+- **Side effect**: typing now attaches the hardware keyboard, which causes the software keyboard to hide. The `type_text` tool description documents this with a pointer to `set_hardware_keyboard enabled=false` for restoring the software keyboard.
+- The probe app under `tools/probe-app/` (added this cycle, see #33) was the controlled fixture that isolated both the shift-drop root cause and the stale HID client bug.
+
 ## [0.13.2] - 2026-05-28
 
 ### Fixed
@@ -152,6 +170,7 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
+[0.13.3]: https://github.com/quern-dev/quern/releases/tag/v0.13.3
 [0.13.2]: https://github.com/quern-dev/quern/releases/tag/v0.13.2
 [0.13.1]: https://github.com/quern-dev/quern/releases/tag/v0.13.1
 [0.13.0]: https://github.com/quern-dev/quern/releases/tag/v0.13.0
