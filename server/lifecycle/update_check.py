@@ -8,7 +8,10 @@ Rate-limited to once per 24 hours. Repeats periodically while the server
 is running so long-lived servers still check in. Never blocks or crashes
 the server.
 
-Opt out by setting "update_check": false in ~/.quern/config.json.
+Persists the structured result to ``~/.quern/update-info.json`` so MCP
+clients and other consumers can surface "update available" without
+re-hitting the endpoint. Opt out by setting ``"update_check": false`` in
+``~/.quern/config.json``.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR, read_user_config
@@ -27,6 +31,7 @@ from server.config import CONFIG_DIR, read_user_config
 logger = logging.getLogger("quern-debug-server.update-check")
 
 LAST_CHECK_FILE = CONFIG_DIR / "last-update-check"
+UPDATE_INFO_FILE = CONFIG_DIR / "update-info.json"
 CHECK_INTERVAL = 86400  # 24 hours
 ENDPOINT = "https://quern.dev/api/check-update"
 TIMEOUT = 5  # seconds
@@ -121,11 +126,51 @@ def check_for_updates() -> str | None:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
 
-        if data.get("update_available"):
-            return 'Update available \u2014 run "quern update" to get the latest version'
-        return None
+        update_available = bool(data.get("update_available"))
+        message = (
+            'Update available \u2014 run "quern update" to get the latest version'
+            if update_available else None
+        )
+        # Persist structured result for the system API + MCP. quern.dev's
+        # current schema only returns update_available; latest_version is
+        # forward-compatible \u2014 fall back to None if absent.
+        _write_update_info({
+            "checked_at": datetime.now(UTC).isoformat(),
+            "current_version": version,
+            "latest_version": data.get("latest_version"),
+            "update_available": update_available,
+            "message": message,
+        })
+        return message
 
     except Exception:
+        return None
+
+
+def _write_update_info(info: dict) -> None:
+    """Persist the latest check result to ``~/.quern/update-info.json``.
+
+    Best-effort: a failed write must not break the periodic check.
+    """
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        UPDATE_INFO_FILE.write_text(json.dumps(info, indent=2))
+    except OSError as e:
+        logger.debug("Failed to persist update info: %s", e)
+
+
+def read_update_info() -> dict | None:
+    """Return the most recent persisted update check, or None if never run.
+
+    Consumed by the system API so MCP clients can surface "update
+    available" inline in tool responses without re-hitting quern.dev.
+    """
+    if not UPDATE_INFO_FILE.exists():
+        return None
+    try:
+        return json.loads(UPDATE_INFO_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug("Failed to read update info: %s", e)
         return None
 
 

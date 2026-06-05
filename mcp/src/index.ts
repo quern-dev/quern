@@ -27,8 +27,26 @@ import { registerAppStateTools } from "./tools/app-state.js";
 import { registerOslogTools } from "./tools/oslog.js";
 import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
 import { registerLandmarkTools } from "./tools/landmarks.js";
+import { registerSystemTools } from "./tools/system.js";
+import { discoverServer } from "./config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Read our own version from package.json so the MCP handshake reports
+// the actual built version instead of a stale hardcoded value. The
+// package.json sits one dir above dist/index.js.
+function readOwnVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(__dirname, "..", "package.json"), "utf-8"),
+    );
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+const MCP_VERSION = readOwnVersion();
 
 const instructions = [
   "Quern is a debug server for AI-assisted iOS development — it captures logs, intercepts network traffic, and controls simulators/devices via MCP tools.",
@@ -67,7 +85,7 @@ const instructions = [
 const server = new McpServer(
   {
     name: "quern-debug-server",
-    version: "0.1.0",
+    version: MCP_VERSION,
   },
   { instructions },
 );
@@ -90,6 +108,7 @@ registerAppStateTools(server);
 registerOslogTools(server);
 registerAppKnowledgeTools(server);
 registerLandmarkTools(server);
+registerSystemTools(server);
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -165,13 +184,47 @@ server.resource(
 // Main
 // ---------------------------------------------------------------------------
 
+async function checkVersionSkew(): Promise<void> {
+  // Compare our package.json version against the Python server's
+  // reported version. Mismatches happen when one side has been
+  // updated but the other hasn't — the user gets weird behavior and
+  // no signal about the cause. Best-effort: if /health is unreachable
+  // or shape-mismatched, we just stay quiet (probeServer already
+  // warns about unreachable). Cap timeout to 2s so a slow server
+  // never blocks MCP startup.
+  try {
+    const serverUrl = discoverServer().url;
+    const resp = await fetch(new URL("/health", serverUrl).toString(), {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { version?: string };
+    const serverVersion = data?.version;
+    if (
+      serverVersion &&
+      MCP_VERSION !== "unknown" &&
+      serverVersion !== MCP_VERSION
+    ) {
+      console.error(
+        `WARNING: Quern MCP version (${MCP_VERSION}) does not match server version (${serverVersion}). ` +
+          `One side has been updated and the other hasn't. ` +
+          `Run "quern update" to bring both in sync.`,
+      );
+    }
+  } catch {
+    // discoverServer can throw if state.json is missing; that's
+    // probeServer's problem, not ours.
+  }
+}
+
 async function main(): Promise<void> {
   await probeServer();
+  await checkVersionSkew();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error("Quern Debug MCP Server running on stdio");
+  console.error(`Quern Debug MCP Server v${MCP_VERSION} running on stdio`);
 }
 
 main().catch((err) => {
