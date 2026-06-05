@@ -48,16 +48,43 @@ def _read_local_version(project_root: Path) -> str | None:
     return None
 
 
-def _fetch_latest_release() -> tuple[str, str] | None:
-    """Fetch latest release version and tarball URL from GitHub.
+def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
+    """Fetch the latest release for the user's channel from GitHub.
 
-    Returns (version, tarball_url) or None on failure.
+    For ``stable``: hits ``/releases/latest``, which is GitHub-defined as
+    the most recent release with ``prerelease: false``.
+
+    For ``beta``: hits ``/releases`` and picks the topmost entry with
+    ``prerelease: true``. Beta users get prereleases when they exist; if
+    there are none, returns the stable latest so beta users never see
+    older content than stable users.
+
+    Returns ``(version, tarball_url)`` or None on failure.
     """
     try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        if channel == "beta":
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+        else:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
+
+        if channel == "beta":
+            # /releases returns an array sorted newest-first. Pick the
+            # first prerelease entry; fall back to stable if there are
+            # no prereleases yet.
+            prerelease = next(
+                (r for r in data if r.get("prerelease") and not r.get("draft")),
+                None,
+            )
+            data = prerelease if prerelease else next(
+                (r for r in data if not r.get("prerelease") and not r.get("draft")),
+                None,
+            )
+            if data is None:
+                return None
+
         tag = data.get("tag_name", "")
         version = tag.lstrip("v")
         tarball_url = data.get("tarball_url", "")
@@ -259,20 +286,23 @@ def _update_via_git(project_root: Path) -> int:
 
 def _update_via_tarball(project_root: Path) -> int:
     """Update a tarball-based install by downloading the latest release."""
-    print("Checking for updates...")
+    from server.config import get_update_channel
+    channel = get_update_channel()
+
+    print(f"Checking for updates on channel '{channel}'...")
 
     current_version = _read_local_version(project_root)
-    release = _fetch_latest_release()
+    release = _fetch_latest_release(channel)
     if release is None:
         return 1
 
     latest_version, tarball_url = release
 
     if current_version == latest_version:
-        print(f"Already up to date (v{current_version}).")
+        print(f"Already up to date (v{current_version}, channel '{channel}').")
         return 2  # No update needed
 
-    print(f"Updating v{current_version or 'unknown'} → v{latest_version}...")
+    print(f"Updating v{current_version or 'unknown'} → v{latest_version} (channel '{channel}')...")
 
     # Download tarball
     tmpdir = tempfile.mkdtemp()

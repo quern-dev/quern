@@ -218,6 +218,122 @@ def test_update_via_git_on_feature_branch_with_no_updates_notes_and_skips(
     assert "No new commits" in captured.out
 
 
+# ---------------------------------------------------------------------------
+# Tarball updater — channel-aware release selection
+# ---------------------------------------------------------------------------
+
+
+class _FakeUrlResp:
+    """Minimal context-manager wrapper for the urlopen patch."""
+    def __init__(self, payload):
+        self._payload = payload
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self):
+        import json as _json
+        return _json.dumps(self._payload).encode()
+
+
+def test_fetch_latest_release_stable_hits_releases_latest(monkeypatch):
+    """Stable channel must hit /releases/latest — GitHub's stable-only
+    feed. The previous unconditional behavior is unchanged."""
+    from server.lifecycle import updater
+
+    captured_urls: list[str] = []
+
+    def fake_urlopen(req, **kwargs):
+        captured_urls.append(req.full_url)
+        return _FakeUrlResp({
+            "tag_name": "v0.13.4",
+            "tarball_url": "https://example.com/v0.13.4.tar.gz",
+            "prerelease": False,
+        })
+
+    monkeypatch.setattr(
+        updater.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    result = updater._fetch_latest_release("stable")
+    assert result == ("0.13.4", "https://example.com/v0.13.4.tar.gz")
+    assert captured_urls == [
+        "https://api.github.com/repos/quern-dev/quern/releases/latest",
+    ]
+
+
+def test_fetch_latest_release_beta_picks_first_prerelease(monkeypatch):
+    """Beta channel must scan /releases and pick the first prerelease.
+    Stable entries newer than the topmost prerelease are deliberately
+    NOT chosen — that's how beta diverges from stable."""
+    from server.lifecycle import updater
+
+    def fake_urlopen(req, **kwargs):
+        return _FakeUrlResp([
+            {"tag_name": "v0.13.5", "tarball_url": "stable.tgz", "prerelease": False},
+            {"tag_name": "v0.13.6-beta.1", "tarball_url": "beta1.tgz", "prerelease": True},
+            {"tag_name": "v0.13.4", "tarball_url": "stable-older.tgz", "prerelease": False},
+        ])
+
+    monkeypatch.setattr(
+        updater.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    result = updater._fetch_latest_release("beta")
+    assert result == ("0.13.6-beta.1", "beta1.tgz")
+
+
+def test_fetch_latest_release_beta_falls_back_to_stable_when_no_prereleases(
+    monkeypatch,
+):
+    """If no prerelease exists yet, beta users must NOT regress to nothing.
+    Fall through to the latest stable so they never see older content than
+    a stable user."""
+    from server.lifecycle import updater
+
+    def fake_urlopen(req, **kwargs):
+        return _FakeUrlResp([
+            {"tag_name": "v0.13.5", "tarball_url": "stable.tgz", "prerelease": False},
+            {"tag_name": "v0.13.4", "tarball_url": "older.tgz", "prerelease": False},
+        ])
+
+    monkeypatch.setattr(
+        updater.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    result = updater._fetch_latest_release("beta")
+    assert result == ("0.13.5", "stable.tgz")
+
+
+def test_fetch_latest_release_beta_skips_draft_prereleases(monkeypatch):
+    """Drafts are not user-visible releases — beta channel must ignore
+    them even when they're flagged prerelease."""
+    from server.lifecycle import updater
+
+    def fake_urlopen(req, **kwargs):
+        return _FakeUrlResp([
+            {
+                "tag_name": "v0.13.6-beta.2",
+                "tarball_url": "draft.tgz",
+                "prerelease": True,
+                "draft": True,
+            },
+            {
+                "tag_name": "v0.13.6-beta.1",
+                "tarball_url": "published.tgz",
+                "prerelease": True,
+                "draft": False,
+            },
+        ])
+
+    monkeypatch.setattr(
+        updater.urllib.request, "urlopen", fake_urlopen,
+    )
+
+    result = updater._fetch_latest_release("beta")
+    assert result == ("0.13.6-beta.1", "published.tgz")
+
+
 def test_update_via_git_on_release_branch_with_updates_still_pulls(
     capsys, stub_quern_dev_no_signal, monkeypatch,
 ):
