@@ -702,6 +702,118 @@ async def test_proxy_setup_guide(app, auth_headers):
         assert "note" in phys
 
 
+@pytest.mark.asyncio
+async def test_proxy_status_surfaces_multi_interface(app, auth_headers, monkeypatch):
+    """proxy_status should enumerate all interfaces and flag ambiguity."""
+    monkeypatch.setattr(
+        "server.api.proxy.enumerate_local_interfaces",
+        lambda: [
+            {
+                "interface": "en0",
+                "ip": "192.168.31.243",
+                "subnet": "192.168.31.0/24",
+                "is_default_route": False,
+                "ssid": "Lilypad",
+            },
+            {
+                "interface": "en10",
+                "ip": "192.168.200.98",
+                "subnet": "192.168.200.0/24",
+                "is_default_route": True,
+                "ssid": None,
+            },
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/status", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+
+    ips = {entry["ip"] for entry in data["local_ips"]}
+    assert ips == {"192.168.31.243", "192.168.200.98"}
+    default = [e for e in data["local_ips"] if e["is_default_route"]]
+    assert len(default) == 1 and default[0]["interface"] == "en10"
+    assert "multi_interface_active" in data["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_status_no_warning_for_single_interface(
+    app, auth_headers, monkeypatch,
+):
+    """Single-interface setups should not see the multi-interface warning."""
+    monkeypatch.setattr(
+        "server.api.proxy.enumerate_local_interfaces",
+        lambda: [
+            {
+                "interface": "en0",
+                "ip": "192.168.1.10",
+                "subnet": "192.168.1.0/24",
+                "is_default_route": True,
+                "ssid": "home",
+            },
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/status", headers=auth_headers)
+        data = resp.json()
+
+    assert len(data["local_ips"]) == 1
+    assert "multi_interface_active" not in data["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_setup_guide_lists_all_interfaces_when_ambiguous(
+    app, auth_headers, monkeypatch,
+):
+    """setup_guide's physical-device step 5 should enumerate every interface
+    when more than one is active, rather than picking a single (possibly
+    wrong) IP."""
+    from server.sources.proxy import ProxyAdapter
+
+    adapter = ProxyAdapter(flow_store=FlowStore())
+    app.state.proxy_adapter = adapter
+
+    monkeypatch.setattr(
+        "server.lifecycle.state.enumerate_local_interfaces",
+        lambda: [
+            {
+                "interface": "en0",
+                "ip": "192.168.31.243",
+                "subnet": "192.168.31.0/24",
+                "is_default_route": False,
+                "ssid": "Lilypad",
+            },
+            {
+                "interface": "en10",
+                "ip": "192.168.200.98",
+                "subnet": "192.168.200.0/24",
+                "is_default_route": True,
+                "ssid": None,
+            },
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/proxy/setup-guide", headers=auth_headers)
+        data = resp.json()
+
+    assert "multi_interface_active" in data["warnings"]
+    assert {iface["ip"] for iface in data["interfaces"]} == {
+        "192.168.31.243",
+        "192.168.200.98",
+    }
+
+    phys_step_5 = data["steps"][1]["instructions"][4]
+    # Both Mac IPs should appear in the physical-device guidance.
+    assert "192.168.31.243" in phys_step_5
+    assert "192.168.200.98" in phys_step_5
+
+
 # ---------------------------------------------------------------------------
 # Dual ring buffer (server_buffer) routing
 # ---------------------------------------------------------------------------
