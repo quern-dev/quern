@@ -141,3 +141,104 @@ async def test_update_trigger_reports_skipped_on_oserror(
     assert data["status"] == "skipped"
     assert data["pid"] is None
     assert "permission denied" in data["note"]
+
+
+# ---------------------------------------------------------------------------
+# /channel — get/put
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_config(tmp_path, monkeypatch):
+    """Redirect ~/.quern/config.json to a temp dir so tests don't mutate
+    the real user config."""
+    monkeypatch.setattr("server.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(
+        "server.config.USER_CONFIG_FILE", tmp_path / "config.json",
+    )
+    return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_get_channel_returns_default_when_unset(
+    app, auth_headers, isolated_config,
+):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/system/channel", headers=auth_headers)
+        data = resp.json()
+
+    assert data["channel"] == "stable"
+    assert data["release_branch"] == "release/stable"
+    assert data["valid_channels"] == ["stable", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_put_channel_persists_and_returns_new_state(
+    app, auth_headers, isolated_config,
+):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.put(
+            "/api/v1/system/channel",
+            headers=auth_headers,
+            json={"channel": "beta"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+    assert data["channel"] == "beta"
+    assert data["release_branch"] == "release/beta"
+
+    # Confirm persistence: subsequent GET should return the same value.
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/system/channel", headers=auth_headers)
+        assert resp.json()["channel"] == "beta"
+
+
+@pytest.mark.asyncio
+async def test_put_channel_rejects_unknown_channel(
+    app, auth_headers, isolated_config,
+):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.put(
+            "/api/v1/system/channel",
+            headers=auth_headers,
+            json={"channel": "nightly"},
+        )
+
+    assert resp.status_code == 400
+    assert "Unknown update channel" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_status_includes_channel(
+    app, auth_headers, isolated_config, monkeypatch,
+):
+    """update-status must surface the configured channel + release branch
+    so MCP clients can render them inline without an extra round-trip."""
+    monkeypatch.setattr(
+        "server.api.system.read_update_info",
+        lambda: {
+            "checked_at": "2026-06-05T19:00:00+00:00",
+            "current_version": "0.13.4",
+            "latest_version": "0.13.5",
+            "update_available": True,
+            "message": "Update available",
+        },
+    )
+    from server.config import set_update_channel
+    set_update_channel("beta")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/system/update-status", headers=auth_headers,
+        )
+        data = resp.json()
+
+    assert data["channel"] == "beta"
+    assert data["release_branch"] == "release/beta"
+    assert data["update_available"] is True
+    assert data["latest_version"] == "0.13.5"

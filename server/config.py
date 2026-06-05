@@ -70,6 +70,52 @@ def get_default_device_family() -> str:
     return read_user_config().get("default_device_family", "iPhone")
 
 
+# ---------------------------------------------------------------------------
+# Update channel — `stable` (default) or `beta`. Drives which branch
+# `quern update` checks against and which GitHub release filter the
+# tarball updater uses (#41).
+# ---------------------------------------------------------------------------
+
+VALID_UPDATE_CHANNELS = ("stable", "beta")
+DEFAULT_UPDATE_CHANNEL = "stable"
+
+
+def get_update_channel() -> str:
+    """Return the configured update channel, defaulting to ``stable``.
+
+    Unknown values fall back to the default rather than throwing — a
+    typo in config.json shouldn't break the daemon.
+    """
+    raw = read_user_config().get("update_channel")
+    if isinstance(raw, str) and raw in VALID_UPDATE_CHANNELS:
+        return raw
+    return DEFAULT_UPDATE_CHANNEL
+
+
+def set_update_channel(channel: str) -> None:
+    """Persist the update channel preference. Raises ValueError on an
+    unknown channel name to prevent typos from silently no-op'ing."""
+    if channel not in VALID_UPDATE_CHANNELS:
+        raise ValueError(
+            f"Unknown update channel {channel!r}. "
+            f"Valid: {', '.join(VALID_UPDATE_CHANNELS)}"
+        )
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = read_user_config()
+    config["update_channel"] = channel
+    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def channel_to_release_branch(channel: str) -> str:
+    """Map a channel name to its reserved release pointer branch.
+
+    Maintainers fast-forward these branches on each release cut —
+    ``release/stable`` to the latest tagged stable release, ``release/
+    beta`` to the latest prerelease commit (or main HEAD).
+    """
+    return f"release/{channel}"
+
+
 def get_local_capture_processes() -> list[str]:
     """Return the list of process names for local capture mode.
 
