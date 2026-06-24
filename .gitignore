@@ -35,3 +35,6 @@ docs/test-results/
 CLAUDE.md
 
 idb-companion-*.tar.gz
+
+# macOS menu-bar app build output
+macos/QuernMenuBar/build/

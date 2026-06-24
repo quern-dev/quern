@@ -103,11 +103,26 @@ git push origin main:refs/heads/release/stable
 
 # 4. Now create the GitHub Release.
 gh release create vN.M.K --title "vN.M.K — short release headline" --notes-file RELEASE_NOTES.md
+
+# 5. Build, sign, notarize, and attach the menu-bar app asset.
+#    Run on a Mac with the Developer ID identity + notarytool profile.
+#    See macos/QuernMenuBar/README.md for the one-time credential setup.
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+NOTARY_PROFILE="quern-notary" \
+  scripts/release-menubar.sh vN.M.K
 ```
 
 **Why the ordering matters:** see the *GitHub quirk* section. Once step 4 has
 happened, you cannot retroactively move `release/stable` to that commit. The
 fast-forward in step 3 has to happen first.
+
+**The menu-bar app asset (step 5):** `scripts/release-menubar.sh` uploads a
+`quern-<version>.tar.gz` asset that bundles a signed/notarized `Quern.app`
+alongside the source tree. The tarball updater
+(`server/lifecycle/updater.py`) prefers this asset over GitHub's
+auto-generated source tarball, so users get the menu-bar app on update;
+releases without the asset fall back to the source tarball automatically.
+Run the same step for beta tags below.
 
 ### Cutting a beta release
 

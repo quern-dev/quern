@@ -48,6 +48,23 @@ def _read_local_version(project_root: Path) -> str | None:
     return None
 
 
+def _select_asset_url(assets: list) -> str | None:
+    """Return the download URL of the bundled release tarball asset, if any.
+
+    Matches ``quern-*.tar.gz`` (the asset produced by
+    ``scripts/release-menubar.sh``, which bundles the signed menu-bar app with
+    the source tree). Returns None when no matching asset exists so the caller
+    falls back to GitHub's auto-generated source tarball.
+    """
+    for asset in assets:
+        name = asset.get("name", "")
+        if name.startswith("quern-") and name.endswith(".tar.gz"):
+            url = asset.get("browser_download_url")
+            if url:
+                return url
+    return None
+
+
 def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
     """Fetch the latest release for the user's channel from GitHub.
 
@@ -87,7 +104,12 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
 
         tag = data.get("tag_name", "")
         version = tag.lstrip("v")
-        tarball_url = data.get("tarball_url", "")
+        # Prefer an uploaded asset tarball (``quern-<version>.tar.gz``) — it
+        # bundles the signed/notarized menu-bar Quern.app alongside the source
+        # tree (see scripts/release-menubar.sh). Fall back to GitHub's
+        # auto-generated source ``tarball_url`` for releases without an asset,
+        # so older releases and source-only installs keep working.
+        tarball_url = _select_asset_url(data.get("assets", [])) or data.get("tarball_url", "")
         if version and tarball_url:
             return version, tarball_url
     except Exception as e:

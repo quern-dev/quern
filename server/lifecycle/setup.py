@@ -555,6 +555,33 @@ exec "{venv_python}" -m server "$@"
         )
 
 
+def launch_menubar_app(project_root: Path) -> CheckResult | None:
+    """Launch the bundled menu-bar app so it self-registers as a login item.
+
+    Tarball releases built by ``scripts/release-menubar.sh`` include a signed
+    ``Quern.app`` at the install root. Opening it once lets the app register
+    itself for launch-at-login (via SMAppService). LaunchServices activates an
+    existing instance rather than spawning a duplicate, so this is safe to call
+    on every setup/update. Returns None for source-only installs (no app).
+    """
+    app = project_root / "Quern.app"
+    if not app.exists():
+        return None
+    rc, _out, err = _run(["open", str(app)])
+    if rc == 0:
+        return CheckResult(
+            name="Menu-bar app",
+            status=CheckStatus.OK,
+            message="Launched (registers itself for launch-at-login)",
+        )
+    return CheckResult(
+        name="Menu-bar app",
+        status=CheckStatus.WARNING,
+        message="Could not launch Quern.app",
+        detail=err.strip() or f"Try: open {app}",
+    )
+
+
 def _install_skills(project_root: Path) -> CheckResult:
     """Symlink quern skills into ~/.claude/skills/ for Claude Code."""
     skills_src = project_root / "skills"
@@ -2036,6 +2063,13 @@ def run_setup() -> int:
     # ── Wrapper script installation ──
 
     report.add(install_wrapper_script())
+
+    # ── Menu-bar app (only present in bundled release tarballs) ──
+
+    if project_root:
+        menubar_result = launch_menubar_app(project_root)
+        if menubar_result is not None:
+            report.add(menubar_result)
 
     # ── Claude Code skills ──
 
