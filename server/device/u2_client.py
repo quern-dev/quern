@@ -331,6 +331,67 @@ class U2Backend:
         except Exception as e:
             raise DeviceError(f"Tap failed: {e}", tool="u2") from e
 
+    async def tap_by_selector(
+        self,
+        udid: str,
+        identifier: str | None = None,
+        label: str | None = None,
+    ) -> dict | None:
+        """Tap an element by native uiautomator2 selector — WITHOUT dumping the
+        full hierarchy.
+
+        describe_all()/dump_hierarchy() performs a full accessibility traversal
+        that scrolls CoordinatorLayout/RecyclerView content out of view on some
+        screens (e.g. cache-detail's header actions), so resolving an identifier
+        via the tree can scroll the target away before the tap lands. A targeted
+        selector click (UiObject.click) finds and taps just the one element with
+        no such side effect — and it's faster (~0.3s vs ~1.2s).
+
+        Returns a normalized {label, identifier, type, x, y} dict for the tapped
+        element, or None if no match was found (caller should fall back to the
+        dump-based path).
+        """
+
+        def _do():
+            device = self._connect(udid)
+            selectors: list[dict] = []
+            if identifier:
+                # quern identifiers are resource-ids with the package stripped
+                # ("button_log"); match the suffix of the full resource-id.
+                selectors.append({"resourceIdMatches": rf".*/{re.escape(identifier)}$"})
+            if label:
+                # A label may be visible text OR content-desc — try both.
+                selectors.append({"text": label})
+                selectors.append({"description": label})
+
+            for sel in selectors:
+                obj = device(**sel)
+                if not obj.exists:
+                    continue
+                info = obj.info or {}
+                obj.click()
+                bounds = info.get("bounds") or {}
+                cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
+                cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
+                cls = info.get("className", "")
+                return {
+                    "label": info.get("text")
+                    or info.get("contentDescription")
+                    or label
+                    or "",
+                    "identifier": identifier,
+                    "type": _map_class(cls) if cls else None,
+                    "x": cx,
+                    "y": cy,
+                }
+            return None
+
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            logger.debug("tap_by_selector fell back (%s)", e)
+            return None
+
     async def swipe(
         self,
         udid: str,

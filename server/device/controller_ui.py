@@ -956,6 +956,31 @@ class DeviceControllerUI:
                         },
                     }
 
+        # Android fast path: tap by native selector, skipping the full UI-tree
+        # dump. dump_hierarchy() scrolls CoordinatorLayout/RecyclerView content
+        # out of view on some screens (e.g. cache-detail), so resolving an
+        # identifier via the tree can scroll the target away before the tap. A
+        # native selector click (UiObject.click) finds+taps the one element with
+        # no such side effect, and is faster. Restricted to unambiguous cases
+        # (exact identifier/label, no type/value/substring filters); anything
+        # else falls through to the dump-based path below.
+        resolved_fast = await self.resolve_udid(udid)
+        if (
+            self._is_android(resolved_fast)
+            and value is None
+            and not label_contains
+            and not label_prefix
+            and not element_type
+            and (identifier or label)
+        ):
+            tapped = await self._ui_backend(resolved_fast).tap_by_selector(
+                resolved_fast, identifier=identifier, label=label,
+            )
+            if tapped is not None:
+                self._invalidate_ui_cache(resolved_fast)
+                return {"status": "ok", "tapped": tapped}
+            # Not found via selector — fall through to the dump-based path.
+
         # Traditional path: fetch full UI tree
         filter_label = _effective_filter_label(label, label_contains, label_prefix)
         elements, resolved = await self.get_ui_elements(
