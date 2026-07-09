@@ -57,6 +57,7 @@ from server.lifecycle.ports import (
 )
 from server.lifecycle.state import (
     detect_local_ip,
+    fetch_tools,
     is_server_healthy,
     read_state,
     remove_state,
@@ -602,33 +603,35 @@ fetch('/api/v1/device/list', {
 
     @app.get("/health")
     async def health() -> dict:
-        """Health check with tool availability status and cache stats."""
-        tools = {}
-        cache_stats = {}
-        if hasattr(app.state, "device_controller") and app.state.device_controller:
-            tools = await app.state.device_controller.check_tools()
-            cache_stats = app.state.device_controller.get_cache_stats()
-        return {
-            "status": "ok",
-            "version": get_version(),
-            "tools": tools,
-            "ui_cache": cache_stats,
-        }
+        """Fast liveness ping.
+
+        Intentionally does NO device-tool probing (that lives on /tools and the
+        `doctor` command). check_tools() shells out to adb/simctl/idb/etc., and a
+        slow probe like `idb list-targets` (~5s) previously pushed /health past
+        the CLI's 2s health-check timeout — making `quern status`/`start` wrongly
+        report the server as down/stale. Keep this endpoint sub-millisecond.
+        """
+        return {"status": "ok", "version": get_version()}
 
     @app.get("/api/v1/health")
     async def api_health() -> dict:
-        """Health check with tool availability status and cache stats."""
-        tools = {}
-        cache_stats = {}
+        """Fast liveness ping — see health()."""
+        return {"status": "ok", "version": get_version()}
+
+    @app.get("/tools")
+    async def tools() -> dict:
+        """Device-tool availability + UI cache stats.
+
+        Split out of /health so the health ping stays fast (tool probes can take
+        several seconds). Consumed by the `doctor` and `status` CLI commands.
+        Public, like /health — it returns only non-sensitive availability flags.
+        """
+        tools_status: dict = {}
+        cache_stats: dict = {}
         if hasattr(app.state, "device_controller") and app.state.device_controller:
-            tools = await app.state.device_controller.check_tools()
+            tools_status = await app.state.device_controller.check_tools()
             cache_stats = app.state.device_controller.get_cache_stats()
-        return {
-            "status": "ok",
-            "version": get_version(),
-            "tools": tools,
-            "ui_cache": cache_stats,
-        }
+        return {"tools": tools_status, "ui_cache": cache_stats}
 
     return app
 
@@ -1000,6 +1003,45 @@ def _cmd_status(args: argparse.Namespace) -> None:
     _print_status(state)
     if "_uptime" in state:
         print(f"  Uptime:     {state['_uptime']}")
+
+    # Device-tool availability. Fetched explicitly from /tools (NOT /health, which
+    # is now a fast liveness ping). This adds a few seconds to `status` because it
+    # probes adb/simctl/idb/etc. — acceptable for a manual command.
+    tools_data = fetch_tools(port)
+    if tools_data and tools_data.get("tools"):
+        line = ", ".join(
+            f"{name} {'✓' if ok else '✗'}"
+            for name, ok in sorted(tools_data["tools"].items())
+        )
+        print(f"  Tools:      {line}")
+    sys.exit(0)
+
+
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    """Report device-tool availability (read-only diagnostics)."""
+    state = read_state()
+    if not state:
+        print("No server running. Start it with: quern start")
+        sys.exit(1)
+
+    port = state.get("server_port", 9100)
+    if not is_server_healthy(port):
+        print("Server is not responding on /health")
+        sys.exit(1)
+
+    data = fetch_tools(port)
+    if data is None:
+        print("Could not fetch tool status from /tools")
+        sys.exit(1)
+
+    tools = data.get("tools", {})
+    if not tools:
+        print("No device tools reported (device controller unavailable).")
+        sys.exit(0)
+
+    print("Device tools:")
+    for name, ok in sorted(tools.items()):
+        print(f"  {'✓' if ok else '✗'} {name}")
     sys.exit(0)
 
 
@@ -1096,6 +1138,11 @@ def cli() -> None:
     # status
     subparsers.add_parser("status", help="Show server status")
 
+    # doctor
+    subparsers.add_parser(
+        "doctor", help="Report device-tool availability (read-only diagnostics)"
+    )
+
     # setup
     subparsers.add_parser("setup", help="Check environment and install dependencies")
 
@@ -1149,6 +1196,8 @@ def cli() -> None:
         _cmd_restart(args)
     elif args.command == "status":
         _cmd_status(args)
+    elif args.command == "doctor":
+        _cmd_doctor(args)
     elif args.command == "regenerate-key":
         key = ServerConfig.regenerate_api_key()
         print(f"New API key: {key}")

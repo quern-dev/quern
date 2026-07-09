@@ -23,7 +23,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         # Health check, API docs, and cert download are always public
         public_paths = (
-            "/", "/health", "/api/v1/health", "/docs", "/redoc",
+            "/", "/health", "/api/v1/health", "/tools", "/docs", "/redoc",
             "/openapi.json", "/api/v1/proxy/cert", "/video-test",
         )
         if request.url.path in public_paths:
