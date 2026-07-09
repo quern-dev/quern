@@ -1005,6 +1005,21 @@ class SwipeRequest(BaseModel):
     udid: str | None = None
 
 
+class ScrollToElementRequest(BaseModel):
+    """Request body for POST /device/ui/scroll-to-element."""
+
+    label: str | None = None
+    identifier: str | None = None
+    udid: str | None = None
+    max_swipes: int = Field(default=10, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def check_target(self):
+        if not self.label and not self.identifier:
+            raise ValueError("Either label or identifier is required")
+        return self
+
+
 class TypeTextRequest(BaseModel):
     """Request body for POST /device/ui/type."""
 

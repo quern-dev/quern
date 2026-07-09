@@ -995,3 +995,81 @@ class TestAnnotatedScreenshot:
                 headers=auth_headers,
             )
         assert resp.status_code == 400
+
+
+class TestScrollToElement:
+    async def test_scroll_to_element_ok(self, app, auth_headers, mock_controller):
+        mock_controller.scroll_to_element = AsyncMock(
+            return_value={
+                "status": "ok",
+                "element": {"label": "Log", "identifier": "button_log",
+                            "type": "Button", "x": 100, "y": 200},
+            }
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/scroll-to-element",
+                json={"identifier": "button_log"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        mock_controller.scroll_to_element.assert_called_once_with(
+            label=None, identifier="button_log", udid=None, max_swipes=10,
+        )
+
+    async def test_scroll_to_element_by_label_and_max_swipes(
+        self, app, auth_headers, mock_controller
+    ):
+        mock_controller.scroll_to_element = AsyncMock(
+            return_value={"status": "ok", "element": {}}
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/scroll-to-element",
+                json={"label": "Log cache", "max_swipes": 5},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        mock_controller.scroll_to_element.assert_called_once_with(
+            label="Log cache", identifier=None, udid=None, max_swipes=5,
+        )
+
+    async def test_scroll_to_element_not_found(self, app, auth_headers, mock_controller):
+        mock_controller.scroll_to_element = AsyncMock(
+            return_value={"status": "not_found", "detail": "gone"}
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/scroll-to-element",
+                json={"identifier": "missing"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 404
+
+    async def test_scroll_to_element_not_supported(self, app, auth_headers, mock_controller):
+        mock_controller.scroll_to_element = AsyncMock(
+            return_value={"status": "not_supported", "detail": "iOS"}
+        )
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/scroll-to-element",
+                json={"identifier": "button_log"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "not_supported"
+
+    async def test_scroll_to_element_requires_target(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/scroll-to-element",
+                json={},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 422

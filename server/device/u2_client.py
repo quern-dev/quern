@@ -392,6 +392,94 @@ class U2Backend:
             logger.debug("tap_by_selector fell back (%s)", e)
             return None
 
+    async def scroll_into_view(
+        self,
+        udid: str,
+        identifier: str | None = None,
+        label: str | None = None,
+        max_swipes: int = 10,
+    ) -> dict | None:
+        """Scroll a scrollable container until the target element is on-screen —
+        WITHOUT dumping the full hierarchy.
+
+        Prefers uiautomator2's native scrollIntoView (UiScrollable) via
+        ``d(scrollable=True).scroll.to(**selector)``, which searches both
+        directions and stops at the element. Falls back to a bounded, targeted
+        swipe loop (checking ``obj.exists`` per selector, not dump_hierarchy) if
+        the native scroll helper is unavailable. Neither path triggers the
+        dump-induced scroll that motivated the selector-based tap (see #49/#50).
+
+        Returns a normalized ``{label, identifier, type, x, y}`` dict once the
+        element is present, or ``None`` if it never appeared.
+        """
+
+        def _result(obj, fallback_label: str | None) -> dict:
+            info = obj.info or {}
+            bounds = info.get("bounds") or {}
+            cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
+            cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
+            cls = info.get("className", "")
+            return {
+                "label": info.get("text")
+                or info.get("contentDescription")
+                or fallback_label
+                or "",
+                "identifier": identifier,
+                "type": _map_class(cls) if cls else None,
+                "x": cx,
+                "y": cy,
+            }
+
+        def _do():
+            device = self._connect(udid)
+            selectors: list[dict] = []
+            if identifier:
+                selectors.append({"resourceIdMatches": rf".*/{re.escape(identifier)}$"})
+            if label:
+                selectors.append({"text": label})
+                selectors.append({"description": label})
+
+            for sel in selectors:
+                target = device(**sel)
+                # Already in the hierarchy — no scrolling needed.
+                if target.exists:
+                    return _result(target, label)
+
+                scrollable = device(scrollable=True)
+                if not scrollable.exists:
+                    continue
+
+                # Native scrollIntoView (both directions, stops at element).
+                found = False
+                try:
+                    found = bool(scrollable.scroll.to(**sel))
+                except AttributeError:
+                    # Older/newer u2 without .scroll.to — bounded manual fallback.
+                    try:
+                        w, h = device.window_size()
+                    except Exception:
+                        w, h = 1080, 1920
+                    mid_x = w // 2
+                    start_y, end_y = int(h * 0.7), int(h * 0.3)
+                    for _ in range(max_swipes):
+                        if target.exists:
+                            found = True
+                            break
+                        device.swipe(mid_x, start_y, mid_x, end_y, duration=0.3)
+                except Exception as e:
+                    logger.debug("scroll_into_view native scroll failed (%s)", e)
+
+                if found and target.exists:
+                    return _result(target, label)
+
+            return None
+
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            logger.debug("scroll_into_view fell back (%s)", e)
+            return None
+
     async def swipe(
         self,
         udid: str,

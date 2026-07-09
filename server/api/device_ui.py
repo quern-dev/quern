@@ -18,6 +18,7 @@ from server.models import (
     ClearTextRequest,
     DeviceError,
     PressButtonRequest,
+    ScrollToElementRequest,
     SwipeRequest,
     TapElementRequest,
     TapRequest,
@@ -398,6 +399,29 @@ async def swipe(request: Request, body: SwipeRequest):
             udid=body.udid,
         )
         return {"status": "ok", "udid": udid}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/scroll-to-element")
+async def scroll_to_element(request: Request, body: ScrollToElementRequest):
+    """Scroll a scrollable container until the target element is in view.
+
+    Android-only for now (native uiautomator2 scrollIntoView). Returns 404 when
+    the element never appears after scrolling; 200 with status "not_supported"
+    on non-Android devices.
+    """
+    controller = _get_controller(request)
+    try:
+        result = await controller.scroll_to_element(
+            label=body.label,
+            identifier=body.identifier,
+            udid=body.udid,
+            max_swipes=body.max_swipes,
+        )
+        if result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail=result)
+        return result
     except DeviceError as e:
         raise _handle_device_error(e)
 
