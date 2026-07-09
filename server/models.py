@@ -1041,6 +1041,7 @@ class OpenUrlRequest(BaseModel):
 
     url: str
     udid: str | None = None
+    bundle_id: str | None = None
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

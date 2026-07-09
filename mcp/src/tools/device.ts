@@ -678,7 +678,9 @@ Examples:
 - Web: "https://example.com"
 - Maps: "geo:48.8584,2.2945?z=15" (Android) or "maps://?ll=48.8584,2.2945&z=15" (iOS)
 - Settings: "App-prefs:WIFI" (iOS) — Android uses action-based intents via adb
-- Deep link: "myapp://path/to/screen"`,
+- Deep link: "myapp://path/to/screen"
+
+Android deep links: pass bundle_id (the app package) to deliver the URL straight to that app. Needed for https deep links on debug/staging builds, which usually aren't verified App Links — without a package target Android opens the browser instead of the app.`,
     inputSchema: strictParams({
       url: z.string().describe(
         "URL or URI to open (e.g. https://example.com, geo:48.8,2.3?z=15, maps://?ll=48.8,2.3)"
@@ -687,6 +689,10 @@ Examples:
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      bundle_id: z
+        .string()
+        .optional()
+        .describe("Android only: app package to receive the intent directly (bypasses App Links verification). Use for deep links on debug/staging builds; ignored on iOS."),
       include_screen_context: z
         .boolean()
         .default(false)
@@ -702,10 +708,11 @@ Examples:
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ url, udid, include_screen_context, capture_screenshots, settle_delay }) => {
+  }, async ({ url, udid, bundle_id, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { url };
       if (udid) body.udid = udid;
+      if (bundle_id) body.bundle_id = bundle_id;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;

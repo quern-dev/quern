@@ -714,18 +714,28 @@ rm -rf /data/local/tmp/tmp-ca-copy
             str(longitude), str(latitude), "0", str(satellites),
         )
 
-    async def open_url(self, serial: str, url: str) -> None:
+    async def open_url(self, serial: str, url: str, package: str | None = None) -> None:
         """Open a URL via Android's VIEW intent.
 
-        Runs: adb -s <serial> shell am start -a android.intent.action.VIEW -d <url>
+        Runs: adb -s <serial> shell am start -a android.intent.action.VIEW -d <url> [<package>]
         Supports any URI scheme the device has a handler for: https://, geo:,
         tel:, mailto:, custom app schemes, etc.
+
+        When `package` is given, the intent is delivered directly to that app,
+        bypassing Android App Links verification. This is required to drive deep
+        links into a debug/staging build: such https links are usually NOT
+        verified App Links (autoVerify=false and/or the debug signing cert isn't
+        in the domain's assetlinks.json), so a package-less VIEW intent falls
+        through to the browser instead of opening the app.
         """
-        await self._run_adb_for_device(
+        args = [
             serial, "shell", "am", "start",
             "-a", "android.intent.action.VIEW",
             "-d", url,
-        )
+        ]
+        if package:
+            args.append(package)
+        await self._run_adb_for_device(*args)
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.

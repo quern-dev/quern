@@ -489,11 +489,19 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.set_location(resolved, latitude, longitude)
         return resolved
 
-    async def open_url(self, url: str, udid: str | None = None) -> str:
-        """Open a URL on the device. Returns the resolved udid."""
+    async def open_url(
+        self, url: str, udid: str | None = None, bundle_id: str | None = None,
+    ) -> str:
+        """Open a URL on the device. Returns the resolved udid.
+
+        On Android, pass `bundle_id` (the app package) to deliver the URL
+        straight to that app — needed for deep links on debug/staging builds
+        that aren't verified App Links (otherwise Android opens the browser).
+        Ignored on iOS (universal links route to the associated app by the OS).
+        """
         resolved = await self.resolve_udid(udid)
         if self._is_android(resolved):
-            await self.adb.open_url(resolved, url)
+            await self.adb.open_url(resolved, url, package=bundle_id)
         else:
             self._require_simulator(resolved, "Open URL")
             await self.simctl.open_url(resolved, url)

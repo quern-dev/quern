@@ -467,7 +467,7 @@ async def open_url(request: Request, body: OpenUrlRequest):
         resolved = await controller.resolve_udid(body.udid)
         if body.capture_screenshots:
             before = await _capture_action_screenshot(controller, resolved, "open_url_before")
-        udid = await controller.open_url(url=body.url, udid=body.udid)
+        udid = await controller.open_url(url=body.url, udid=body.udid, bundle_id=body.bundle_id)
         result: dict = {"status": "ok", "udid": udid, "url": body.url}
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
