@@ -343,3 +343,24 @@ def is_server_healthy(port: int, host: str = "127.0.0.1", timeout: float = 2.0) 
             return resp.status == 200
     except Exception:
         return False
+
+
+def fetch_tools(
+    port: int, host: str = "127.0.0.1", timeout: float = 15.0
+) -> dict | None:
+    """Fetch device-tool availability from a running server's /tools endpoint.
+
+    Separate from is_server_healthy() because tool probing (e.g. `idb
+    list-targets`) can take several seconds — which is exactly why it no longer
+    lives on the fast /health path. Returns the parsed JSON dict, or None if the
+    server is unreachable. Uses stdlib urllib only.
+    """
+    try:
+        url = f"http://{host}:{port}/tools"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
