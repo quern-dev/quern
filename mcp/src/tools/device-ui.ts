@@ -503,6 +503,59 @@ Label matching modes (mutually exclusive — use only one):
     }
   });
 
+  server.registerTool("scroll_to_element", {
+    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Android-only for now — uses native uiautomator2 scrollIntoView, so it does not trigger the dump-induced scroll that a full UI-tree read can cause. Returns the element's on-screen position once visible; 404 if it never appears after scrolling. On non-Android devices returns status "not_supported".`,
+    inputSchema: strictParams({
+      label: z
+        .string()
+        .optional()
+        .describe("Exact visible text or content-description of the target"),
+      identifier: z
+        .string()
+        .optional()
+        .describe("Resource-id (package-stripped, e.g. \"button_log\")"),
+      max_swipes: z
+        .coerce.number()
+        .int()
+        .default(10)
+        .describe("Max scroll attempts before giving up (default 10)"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ label, identifier, max_swipes, udid }) => {
+    try {
+      const body: Record<string, unknown> = { max_swipes };
+      if (label) body.label = label;
+      if (identifier) body.identifier = identifier;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/scroll-to-element",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("type_text", {
     description: `Type text into the currently focused input field. On iOS simulators this attaches the simulated hardware keyboard before typing (required for shifted characters to retain their modifier), which hides the software keyboard — use set_hardware_keyboard with enabled=false afterward if a later step expects the software keyboard to be visible.`,
     inputSchema: strictParams({

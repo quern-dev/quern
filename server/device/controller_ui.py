@@ -1217,6 +1217,50 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
+    async def scroll_to_element(
+        self,
+        label: str | None = None,
+        identifier: str | None = None,
+        udid: str | None = None,
+        max_swipes: int = 10,
+    ) -> dict:
+        """Scroll until an element is in view, without interacting with it.
+
+        Android: native uiautomator2 scrollIntoView (no dump_hierarchy, so no
+        dump-induced scroll — see #49). iOS is not yet wired here (tracked in
+        #50); tap_element already nudges home-indicator-obscured elements into
+        view via _scroll_element_into_view.
+
+        Returns {"status": "ok", "element": {...}} once visible,
+        {"status": "not_found", ...} if it never appeared, or
+        {"status": "not_supported", ...} on non-Android devices.
+        """
+        if not label and not identifier:
+            raise DeviceError(
+                "Either label or identifier is required for scroll-to-element",
+                tool="u2",
+            )
+
+        resolved = await self.resolve_udid(udid)
+        if not self._is_android(resolved):
+            return {
+                "status": "not_supported",
+                "detail": "scroll_to_element is currently Android-only (see #50)",
+            }
+
+        found = await self._ui_backend(resolved).scroll_into_view(
+            resolved, identifier=identifier, label=label, max_swipes=max_swipes,
+        )
+        self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
+
+        if found is None:
+            target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
+            return {
+                "status": "not_found",
+                "detail": f"Element not found after scrolling ({target})",
+            }
+        return {"status": "ok", "element": found}
+
     async def type_text(self, text: str, udid: str | None = None) -> str:
         """Type text into focused field. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)

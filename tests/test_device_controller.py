@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -1123,3 +1123,49 @@ class TestAndroidUIBackendSelection:
         from server.device.u2_client import U2Backend
 
         assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)
+
+
+class TestScrollToElement:
+    async def test_requires_label_or_identifier(self):
+        ctrl = DeviceController()
+        with pytest.raises(DeviceError, match="label or identifier"):
+            await ctrl.scroll_to_element()
+
+    async def test_not_supported_on_ios(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+
+        result = await ctrl.scroll_to_element(identifier="button_log")
+        assert result["status"] == "not_supported"
+
+    async def test_android_ok_delegates_to_backend(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+
+        element = {"label": "Log", "identifier": "button_log",
+                   "type": "Button", "x": 100, "y": 200}
+        backend = MagicMock()
+        backend.scroll_into_view = AsyncMock(return_value=element)
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=5)
+        assert result == {"status": "ok", "element": element}
+        backend.scroll_into_view.assert_called_once_with(
+            "emulator-5554", identifier="button_log", label=None, max_swipes=5,
+        )
+
+    async def test_android_not_found(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+
+        backend = MagicMock()
+        backend.scroll_into_view = AsyncMock(return_value=None)
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.scroll_to_element(label="Nope")
+        assert result["status"] == "not_found"
