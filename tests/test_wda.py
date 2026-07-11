@@ -18,6 +18,7 @@ from server.device.wda import (
     ICON_PATH,
     _find_xctestrun,
     _parse_ios_major_version,
+    _post_process_runner_app,
     _rename_xctestrun,
     build_wda,
     clone_wda,
@@ -379,6 +380,7 @@ class TestBuildWda:
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda._post_process_runner_app", AsyncMock()),
         ):
             result = await build_wda("TEAM123")
 
@@ -401,6 +403,7 @@ class TestBuildWda:
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda._post_process_runner_app", AsyncMock()),
         ):
             result = await build_wda("NEW_TEAM")
 
@@ -428,6 +431,7 @@ class TestBuildWda:
             patch("server.device.wda.WDA_REPO", repo),
             patch("server.device.wda.WDA_DERIVED", derived),
             patch("server.device.wda.asyncio.create_subprocess_exec", return_value=proc),
+            patch("server.device.wda._post_process_runner_app", AsyncMock()),
         ):
             result = await build_wda("TEAM123", force=True)
 
@@ -616,12 +620,72 @@ class TestSetupWda:
             patch("server.device.wda.save_wda_state"),
             patch("server.device.wda.customize_wda", return_value=False),
             patch("server.device.wda.build_wda", return_value=False),
+            patch("server.device.wda._runner_app_signature_valid", return_value=True),
             patch("server.device.wda.install_wda", return_value=None),
         ):
             result = await setup_wda("DEV1", "iOS 17.4")
 
         assert result["status"] == "ok"
         assert result["team_id"] == "TEAM1"
+
+    async def test_self_heal_resigns_stale_signature(self):
+        """A skipped build with an invalid on-disk signature re-runs post-process."""
+        identities = [{"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"}]
+        post_process = AsyncMock()
+        with (
+            patch("server.device.wda.discover_signing_identities", return_value=identities),
+            patch("server.device.wda.clone_wda", return_value=False),
+            patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.customize_wda", return_value=False),
+            patch("server.device.wda.build_wda", return_value=False),  # skipped
+            patch("server.device.wda._runner_app_signature_valid", return_value=False),
+            patch("server.device.wda._post_process_runner_app", post_process),
+            patch("server.device.wda.install_wda", return_value=None),
+        ):
+            result = await setup_wda("DEV1", "iOS 17.4")
+
+        assert result["status"] == "ok"
+        post_process.assert_awaited_once_with("TEAM1")
+
+    async def test_no_resign_when_signature_valid(self):
+        """A skipped build with a valid signature does not re-run post-process."""
+        identities = [{"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"}]
+        post_process = AsyncMock()
+        with (
+            patch("server.device.wda.discover_signing_identities", return_value=identities),
+            patch("server.device.wda.clone_wda", return_value=False),
+            patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.customize_wda", return_value=False),
+            patch("server.device.wda.build_wda", return_value=False),  # skipped
+            patch("server.device.wda._runner_app_signature_valid", return_value=True),
+            patch("server.device.wda._post_process_runner_app", post_process),
+            patch("server.device.wda.install_wda", return_value=None),
+        ):
+            result = await setup_wda("DEV1", "iOS 17.4")
+
+        assert result["status"] == "ok"
+        post_process.assert_not_awaited()
+
+    async def test_fresh_build_skips_signature_check(self):
+        """A fresh build already re-signed; no extra verify/re-sign."""
+        identities = [{"team_id": "TEAM1", "team_name": "Acme", "team_type": "Company"}]
+        sig_check = AsyncMock(return_value=True)
+        with (
+            patch("server.device.wda.discover_signing_identities", return_value=identities),
+            patch("server.device.wda.clone_wda", return_value=False),
+            patch("server.device.wda.read_wda_state", return_value={"cloned": False}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.customize_wda", return_value=False),
+            patch("server.device.wda.build_wda", return_value=True),  # fresh build
+            patch("server.device.wda._runner_app_signature_valid", sig_check),
+            patch("server.device.wda.install_wda", return_value=None),
+        ):
+            result = await setup_wda("DEV1", "iOS 17.4")
+
+        assert result["status"] == "ok"
+        sig_check.assert_not_awaited()
 
     async def test_explicit_team_id(self):
         identities = [
@@ -651,6 +715,42 @@ class TestSetupWda:
 
         assert result["status"] == "error"
         assert "BOGUS" in result["error"]
+
+
+class TestPostProcessResign:
+    async def test_missing_signing_identity_is_fatal(self, tmp_path):
+        """Post-process patches the app, so an un-resignable app must raise —
+        never leave a bundle whose signature seals a stale Info.plist."""
+        runner_app = tmp_path / "WebDriverAgentRunner-Runner.app"
+        runner_app.mkdir()
+        with (
+            patch("server.device.wda.WDA_APP", runner_app),
+            patch("server.device.wda._find_signing_identity", AsyncMock(return_value=None)),
+        ):
+            with pytest.raises(RuntimeError, match="no signing identity"):
+                await _post_process_runner_app("TEAM1")
+
+    async def test_resign_failure_is_fatal(self, tmp_path):
+        """A failing codesign re-sign raises rather than shipping a broken app."""
+        runner_app = tmp_path / "WebDriverAgentRunner-Runner.app"
+        runner_app.mkdir()
+
+        async def _fake_codesign(*args, **kwargs):
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b"codesign boom"))
+            proc.returncode = 1
+            return proc
+
+        with (
+            patch("server.device.wda.WDA_APP", runner_app),
+            patch(
+                "server.device.wda._find_signing_identity",
+                AsyncMock(return_value="Apple Development: Tester (ABC123)"),
+            ),
+            patch("asyncio.create_subprocess_exec", _fake_codesign),
+        ):
+            with pytest.raises(RuntimeError, match="Re-signing"):
+                await _post_process_runner_app("TEAM1")
 
 
 # ---------------------------------------------------------------------------
