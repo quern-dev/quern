@@ -408,9 +408,8 @@ async def swipe(request: Request, body: SwipeRequest):
 async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """Scroll a scrollable container until the target element is in view.
 
-    Android-only for now (native uiautomator2 scrollIntoView). Returns 404 when
-    the element never appears after scrolling; 200 with status "not_supported"
-    on non-Android devices.
+    Supported on Android and iOS (physical + simulator) via a bounded swipe
+    loop. Returns 404 when the element never appears after scrolling.
     """
     controller = _get_controller(request)
     try:

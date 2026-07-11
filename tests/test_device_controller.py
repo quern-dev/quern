@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from server.device.controller import DeviceController
-from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType
+from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -446,10 +446,14 @@ class TestTapElement:
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        # iOS taps now scroll-to-find on a miss; simulate the scroll also
+        # failing to surface the element so we exercise the not_found path.
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
 
         result = await ctrl.tap_element(label="Nonexistent")
         assert result["status"] == "not_found"
         assert "No element found" in result["detail"]
+        ctrl._ios_scroll_to_element.assert_awaited_once()
 
     async def test_no_label_or_identifier_raises(self):
         ctrl = DeviceController()
@@ -729,6 +733,23 @@ class TestGetUIElementsWdaDispatch:
         assert elements[0].label == "Done"
         # Should NOT call describe_all
         ctrl.wda_client.describe_all.assert_not_called()
+        # filter_identifier must map to the identifier locator (accessibility
+        # id), not be misrouted into a label CONTAINS predicate.
+        first_call = ctrl.wda_client.find_elements_by_query.call_args_list[0]
+        assert first_call == call("PHYS-0001", "accessibility id", "done_btn")
+
+    async def test_physical_filter_type_maps_to_type_predicate(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
+        ctrl.wda_client.describe_all = AsyncMock()
+
+        await ctrl.get_ui_elements("PHYS-0001", filter_type="Application")
+        # filter_type must map to a type predicate, not a label BEGINSWITH.
+        q = ctrl.wda_client.find_elements_by_query.call_args[0][2]
+        assert "type == 'XCUIElementTypeApplication'" in q
+        assert "BEGINSWITH" not in q
 
     async def test_physical_no_filters_uses_describe_all(self):
         ctrl = DeviceController()
@@ -1131,13 +1152,103 @@ class TestScrollToElement:
         with pytest.raises(DeviceError, match="label or identifier"):
             await ctrl.scroll_to_element()
 
-    async def test_not_supported_on_ios(self):
+    def _ios_ctrl(self, backend):
         ctrl = DeviceController()
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._get_screen_dimensions = AsyncMock(
+            return_value={"width": 402, "height": 852}
+        )
+        ctrl._ui_backend = MagicMock(return_value=backend)
+        return ctrl
+
+    @staticmethod
+    def _el(y: float, *, height: float = 40.0):
+        return UIElement(
+            type="Button", label="Log", identifier="button_log",
+            frame={"x": 100.0, "y": y, "width": 120.0, "height": height},
+        )
+
+    async def test_ios_already_visible_no_swipe(self):
+        backend = MagicMock()
+        backend.swipe = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        # On-screen from the first fetch (center 420, within [0, 818]).
+        ctrl.get_ui_elements = AsyncMock(
+            return_value=([self._el(400)], "AAAA-1111")
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
-        assert result["status"] == "not_supported"
+        assert result["status"] == "ok"
+        assert result["element"]["identifier"] == "button_log"
+        assert result["element"]["y"] == 420.0
+        backend.swipe.assert_not_called()
+
+    async def test_ios_scrolls_toward_offscreen_below(self):
+        backend = MagicMock()
+        backend.swipe = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        # First below the viewport (center 1020), then in view after a swipe
+        # (the third fetch is the settle re-confirm).
+        ctrl.get_ui_elements = AsyncMock(side_effect=[
+            ([self._el(1000)], "AAAA-1111"),
+            ([self._el(400)], "AAAA-1111"),
+            ([self._el(400)], "AAAA-1111"),
+        ])
+
+        result = await ctrl.scroll_to_element(identifier="button_log")
+        assert result["status"] == "ok"
+        backend.swipe.assert_called_once()
+        # A target below the viewport should be revealed by a finger swipe UP
+        # (start_y > end_y), which scrolls the content down.
+        args = backend.swipe.call_args.args
+        start_y, end_y = args[2], args[4]
+        assert start_y > end_y
+
+    async def test_ios_scrolls_toward_offscreen_above(self):
+        backend = MagicMock()
+        backend.swipe = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        # First tucked under the top nav bar (top edge 4 < 50 inset), then in
+        # view after scrolling up (the third fetch is the settle re-confirm).
+        ctrl.get_ui_elements = AsyncMock(side_effect=[
+            ([self._el(4)], "AAAA-1111"),
+            ([self._el(120)], "AAAA-1111"),
+            ([self._el(120)], "AAAA-1111"),
+        ])
+
+        result = await ctrl.scroll_to_element(identifier="button_log")
+        assert result["status"] == "ok"
+        backend.swipe.assert_called_once()
+        # A target hidden above should be revealed by a finger swipe DOWN
+        # (start_y < end_y), which scrolls the content up.
+        args = backend.swipe.call_args.args
+        start_y, end_y = args[2], args[4]
+        assert start_y < end_y
+
+    async def test_ios_not_found_after_budget(self):
+        backend = MagicMock()
+        backend.swipe = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        # Never located (lazy/recycled row) → blind sweep, never visible.
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "AAAA-1111"))
+
+        result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=3)
+        assert result["status"] == "not_found"
+        assert backend.swipe.await_count > 0
+
+    async def test_ios_aborts_when_container_stalls(self):
+        backend = MagicMock()
+        backend.swipe = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        # Located below the viewport but the frame never moves → end of travel.
+        ctrl.get_ui_elements = AsyncMock(return_value=([self._el(1000)], "AAAA-1111"))
+
+        result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=10)
+        assert result["status"] == "not_found"
+        # Stall detected after a couple of swipes — nowhere near the full budget.
+        assert backend.swipe.await_count <= 3
 
     async def test_android_ok_delegates_to_backend(self):
         ctrl = DeviceController()
@@ -1169,6 +1280,79 @@ class TestScrollToElement:
 
         result = await ctrl.scroll_to_element(label="Nope")
         assert result["status"] == "not_found"
+
+
+class TestTapElementIosScroll:
+    """iOS tap_element auto-scrolls an off-screen target into view, then taps."""
+
+    def _ios_ctrl(self, backend):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._get_screen_dimensions = AsyncMock(
+            return_value={"width": 402, "height": 852}
+        )
+        ctrl._ui_backend = MagicMock(return_value=backend)
+        return ctrl
+
+    @staticmethod
+    def _target():
+        return UIElement(
+            type="Button", label="Sign out", identifier="_SignOut button",
+            frame={"x": 20.0, "y": 400.0, "width": 360.0, "height": 44.0},
+        )
+
+    async def test_miss_then_scroll_then_tap(self):
+        backend = MagicMock()
+        backend.tap = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        # Traditional fetch misses (off-screen); scroll brings it into view.
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "AAAA-1111"))
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=self._target())
+
+        result = await ctrl.tap_element(
+            identifier="_SignOut button", skip_stability_check=True,
+        )
+        assert result["status"] == "ok"
+        assert result["tapped"]["identifier"] == "_SignOut button"
+        ctrl._ios_scroll_to_element.assert_awaited_once_with(
+            "AAAA-1111", label=None, identifier="_SignOut button", max_swipes=10,
+        )
+        backend.tap.assert_awaited_once()
+
+    async def test_scroll_to_find_false_skips_scroll(self):
+        backend = MagicMock()
+        backend.tap = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "AAAA-1111"))
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=self._target())
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(
+                identifier="_SignOut button", scroll_to_find=False,
+            )
+        assert result["status"] == "not_found"
+        ctrl._ios_scroll_to_element.assert_not_called()
+
+    async def test_scroll_miss_returns_not_found(self):
+        backend = MagicMock()
+        backend.tap = AsyncMock()
+        ctrl = self._ios_ctrl(backend)
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "AAAA-1111"))
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(label="Nope")
+        assert result["status"] == "not_found"
+        ctrl._ios_scroll_to_element.assert_awaited_once()
+        backend.tap.assert_not_called()
 
 
 class TestTapElementAutoScroll:
