@@ -893,6 +893,7 @@ class DeviceControllerUI:
         skip_stability_check: bool = False,
         source_timeout: float | None = None,
         value: str | None = None,
+        scroll_to_find: bool = True,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -973,13 +974,25 @@ class DeviceControllerUI:
             and not element_type
             and (identifier or label)
         ):
-            tapped = await self._ui_backend(resolved_fast).tap_by_selector(
+            backend = self._ui_backend(resolved_fast)
+            tapped = await backend.tap_by_selector(
                 resolved_fast, identifier=identifier, label=label,
             )
+            # Not in the current view — auto-scroll to it and retry. Uses the
+            # selector-based swipe loop (no dump_hierarchy), so it inherits the
+            # no-dump-induced-scroll property of the fast path.
+            if tapped is None and scroll_to_find:
+                found = await backend.scroll_into_view(
+                    resolved_fast, identifier=identifier, label=label,
+                )
+                if found is not None:
+                    tapped = await backend.tap_by_selector(
+                        resolved_fast, identifier=identifier, label=label,
+                    )
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
                 return {"status": "ok", "tapped": tapped}
-            # Not found via selector — fall through to the dump-based path.
+            # Not found even after scrolling — fall through to the dump-based path.
 
         # Traditional path: fetch full UI tree
         filter_label = _effective_filter_label(label, label_contains, label_prefix)

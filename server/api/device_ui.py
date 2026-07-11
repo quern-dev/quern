@@ -360,6 +360,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             skip_stability_check=body.skip_stability_check,
             source_timeout=body.source_timeout,
             value=body.value,
+            scroll_to_find=body.scroll_to_find,
         )
 
         end = time.perf_counter()

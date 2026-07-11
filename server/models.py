@@ -979,6 +979,7 @@ class TapElementRequest(BaseModel):
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
     value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
+    scroll_to_find: bool = True  # Android: if the element isn't in view, scroll to it then tap
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

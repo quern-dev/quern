@@ -559,6 +559,7 @@ class TestTapElement:
             skip_stability_check=False,
             source_timeout=None,
             value=None,
+            scroll_to_find=True,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -580,6 +581,7 @@ class TestTapElement:
             skip_stability_check=False,
             source_timeout=None,
             value=None,
+            scroll_to_find=True,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -601,6 +603,7 @@ class TestTapElement:
             skip_stability_check=False,
             source_timeout=None,
             value=None,
+            scroll_to_find=True,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
