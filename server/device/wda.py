@@ -444,11 +444,20 @@ async def _post_process_runner_app(team_id: str) -> None:
 
     # Re-sign the app since we modified its contents.
     # Find the signing identity that matches the team_id from the keychain.
+    # We just modified the app's Info.plist and icon assets, so its existing
+    # signature no longer matches. Re-signing is mandatory: a half-customized
+    # app whose signature seals a stale Info.plist installs on-device with
+    # 0xe8008001 (ApplicationVerificationFailed). Fail loudly rather than
+    # leave a broken bundle behind.
     logger.info("Re-signing Runner app after post-processing")
     signing_identity = await _find_signing_identity(team_id)
     if not signing_identity:
-        logger.warning("No signing identity found for team %s — skipping re-sign", team_id)
-        return
+        raise RuntimeError(
+            f"Post-processed the WDA Runner app but found no signing identity "
+            f"for team {team_id} to re-sign it. The app's signature no longer "
+            f"matches its patched Info.plist and would fail to install. "
+            f"Re-run setup_wda with force:true."
+        )
 
     # Re-sign inner xctest first, then outer app
     for bundle in [xctest_dir, runner_app]:
@@ -461,8 +470,10 @@ async def _post_process_runner_app(team_id: str) -> None:
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            logger.warning("Re-signing %s failed: %s", bundle.name, stderr.decode())
-            return
+            raise RuntimeError(
+                f"Re-signing {bundle.name} failed after post-processing: "
+                f"{stderr.decode()}"
+            )
 
     logger.info("Post-processed Runner app: display name, icon, and signature updated")
 
@@ -492,6 +503,24 @@ async def _find_signing_identity(team_id: str) -> str | None:
             return line.split("=", 1)[1]
 
     return None
+
+
+async def _runner_app_signature_valid() -> bool:
+    """Return True if the built Runner app's code signature verifies on disk.
+
+    A False here (with the app present) means a prior post-process patched the
+    Info.plist/icons but the signature was left sealing the old contents — the
+    app would fail to install with 0xe8008001. Missing app also returns False.
+    """
+    if not WDA_APP.exists():
+        return False
+    proc = await asyncio.create_subprocess_exec(
+        "codesign", "--verify", "--deep", "--strict", str(WDA_APP),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    return proc.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +963,18 @@ async def setup_wda(
 
     # Step 5: Build (device-independent, keyed by team_id only)
     built = await build_wda(team_id, force=force)
+
+    # Step 5b: Self-heal a stale signature. build_wda is cached by team, so a
+    # skipped build won't re-run the post-process re-sign. If a *previous* run
+    # left the on-disk app with a signature that no longer verifies (patched
+    # Info.plist, interrupted re-sign), installing it fails with 0xe8008001.
+    # Re-run the post-process (re-patch + re-sign) so we never install a broken
+    # bundle — without forcing a full rebuild.
+    if not built and not await _runner_app_signature_valid():
+        logger.warning(
+            "WDA Runner app signature does not verify — re-signing before install"
+        )
+        await _post_process_runner_app(team_id)
 
     # Step 6: Install
     await install_wda(udid, os_version)
