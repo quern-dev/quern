@@ -986,6 +986,10 @@ class DeviceControllerUI:
                     resolved_fast, identifier=identifier, label=label,
                 )
                 if found is not None:
+                    # Let the scroll settle before clicking — a tap landing
+                    # while the list is still coming to rest gets absorbed as a
+                    # scroll-stop instead of a click (observed intermittently).
+                    await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label,
                     )
