@@ -94,6 +94,12 @@ class DeviceControllerUI:
     # Bottom safe area inset for devices with home indicator (Face ID / Dynamic Island)
     _HOME_INDICATOR_INSET = 34  # points
 
+    # Top safe inset (status bar / navigation bar). The iOS accessibility tree
+    # includes elements that have scrolled *under* the top chrome — they carry
+    # real, in-bounds frames but aren't visible or tappable. scroll_to_element
+    # treats a target whose top edge is above this inset as not-yet-in-view.
+    _TOP_SAFE_INSET = 50  # points
+
     # Maximum scroll-into-view attempts before giving up
     _MAX_SCROLL_ATTEMPTS = 3
 
@@ -272,6 +278,137 @@ class DeviceControllerUI:
         logger.warning(
             "scroll-into-view: failed after %d attempts", self._MAX_SCROLL_ATTEMPTS,
         )
+        return None
+
+    async def _ios_scroll_to_element(
+        self,
+        resolved: str,
+        label: str | None,
+        identifier: str | None,
+        max_swipes: int,
+    ) -> UIElement | None:
+        """Scroll an iOS scroll container until the target element is on-screen.
+
+        The controller-level analog of Android's U2Backend.scroll_into_view
+        swipe loop (#50/#54): a bounded, coordinate-swipe loop that re-checks the
+        target by selector after each swipe. iOS accessibility snapshots are
+        side-effect-free (unlike Android's dump_hierarchy, see #49), so matching
+        against the tree is safe. Two scroller behaviours are handled:
+
+        - Laid-out scrollers (UIScrollView / SwiftUI ScrollView) keep off-screen
+          subviews in the tree with frames outside the viewport. When the target
+          is located but off-screen we know its direction, so we swipe straight
+          toward it and stop once its frame stops moving (end of travel).
+        - Lazy/recycling scrollers (UITableView / UICollectionView / SwiftUI
+          List) drop off-screen rows from the tree entirely — the target simply
+          isn't matched — so we fall back to a blind sweep, down then up.
+
+        Returns the on-screen UIElement, or None if it never became visible
+        within the swipe budget.
+        """
+        dims = await self._get_screen_dimensions(resolved)
+        screen_height = dims["height"] if dims else None
+        screen_width = dims["width"] if dims else None
+        if not screen_height or not screen_width:
+            # Physical devices aren't in the dimensions table. Recover the
+            # viewport from the Application element via a *targeted* query
+            # (filter_type) — on physical this routes to a WDA predicate query
+            # for the root element, avoiding the full /source read that can time
+            # out and restart WDA on dense screens.
+            app_els, _ = await self.get_ui_elements(
+                resolved, use_cache=False, filter_type="Application",
+            )
+            app_frame = next((e.frame for e in app_els if e.frame), None)
+            if app_frame:
+                screen_height = screen_height or app_frame["height"]
+                screen_width = screen_width or app_frame["width"]
+        screen_height = screen_height or 852
+        screen_width = screen_width or 393
+
+        top_safe = self._TOP_SAFE_INSET
+        bottom_safe = screen_height - self._HOME_INDICATOR_INSET
+        mid_x = screen_width / 2
+        # Swipe endpoints: near the bottom (y_far) and near the top (y_near).
+        # Swiping y_far -> y_near reveals content below; y_near -> y_far reveals
+        # content above (mirrors the Android sweep geometry).
+        y_far = screen_height * 0.72
+        y_near = screen_height * 0.30
+
+        async def _fetch() -> UIElement | None:
+            els, _ = await self.get_ui_elements(
+                resolved, use_cache=False,
+                filter_label=label, filter_identifier=identifier,
+            )
+            matches = find_element(els, label=label, identifier=identifier)
+            return matches[0] if matches else None
+
+        def _visible(el: UIElement) -> bool:
+            # In view = the top edge clears the top chrome (not scrolled under
+            # the nav/status bar) AND the tap point clears the home indicator.
+            # The iOS a11y tree lists occluded rows with in-bounds frames, so a
+            # top-edge bound is needed to reject them (a bare center check gives
+            # false positives for rows tucked under the nav bar).
+            if el.frame is None:
+                return False
+            _, cy = get_tap_point(el)
+            return el.frame["y"] >= top_safe and cy <= bottom_safe
+
+        async def _swipe(y1: float, y2: float) -> None:
+            await self._ui_backend(resolved).swipe(resolved, mid_x, y1, mid_x, y2, 0.3)
+            self._invalidate_ui_cache(resolved)
+
+        el = await _fetch()
+        if el is not None and _visible(el):
+            return el
+
+        last_cy: float | None = None
+        stalls = 0
+        blind_steps = 0
+        blind_down = max_swipes          # sweep down for the first budget...
+        blind_total = max_swipes * 3     # ...then up for twice as long
+
+        for _ in range(max_swipes * 3):
+            if el is not None and el.frame is not None:
+                # Located but off-screen: swipe straight toward it. Direction
+                # mirrors _visible's two out-of-view cases.
+                _, cy = get_tap_point(el)
+                if el.frame["y"] < top_safe:
+                    y1, y2 = y_near, y_far   # clipped above → reveal upper content
+                else:
+                    y1, y2 = y_far, y_near   # below safe area → reveal lower content
+                # End-of-travel guard: frame stopped moving across swipes.
+                if last_cy is not None and abs(cy - last_cy) < 2:
+                    stalls += 1
+                    if stalls >= 2:
+                        logger.info(
+                            "ios scroll-to-element: target off-screen but container "
+                            "won't scroll further (cy=%.0f) — aborting", cy,
+                        )
+                        return None
+                else:
+                    stalls = 0
+                last_cy = cy
+            else:
+                # Not located (recycled/lazy row): blind sweep, down then up.
+                if blind_steps >= blind_total:
+                    return None
+                y1, y2 = (y_far, y_near) if blind_steps < blind_down else (y_near, y_far)
+                blind_steps += 1
+                last_cy = None
+                stalls = 0
+
+            await _swipe(y1, y2)
+            el = await _fetch()
+            if el is not None and _visible(el):
+                # Settle and re-confirm: a swipe can leave the container
+                # rubber-banding, so the immediate frame may be an over-scroll
+                # bounce that snaps back out of view. Re-fetching once settled
+                # both rejects that and returns accurate resting coordinates.
+                await asyncio.sleep(0.3)
+                el = await _fetch()
+                if el is not None and _visible(el):
+                    return el
+
         return None
 
     async def _try_fast_path_element_check(
@@ -483,7 +620,8 @@ class DeviceControllerUI:
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and self._is_physical(resolved):
             elements, query_elapsed = await self._wda_direct_query(
-                resolved, filter_label, filter_identifier, filter_type,
+                resolved, label=filter_label,
+                identifier=filter_identifier, element_type=filter_type,
             )
             if elements:
                 return elements, resolved
@@ -893,6 +1031,7 @@ class DeviceControllerUI:
         skip_stability_check: bool = False,
         source_timeout: float | None = None,
         value: str | None = None,
+        scroll_to_find: bool = True,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -997,6 +1136,23 @@ class DeviceControllerUI:
             label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
+
+        # iOS off-screen retry: on a tree-path miss, scroll the target into view
+        # and retry. Android selector-misses are handled by the fast path above,
+        # so this is scoped to iOS. Only exact label/identifier can be scrolled
+        # to (scroll_to_element's contract); contains/prefix/type-only fall
+        # through to not_found.
+        if (
+            len(matches) == 0
+            and scroll_to_find
+            and not self._is_android(resolved)
+            and (label or identifier)
+        ):
+            scrolled = await self._ios_scroll_to_element(
+                resolved, label=label, identifier=identifier, max_swipes=10,
+            )
+            if scrolled is not None:
+                matches = [scrolled]
 
         if len(matches) == 0:
             search_desc = (
@@ -1226,17 +1382,18 @@ class DeviceControllerUI:
     ) -> dict:
         """Scroll until an element is in view, without interacting with it.
 
-        Android: a bounded, coordinate swipe loop that re-checks the target by
-        selector after each swipe (no dump_hierarchy, so no dump-induced scroll
-        — see #49). Works across the app's mix of scroll containers (View
-        RecyclerView, Compose LazyColumn, Compose-in-ScrollView) where native
-        UiScrollable.scrollIntoView is unreliable — see #50. iOS is not yet
-        wired here (tracked in #50); tap_element already nudges
-        home-indicator-obscured elements into view via _scroll_element_into_view.
+        A bounded, coordinate swipe loop that re-checks the target by selector
+        after each swipe (no full-tree dump-induced scroll — see #49). Works
+        across each platform's mix of scroll containers where native
+        scroll-into-view is unreliable (Android: View RecyclerView, Compose
+        LazyColumn, Compose-in-ScrollView — see #50). Backends:
+        - Android: U2Backend.scroll_into_view (`.exists` re-check).
+        - iOS (physical WDA + simulator): _ios_scroll_to_element, which also
+          handles laid-out scrollers by swiping directly toward an off-screen
+          but located target.
 
-        Returns {"status": "ok", "element": {...}} once visible,
-        {"status": "not_found", ...} if it never appeared, or
-        {"status": "not_supported", ...} on non-Android devices.
+        Returns {"status": "ok", "element": {...}} once visible, or
+        {"status": "not_found", ...} if it never appeared.
         """
         if not label and not identifier:
             raise DeviceError(
@@ -1245,24 +1402,41 @@ class DeviceControllerUI:
             )
 
         resolved = await self.resolve_udid(udid)
-        if not self._is_android(resolved):
-            return {
-                "status": "not_supported",
-                "detail": "scroll_to_element is currently Android-only (see #50)",
-            }
+        target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
 
-        found = await self._ui_backend(resolved).scroll_into_view(
-            resolved, identifier=identifier, label=label, max_swipes=max_swipes,
+        if self._is_android(resolved):
+            found = await self._ui_backend(resolved).scroll_into_view(
+                resolved, identifier=identifier, label=label, max_swipes=max_swipes,
+            )
+            self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
+            if found is None:
+                return {
+                    "status": "not_found",
+                    "detail": f"Element not found after scrolling ({target})",
+                }
+            return {"status": "ok", "element": found}
+
+        # iOS (physical WDA + simulator)
+        el = await self._ios_scroll_to_element(
+            resolved, label=label, identifier=identifier, max_swipes=max_swipes,
         )
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
-
-        if found is None:
-            target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
+        if el is None:
             return {
                 "status": "not_found",
                 "detail": f"Element not found after scrolling ({target})",
             }
-        return {"status": "ok", "element": found}
+        cx, cy = get_tap_point(el)
+        return {
+            "status": "ok",
+            "element": {
+                "label": el.label,
+                "identifier": el.identifier,
+                "type": el.type,
+                "x": cx,
+                "y": cy,
+            },
+        }
 
     async def type_text(self, text: str, udid: str | None = None) -> str:
         """Type text into focused field. Returns the resolved udid."""
