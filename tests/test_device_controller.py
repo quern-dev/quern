@@ -1169,3 +1169,56 @@ class TestScrollToElement:
 
         result = await ctrl.scroll_to_element(label="Nope")
         assert result["status"] == "not_found"
+
+
+class TestTapElementAutoScroll:
+    def _android_ctrl(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+        return ctrl
+
+    async def test_scrolls_then_taps_when_offscreen(self):
+        ctrl = self._android_ctrl()
+        backend = MagicMock()
+        # first selector tap misses (off-screen), succeeds after scroll
+        backend.tap_by_selector = AsyncMock(
+            side_effect=[None, {"identifier": "button_log", "type": "Button", "x": 1, "y": 2}]
+        )
+        backend.scroll_into_view = AsyncMock(return_value={"identifier": "button_log"})
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.tap_element(identifier="button_log")
+        assert result["status"] == "ok"
+        backend.scroll_into_view.assert_called_once_with(
+            "emulator-5554", identifier="button_log", label=None,
+        )
+        assert backend.tap_by_selector.call_count == 2
+
+    async def test_no_scroll_when_already_tappable(self):
+        ctrl = self._android_ctrl()
+        backend = MagicMock()
+        backend.tap_by_selector = AsyncMock(
+            return_value={"identifier": "button_log", "type": "Button", "x": 1, "y": 2}
+        )
+        backend.scroll_into_view = AsyncMock()
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.tap_element(identifier="button_log")
+        assert result["status"] == "ok"
+        backend.scroll_into_view.assert_not_called()
+
+    async def test_scroll_to_find_false_skips_scroll(self):
+        ctrl = self._android_ctrl()
+        backend = MagicMock()
+        backend.tap_by_selector = AsyncMock(return_value=None)  # miss
+        backend.scroll_into_view = AsyncMock()
+        ctrl._ui_backend = MagicMock(return_value=backend)
+        # with scrolling disabled, it falls through to the dump path → not_found
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "emulator-5554"))
+
+        with patch("server.device.controller_ui._capture_screenshot", AsyncMock(return_value=None)):
+            result = await ctrl.tap_element(identifier="button_log", scroll_to_find=False)
+        assert result["status"] == "not_found"
+        backend.scroll_into_view.assert_not_called()

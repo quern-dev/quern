@@ -396,6 +396,10 @@ Label matching modes (mutually exclusive — use only one):
         .string()
         .optional()
         .describe('For switches/toggles: desired value ("1" = on, "0" = off). Checks current state first and skips the tap if already set. Returns status "already_set" if no tap was needed.'),
+      scroll_to_find: z
+        .boolean()
+        .default(true)
+        .describe("Android only: if the element isn't in the current view, scroll to it (via the no-dump swipe loop) and then tap. Set false to fail fast without scrolling."),
       include_screen_context: z
         .boolean()
         .default(false)
@@ -411,7 +415,7 @@ Label matching modes (mutually exclusive — use only one):
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0). Increase for slow devices or complex transitions."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, include_screen_context, capture_screenshots, settle_delay }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
@@ -422,6 +426,7 @@ Label matching modes (mutually exclusive — use only one):
       if (udid) body.udid = udid;
       if (source_timeout) body.source_timeout = source_timeout;
       if (value !== undefined) body.value = value;
+      if (scroll_to_find === false) body.scroll_to_find = false;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
