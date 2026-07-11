@@ -669,14 +669,25 @@ rm -rf /data/local/tmp/tmp-ca-copy
         logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
 
     async def is_screen_on(self, serial: str) -> bool:
-        """Check if the device screen is on."""
+        """Check if the device screen is on (interactive)."""
         try:
             stdout, _ = await self._run_adb_for_device(serial, "shell", "dumpsys", "power")
-            # Different Android versions use different keys
+            # Different Android versions expose this differently. Prefer
+            # mWakefulness (authoritative on modern Android: Awake / Dreaming /
+            # Dozing / Asleep).
+            #
+            # IMPORTANT: do NOT match a bare "Display Power:" line — on recent
+            # Android that line is a listener object reference, e.g.
+            #   "Display Power: com.android.server.power.PowerManagerService$1@..."
+            # which contains no state and always read as OFF, making the screen
+            # look off even when awake. Require "state=" so we only match the
+            # actual display-state line ("Display Power: state=ON").
             for line in stdout.splitlines():
                 stripped = line.strip()
-                if stripped.startswith("Display Power:"):
-                    return "ON" in stripped
+                if stripped.startswith("mWakefulness="):
+                    return "Awake" in stripped
+                if stripped.startswith("Display Power: state="):
+                    return "state=ON" in stripped
                 if stripped.startswith("mScreenOn="):
                     return "true" in stripped
         except DeviceError:
@@ -684,15 +695,19 @@ rm -rf /data/local/tmp/tmp-ca-copy
         return True  # Assume on if we can't tell
 
     async def wake_screen(self, serial: str) -> None:
-        """Wake the device screen and dismiss the lock screen (no passcode)."""
+        """Wake the device screen and dismiss a non-secure lock screen."""
         if await self.is_screen_on(serial):
             return
         # KEYCODE_WAKEUP (224) turns screen on without toggling
         await self._run_adb_for_device(serial, "shell", "input", "keyevent", "224")
-        # Swipe up to dismiss lock screen (no passcode assumed)
-        await self._run_adb_for_device(
-            serial, "shell", "input", "swipe", "540", "1800", "540", "800", "300",
-        )
+        # Dismiss a non-secure keyguard WITHOUT a content-scrolling gesture.
+        # The previous `input swipe 540 1800 540 800` was a full-screen upward
+        # swipe that scrolled whatever app was showing (e.g. scrolling a
+        # cache-detail RecyclerView out of place), corrupting scroll state on
+        # every screenshot / UI read that happened to wake the screen.
+        # `wm dismiss-keyguard` is a no-op when there's no keyguard and never
+        # touches app content (secure keyguards still require the passcode).
+        await self._run_adb_for_device(serial, "shell", "wm", "dismiss-keyguard")
 
     async def set_location(
         self, serial: str, latitude: float, longitude: float,

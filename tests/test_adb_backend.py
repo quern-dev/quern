@@ -230,3 +230,58 @@ class TestScreenshot:
 
             with pytest.raises(DeviceError, match="adb screencap failed"):
                 await backend.screenshot("emulator-5554")
+
+
+class TestScreenState:
+    async def test_is_screen_on_awake_wins_over_object_ref_display_power(self):
+        # Regression: on modern Android the bare "Display Power:" line is a
+        # listener object reference (no state) — it must NOT be read as OFF.
+        # mWakefulness=Awake is authoritative.
+        backend = AdbBackend()
+        dump = (
+            "  mWakefulness=Awake\n"
+            "  mHoldingDisplaySuspendBlocker=true\n"
+            "Display Power: com.android.server.power.PowerManagerService$1@7306ed6\n"
+        )
+        backend._run_adb_for_device = AsyncMock(return_value=(dump, ""))
+        assert await backend.is_screen_on("dev") is True
+
+    async def test_is_screen_on_asleep(self):
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=("  mWakefulness=Asleep\n", ""))
+        assert await backend.is_screen_on("dev") is False
+
+    async def test_is_screen_on_legacy_display_power_state(self):
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=("Display Power: state=ON\n", ""))
+        assert await backend.is_screen_on("dev") is True
+
+    async def test_is_screen_on_display_power_state_off(self):
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=("Display Power: state=OFF\n", ""))
+        assert await backend.is_screen_on("dev") is False
+
+    async def test_is_screen_on_object_ref_only_assumes_on(self):
+        # Only the object-ref line, no wakefulness/state → don't match it; assume on.
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(
+            return_value=("Display Power: com.android.server.power.PowerManagerService$1@abc\n", "")
+        )
+        assert await backend.is_screen_on("dev") is True
+
+    async def test_wake_screen_noop_when_on(self):
+        backend = AdbBackend()
+        backend.is_screen_on = AsyncMock(return_value=True)
+        backend._run_adb_for_device = AsyncMock()
+        await backend.wake_screen("dev")
+        backend._run_adb_for_device.assert_not_called()
+
+    async def test_wake_screen_dismisses_keyguard_without_content_swipe(self):
+        backend = AdbBackend()
+        backend.is_screen_on = AsyncMock(return_value=False)
+        backend._run_adb_for_device = AsyncMock()
+        await backend.wake_screen("dev")
+        calls = [c.args for c in backend._run_adb_for_device.call_args_list]
+        assert ("dev", "shell", "input", "keyevent", "224") in calls
+        assert ("dev", "shell", "wm", "dismiss-keyguard") in calls
+        assert not any("swipe" in c for c in calls)
