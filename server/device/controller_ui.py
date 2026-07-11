@@ -1226,10 +1226,13 @@ class DeviceControllerUI:
     ) -> dict:
         """Scroll until an element is in view, without interacting with it.
 
-        Android: native uiautomator2 scrollIntoView (no dump_hierarchy, so no
-        dump-induced scroll — see #49). iOS is not yet wired here (tracked in
-        #50); tap_element already nudges home-indicator-obscured elements into
-        view via _scroll_element_into_view.
+        Android: a bounded, coordinate swipe loop that re-checks the target by
+        selector after each swipe (no dump_hierarchy, so no dump-induced scroll
+        — see #49). Works across the app's mix of scroll containers (View
+        RecyclerView, Compose LazyColumn, Compose-in-ScrollView) where native
+        UiScrollable.scrollIntoView is unreliable — see #50. iOS is not yet
+        wired here (tracked in #50); tap_element already nudges
+        home-indicator-obscured elements into view via _scroll_element_into_view.
 
         Returns {"status": "ok", "element": {...}} once visible,
         {"status": "not_found", ...} if it never appeared, or
