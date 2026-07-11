@@ -504,7 +504,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("scroll_to_element", {
-    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Android-only for now — uses native uiautomator2 scrollIntoView, so it does not trigger the dump-induced scroll that a full UI-tree read can cause. Returns the element's on-screen position once visible; 404 if it never appears after scrolling. On non-Android devices returns status "not_supported".`,
+    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Android-only for now — drives a bounded swipe loop that re-checks the target by selector after each swipe (no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause, and works across View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView screens). Returns the element's on-screen position once visible; 404 if it never appears within the swipe budget. On non-Android devices returns status "not_supported".`,
     inputSchema: strictParams({
       label: z
         .string()

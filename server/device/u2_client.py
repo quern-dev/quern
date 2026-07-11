@@ -402,19 +402,18 @@ class U2Backend:
         """Scroll a scrollable container until the target element is on-screen —
         WITHOUT dumping the full hierarchy.
 
-        Prefers uiautomator2's native scrollIntoView (UiScrollable) via
-        ``d(scrollable=True).scroll.to(**selector)``, which searches both
-        directions and stops at the element. Falls back to a bounded, targeted
-        swipe loop (checking ``obj.exists`` per selector, not dump_hierarchy) if
-        the native scroll helper is unavailable. Neither path triggers the
-        dump-induced scroll that motivated the selector-based tap (see #49/#50).
-
-        Returns a normalized ``{label, identifier, type, x, y}`` dict once the
-        element is present, or ``None`` if it never appeared.
+        A bounded, metered swipe loop that re-checks the target by selector
+        (``obj.exists`` — not ``dump_hierarchy``, so no dump-induced scroll, see
+        #49) after each swipe. Deliberately NOT native
+        ``UiScrollable.scrollIntoView``, which no-ops on Compose ``LazyColumn``
+        (not flagged ``scrollable``) and can't match lazily-composed rows (#50);
+        plain swipes work regardless. Sweeps down first, then up (for
+        top-anchored controls). Returns a normalized
+        ``{label, identifier, type, x, y}`` dict once the element is on-screen,
+        or ``None`` if it never appeared within the swipe budget.
         """
 
-        def _result(obj, fallback_label: str | None) -> dict:
-            info = obj.info or {}
+        def _result(info: dict) -> dict:
             bounds = info.get("bounds") or {}
             cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
             cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
@@ -422,7 +421,7 @@ class U2Backend:
             return {
                 "label": info.get("text")
                 or info.get("contentDescription")
-                or fallback_label
+                or label
                 or "",
                 "identifier": identifier,
                 "type": _map_class(cls) if cls else None,
@@ -438,46 +437,53 @@ class U2Backend:
             if label:
                 selectors.append({"text": label})
                 selectors.append({"description": label})
+            if not selectors:
+                return None
 
-            for sel in selectors:
-                target = device(**sel)
-                # Already in the hierarchy — no scrolling needed.
-                if target.exists:
-                    return _result(target, label)
+            def _match():
+                # These containers (RecyclerView, Compose LazyColumn/ScrollView)
+                # only keep on-screen rows in the accessibility tree, so
+                # `.exists` is equivalent to "visible" — no separate visibility
+                # check needed.
+                for sel in selectors:
+                    obj = device(**sel)
+                    if obj.exists:
+                        try:
+                            return obj.info or {}
+                        except Exception:
+                            return None
+                return None
 
-                scrollable = device(scrollable=True)
-                if not scrollable.exists:
-                    continue
+            info = _match()
+            if info is not None:  # already on-screen
+                return _result(info)
 
-                # Native scrollIntoView (both directions, stops at element).
-                found = False
-                try:
-                    found = bool(scrollable.scroll.to(**sel))
-                except AttributeError:
-                    # Older/newer u2 without .scroll.to — bounded manual fallback.
-                    try:
-                        w, h = device.window_size()
-                    except Exception:
-                        w, h = 1080, 1920
-                    mid_x = w // 2
-                    start_y, end_y = int(h * 0.7), int(h * 0.3)
-                    for _ in range(max_swipes):
-                        if target.exists:
-                            found = True
-                            break
-                        device.swipe(mid_x, start_y, mid_x, end_y, duration=0.3)
-                except Exception as e:
-                    logger.debug("scroll_into_view native scroll failed (%s)", e)
+            try:
+                w, h = device.window_size()
+            except Exception:
+                w, h = 1080, 2160
+            cx, y_lo, y_hi = w // 2, int(h * 0.30), int(h * 0.72)
 
-                if found and target.exists:
-                    return _result(target, label)
+            def _scroll(y1: int, y2: int) -> None:
+                # Metered stepped swipe: no fling (target stays where it lands)
+                # and no row press/long-press. A plain duration-swipe flings and
+                # a drag highlights rows.
+                device.swipe(cx, y1, cx, y2, steps=25)
 
+            # Sweep down (reveal rows below) then up (rows above / top-anchored
+            # controls), re-checking after each swipe.
+            sweeps = [(y_hi, y_lo)] * max_swipes + [(y_lo, y_hi)] * (max_swipes * 2)
+            for y1, y2 in sweeps:
+                _scroll(y1, y2)
+                info = _match()
+                if info is not None:
+                    return _result(info)
             return None
 
         try:
             return await asyncio.to_thread(_do)
         except Exception as e:
-            logger.debug("scroll_into_view fell back (%s)", e)
+            logger.debug("scroll_into_view failed (%s)", e)
             return None
 
     async def swipe(
