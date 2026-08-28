@@ -128,6 +128,12 @@ When you find them, document the key names in the alert files and in a dedicated
 - **Triggering specific modals** for testing — delete a single flag and relaunch
 - **Saving known-good checkpoints** — `save_app_state` after setting all flags, restore before each test
 
+> **Checkpointing a logged-in state?** Pass `include_keychain: true`. Auth tokens live in the
+> simulator keychain, outside every app container, so a checkpoint without it always restores
+> to the login screen however it was captured. Capturing the keychain needs the device shut
+> down (`xcrun simctl shutdown <udid>`) — it is a WAL-mode SQLite database held open by
+> `securityd`. `restore_app_state` puts it back automatically when the checkpoint has one.
+
 See [Building an App Knowledge Base](workflow-app-knowledge.md) for a detailed walkthrough of this process.
 
 ## Maintaining the Knowledge Base

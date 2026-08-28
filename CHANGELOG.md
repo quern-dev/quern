@@ -5,6 +5,19 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`save_app_state` / `restore_app_state` can now capture the simulator keychain, making logged-in checkpoints actually work** — auth tokens live in the simulator keychain at `<device>/data/Library/Keychains/`, which sits outside every app container, so a checkpoint of containers alone *always* restored to a logged-out app no matter what was logged in when it was taken. Checkpoints labelled `logged_in` were silently aspirational: restore + launch landed on the login screen, and the app's own `keychainReady`-style flags came back saying credentials existed when they no longer did, so the failure read as a confusing auth bug rather than an obvious missing-state one. New `include_keychain` on both endpoints copies `keychain-2*.db*` alongside the containers; `restore_app_state` restores it automatically whenever the checkpoint carries one. Measured on iPhone 16 Pro / iOS 18.6: containers-only restore → login screen; keychain-only restore onto a signed-out container → login screen; both together → app comes up authenticated (profile populated, server-backed tabs load). Both halves must come from the same captured moment.
+- Response metadata now carries a `keychain` block (`captured`/`restored` plus filenames), and restoring a checkpoint that has no keychain logs a warning naming the consequence, so the "why am I logged out" case is self-explaining instead of silent.
+
+### Fixed
+- **`get_data_container` no longer fails on a shut-down simulator** — `simctl get_app_container` errors with `Unable to lookup in current state: Shutdown`, but keychain capture *requires* the device to be shut down (it is a WAL-mode SQLite database held open by `securityd`; copying it while booted yields a torn snapshot, and writing it beneath a running `securityd` is ignored). Those two constraints were in direct contradiction and would have forced callers into a shutdown/boot/shutdown dance. Container lookup now falls back to scanning `Containers/Data/Application/*/.com.apple.mobile_container_manager.metadata.plist` for a matching `MCMMetadataIdentifier` — the same technique `get_app_groups` already used — so a single call can save or restore containers and keychain together against a powered-off device.
+
+### Notes
+- The keychain preconditions are checked *before* any container is wiped, so calling either endpoint against a booted device fails cleanly with the exact `xcrun simctl shutdown <udid>` command to run, rather than leaving a half-restored app.
+- `include_keychain` defaults to false on save (unchanged behaviour, unchanged checkpoint layout). Existing keychain-less checkpoints keep working and now report `keychain.restored: false` with a reason.
+
 ## [0.13.4] - 2026-06-05
 
 ### Fixed

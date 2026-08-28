@@ -5,8 +5,21 @@ Each checkpoint directory contains:
   .quern-meta.json         ← metadata (label, description, bundle_id, captured_at, udid)
   data-container/          ← copy of the app's data container
   app-group/<group-id>/    ← one subdir per app group (keyed by group identifier)
+  keychain/                ← optional: simulator keychain database (see below)
 
-Simulator only. Keychain is out of scope.
+Simulator only.
+
+Keychain
+--------
+Auth tokens live in the simulator keychain, which sits *outside* every app container, at
+<device>/data/Library/Keychains/. A checkpoint of containers alone therefore always
+restores to a logged-out app, however it was captured — the single most common surprise
+with this feature.
+
+Passing include_keychain=True captures that directory too, which makes logged-in
+checkpoints work. The device must be shut down for both save and restore: the keychain is
+a WAL-mode SQLite database held open by securityd, so a copy taken while booted is torn,
+and overwriting it beneath a running securityd does not take effect.
 """
 
 from __future__ import annotations
@@ -25,32 +38,189 @@ logger = logging.getLogger("quern-debug-server.app_state")
 
 APP_STATES_DIR = CONFIG_DIR / "app-states"
 
+SIM_DEVICES_ROOT = Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
+
+# Keychain lives outside every app container. The basename varies by runtime
+# (keychain-2.db, keychain-2-debug.db), so match the family rather than one name.
+KEYCHAIN_GLOB = "keychain-2*.db*"
+
+
+# ---------------------------------------------------------------------------
+# Keychain capture
+# ---------------------------------------------------------------------------
+
+
+def _keychain_dir(udid: str) -> Path:
+    return SIM_DEVICES_ROOT / udid / "data" / "Library" / "Keychains"
+
+
+async def get_device_state(udid: str) -> str:
+    """Return the simctl state for a device ("Booted", "Shutdown", ...) or "unknown"."""
+    proc = await asyncio.create_subprocess_exec(
+        "xcrun", "simctl", "list", "devices", "--json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return "unknown"
+    try:
+        listing = json.loads(stdout.decode())
+    except json.JSONDecodeError:
+        return "unknown"
+    for devices in listing.get("devices", {}).values():
+        for device in devices:
+            if device.get("udid") == udid:
+                return device.get("state", "unknown")
+    return "unknown"
+
+
+async def _require_shutdown(udid: str, operation: str) -> None:
+    """Raise unless the device is shut down.
+
+    The keychain is a WAL-mode SQLite database held open by securityd. Copying it from a
+    booted device yields a torn snapshot, and writing it beneath a running securityd is
+    ignored — so both directions require the device to be off.
+    """
+    state = await get_device_state(udid)
+    if state == "Shutdown":
+        return
+    raise DeviceError(
+        f"{operation} needs the device shut down (it is currently {state!r}). "
+        f"The simulator keychain is a WAL-mode SQLite database held open by securityd, so "
+        f"copying it while booted produces a torn snapshot. "
+        f"Run: xcrun simctl shutdown {udid}",
+        tool="simctl",
+    )
+
+
+async def _save_keychain(udid: str, checkpoint: Path) -> dict:
+    """Copy the simulator keychain into the checkpoint. Device must be shut down."""
+    await _require_shutdown(udid, "Saving a checkpoint with include_keychain=True")
+
+    src = _keychain_dir(udid)
+    if not src.exists():
+        raise DeviceError(
+            f"No keychain directory for device {udid} at {src}",
+            tool="simctl",
+        )
+
+    files = sorted(src.glob(KEYCHAIN_GLOB))
+    if not files:
+        raise DeviceError(
+            f"No keychain database found in {src} (looked for {KEYCHAIN_GLOB})",
+            tool="simctl",
+        )
+
+    dest = checkpoint / "keychain"
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        await asyncio.to_thread(shutil.copy2, str(path), str(dest / path.name))
+
+    logger.info("Captured keychain (%d files) for udid=%s", len(files), udid[:8])
+    return {"captured": True, "files": [p.name for p in files]}
+
+
+async def _restore_keychain(udid: str, checkpoint: Path) -> dict:
+    """Copy a checkpoint's keychain back onto the device. Device must be shut down."""
+    await _require_shutdown(udid, "Restoring a checkpoint that contains a keychain")
+
+    src = checkpoint / "keychain"
+    files = sorted(src.glob(KEYCHAIN_GLOB))
+    if not files:
+        raise DeviceError(
+            f"Checkpoint keychain directory {src} contains no keychain database",
+            tool="simctl",
+        )
+
+    dest = _keychain_dir(udid)
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        await asyncio.to_thread(shutil.copy2, str(path), str(dest / path.name))
+
+    logger.info("Restored keychain (%d files) for udid=%s", len(files), udid[:8])
+    return {"restored": True, "files": [p.name for p in files]}
+
+
+def checkpoint_has_keychain(bundle_id: str, label: str) -> bool:
+    """True if the named checkpoint carries a keychain snapshot."""
+    keychain = _checkpoint_dir(bundle_id, label) / "keychain"
+    return keychain.is_dir() and any(keychain.glob(KEYCHAIN_GLOB))
+
 
 # ---------------------------------------------------------------------------
 # Container discovery
 # ---------------------------------------------------------------------------
 
 
+async def _read_container_identifier(container_dir: Path) -> str | None:
+    """Read MCMMetadataIdentifier from a container's metadata plist, or None."""
+    metadata_path = container_dir / ".com.apple.mobile_container_manager.metadata.plist"
+    if not metadata_path.exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "plutil", "-convert", "json", "-o", "-", "--", str(metadata_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        return json.loads(stdout.decode()).get("MCMMetadataIdentifier")
+    except Exception:
+        logger.debug("Failed to read metadata for %s", container_dir, exc_info=True)
+        return None
+
+
+async def find_data_container_on_disk(udid: str, bundle_id: str) -> Path | None:
+    """Locate the app's data container by scanning the device directory.
+
+    simctl get_app_container only works on a *booted* device ("Unable to lookup in current
+    state: Shutdown"), but keychain capture requires the device to be shut down. Scanning
+    the metadata plists works in either state, which is what lets a single call save or
+    restore containers and keychain together.
+    """
+    app_root = SIM_DEVICES_ROOT / udid / "data" / "Containers" / "Data" / "Application"
+    if not app_root.exists():
+        return None
+    for container_dir in app_root.iterdir():
+        if not container_dir.is_dir():
+            continue
+        if await _read_container_identifier(container_dir) == bundle_id:
+            return container_dir
+    return None
+
+
 async def get_data_container(udid: str, bundle_id: str) -> Path:
-    """Return the path to the app's data container via simctl."""
+    """Return the path to the app's data container.
+
+    Uses simctl when the device is booted, and falls back to a filesystem scan otherwise
+    (or when simctl fails), so this works against a shut-down device too.
+    """
     proc = await asyncio.create_subprocess_exec(
         "xcrun", "simctl", "get_app_container", udid, bundle_id, "data",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise DeviceError(
-            f"Could not get data container for {bundle_id}: {stderr.decode().strip()}",
-            tool="simctl",
-        )
-    path = Path(stdout.decode().strip())
-    if not path.exists():
-        raise DeviceError(
-            f"Data container path does not exist: {path}",
-            tool="simctl",
-        )
-    return path
+
+    if proc.returncode == 0:
+        path = Path(stdout.decode().strip())
+        if path.exists():
+            return path
+
+    on_disk = await find_data_container_on_disk(udid, bundle_id)
+    if on_disk is not None:
+        return on_disk
+
+    detail = stderr.decode().strip() or "container path did not exist"
+    raise DeviceError(
+        f"Could not get data container for {bundle_id}: {detail}",
+        tool="simctl",
+    )
 
 
 async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
@@ -158,14 +328,23 @@ async def save_state(
     bundle_id: str,
     label: str,
     description: str = "",
+    include_keychain: bool = False,
 ) -> dict:
     """Save a named checkpoint of the app's state.
 
     Terminates the app, copies data container and all app group containers,
     then writes a .quern-meta.json metadata file.
 
+    include_keychain also captures the simulator keychain, which is what makes a
+    logged-in checkpoint restorable. It requires the device to be shut down; the
+    precondition is checked before anything is written.
+
     Returns the metadata dict.
     """
+    # Check before mutating anything, so a booted device fails cleanly.
+    if include_keychain:
+        await _require_shutdown(udid, "Saving a checkpoint with include_keychain=True")
+
     checkpoint = _checkpoint_dir(bundle_id, label)
     if checkpoint.exists():
         shutil.rmtree(checkpoint)
@@ -188,6 +367,11 @@ async def save_state(
             dest = groups_dest / group_id
             await _copy_container(group_path, dest)
 
+    # Copy the keychain (outside every container — this is what carries the login)
+    keychain_meta: dict = {"captured": False}
+    if include_keychain:
+        keychain_meta = await _save_keychain(udid, checkpoint)
+
     # Write metadata
     captured_at = datetime.now(UTC).isoformat()
     meta = {
@@ -196,6 +380,7 @@ async def save_state(
         "bundle_id": bundle_id,
         "captured_at": captured_at,
         "udid": udid,
+        "keychain": keychain_meta,
         "containers": {
             "data": str(data_path),
             "groups": {gid: str(p) for gid, p in groups.items()},
@@ -211,13 +396,21 @@ async def restore_state(
     udid: str,
     bundle_id: str,
     label: str,
+    include_keychain: bool | None = None,
 ) -> dict:
     """Restore a named checkpoint.
 
     Terminates the app, wipes each live container, then copies the checkpoint
     contents back using re-resolved live paths (not the paths stored in metadata).
 
-    Returns the metadata dict.
+    include_keychain:
+      None  (default) — restore the keychain if the checkpoint has one. Requires the
+                        device to be shut down; raises before touching anything if not,
+                        rather than silently producing a logged-out app.
+      True            — require a keychain in the checkpoint and restore it.
+      False           — skip the keychain even if present. The app will start logged out.
+
+    Returns the metadata dict, with a "keychain" key describing what was restored.
     """
     checkpoint = _checkpoint_dir(bundle_id, label)
     if not checkpoint.exists():
@@ -233,6 +426,20 @@ async def restore_state(
             tool="simctl",
         )
     meta = json.loads(meta_path.read_text())
+
+    has_keychain = checkpoint_has_keychain(bundle_id, label)
+    if include_keychain is True and not has_keychain:
+        raise DeviceError(
+            f"Checkpoint {label!r} has no keychain snapshot, so the login cannot be "
+            f"restored. Re-save it with include_keychain=True while the device is shut down.",
+            tool="simctl",
+        )
+    should_restore_keychain = has_keychain and include_keychain is not False
+
+    # Check the precondition before wiping any container, so a booted device fails
+    # cleanly instead of leaving a half-restored app.
+    if should_restore_keychain:
+        await _require_shutdown(udid, "Restoring a checkpoint that contains a keychain")
 
     # Terminate app before restoring
     await _terminate_app(udid, bundle_id)
@@ -271,6 +478,22 @@ async def restore_state(
             # Copy checkpoint back
             await asyncio.to_thread(
                 shutil.copytree, str(group_dir), str(live_group_path), dirs_exist_ok=True,
+            )
+
+    # Restore the keychain last: the container wipe above must not run after it.
+    if should_restore_keychain:
+        meta["keychain"] = await _restore_keychain(udid, checkpoint)
+    else:
+        meta["keychain"] = {"restored": False}
+        if has_keychain:
+            meta["keychain"]["reason"] = "include_keychain=False"
+            logger.info("Skipped keychain restore for %r by request", label)
+        else:
+            meta["keychain"]["reason"] = "checkpoint has no keychain snapshot"
+            logger.warning(
+                "Checkpoint %r has no keychain snapshot — the app will start logged out. "
+                "Re-save with include_keychain=True (device shut down) to capture the login.",
+                label,
             )
 
     logger.info("Restored app state %r for %s (udid=%s)", label, bundle_id, udid[:8])
