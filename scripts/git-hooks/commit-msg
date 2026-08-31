@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# commit-msg hook: enforce CLAUDE.md's "No Co-Authored-By lines. No AI
+# attribution in commits."
+#
+# This has to be commit-msg rather than pre-commit: pre-commit runs before the
+# message exists, so it cannot see trailers at all.
+#
+# Patterns are anchored to the start of a line so that prose *about* the rule
+# ("dropped the Co-Authored-By trailer") passes, while an actual trailer fails.
+# Comment lines are stripped first — git's own template mentions nothing
+# relevant, but a verbose-diff commit (`git commit -v`) appends the whole staged
+# diff below the scissors line, and that must not be scanned.
+
+msg_file="$1"
+[ -f "$msg_file" ] || exit 0
+
+# Strip comments and anything below the `git commit -v` scissors line.
+body=$(sed -e '/^#/d' -e '/^# *-\+ *>8 *-\+/,$d' "$msg_file")
+
+fail() {
+    echo "commit-msg: $1" >&2
+    echo >&2
+    echo "  $2" >&2
+    echo >&2
+    echo "CLAUDE.md, Code Conventions: \"No Co-Authored-By lines. No AI" >&2
+    echo "attribution in commits.\" Edit the message and commit again." >&2
+    exit 1
+}
+
+if echo "$body" | grep -qiE '^[[:space:]]*Co-Authored-By:'; then
+    offender=$(echo "$body" | grep -iE '^[[:space:]]*Co-Authored-By:' | head -1)
+    fail "Co-Authored-By trailer is not allowed in this repo." "$offender"
+fi
+
+if echo "$body" | grep -qiE '^[[:space:]]*(Generated with|Co-authored-by|Assisted-by|Created with)[[:space:]]+.*(Claude|Copilot|Cursor|ChatGPT|Codex|Gemini)'; then
+    offender=$(echo "$body" | grep -iE '^[[:space:]]*(Generated with|Co-authored-by|Assisted-by|Created with)' | head -1)
+    fail "AI attribution line is not allowed in this repo." "$offender"
+fi
+
+if echo "$body" | grep -q '🤖'; then
+    fail "AI attribution marker (🤖) is not allowed in this repo." \
+         "$(echo "$body" | grep '🤖' | head -1)"
+fi
+
+exit 0

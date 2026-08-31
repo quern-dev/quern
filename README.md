@@ -345,6 +345,9 @@ cd quern
 ./quern setup                # creates venv, installs deps, checks tools, adds quern to ~/.local/bin
 ./quern mcp-install          # builds MCP server, adds to ~/.claude.json
 
+# Enable the repo's git hooks (one-time, per clone)
+git config core.hooksPath scripts/git-hooks
+
 # Run tests (venv auto-detected)
 .venv/bin/pytest tests/ -v
 
@@ -354,6 +357,26 @@ cd mcp && npm run build
 # Run with debug logging
 quern start -f --verbose
 ```
+
+### Git hooks
+
+`scripts/git-hooks/` is versioned, so the hooks travel with the repo — but git
+does not pick them up automatically. Point your clone at them once:
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
+| Hook | Does |
+|------|------|
+| `pre-commit` | Runs `ruff check` on staged Python files |
+| `commit-msg` | Rejects `Co-Authored-By:` trailers and AI-attribution lines, per the Code Conventions in `CLAUDE.md` |
+
+The message rule lives in `commit-msg` rather than `pre-commit` because
+`pre-commit` runs before the commit message exists and cannot see trailers at
+all. Both hooks are bypassable with `git commit --no-verify` when you genuinely
+need to — that is intentional, but it means the hooks are a guardrail rather
+than a guarantee.
 
 ## License
 

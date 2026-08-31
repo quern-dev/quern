@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run ruff lint check on staged Python files.
+
+# Find the project venv
+VENV_PYTHON="$(git rev-parse --show-toplevel)/.venv/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Warning: venv not found, skipping lint check"
+    exit 0
+fi
+
+# Get staged Python files (added/modified, not deleted)
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+if [ -z "$STAGED_PY" ]; then
+    exit 0
+fi
+
+echo "Running ruff lint check..."
+$VENV_PYTHON -m ruff check $STAGED_PY
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Lint check failed. Fix errors above or run: .venv/bin/python -m ruff check --fix"
+    exit 1
+fi
