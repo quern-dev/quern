@@ -5,7 +5,7 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.1-beta.1] - 2026-08-31
 
 ### Added
 - **`save_app_state` / `restore_app_state` can now capture the simulator keychain, making logged-in checkpoints actually work** — auth tokens live in the simulator keychain at `<device>/data/Library/Keychains/`, which sits outside every app container, so a checkpoint of containers alone *always* restored to a logged-out app no matter what was logged in when it was taken. Checkpoints labelled `logged_in` were silently aspirational: restore + launch landed on the login screen, and the app's own `keychainReady`-style flags came back saying credentials existed when they no longer did, so the failure read as a confusing auth bug rather than an obvious missing-state one. New `include_keychain` on both endpoints copies `keychain-2*.db*` alongside the containers; `restore_app_state` restores it automatically whenever the checkpoint carries one. Measured on iPhone 16 Pro / iOS 18.6: containers-only restore → login screen; keychain-only restore onto a signed-out container → login screen; both together → app comes up authenticated (profile populated, server-backed tabs load). Both halves must come from the same captured moment.
@@ -239,7 +239,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.1-beta.1...main
+[0.14.1-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.1
 [0.14.0]: https://github.com/quern-dev/quern/releases/tag/v0.14.0
 [0.13.4]: https://github.com/quern-dev/quern/releases/tag/v0.13.4
 [0.13.3]: https://github.com/quern-dev/quern/releases/tag/v0.13.3
