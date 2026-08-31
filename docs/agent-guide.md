@@ -154,6 +154,8 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 **Key insight**: Use summary for quick checks, full tree when you need details.
 
+**If the element isn't on screen**: reach for `tap_element` (which auto-scrolls) or `scroll_to_element` rather than a manual `swipe` loop. Be aware that reading the full UI tree can itself scroll the content — on Android's `CoordinatorLayout`/`RecyclerView` screens the accessibility traversal a dump performs pushes top controls out of view before your tap lands. Both scroll paths avoid the dump for exactly this reason, so prefer them over "dump, read coordinates, tap".
+
 **Debugging the platform normalizer**: When `tap_element` or a landmark match doesn't behave as expected and you suspect the underlying source attributes aren't surfacing correctly (e.g. an Android tab that doesn't appear `selected`), call `get_ui_tree` with `include_raw=true` to get the raw provider attributes (full uiautomator2 XML on Android) on each element under `extra_attrs`. This is faster than dropping to `adb shell uiautomator dump` and stays inside the Quern API surface.
 
 ---
@@ -282,6 +284,12 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Gesture: `swipe`
 - Text input: focus the element, then `type_text`
 
+**"The element I want is scrolled off-screen"**
+- `tap_element` already handles this: on a miss it scrolls the target into view and retries. Pass `scroll_to_find: false` to fail fast instead.
+- Need it visible but *not* tapped (asserting on it, screenshotting it): `scroll_to_element`
+- Both work on Android and iOS (simulator and physical), and both drive a bounded swipe loop that re-checks the target by selector rather than dumping the UI tree — a tree dump can itself scroll the target away, which is the bug this design exists to avoid
+- Neither is a substitute for `swipe` when you want to scroll a *screen* rather than reach a known element
+
 **"I need to see network traffic"**
 - Overview: `get_flow_summary` (use `simulator_udid` to filter by simulator)
 - Specific requests: `query_flows` with filters (`hosts`, `exclude_hosts`, `detail="summary"`)
@@ -317,77 +325,31 @@ Open real-time video windows to see what's happening on USB-connected physical d
 
 ## REST API Reference
 
-When calling the HTTP API directly (without MCP), use these paths:
+When calling the HTTP API directly instead of going through MCP, the complete
+mapping — every tool, its method and path, and the endpoints that have no tool
+(SSE streams, public probes) — is in `docs/api-reference.md`, also readable over
+MCP as the `quern://api-reference` resource.
 
-| MCP Tool             | HTTP Method | REST Path                              |
-|----------------------|-------------|----------------------------------------|
-| `ensure_server`      | GET         | `/health`                              |
-| `tail_logs`          | GET         | `/api/v1/logs/query`                   |
-| `query_logs`         | GET         | `/api/v1/logs/query`                   |
-| `get_log_summary`    | GET         | `/api/v1/logs/summary`                 |
-| `get_errors`         | GET         | `/api/v1/logs/errors`                  |
-| `get_build_result`   | GET         | `/api/v1/builds/latest`                |
-| `parse_build_output` | POST        | `/api/v1/builds/parse-file`            |
-| `get_latest_crash`   | GET         | `/api/v1/crashes/latest`               |
-| `set_log_filter`     | POST        | `/api/v1/logs/filter`                  |
-| `list_log_sources`   | GET         | `/api/v1/logs/sources`                 |
-| `query_flows`              | GET         | `/api/v1/proxy/flows`                  |
-| `get_flow_detail`          | GET         | `/api/v1/proxy/flows/{id}`             |
-| `wait_for_flow`            | POST        | `/api/v1/proxy/flows/wait`             |
-| `get_flow_summary`         | GET         | `/api/v1/proxy/flows/summary`          |
-| `start_capture_session`    | POST        | `/api/v1/proxy/capture/start`          |
-| `stop_capture_session`     | POST        | `/api/v1/proxy/capture/stop`           |
-| `proxy_status`       | GET         | `/api/v1/proxy/status`                 |
-| `verify_proxy_setup` | POST        | `/api/v1/proxy/cert/verify`            |
-| `start_proxy`        | POST        | `/api/v1/proxy/start`                  |
-| `stop_proxy`         | POST        | `/api/v1/proxy/stop`                   |
-| `set_local_capture`  | POST        | `/api/v1/proxy/local-capture`          |
-| `set_intercept`      | POST        | `/api/v1/proxy/intercept`              |
-| `clear_intercept`    | DELETE      | `/api/v1/proxy/intercept`              |
-| `list_held_flows`    | GET         | `/api/v1/proxy/intercept/held`         |
-| `release_flow`       | POST        | `/api/v1/proxy/intercept/release`      |
-| `replay_flow`        | POST        | `/api/v1/proxy/replay/{id}`            |
-| `set_mock`           | POST        | `/api/v1/proxy/mocks`                  |
-| `update_mock`        | PATCH       | `/api/v1/proxy/mocks/{rule_id}`        |
-| `list_mocks`         | GET         | `/api/v1/proxy/mocks`                  |
-| `clear_mocks`        | DELETE      | `/api/v1/proxy/mocks`                  |
-| `list_devices`       | GET         | `/api/v1/device/list`                  |
-| `boot_device`        | POST        | `/api/v1/device/boot`                  |
-| `shutdown_device`    | POST        | `/api/v1/device/shutdown`              |
-| `install_app`        | POST        | `/api/v1/device/app/install`           |
-| `launch_app`         | POST        | `/api/v1/device/app/launch`            |
-| `terminate_app`      | POST        | `/api/v1/device/app/terminate`         |
-| `uninstall_app`      | POST        | `/api/v1/device/app/uninstall`         |
-| `list_apps`          | GET         | `/api/v1/device/app/list`              |
-| `take_screenshot`    | GET         | `/api/v1/device/screenshot`            |
-| `get_ui_tree`        | GET         | `/api/v1/device/ui`                    |
-| `get_element_state`  | GET         | `/api/v1/device/ui/element`            |
-| `wait_for_element`   | POST        | `/api/v1/device/ui/wait-for-element`   |
-| `get_screen_summary` | GET         | `/api/v1/device/screen-summary`        |
-| `tap`                | POST        | `/api/v1/device/ui/tap`                |
-| `tap_element`        | POST        | `/api/v1/device/ui/tap-element`        |
-| `swipe`              | POST        | `/api/v1/device/ui/swipe`              |
-| `type_text`          | POST        | `/api/v1/device/ui/type`               |
-| `clear_text`         | POST        | `/api/v1/device/ui/clear`              |
-| `press_button`       | POST        | `/api/v1/device/ui/press`              |
-| `set_location`       | POST        | `/api/v1/device/location`              |
-| `grant_permission`   | POST        | `/api/v1/device/permission`            |
-| `resolve_device`     | POST        | `/api/v1/devices/resolve`              |
-| `ensure_devices`     | POST        | `/api/v1/devices/ensure`               |
-| `start_simulator_logging` | POST   | `/api/v1/device/logging/start`         |
-| `stop_simulator_logging`  | POST   | `/api/v1/device/logging/stop`          |
-| `start_device_logging`    | POST   | `/api/v1/device/logging/device/start`  |
-| `stop_device_logging`     | POST   | `/api/v1/device/logging/device/stop`   |
-| `start_oslog_streaming`   | POST   | `/api/v1/logs/oslog/start`             |
-| `stop_oslog_streaming`    | POST   | `/api/v1/logs/oslog/stop`              |
-| `preview_device`     | POST        | `/api/v1/device/preview/start`         |
-| `stop_preview`       | POST        | `/api/v1/device/preview/stop`          |
-| `preview_status`     | GET         | `/api/v1/device/preview/status`        |
-| `setup_wda`          | POST        | `/api/v1/device/wda/setup`             |
-| `start_driver`       | POST        | `/api/v1/device/wda/start`             |
-| `stop_driver`        | POST        | `/api/v1/device/wda/stop`              |
+The paths you will reach for most:
 
----
+| Purpose | Method | Path |
+|---|---|---|
+| Liveness probe | GET | `/health` (public, sub-millisecond) |
+| Device-tool availability | GET | `/tools` (public) |
+| Query logs | GET | `/api/v1/logs/query` |
+| Log summary | GET | `/api/v1/logs/summary` |
+| Live log stream | GET | `/api/v1/logs/stream` (SSE — no MCP equivalent) |
+| Query flows | GET | `/api/v1/proxy/flows` |
+| Flow summary | GET | `/api/v1/proxy/flows/summary` |
+| Live flow stream | GET | `/api/v1/proxy/flows/stream` (SSE — no MCP equivalent) |
+| Screen summary | GET | `/api/v1/device/screen-summary` |
+| Tap an element | POST | `/api/v1/device/ui/tap-element` |
+| Scroll to an element | POST | `/api/v1/device/ui/scroll-to-element` |
+| Resolve a device | POST | `/api/v1/devices/resolve` |
+
+Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key`, except
+`/`, `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
+`/video-test`, and `/api/v1/proxy/cert`.
 
 ## Advanced Patterns
 
@@ -478,6 +440,12 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 ---
 
 ## Troubleshooting
+
+**Tools missing or misbehaving?** `quern doctor` reports device-tool availability
+(adb, simctl, idb, devicectl, pymobiledevice3) as read-only diagnostics, and
+`GET /tools` returns the same data over HTTP. Both are deliberately kept off the
+`/health` path so the liveness probe stays sub-millisecond — do not expect
+`/health` to tell you whether a tool is installed.
 
 **"No element found matching label"** — The element may not exist, the label may be wrong, or multiple elements match. Use `get_screen_summary` to see what's actually on screen, then refine your query with the exact label and an element_type.
 

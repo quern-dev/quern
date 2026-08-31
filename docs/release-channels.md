@@ -95,19 +95,35 @@ git push origin main
 git tag -a vN.M.K -m "vN.M.K — short release headline"
 git push origin vN.M.K
 
-# 3. Fast-forward release/stable to the same commit.
+# 3. Fast-forward EVERY channel branch you intend to move.
 #    *** Do this BEFORE creating the GitHub Release. ***
 #    Once a commit has a Release attached, GitHub silently refuses pushes
 #    that point any branch at that exact commit (see "GitHub quirk" below).
 git push origin main:refs/heads/release/stable
+git push origin main:refs/heads/release/beta
 
-# 4. Now create the GitHub Release.
+# 4. Verify both actually moved — the rejection in step 3 is silent.
+git fetch origin
+git rev-parse origin/release/stable origin/release/beta origin/main   # expect three identical SHAs
+
+# 5. Now create the GitHub Release.
 gh release create vN.M.K --title "vN.M.K — short release headline" --notes-file RELEASE_NOTES.md
 ```
 
-**Why the ordering matters:** see the *GitHub quirk* section. Once step 4 has
-happened, you cannot retroactively move `release/stable` to that commit. The
-fast-forward in step 3 has to happen first.
+**Why the ordering matters:** see the *GitHub quirk* section. Once step 5 has
+happened, you cannot retroactively move any branch to that commit. The
+fast-forwards in step 3 have to happen first.
+
+**Why `release/beta` too.** A stable release is by definition newer than
+anything beta users are running, so leaving `release/beta` behind means
+beta-channel users receive *older* content than stable users — the exact
+inversion the channel exists to prevent. This is not hypothetical: the v0.14.0
+cut advanced only `release/stable`, stranding `release/beta` 27 commits back,
+and because the release commit was already published the branch could not be
+moved onto it afterwards. It took the next beta cut to clear.
+
+If you are cutting a **prerelease**, advance only `release/beta` — `release/stable`
+should keep pointing at the last stable tag.
 
 ### Cutting a beta release
 
@@ -141,18 +157,16 @@ git push origin main:refs/heads/release/beta
 Tarball beta users are unaffected by (b) since they're driven by the GitHub
 Releases API.
 
-### Why are both `release/*` branches currently at main HEAD?
+### What the channel branches point at today
 
-When this channels work first shipped, GitHub's `release/stable` and
-`release/beta` branches were created at the then-current `main` HEAD, not at
-the most recent stable tag. The reason is the *GitHub quirk* below.
+`release/stable` tracks the most recent stable tag; `release/beta` tracks the
+most recent prerelease, which is normally at or ahead of stable. If you ever
+find beta *behind* stable, a cut skipped step 3 — see the note above.
 
-The practical effect: until you cut the next stable release using the
-procedure above, "stable channel" effectively means "the post-release main
-HEAD at the moment release/stable was last advanced." That's a slightly looser
-interpretation than "the latest tagged commit," but it's functionally fine —
-every commit on main has passed CI, and once you cut the next release the
-strict semantics kick in.
+When this work first shipped, both branches were created at the then-current
+`main` HEAD rather than at the most recent stable tag, because of the GitHub
+quirk below. That bootstrapping state is gone: since v0.14.0 both branches
+follow the procedure above.
 
 ### The GitHub quirk — read this once
 

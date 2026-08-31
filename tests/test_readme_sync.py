@@ -23,6 +23,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
+API_REFERENCE = REPO_ROOT / "docs" / "api-reference.md"
 MCP_TOOLS_DIR = REPO_ROOT / "mcp" / "src" / "tools"
 SERVER_DIR = REPO_ROOT / "server"
 # The CLI surface is split across two files: argparse subparsers are built in
@@ -33,10 +34,11 @@ CLI_SOURCES = (REPO_ROOT / "server" / "__main__.py", REPO_ROOT / "server" / "mai
 # Routes deliberately left out of the endpoint tables. Both are named in the
 # README's public-paths sentence, so they aren't hidden — they just don't earn
 # a table row. Anything else missing is drift.
-UNDOCUMENTED_ROUTES_ALLOWLIST = {
-    ("GET", "/"),          # redirects to /docs
-    ("GET", "/video-test"), # internal preview test page
-}
+# Routes deliberately left out of docs/api-reference.md. Currently empty — the
+# reference covers every route, including the public probes and SSE streams that
+# have no MCP tool. Kept so a future intentional omission has a documented home
+# rather than being silently dropped from the check.
+UNDOCUMENTED_ROUTES_ALLOWLIST: set[tuple[str, str]] = set()
 
 # CLI subcommands intentionally absent from the README command block.
 UNDOCUMENTED_CLI_ALLOWLIST = {
@@ -118,16 +120,37 @@ def documented_tool_count() -> int:
 
 
 def documented_routes() -> set[tuple[str, str]]:
-    """(METHOD, path) pairs from every API endpoint table."""
-    section = _readme_section("## API Endpoints", "## Architecture")
+    """(METHOD, path) pairs from docs/api-reference.md.
+
+    Two table shapes live there: tool rows (`tool | method | path | desc`) and
+    tool-less rows (`method | path | desc`), so the method column is not always
+    in the same position.
+    """
+    text = API_REFERENCE.read_text()
     routes: set[tuple[str, str]] = set()
-    for line in section.splitlines():
-        match = re.match(
-            r"\|\s*(GET|POST|PUT|DELETE|PATCH)\s*\|\s*`([^`]+)`", line
-        )
-        if match:
-            routes.add((match.group(1), _normalize_path(match.group(2))))
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        for i, cell in enumerate(cells[:-1]):
+            if cell in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
+                path = re.match(r"`([^`]+)`", cells[i + 1])
+                if path:
+                    routes.add((cell, _normalize_path(path.group(1))))
+                break
     return routes
+
+
+def api_reference_tools() -> set[str]:
+    """Tool names appearing in the first column of api-reference.md tables."""
+    names: set[str] = set()
+    for line in API_REFERENCE.read_text().splitlines():
+        if line.startswith("|"):
+            first = line.strip("|").split("|")[0].strip()
+            match = re.fullmatch(r"`([a-z_0-9]+)`", first)
+            if match:
+                names.add(match.group(1))
+    return names
 
 
 # --------------------------------------------------------------------------
@@ -180,14 +203,14 @@ def test_readme_endpoint_tables_match_registered_routes():
     problems = []
     if missing:
         problems.append(
-            f"{len(missing)} route(s) served by the API but absent from the "
-            f"README endpoint tables:\n{_format(missing)}\n"
+            f"{len(missing)} route(s) served by the API but absent from "
+            f"docs/api-reference.md:\n{_format(missing)}\n"
             f"Add a table row, or add the route to "
             f"UNDOCUMENTED_ROUTES_ALLOWLIST with a reason."
         )
     if stale:
         problems.append(
-            f"{len(stale)} route(s) documented in the README endpoint tables "
+            f"{len(stale)} route(s) documented in docs/api-reference.md "
             f"but not served by the API:\n{_format(stale)}"
         )
     assert not problems, "\n\n".join(problems)
@@ -203,7 +226,29 @@ def test_undocumented_route_allowlist_is_not_stale():
     )
 
 
-@pytest.mark.parametrize("path", [README, MCP_TOOLS_DIR, SERVER_DIR])
+def test_api_reference_covers_every_registered_tool():
+    """Every MCP tool needs a row in the reference agents read over MCP."""
+    actual = registered_tools()
+    documented = api_reference_tools()
+
+    missing = actual - documented
+    stale = documented - actual
+
+    problems = []
+    if missing:
+        problems.append(
+            f"{len(missing)} tool(s) registered but absent from "
+            f"docs/api-reference.md:\n{_format(missing)}"
+        )
+    if stale:
+        problems.append(
+            f"{len(stale)} tool(s) in docs/api-reference.md that are no longer "
+            f"registered:\n{_format(stale)}"
+        )
+    assert not problems, "\n\n".join(problems)
+
+
+@pytest.mark.parametrize("path", [README, API_REFERENCE, MCP_TOOLS_DIR, SERVER_DIR])
 def test_documentation_sources_exist(path: Path):
     """Fail loudly rather than silently passing on an empty scan."""
     assert path.exists(), f"{path} is missing — these guard tests cannot run."

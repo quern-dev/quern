@@ -27,10 +27,48 @@ Your agent terminates the app before save/restore (to avoid corrupted state), th
 - Downloaded files, caches
 - App group containers (shared data with extensions/widgets)
 
+**Optionally, the simulator keychain** — see below. Off by default.
+
 **What's NOT included:**
-- **Keychain items** — iOS Keychain is a system service, not part of the app container. Saved credentials, tokens stored in Keychain won't be captured.
 - **Push notification registration** — Server-side (APNs).
 - **System permissions** — Camera, location, etc. are managed by iOS, not the app. Use your agent to grant these separately.
+
+## Logged-In Checkpoints and the Keychain
+
+Auth tokens live in the simulator keychain at `<device>/data/Library/Keychains/`,
+which sits *outside* every app container. A checkpoint of containers alone
+therefore always restores to a **logged-out** app, however it was captured — so
+a checkpoint you named `logged-in-with-data` will land you on the login screen.
+
+The failure is quiet rather than loud. The containers come back carrying the
+app's own "keychain is ready" flags, so the app believes it holds credentials
+that are gone, and the result reads as a confusing auth bug rather than as
+missing state.
+
+To capture it, ask for the keychain explicitly:
+
+> "Save the current state as 'logged-in', including the keychain"
+
+Restore puts it back automatically whenever the checkpoint carries one. Both
+halves have to come from the same captured moment — a keychain restored onto a
+signed-out container leaves you logged out just the same.
+
+**The device must be shut down for both save and restore.** The keychain is a
+WAL-mode SQLite database held open by `securityd`: copying it while the
+simulator is booted yields a torn snapshot, and writing it beneath a running
+`securityd` is simply ignored. Shut down first:
+
+```sh
+xcrun simctl shutdown <udid>
+```
+
+The preconditions are checked *before* anything is wiped, so calling against a
+booted device fails cleanly and tells you the exact command to run — it will not
+leave a half-restored app behind.
+
+Checkpoints saved without the keychain keep working unchanged, and report
+`keychain.restored: false` with a reason so the "why am I logged out" case
+explains itself.
 
 ## Plist Operations
 

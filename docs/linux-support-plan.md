@@ -167,7 +167,7 @@ WantedBy=default.target
 
 ### 8. MCP Tool Registration
 
-**Current:** All 76 tools are registered regardless of platform.
+**Current:** All 107 tools are registered regardless of platform.
 
 **Change:** Tools should still all be registered (MCP tools are lazy and don't consume context). But iOS-only tools should return a clear error on Linux: "This tool requires macOS with Xcode installed."
 

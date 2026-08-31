@@ -128,7 +128,7 @@ server.resource(
   "quern://guide",
   {
     description:
-      "Agent guide: principles, workflows, tool selection, REST API reference, and performance tips",
+      "Agent guide: principles, workflows, tool selection, and performance tips",
     mimeType: "text/markdown",
   },
   async () => ({
@@ -137,6 +137,25 @@ server.resource(
         uri: "quern://guide",
         mimeType: "text/markdown",
         text: readResourceFile("agent-guide.md"),
+      },
+    ],
+  })
+);
+
+server.resource(
+  "api-reference",
+  "quern://api-reference",
+  {
+    description:
+      "Complete REST API reference: every MCP tool and the endpoint behind it, plus the endpoints that have no tool (SSE streams, public probes). Read this when calling the HTTP API directly instead of through MCP.",
+    mimeType: "text/markdown",
+  },
+  async () => ({
+    contents: [
+      {
+        uri: "quern://api-reference",
+        mimeType: "text/markdown",
+        text: readResourceFile("api-reference.md"),
       },
     ],
   })

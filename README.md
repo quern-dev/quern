@@ -304,168 +304,20 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## API Endpoints
 
-All endpoints require `Authorization: Bearer <key>` except these public paths: `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`, `/video-test`, and `/api/v1/proxy/cert`.
+Everything the MCP tools do is also reachable over plain HTTP. The complete
+reference — every tool, the endpoint behind it, and the endpoints that have no
+tool — lives in **[`docs/api-reference.md`](docs/api-reference.md)**.
 
-`/api/v1/proxy/cert` is deliberately unauthenticated — devices and simulators fetch the mitmproxy CA certificate from it during setup, before they have any API key. It serves only the public CA certificate; no traffic, logs, or device state are reachable without a key.
+All endpoints require `Authorization: Bearer <key>` except `/`, `/health`,
+`/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`, `/video-test`,
+and `/api/v1/proxy/cert`. The key is at `~/.quern/api-key`; the server's URL and
+port are in `~/.quern/state.json`.
 
-### Server
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Fast liveness ping (public). Does no device-tool probing — kept sub-millisecond so CLI health checks can't time out |
-| GET | `/api/v1/health` | Same as `/health` (public) |
-| GET | `/tools` | Device-tool availability and UI cache stats (public). Backs `quern doctor` and `quern status` |
-| GET | `/api/v1/system/update-status` | Most recent persisted update-check result |
-| POST | `/api/v1/system/update` | Launch `quern update` in a detached child; returns immediately |
-| GET | `/api/v1/system/channel` | Current update channel preference |
-| PUT | `/api/v1/system/channel` | Set the update channel (`stable` or `beta`) |
-
-### Logs
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/logs/query` | Query logs with filters and pagination |
-| GET | `/api/v1/logs/stream` | SSE real-time log stream |
-| GET | `/api/v1/logs/summary` | LLM-optimized summary with cursor support |
-| GET | `/api/v1/logs/errors` | Errors and crashes only |
-| GET | `/api/v1/logs/sources` | Active log source adapters |
-| POST | `/api/v1/logs/filter` | Reconfigure capture filters |
-| GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
-| POST | `/api/v1/logs/oslog/start` | Start streaming the host Mac's unified log |
-| POST | `/api/v1/logs/oslog/stop` | Stop host oslog streaming |
-| GET | `/api/v1/crashes/latest` | Recent parsed crash reports |
-| GET | `/api/v1/builds/latest` | Most recent build result |
-| POST | `/api/v1/builds/parse` | Submit xcodebuild output |
-| POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
-
-### Network Proxy
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/proxy/status` | Proxy status and config |
-| POST | `/api/v1/proxy/start` | Start the proxy |
-| POST | `/api/v1/proxy/stop` | Stop the proxy |
-| POST | `/api/v1/proxy/configure-system` | Auto-configure macOS system proxy |
-| POST | `/api/v1/proxy/unconfigure-system` | Restore original proxy settings |
-| POST | `/api/v1/proxy/filter` | Set proxy capture filters |
-| GET | `/api/v1/proxy/flows` | Query captured flows |
-| GET | `/api/v1/proxy/flows/{id}` | Full flow detail |
-| GET | `/api/v1/proxy/flows/summary` | Traffic digest |
-| GET | `/api/v1/proxy/flows/stream` | SSE real-time flow stream |
-| POST | `/api/v1/proxy/flows/wait` | Block until a matching flow appears, or time out |
-| POST | `/api/v1/proxy/capture/start` | Start a capture session to bracket a UI action |
-| POST | `/api/v1/proxy/capture/stop` | Stop the session and return only the flows from that window |
-| POST | `/api/v1/proxy/intercept` | Set intercept pattern |
-| DELETE | `/api/v1/proxy/intercept` | Clear intercept |
-| GET | `/api/v1/proxy/intercept/held` | List held flows |
-| POST | `/api/v1/proxy/intercept/release` | Release a held flow |
-| POST | `/api/v1/proxy/intercept/release-all` | Release all held flows |
-| POST | `/api/v1/proxy/replay/{id}` | Replay a captured flow |
-| POST | `/api/v1/proxy/mocks` | Add mock rule |
-| GET | `/api/v1/proxy/mocks` | List mock rules |
-| PATCH | `/api/v1/proxy/mocks/{rule_id}` | Update a mock rule's pattern and/or response |
-| DELETE | `/api/v1/proxy/mocks/{rule_id}` | Delete a specific mock rule |
-| DELETE | `/api/v1/proxy/mocks` | Clear all mock rules |
-| GET | `/api/v1/proxy/bypass` | List bypass patterns |
-| POST | `/api/v1/proxy/bypass` | Add domain patterns to the bypass allowlist |
-| DELETE | `/api/v1/proxy/bypass` | Remove bypass patterns, or clear all |
-| GET | `/api/v1/proxy/cert` | Download CA certificate (public — see note above) |
-| GET | `/api/v1/proxy/cert/status` | Check certificate installation status |
-| POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation (defaults to booted simulators) |
-| POST | `/api/v1/proxy/cert/install` | Install CA certificate on simulators and emulators |
-| POST | `/api/v1/proxy/device-proxy-config` | Record a physical device's Wi-Fi proxy config (per SSID) |
-| GET | `/api/v1/proxy/setup-guide` | Device setup instructions |
-| POST | `/api/v1/proxy/local-capture` | Set local capture process list |
-
-### Device Control
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/device/list` | List simulators, emulators, and physical devices |
-| POST | `/api/v1/device/boot` | Boot simulator |
-| POST | `/api/v1/device/shutdown` | Shutdown simulator |
-| POST | `/api/v1/device/erase` | Erase a simulator, resetting it to factory state |
-| POST | `/api/v1/device/active` | Set the active device by UDID |
-| POST | `/api/v1/device/app/install` | Install app |
-| POST | `/api/v1/device/app/launch` | Launch app |
-| POST | `/api/v1/device/app/terminate` | Terminate app |
-| POST | `/api/v1/device/app/uninstall` | Uninstall app |
-| GET | `/api/v1/device/app/list` | List installed apps |
-| POST | `/api/v1/device/build-and-install` | Build an Xcode scheme and install it on one or more devices |
-| GET | `/api/v1/device/screenshot` | Capture screenshot |
-| GET | `/api/v1/device/screenshot/annotated` | Screenshot with accessibility overlays |
-| POST | `/api/v1/device/screenshot/timeline/start` | Auto-capture a screenshot after every UI action |
-| POST | `/api/v1/device/screenshot/timeline/stop` | Stop the timeline and return its manifest |
-| GET | `/api/v1/device/screenshot/timeline` | Manifest of the active timeline, without stopping it |
-| GET | `/api/v1/device/video` | Live MJPEG video stream |
-| GET | `/api/v1/device/ui` | Accessibility tree |
-| GET | `/api/v1/device/ui/element` | Query specific element state |
-| POST | `/api/v1/device/ui/wait-for-element` | Poll until element appears |
-| GET | `/api/v1/device/screen-summary` | LLM-optimized screen description |
-| POST | `/api/v1/device/ui/tap` | Tap at coordinates |
-| POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier |
-| POST | `/api/v1/device/ui/swipe` | Swipe gesture |
-| POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it |
-| POST | `/api/v1/device/ui/type` | Type text |
-| POST | `/api/v1/device/ui/clear` | Clear text field |
-| POST | `/api/v1/device/ui/press` | Press hardware button |
-| POST | `/api/v1/device/location` | Set GPS location |
-| POST | `/api/v1/device/open-url` | Open a URL via the platform's default handler (Android can target a package) |
-| POST | `/api/v1/device/permission` | Grant app permission |
-| POST | `/api/v1/device/keyboard` | Attach/detach the simulated hardware keyboard (iOS simulators) |
-| POST | `/api/v1/device/locale` | Set the system locale (Android) |
-| POST | `/api/v1/device/font-scale` | Set the font scale (Android) |
-| POST | `/api/v1/device/display-density` | Set the display density / DPI (Android) |
-| POST | `/api/v1/device/logging/start` | Start simulator log capture |
-| POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
-| POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
-| POST | `/api/v1/device/logging/device/stop` | Stop physical device log capture |
-| POST | `/api/v1/device/wda/setup` | Build and install WDA on physical device |
-| POST | `/api/v1/device/wda/start` | Start WDA driver |
-| POST | `/api/v1/device/wda/stop` | Stop WDA driver |
-| POST | `/api/v1/device/preview/start` | Add a device preview (or all devices if no UDID) |
-| POST | `/api/v1/device/preview/stop` | Remove a device preview (or stop all if no UDID) |
-| GET | `/api/v1/device/preview/status` | Per-device preview state and available devices |
-| GET | `/api/v1/device/preview/devices` | List CoreMediaIO preview devices |
-
-### App State and Plist
-
-Checkpoint a simulator app's containers so a test can start from a known state, and read or edit the defaults inside those containers. Pass `include_keychain` on save to capture the simulator keychain too — required for a checkpoint to restore a logged-in session, and only possible while the device is shut down.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/device/app/state/save` | Save a named checkpoint (data container + app groups, optionally the keychain) |
-| POST | `/api/v1/device/app/state/restore` | Restore a named checkpoint |
-| GET | `/api/v1/device/app/state/list` | List saved checkpoints for a bundle ID |
-| DELETE | `/api/v1/device/app/state/{label}` | Delete a named checkpoint |
-| GET | `/api/v1/device/app/state/plist` | Read a plist, or a single key, from an app container |
-| POST | `/api/v1/device/app/state/plist` | Set a plist key |
-| POST | `/api/v1/device/app/state/plist/batch` | Set multiple plist keys in one call |
-| GET | `/api/v1/device/app/state/plist/diff` | Compare a live plist against a saved checkpoint |
-| DELETE | `/api/v1/device/app/state/plist/key` | Remove a key from a plist |
-| POST | `/api/v1/device/app/state/plist/watch/start` | Poll a plist and emit per-key changes as log entries |
-| POST | `/api/v1/device/app/state/plist/watch/stop` | Stop polling a plist |
-| GET | `/api/v1/device/app/state/plist/watch/config` | Read the persistent watch configuration |
-| POST | `/api/v1/device/app/state/plist/watch/configure` | Save a persistent watch config for a bundle ID |
-| DELETE | `/api/v1/device/app/state/plist/watch/configure` | Remove a persistent watch config |
-
-### Device Pool
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/devices/refresh` | Refresh pool from simctl |
-| POST | `/api/v1/devices/resolve` | Resolve a device by criteria *or* by explicit `udid` (sets active device) |
-| POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted |
-
-### Landmarks
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/landmarks/load` | Load landmarks from a knowledge base path or inline JSON. Returns `screens` count and a categorized `skipped[]` array (legacy-format files, stubs, malformed YAML). |
-| POST | `/api/v1/landmarks/identify` | Match the live UI tree against loaded landmarks. Returns matched screen, confidence, and full per-landmark detail in `partial_matches`. |
-| GET | `/api/v1/landmarks/` | List loaded landmark sets per app |
-| DELETE | `/api/v1/landmarks/` | Unload landmarks for an app or all apps |
-| POST | `/api/v1/landmarks/validate` | Detect collisions between screens with overlapping landmark sets |
+```bash
+KEY=$(cat ~/.quern/api-key)
+curl -s localhost:9100/health                                    # public
+curl -s -H "Authorization: Bearer $KEY" localhost:9100/api/v1/logs/summary
+```
 
 ## Architecture
 
