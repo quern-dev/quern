@@ -49,7 +49,13 @@ To capture it, ask for the keychain explicitly:
 
 > "Save the current state as 'logged-in', including the keychain"
 
-Restore puts it back automatically whenever the checkpoint carries one. Both
+Driving the API yourself? That is the `include_keychain` flag on the
+`save_app_state` MCP tool, or on `POST /api/v1/device/app/state/save`. It
+defaults to false, so an existing checkpoint keeps behaving exactly as it did.
+
+Restore puts it back automatically whenever the checkpoint carries one.
+`restore_app_state` takes the same flag — pass `include_keychain: false` to
+restore the containers but deliberately start logged out. Both
 halves have to come from the same captured moment — a keychain restored onto a
 signed-out container leaves you logged out just the same.
 

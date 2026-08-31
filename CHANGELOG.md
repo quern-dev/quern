@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **The app-state guide names `include_keychain`** — it described capturing the keychain only in the guide's agent-prompt voice ("including the keychain"), which left anyone driving the MCP tool or REST endpoint directly without the parameter name. Now states it for both calls, along with the defaults that differ between them: `save_app_state` defaults to false, while `restore_app_state` defaults to restoring whatever the checkpoint carries and takes an explicit false to start logged out.
+
 ### Fixed
 - **The daily update check now asks about your channel** — `update_check.py` sent only the version and HEAD SHA, and quern.dev compared that SHA against `refs/heads/main`. Neither side knew about channels, so a fully up-to-date stable user was told an update was available the moment any commit landed on `main`, while `quern update` — which compares against `release/stable` — correctly answered "Already up to date." Same data, opposite answers, and it went live as soon as `main` moved past the v0.14.0 tag. The client now sends `channel=`, and the endpoint compares against that channel's pointer branch. Requires the matching quern.dev deployment; older deployments simply ignore the parameter.
 - **"Update available" now names the version** — the endpoint returns `latest_version`, so the message reads `Update available (v0.14.1-beta.2) — run "quern update" to install it` instead of an unqualified "a newer version exists". The client already persisted a `latest_version` field that quern.dev never populated; it does now, and the message falls back to the old wording when it's absent.
