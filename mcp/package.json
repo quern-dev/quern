@@ -1,6 +1,6 @@
 {
   "name": "quern-debug-mcp",
-  "version": "0.13.4",
+  "version": "0.14.0",
   "description": "MCP server for Quern — thin wrapper over HTTP API",
   "type": "module",
   "main": "dist/launcher.cjs",
@@ -15,12 +15,12 @@
     "dist"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "typescript": "^6.0.3",
-    "@types/node": "^22.20.0"
+    "@types/node": "^22.20.1"
   },
   "license": "Apache-2.0",
   "engines": {

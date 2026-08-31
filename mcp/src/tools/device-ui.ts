@@ -399,7 +399,7 @@ Label matching modes (mutually exclusive — use only one):
       scroll_to_find: z
         .boolean()
         .default(true)
-        .describe("Android only: if the element isn't in the current view, scroll to it (via the no-dump swipe loop) and then tap. Set false to fail fast without scrolling."),
+        .describe("If the element isn't in the current view, scroll it into view (via the no-dump swipe loop) and then tap. Supported on Android and iOS. Set false to fail fast without scrolling."),
       include_screen_context: z
         .boolean()
         .default(false)
@@ -509,7 +509,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("scroll_to_element", {
-    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Android-only for now — drives a bounded swipe loop that re-checks the target by selector after each swipe (no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause, and works across View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView screens). Returns the element's on-screen position once visible; 404 if it never appears within the swipe budget. On non-Android devices returns status "not_supported".`,
+    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Supported on Android and iOS (simulator + physical). Drives a bounded swipe loop that re-checks the target by selector after each swipe — no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause. Android covers View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView. iOS handles both scroller shapes: a directional swipe toward a located-but-off-screen target in laid-out ScrollViews, and a blind down-then-up sweep for lazy/recycled lists where rows drop out of the tree; rows scrolled under the nav/status bar are rejected rather than counted as already visible. Returns the element's on-screen position once visible; 404 if it never appears within the swipe budget.`,
     inputSchema: strictParams({
       label: z
         .string()

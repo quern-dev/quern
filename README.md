@@ -174,6 +174,7 @@ Captures from multiple sources simultaneously, deduplicates, and stores in a rin
 | Source | Tool | What it captures | Mode |
 |--------|------|-------------------|------|
 | Physical device logs | `pymobiledevice3 syslog` | os_log, Logger, NSLog from physical devices | On-demand (`start_device_logging`) |
+| Android device / emulator logs | `adb logcat` | App and system logs from Android devices and emulators, tagged `source="logcat"` | On-demand (`start_device_logging`) |
 | Simulator logs | `simctl log stream` | os_log, Logger, NSLog from simulators | On-demand (`start_simulator_logging`) |
 | Crash reports | `idevicecrashreport` | Parsed crash reports with stack traces | Always on |
 | Build output | `xcodebuild` | Errors, warnings, test results | Always on |
@@ -187,8 +188,10 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 - **Query flows** — filter by host, method, status code, path, or simulator UDID
 - **Inspect details** — full headers and bodies for any captured request
 - **Intercept** — pause matching requests, inspect, modify, release
-- **Mock** — return synthetic responses without hitting the real server
+- **Mock** — return synthetic responses without hitting the real server; rules can be updated in place without tearing down and re-adding them
 - **Replay** — re-send a previously captured request
+- **Capture sessions** — bracket a single UI action and get back only the flows it produced, instead of filtering them out of everything else
+- **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
 - **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
 - **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
 - **Certificate management** — check, install, and verify mitmproxy CA certificates
@@ -218,16 +221,18 @@ The process name is usually the target name in Xcode. You can also update the li
 
 Manage iOS simulators and physical devices, and interact with running apps.
 
-- **Device management** — list, boot, shutdown simulators; discover physical devices
-- **App management** — install, launch, terminate, uninstall, list apps
-- **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays
+- **Device management** — list, boot, shutdown, and erase simulators; discover physical devices and Android emulators
+- **App management** — install, launch, terminate, uninstall, list apps; build an Xcode scheme and install it across several devices in one call
+- **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays, and screenshot timelines that auto-capture after every UI action so a whole run can be reviewed frame by frame
 - **Live preview** — real-time video windows for USB-connected physical devices, independently per-device
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
 - **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
-- **Interaction** — tap (by element label or coordinates), swipe, type text, clear text, press hardware buttons
-- **Configuration** — set GPS location, grant permissions
+- **Interaction** — tap (by element label or coordinates), swipe, scroll a container until a target is in view, type text, clear text, press hardware buttons
+- **Configuration** — set GPS location, grant permissions, open URLs and deep links, attach or detach the simulated hardware keyboard (iOS), and set locale, font scale, and display density (Android)
+- **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a known logged-in or seeded state instead of driving the UI there every time
+- **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows
 - **Device pool** — smart device resolution with active device tracking for multi-device workflows
 
 **Simulator UI automation** uses a native Swift helper, `sim-bridge`, that talks to `CoreSimulator` / `SimulatorKit` / `AccessibilityPlatformTranslation` directly — no daemon, no subprocess per call. It's built automatically on first use and requires Xcode 26+ on Apple Silicon. On Intel Macs or older Xcode, Quern falls back to [idb](https://fbidb.io/) (`brew install idb-companion` + `pip install fb-idb`); `quern setup` handles the install in that case. Device management and screenshots use `xcrun simctl` (always available with Xcode).
@@ -257,41 +262,63 @@ quern disable-local-capture  # Disable local capture
 
 ## MCP Tools
 
-78 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use. 
+107 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
-| Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `set_local_capture` |
+| Updates | `update_quern`, `set_update_channel` |
+| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
+| Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `set_bypass`, `clear_bypass` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
-| Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `clear_mocks` |
-| Device | `list_devices`, `boot_device`, `shutdown_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps` |
-| UI | `take_screenshot`, `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `type_text`, `clear_text`, `press_button` |
-| Config | `set_location`, `grant_permission` |
+| Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |
+| Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `build_and_install` |
+| UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `scroll_to_element`, `type_text`, `clear_text`, `press_button` |
+| Screenshots | `take_screenshot`, `take_annotated_screenshot`, `start_screenshot_timeline`, `stop_screenshot_timeline`, `get_screenshot_timeline` |
+| Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `set_font_scale`, `set_display_density` |
+| App State | `save_app_state`, `restore_app_state`, `list_app_states`, `delete_app_state` |
+| Plist | `read_app_plist`, `set_app_plist_value`, `set_app_plist_values`, `diff_app_plist`, `delete_app_plist_key`, `start_plist_watch`, `stop_plist_watch`, `configure_plist_watch`, `get_plist_watch_config`, `unconfigure_plist_watch` |
 | Device Pool | `resolve_device`, `ensure_devices` |
+| App Knowledge | `init_app_knowledge` |
 | Landmarks | `load_landmarks`, `identify_screen`, `list_landmarks`, `unload_landmarks`, `validate_landmarks` |
 | Preview | `preview_device`, `stop_preview`, `preview_status` |
 | Physical Device | `setup_wda`, `start_driver`, `stop_driver` |
 
 ## API Endpoints
 
-All endpoints require `Authorization: Bearer <key>` except `/health`.
+All endpoints require `Authorization: Bearer <key>` except these public paths: `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`, `/video-test`, and `/api/v1/proxy/cert`.
+
+`/api/v1/proxy/cert` is deliberately unauthenticated — devices and simulators fetch the mitmproxy CA certificate from it during setup, before they have any API key. It serves only the public CA certificate; no traffic, logs, or device state are reachable without a key.
+
+### Server
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Fast liveness ping (public). Does no device-tool probing — kept sub-millisecond so CLI health checks can't time out |
+| GET | `/api/v1/health` | Same as `/health` (public) |
+| GET | `/tools` | Device-tool availability and UI cache stats (public). Backs `quern doctor` and `quern status` |
+| GET | `/api/v1/system/update-status` | Most recent persisted update-check result |
+| POST | `/api/v1/system/update` | Launch `quern update` in a detached child; returns immediately |
+| GET | `/api/v1/system/channel` | Current update channel preference |
+| PUT | `/api/v1/system/channel` | Set the update channel (`stable` or `beta`) |
 
 ### Logs
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check |
 | GET | `/api/v1/logs/query` | Query logs with filters and pagination |
 | GET | `/api/v1/logs/stream` | SSE real-time log stream |
 | GET | `/api/v1/logs/summary` | LLM-optimized summary with cursor support |
 | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | GET | `/api/v1/logs/sources` | Active log source adapters |
 | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
+| GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
+| POST | `/api/v1/logs/oslog/start` | Start streaming the host Mac's unified log |
+| POST | `/api/v1/logs/oslog/stop` | Stop host oslog streaming |
 | GET | `/api/v1/crashes/latest` | Recent parsed crash reports |
 | GET | `/api/v1/builds/latest` | Most recent build result |
 | POST | `/api/v1/builds/parse` | Submit xcodebuild output |
+| POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
 
 ### Network Proxy
 
@@ -306,6 +333,10 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | GET | `/api/v1/proxy/flows` | Query captured flows |
 | GET | `/api/v1/proxy/flows/{id}` | Full flow detail |
 | GET | `/api/v1/proxy/flows/summary` | Traffic digest |
+| GET | `/api/v1/proxy/flows/stream` | SSE real-time flow stream |
+| POST | `/api/v1/proxy/flows/wait` | Block until a matching flow appears, or time out |
+| POST | `/api/v1/proxy/capture/start` | Start a capture session to bracket a UI action |
+| POST | `/api/v1/proxy/capture/stop` | Stop the session and return only the flows from that window |
 | POST | `/api/v1/proxy/intercept` | Set intercept pattern |
 | DELETE | `/api/v1/proxy/intercept` | Clear intercept |
 | GET | `/api/v1/proxy/intercept/held` | List held flows |
@@ -314,12 +345,17 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/proxy/replay/{id}` | Replay a captured flow |
 | POST | `/api/v1/proxy/mocks` | Add mock rule |
 | GET | `/api/v1/proxy/mocks` | List mock rules |
+| PATCH | `/api/v1/proxy/mocks/{rule_id}` | Update a mock rule's pattern and/or response |
 | DELETE | `/api/v1/proxy/mocks/{rule_id}` | Delete a specific mock rule |
 | DELETE | `/api/v1/proxy/mocks` | Clear all mock rules |
-| GET | `/api/v1/proxy/cert` | Download CA certificate |
+| GET | `/api/v1/proxy/bypass` | List bypass patterns |
+| POST | `/api/v1/proxy/bypass` | Add domain patterns to the bypass allowlist |
+| DELETE | `/api/v1/proxy/bypass` | Remove bypass patterns, or clear all |
+| GET | `/api/v1/proxy/cert` | Download CA certificate (public — see note above) |
 | GET | `/api/v1/proxy/cert/status` | Check certificate installation status |
 | POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation (defaults to booted simulators) |
-| POST | `/api/v1/proxy/cert/install` | Install CA certificate |
+| POST | `/api/v1/proxy/cert/install` | Install CA certificate on simulators and emulators |
+| POST | `/api/v1/proxy/device-proxy-config` | Record a physical device's Wi-Fi proxy config (per SSID) |
 | GET | `/api/v1/proxy/setup-guide` | Device setup instructions |
 | POST | `/api/v1/proxy/local-capture` | Set local capture process list |
 
@@ -327,16 +363,23 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/device/list` | List simulators |
+| GET | `/api/v1/device/list` | List simulators, emulators, and physical devices |
 | POST | `/api/v1/device/boot` | Boot simulator |
 | POST | `/api/v1/device/shutdown` | Shutdown simulator |
+| POST | `/api/v1/device/erase` | Erase a simulator, resetting it to factory state |
+| POST | `/api/v1/device/active` | Set the active device by UDID |
 | POST | `/api/v1/device/app/install` | Install app |
 | POST | `/api/v1/device/app/launch` | Launch app |
 | POST | `/api/v1/device/app/terminate` | Terminate app |
 | POST | `/api/v1/device/app/uninstall` | Uninstall app |
 | GET | `/api/v1/device/app/list` | List installed apps |
+| POST | `/api/v1/device/build-and-install` | Build an Xcode scheme and install it on one or more devices |
 | GET | `/api/v1/device/screenshot` | Capture screenshot |
 | GET | `/api/v1/device/screenshot/annotated` | Screenshot with accessibility overlays |
+| POST | `/api/v1/device/screenshot/timeline/start` | Auto-capture a screenshot after every UI action |
+| POST | `/api/v1/device/screenshot/timeline/stop` | Stop the timeline and return its manifest |
+| GET | `/api/v1/device/screenshot/timeline` | Manifest of the active timeline, without stopping it |
+| GET | `/api/v1/device/video` | Live MJPEG video stream |
 | GET | `/api/v1/device/ui` | Accessibility tree |
 | GET | `/api/v1/device/ui/element` | Query specific element state |
 | POST | `/api/v1/device/ui/wait-for-element` | Poll until element appears |
@@ -344,11 +387,17 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/ui/tap` | Tap at coordinates |
 | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier |
 | POST | `/api/v1/device/ui/swipe` | Swipe gesture |
+| POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it |
 | POST | `/api/v1/device/ui/type` | Type text |
 | POST | `/api/v1/device/ui/clear` | Clear text field |
 | POST | `/api/v1/device/ui/press` | Press hardware button |
 | POST | `/api/v1/device/location` | Set GPS location |
+| POST | `/api/v1/device/open-url` | Open a URL via the platform's default handler (Android can target a package) |
 | POST | `/api/v1/device/permission` | Grant app permission |
+| POST | `/api/v1/device/keyboard` | Attach/detach the simulated hardware keyboard (iOS simulators) |
+| POST | `/api/v1/device/locale` | Set the system locale (Android) |
+| POST | `/api/v1/device/font-scale` | Set the font scale (Android) |
+| POST | `/api/v1/device/display-density` | Set the display density / DPI (Android) |
 | POST | `/api/v1/device/logging/start` | Start simulator log capture |
 | POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
 | POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
@@ -360,6 +409,27 @@ All endpoints require `Authorization: Bearer <key>` except `/health`.
 | POST | `/api/v1/device/preview/stop` | Remove a device preview (or stop all if no UDID) |
 | GET | `/api/v1/device/preview/status` | Per-device preview state and available devices |
 | GET | `/api/v1/device/preview/devices` | List CoreMediaIO preview devices |
+
+### App State and Plist
+
+Checkpoint a simulator app's containers so a test can start from a known state, and read or edit the defaults inside those containers.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/device/app/state/save` | Save a named checkpoint (data container + app groups) |
+| POST | `/api/v1/device/app/state/restore` | Restore a named checkpoint |
+| GET | `/api/v1/device/app/state/list` | List saved checkpoints for a bundle ID |
+| DELETE | `/api/v1/device/app/state/{label}` | Delete a named checkpoint |
+| GET | `/api/v1/device/app/state/plist` | Read a plist, or a single key, from an app container |
+| POST | `/api/v1/device/app/state/plist` | Set a plist key |
+| POST | `/api/v1/device/app/state/plist/batch` | Set multiple plist keys in one call |
+| GET | `/api/v1/device/app/state/plist/diff` | Compare a live plist against a saved checkpoint |
+| DELETE | `/api/v1/device/app/state/plist/key` | Remove a key from a plist |
+| POST | `/api/v1/device/app/state/plist/watch/start` | Poll a plist and emit per-key changes as log entries |
+| POST | `/api/v1/device/app/state/plist/watch/stop` | Stop polling a plist |
+| GET | `/api/v1/device/app/state/plist/watch/config` | Read the persistent watch configuration |
+| POST | `/api/v1/device/app/state/plist/watch/configure` | Save a persistent watch config for a bundle ID |
+| DELETE | `/api/v1/device/app/state/plist/watch/configure` | Remove a persistent watch config |
 
 ### Device Pool
 
