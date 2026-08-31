@@ -113,12 +113,19 @@ def check_for_updates() -> str | None:
         if not version and not head_sha:
             return None
 
-        # Build query params — send version and optionally SHA
+        # Build query params — send version, channel, and optionally SHA.
+        # The channel matters: quern.dev compares the SHA against that
+        # channel's pointer branch (release/stable or release/beta). Omitting
+        # it makes the endpoint assume stable, which reports a spurious update
+        # to anyone on beta.
+        from server.config import get_update_channel
+
         params = []
         if head_sha:
             params.append(f"sha={head_sha}")
         if version:
             params.append(f"version={version}")
+        params.append(f"channel={get_update_channel()}")
 
         # Hit the endpoint
         url = f"{ENDPOINT}?{'&'.join(params)}"
@@ -127,17 +134,23 @@ def check_for_updates() -> str | None:
             data = json.loads(resp.read().decode())
 
         update_available = bool(data.get("update_available"))
-        message = (
-            'Update available \u2014 run "quern update" to get the latest version'
-            if update_available else None
-        )
-        # Persist structured result for the system API + MCP. quern.dev's
-        # current schema only returns update_available; latest_version is
-        # forward-compatible \u2014 fall back to None if absent.
+        latest_version = data.get("latest_version")
+        if not update_available:
+            message = None
+        elif latest_version:
+            message = (
+                f'Update available (v{latest_version}) \u2014 run "quern update" '
+                f"to install it"
+            )
+        else:
+            message = 'Update available \u2014 run "quern update" to get the latest version'
+        # Persist structured result for the system API + MCP. Older
+        # deployments of quern.dev returned only update_available, so
+        # latest_version may still be absent.
         _write_update_info({
             "checked_at": datetime.now(UTC).isoformat(),
             "current_version": version,
-            "latest_version": data.get("latest_version"),
+            "latest_version": latest_version,
             "update_available": update_available,
             "message": message,
         })
