@@ -5,6 +5,14 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+- **README CLI command block was missing six commands** — `doctor` and `set-channel` both shipped in 0.14.0 and neither reached the README, so the beta channel had no documented entry point despite being the release's headline feature. Also absent: `version`, `grant-full-perms`, `install-precommit-hook`, and `tunneld`. The block now lists every command `quern` dispatches.
+- **Update channels are documented** — a new "Update channels" section covers `quern set-channel`, what each channel tracks for git-clone versus tarball installs, and links to `docs/release-channels.md`.
+- **App-state prose no longer overstates logged-in checkpoints** — the README described checkpoints as restoring "a known logged-in state" without mentioning `include_keychain` or its shut-down-device requirement, which is precisely the misunderstanding that made the pre-#65 behaviour read as an auth bug.
+- **Guard tests cover the CLI block** (`tests/test_readme_sync.py`) — the command list is now checked against the source in both directions. The check reads both dispatch paths: argparse subparsers in `server/main.py` *and* the commands intercepted off `sys.argv` in `server/__main__.py` before argparse runs. Reading only `--help` under-reports the surface, which is how `set-channel` and `install-precommit-hook` stayed invisible.
+
 ## [0.14.1-beta.1] - 2026-08-31
 
 ### Added

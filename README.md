@@ -165,6 +165,18 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored. To disable, add `"update_check": false` to `~/.quern/config.json`.
 
+### Update channels
+
+Quern ships on two channels. `stable` (the default) tracks tagged releases; `beta` is opt-in early access to the next release's content.
+
+```bash
+quern set-channel beta     # opt in
+quern set-channel          # print the current channel
+quern set-channel stable   # switch back
+```
+
+Setting the channel only writes `~/.quern/config.json` — nothing changes until the next `quern update`. Git-clone installs follow the `release/stable` / `release/beta` pointer branches; tarball installs follow GitHub Releases, filtered on the prerelease flag. Full details, including the maintainer release procedure, are in [`docs/release-channels.md`](docs/release-channels.md).
+
 ## What Quern Does
 
 ### Log Capture
@@ -231,7 +243,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
 - **Interaction** — tap (by element label or coordinates), swipe, scroll a container until a target is in view, type text, clear text, press hardware buttons
 - **Configuration** — set GPS location, grant permissions, open URLs and deep links, attach or detach the simulated hardware keyboard (iOS), and set locale, font scale, and display density (Android)
-- **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a known logged-in or seeded state instead of driving the UI there every time
+- **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a seeded state instead of driving the UI there every time. Auth tokens live in the simulator keychain, *outside* every app container, so a checkpoint restores logged-out unless you pass `include_keychain` — which additionally requires the device to be shut down, since the keychain is a WAL-mode SQLite database held open by `securityd`
 - **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows
 - **Device pool** — smart device resolution with active device tracking for multi-device workflows
 
@@ -249,13 +261,19 @@ quern start                  # Daemonize
 quern start -f               # Foreground
 quern stop                   # Graceful shutdown
 quern restart                # Stop + start
-quern status                 # Show PID, URL, uptime
-quern update                 # Update to latest release and rebuild
+quern status                 # Show PID, URL, uptime, tool availability
+quern doctor                 # Read-only device-tool diagnostics
+quern version                # Print the installed version
+quern update                 # Update to the latest release on your channel and rebuild
+quern set-channel [name]     # Show or set the update channel (stable / beta)
 quern uninstall              # Remove Quern and dependencies installed by setup
 quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
+quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without prompting
+quern install-precommit-hook # Install the pre-commit checklist hook
 quern enable-local-capture   # Enable transparent simulator traffic capture
 quern disable-local-capture  # Disable local capture
+quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart)
 ```
 
 `~/.quern/state.json` is the single source of truth for discovering a running instance.
@@ -412,11 +430,11 @@ All endpoints require `Authorization: Bearer <key>` except these public paths: `
 
 ### App State and Plist
 
-Checkpoint a simulator app's containers so a test can start from a known state, and read or edit the defaults inside those containers.
+Checkpoint a simulator app's containers so a test can start from a known state, and read or edit the defaults inside those containers. Pass `include_keychain` on save to capture the simulator keychain too — required for a checkpoint to restore a logged-in session, and only possible while the device is shut down.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/device/app/state/save` | Save a named checkpoint (data container + app groups) |
+| POST | `/api/v1/device/app/state/save` | Save a named checkpoint (data container + app groups, optionally the keychain) |
 | POST | `/api/v1/device/app/state/restore` | Restore a named checkpoint |
 | GET | `/api/v1/device/app/state/list` | List saved checkpoints for a bundle ID |
 | DELETE | `/api/v1/device/app/state/{label}` | Delete a named checkpoint |
