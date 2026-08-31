@@ -5,7 +5,7 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.1-beta.2] - 2026-08-31
 
 ### Documentation
 - **README CLI command block was missing six commands** — `doctor` and `set-channel` both shipped in 0.14.0 and neither reached the README, so the beta channel had no documented entry point despite being the release's headline feature. Also absent: `version`, `grant-full-perms`, `install-precommit-hook`, and `tunneld`. The block now lists every command `quern` dispatches.
@@ -253,7 +253,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.1-beta.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.1-beta.2...main
+[0.14.1-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.2
 [0.14.1-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.1
 [0.14.0]: https://github.com/quern-dev/quern/releases/tag/v0.14.0
 [0.13.4]: https://github.com/quern-dev/quern/releases/tag/v0.13.4
