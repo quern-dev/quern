@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The keychain preconditions are checked *before* any container is wiped, so calling either endpoint against a booted device fails cleanly with the exact `xcrun simctl shutdown <udid>` command to run, rather than leaving a half-restored app.
 - `include_keychain` defaults to false on save (unchanged behaviour, unchanged checkpoint layout). Existing keychain-less checkpoints keep working and now report `keychain.restored: false` with a reason.
 
+### Dependencies
+- `typescript` 6.0.3 → 7.0.2 (#61) — held out of 0.14.0 so a compiler major wouldn't ride along with a feature release. Builds clean; no source changes were needed.
+- `actions/setup-python` 6 → 7 (#63)
+- `npm audit fix` in `mcp/` — clears eight advisories (four high: `fast-uri`, `hono`, `ip-address`, `path-to-regexp`; three moderate: `@hono/node-server`, `express-rate-limit`, `qs`; one low: `body-parser`). All were transitive under `@modelcontextprotocol/sdk`; only `package-lock.json` changed, no direct dependency moved.
+
 ## [0.14.0] - 2026-08-31
 
 Nineteen commits since 0.13.4. The theme is reaching controls that aren't currently on screen — a scroll primitive on both platforms, auto-scroll wired into `tap_element` — plus the update-channel plumbing that shipped to `main` just after 0.13.4 was tagged and has never appeared in a release.
