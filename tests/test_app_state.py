@@ -272,3 +272,327 @@ class TestListStates:
             assert list_states("com.unknown.App") == []
         finally:
             app_state_module.APP_STATES_DIR = original_dir
+
+
+# ---------------------------------------------------------------------------
+# Keychain capture
+# ---------------------------------------------------------------------------
+
+
+def _make_keychain(device_root: Path, udid: str, body: str = "logged-in") -> Path:
+    """Create a fake simulator keychain directory for udid, returning it."""
+    keychain = device_root / udid / "data" / "Library" / "Keychains"
+    keychain.mkdir(parents=True)
+    (keychain / "keychain-2-debug.db").write_text(body)
+    (keychain / "keychain-2-debug.db-shm").write_text("shm")
+    (keychain / "keychain-2-debug.db-wal").write_text("wal")
+    return keychain
+
+
+class TestKeychainCapture:
+    """The keychain lives outside every app container, so containers alone restore logged out."""
+
+    async def test_save_captures_keychain_when_requested(self, tmp_path, monkeypatch):
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _make_keychain(device_root, "TEST-UDID")
+
+        try:
+            fake_data = tmp_path / "sim-data"
+            fake_data.mkdir()
+
+            with (
+                patch(
+                    "server.device.app_state.get_data_container",
+                    AsyncMock(return_value=fake_data),
+                ),
+                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state._terminate_app", AsyncMock()),
+                patch(
+                    "server.device.app_state.get_device_state",
+                    AsyncMock(return_value="Shutdown"),
+                ),
+            ):
+                meta = await save_state(
+                    "TEST-UDID", "com.example.App", "logged_in", include_keychain=True,
+                )
+
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "logged_in"
+            assert (checkpoint / "keychain" / "keychain-2-debug.db").exists()
+            assert (checkpoint / "keychain" / "keychain-2-debug.db-wal").exists()
+            assert meta["keychain"]["captured"] is True
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_save_omits_keychain_by_default(self, tmp_path, monkeypatch):
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _make_keychain(device_root, "TEST-UDID")
+
+        try:
+            fake_data = tmp_path / "sim-data"
+            fake_data.mkdir()
+
+            with (
+                patch(
+                    "server.device.app_state.get_data_container",
+                    AsyncMock(return_value=fake_data),
+                ),
+                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state._terminate_app", AsyncMock()),
+            ):
+                meta = await save_state("TEST-UDID", "com.example.App", "plain")
+
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "plain"
+            assert not (checkpoint / "keychain").exists()
+            assert meta["keychain"]["captured"] is False
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_save_refuses_booted_device_before_writing_anything(self, tmp_path, monkeypatch):
+        """A booted device must fail before the checkpoint dir is created."""
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _make_keychain(device_root, "TEST-UDID")
+
+        try:
+            with (
+                patch(
+                    "server.device.app_state.get_device_state",
+                    AsyncMock(return_value="Booted"),
+                ),
+                pytest.raises(DeviceError, match="shut down"),
+            ):
+                await save_state(
+                    "TEST-UDID", "com.example.App", "logged_in", include_keychain=True,
+                )
+
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "logged_in"
+            assert not checkpoint.exists()
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_restore_puts_keychain_back(self, tmp_path, monkeypatch):
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        live_keychain = _make_keychain(device_root, "TEST-UDID", body="logged-out")
+
+        try:
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "logged_in"
+            (checkpoint / "data-container").mkdir(parents=True)
+            saved_keychain = checkpoint / "keychain"
+            saved_keychain.mkdir()
+            (saved_keychain / "keychain-2-debug.db").write_text("logged-in")
+            (checkpoint / ".quern-meta.json").write_text(
+                json.dumps({"label": "logged_in", "bundle_id": "com.example.App"}),
+            )
+
+            live_data = tmp_path / "live-data"
+            live_data.mkdir()
+
+            with (
+                patch(
+                    "server.device.app_state.get_data_container",
+                    AsyncMock(return_value=live_data),
+                ),
+                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state._terminate_app", AsyncMock()),
+                patch(
+                    "server.device.app_state.get_device_state",
+                    AsyncMock(return_value="Shutdown"),
+                ),
+            ):
+                meta = await restore_state("TEST-UDID", "com.example.App", "logged_in")
+
+            assert (live_keychain / "keychain-2-debug.db").read_text() == "logged-in"
+            assert meta["keychain"]["restored"] is True
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_restore_refuses_booted_device_before_wiping_containers(
+        self, tmp_path, monkeypatch,
+    ):
+        """The container wipe must not happen if the keychain restore cannot proceed."""
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _make_keychain(device_root, "TEST-UDID")
+
+        try:
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "logged_in"
+            (checkpoint / "data-container").mkdir(parents=True)
+            saved_keychain = checkpoint / "keychain"
+            saved_keychain.mkdir()
+            (saved_keychain / "keychain-2-debug.db").write_text("logged-in")
+            (checkpoint / ".quern-meta.json").write_text(
+                json.dumps({"label": "logged_in", "bundle_id": "com.example.App"}),
+            )
+
+            live_data = tmp_path / "live-data"
+            live_data.mkdir()
+            (live_data / "precious.txt").write_text("still here")
+
+            with (
+                patch(
+                    "server.device.app_state.get_data_container",
+                    AsyncMock(return_value=live_data),
+                ),
+                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state._terminate_app", AsyncMock()),
+                patch(
+                    "server.device.app_state.get_device_state",
+                    AsyncMock(return_value="Booted"),
+                ),
+                pytest.raises(DeviceError, match="shut down"),
+            ):
+                await restore_state("TEST-UDID", "com.example.App", "logged_in")
+
+            assert (live_data / "precious.txt").exists()
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_restore_reports_when_checkpoint_has_no_keychain(self, tmp_path, monkeypatch):
+        """A keychain-less checkpoint restores containers but says the login is not coming back."""
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", tmp_path / "Devices")
+
+        try:
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "plain"
+            (checkpoint / "data-container").mkdir(parents=True)
+            (checkpoint / ".quern-meta.json").write_text(
+                json.dumps({"label": "plain", "bundle_id": "com.example.App"}),
+            )
+
+            live_data = tmp_path / "live-data"
+            live_data.mkdir()
+
+            with (
+                patch(
+                    "server.device.app_state.get_data_container",
+                    AsyncMock(return_value=live_data),
+                ),
+                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state._terminate_app", AsyncMock()),
+            ):
+                meta = await restore_state("TEST-UDID", "com.example.App", "plain")
+
+            assert meta["keychain"]["restored"] is False
+            assert "no keychain" in meta["keychain"]["reason"]
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_restore_can_skip_keychain_on_a_booted_device(self, tmp_path, monkeypatch):
+        """include_keychain=False keeps the old booted-device behaviour available."""
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        live_keychain = _make_keychain(device_root, "TEST-UDID", body="logged-out")
+
+        try:
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "logged_in"
+            (checkpoint / "data-container").mkdir(parents=True)
+            saved_keychain = checkpoint / "keychain"
+            saved_keychain.mkdir()
+            (saved_keychain / "keychain-2-debug.db").write_text("logged-in")
+            (checkpoint / ".quern-meta.json").write_text(
+                json.dumps({"label": "logged_in", "bundle_id": "com.example.App"}),
+            )
+
+            live_data = tmp_path / "live-data"
+            live_data.mkdir()
+
+            with (
+                patch(
+                    "server.device.app_state.get_data_container",
+                    AsyncMock(return_value=live_data),
+                ),
+                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state._terminate_app", AsyncMock()),
+                patch(
+                    "server.device.app_state.get_device_state",
+                    AsyncMock(return_value="Booted"),
+                ),
+            ):
+                meta = await restore_state(
+                    "TEST-UDID", "com.example.App", "logged_in", include_keychain=False,
+                )
+
+            assert meta["keychain"]["restored"] is False
+            assert (live_keychain / "keychain-2-debug.db").read_text() == "logged-out"
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_restore_rejects_include_keychain_true_without_snapshot(
+        self, tmp_path, monkeypatch,
+    ):
+        original_dir = app_state_module.APP_STATES_DIR
+        app_state_module.APP_STATES_DIR = tmp_path / "app-states"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", tmp_path / "Devices")
+
+        try:
+            checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "plain"
+            (checkpoint / "data-container").mkdir(parents=True)
+            (checkpoint / ".quern-meta.json").write_text(
+                json.dumps({"label": "plain", "bundle_id": "com.example.App"}),
+            )
+
+            with pytest.raises(DeviceError, match="no keychain snapshot"):
+                await restore_state(
+                    "TEST-UDID", "com.example.App", "plain", include_keychain=True,
+                )
+        finally:
+            app_state_module.APP_STATES_DIR = original_dir
+
+
+class TestDataContainerDiscovery:
+    """simctl get_app_container only works on a booted device; keychain work needs it off."""
+
+    async def test_falls_back_to_disk_scan_when_simctl_fails(self, tmp_path, monkeypatch):
+        device_root = tmp_path / "Devices"
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+
+        app_root = device_root / "TEST-UDID" / "data" / "Containers" / "Data" / "Application"
+        wanted = app_root / "AAAA-BBBB"
+        other = app_root / "CCCC-DDDD"
+        for path in (wanted, other):
+            path.mkdir(parents=True)
+            (path / ".com.apple.mobile_container_manager.metadata.plist").write_text("x")
+
+        async def fake_identifier(container_dir):
+            return "com.example.App" if container_dir == wanted else "com.other.App"
+
+        shutdown_error = _mock_proc(
+            returncode=1, stderr=b"Unable to lookup in current state: Shutdown",
+        )
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=shutdown_error)),
+            patch(
+                "server.device.app_state._read_container_identifier",
+                AsyncMock(side_effect=fake_identifier),
+            ),
+        ):
+            found = await app_state_module.get_data_container("TEST-UDID", "com.example.App")
+
+        assert found == wanted
+
+    async def test_raises_when_neither_simctl_nor_disk_finds_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", tmp_path / "Devices")
+        shutdown_error = _mock_proc(
+            returncode=1, stderr=b"Unable to lookup in current state: Shutdown",
+        )
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=shutdown_error)),
+            pytest.raises(DeviceError, match="Could not get data container"),
+        ):
+            await app_state_module.get_data_container("TEST-UDID", "com.missing.App")

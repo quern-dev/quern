@@ -11,17 +11,21 @@ export function registerAppStateTools(server: McpServer): void {
   server.registerTool("save_app_state", {
     description: `Save a named checkpoint of a simulator app's state. Captures the data container and all app group containers. Terminates the app before copying. Simulator only.
 
-Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") so you can restore them later without reinstalling.`,
+Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") so you can restore them later without reinstalling.
+
+IMPORTANT for logged-in states: auth tokens live in the simulator keychain, which is NOT part of any app container. Without include_keychain a checkpoint always restores to a logged-out app, however it was captured. Pass include_keychain: true to capture it — this requires the device to be shut down first (xcrun simctl shutdown <udid>), because the keychain is a WAL-mode SQLite database held open by securityd.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier (e.g. com.example.MyApp)"),
       label: z.string().describe('Short name for this checkpoint (e.g. "logged_in", "fresh_install")'),
       description: z.string().optional().describe("Human-readable description of this state"),
+      include_keychain: z.boolean().optional().describe("Also capture the simulator keychain, so the checkpoint can restore a logged-in session. Requires the device to be shut down."),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
-  }, async ({ bundle_id, label, description, udid }) => {
+  }, async ({ bundle_id, label, description, include_keychain, udid }) => {
     try {
       const body: Record<string, unknown> = { bundle_id, label };
       if (description) body.description = description;
+      if (include_keychain !== undefined) body.include_keychain = include_keychain;
       if (udid) body.udid = udid;
       const data = await apiRequest("POST", "/api/v1/device/app/state/save", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -34,15 +38,19 @@ Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") 
   });
 
   server.registerTool("restore_app_state", {
-    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Simulator only.`,
+    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Simulator only.
+
+If the checkpoint carries a keychain (saved with include_keychain), it is restored too and the app comes up logged in — this requires the device to be shut down, and the call fails before touching anything if it is not. A checkpoint saved without a keychain always restores to a logged-out app; the response's meta.keychain says which happened.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       label: z.string().describe("Name of the checkpoint to restore"),
+      include_keychain: z.boolean().optional().describe("Defaults to restoring the keychain when the checkpoint has one. Set false to skip it and start logged out."),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
-  }, async ({ bundle_id, label, udid }) => {
+  }, async ({ bundle_id, label, include_keychain, udid }) => {
     try {
       const body: Record<string, unknown> = { bundle_id, label };
+      if (include_keychain !== undefined) body.include_keychain = include_keychain;
       if (udid) body.udid = udid;
       const data = await apiRequest("POST", "/api/v1/device/app/state/restore", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };

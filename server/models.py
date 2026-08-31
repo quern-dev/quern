@@ -1357,6 +1357,7 @@ class SaveAppStateRequest(BaseModel):
     label: str
     description: str | None = None
     udid: str | None = None
+    include_keychain: bool = False
 
 
 class RestoreAppStateRequest(BaseModel):
@@ -1365,6 +1366,7 @@ class RestoreAppStateRequest(BaseModel):
     bundle_id: str
     label: str
     udid: str | None = None
+    include_keychain: bool | None = None
 
 
 class ReadAppPlistRequest(BaseModel):

@@ -57,7 +57,9 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 async def save_app_state(request: Request, body: SaveAppStateRequest):
     """Save a named checkpoint of the app's state (data container + app groups).
 
-    Simulator only. Terminates the app before copying.
+    Simulator only. Terminates the app before copying. Set include_keychain to also
+    capture the simulator keychain, which is required for the checkpoint to restore a
+    logged-in session; that needs the device shut down.
     """
     controller = _get_controller(request)
     try:
@@ -68,6 +70,7 @@ async def save_app_state(request: Request, body: SaveAppStateRequest):
             bundle_id=body.bundle_id,
             label=body.label,
             description=body.description or "",
+            include_keychain=body.include_keychain,
         )
         return {"status": "saved", "udid": udid, "meta": meta}
     except DeviceError as e:
@@ -76,7 +79,11 @@ async def save_app_state(request: Request, body: SaveAppStateRequest):
 
 @router.post("/restore")
 async def restore_app_state(request: Request, body: RestoreAppStateRequest):
-    """Restore a named checkpoint. Terminates the app and re-resolves live container paths."""
+    """Restore a named checkpoint. Terminates the app and re-resolves live container paths.
+
+    If the checkpoint carries a keychain it is restored too (device must be shut down),
+    unless include_keychain is explicitly false.
+    """
     controller = _get_controller(request)
     try:
         udid = await controller.resolve_udid(body.udid)
@@ -85,6 +92,7 @@ async def restore_app_state(request: Request, body: RestoreAppStateRequest):
             udid=udid,
             bundle_id=body.bundle_id,
             label=body.label,
+            include_keychain=body.include_keychain,
         )
         return {"status": "restored", "udid": udid, "meta": meta}
     except DeviceError as e:
