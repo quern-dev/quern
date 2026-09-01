@@ -274,3 +274,38 @@ Unix domain socket at
 no developer disk image. Teaching `pymobiledevice3` to attach to it would give Quern a
 Python-native path with no new runtime dependency, and would likely be useful to that project's
 other consumers. Until then, `ios_webkit_debug_proxy` is the pragmatic choice.
+
+## Can this channel actually drive the webview?
+
+Yes, through JavaScript — not through synthetic input events. Domains probed on this build:
+
+| Domain | Available |
+|---|---|
+| `Runtime`, `DOM`, `Page`, `Console`, `Network` | yes |
+| **`Input`** (`dispatchMouseEvent` / `dispatchKeyEvent`) | **absent** |
+| **`Automation`** (WebDriver-style actions) | **absent** |
+
+Verified end to end: evaluating `[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Filter').click()`
+opened the Filter dropdown on the device, confirmed by screenshot.
+
+**Works well:** buttons and links via `.click()`, form fill via `.value` plus `input`/`change`
+events, scrolling via `scrollIntoView()`, and waiting on arbitrary JS state — the last of which
+the accessibility tree cannot do at all.
+
+**Weak or unsafe:**
+
+- **Press-and-drag** must be hand-dispatched as a pointer/touch event sequence. Whether it works
+  depends on which event family the component listens to. No hit-testing, no momentum, no native
+  gesture recognizers.
+- **`.click()` does not respect reality.** It fires on elements that are covered, scrolled out of
+  view, or visually disabled. Tests can pass against broken UI. This is precisely why §5.4 treats
+  `nativeWebTap` as mandatory rather than polish.
+
+**So the hybrid in §5.4 is the right shape, and it is now cheap:** use this channel to locate the
+element and read `getBoundingClientRect()`, then perform a real native tap through Quern's
+existing input path. Quern already taps well; the missing piece was only knowing where.
+
+**One integration wrinkle:** converting DOM coordinates to screen coordinates needs the
+`WKWebView`'s frame in screen space, and the sim-bridge tree does not expose the webview node at
+all — it returns five elements, none of them the webview. That frame has to come from somewhere
+else (WDA exposes it, or derive it from the window and nav-bar geometry).
