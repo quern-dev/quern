@@ -62,7 +62,7 @@ Rewrite this section as things settle. Everything else in the file is append-onl
 | Can Quern see it on simulators? | **No** — sim-bridge/idb do not descend into `WKWebView`. Not a Quern-Python bug; below Quern in the native walk. | MEASURED | spike findings |
 | Does XCUITest/WDA see it? | Yes — 47 vs 5, and 63 vs 5 by two separate measurements. | MEASURED | spike findings |
 | Does Web Inspector (iwdp) work on simulators? | Yes, with `-s` pointed at the `webinspectord_sim` socket. | MEASURED | spike findings; reproduced on `scorpius` |
-| Does it work on **third-party** content? | **Yes.** Inspectability is a property of the hosting app, not the content. | MEASURED | entry 3 below |
+| Does it work on **third-party** content? | **Yes, when your code constructs the webview.** Inspectability belongs to whoever calls `WKWebView(...)` — not the content, and not merely the hosting process. SDK-owned webviews (e.g. Iterable) are out of reach. | MEASURED | entries 3, 7 |
 | Does running WDA poison the a11y bridge? | Yes — recoverable in **under a second**, state preserved. Not "until reboot", and not ~10s. | MEASURED | #66; entry 6 |
 | Does Web Inspector poison it? | No. It composes with sim-bridge. | MEASURED | spike findings; reproduced on `scorpius` |
 | Do our pages ship testids? | No — 0 on Geocaching Shareables, 0 on joinmastodon.org. | MEASURED | spike findings; entry 3 |
@@ -313,6 +313,60 @@ behind PyPI's 11.3.0. Its `webinspector` subcommand exists here (`opened-tabs`, 
 `cdp`) but is lockdown/RSD-only and raises against a booted simulator, which matches your
 reading of the code. Agreed this wants deciding independently of the feature.
 
+### Entry 7 — Iterable modals are hosted WKWebViews, but not inspectable · *(work machine)* · 2026-09-01T05:32Z
+
+**MEASURED** (read from the SDK source, not inferred). Answers open question 2, and the
+answer is "yes, but" in a way that matters.
+
+Iterable `swift-sdk` **6.7.3**, checked out as a source SPM package.
+
+**They are hosted `WKWebView`s, in-process.** `IterableHtmlMessageViewController`:
+
+- `createWebView()` → `WKWebView(frame: .zero)` (line 237)
+- content loaded via `loadHTMLString(html, baseURL:)` (line 145) — local HTML, not a remote page
+- **`SFSafariViewController` does not appear anywhere in the shipped SDK source**, nor does
+  `ASWebAuthenticationSession`
+
+So architecturally they fall on the good side of entry 3's distinction: in-process, hosted,
+not an out-of-process surface.
+
+**But the app cannot opt them into inspection.**
+
+- The SDK **never sets `isInspectable`** — zero occurrences in the whole package — so on
+  iOS 16.4+ those webviews default to non-inspectable.
+- There is **no public seam** to change that. `createWebView()` is `private static`, and the
+  initializer carrying the `webViewProvider` injection point is a `private init`. The seam
+  exists for the SDK's own unit tests, not for consumers. No `public`/`open` webview hook
+  anywhere in the package.
+
+**INFERRED:** so entry 3's conclusion — *"if the third-party content is in a `WKWebView`
+your app hosts, the full channel is available"* — needs one qualifier. The channel is
+available when **the code that constructs the webview** opts in. Hosting the process is
+necessary but not sufficient; whoever calls `WKWebView(...)` controls it. For SDK-owned
+webviews that is the vendor, not you.
+
+Practical options, none clean:
+
+1. Walk the view hierarchy when an Iterable modal appears and set `isInspectable` on any
+   `WKWebView` found. Works in an internal build, is a hack, and is timing-dependent.
+2. Ask Iterable to set it under `#if DEBUG`, or expose a config hook. Correct fix, slow.
+3. Leave them out of scope and keep §7's existing treatment — suppress, mock, guard.
+
+**Worth testing before choosing:** the accessibility route needs no opt-in at all, so
+XCUITest/WDA may be able to read Iterable modal content even though Web Inspector cannot.
+If so, option 3 is less lossy than it looks.
+
+*Falsifiable by:* a newer Iterable SDK adding `isInspectable` or a public webview hook —
+worth re-checking on upgrade, since it is a one-line change on their side.
+
+**A connection worth flagging** for whoever tests that: this codebase has a separate,
+already-documented quirk where **a presented web modal collapses the entire a11y tree to a
+single bare `Application`** — the same signature as the poisoned-bridge state from #66, and
+easy to confuse with it. If Iterable modals behave the same way, then reading them via
+accessibility may be blocked for an unrelated reason. Screenshot first; the poisoned-bridge
+signature is distinguishable because SpringBoard still reads normally while a modal-collapsed
+tree recovers as soon as the modal is dismissed.
+
 ---
 
 ## Open questions
@@ -320,7 +374,7 @@ reading of the code. Agreed this wants deciding independently of the feature.
 | # | Question | Raised by | Status |
 |---|---|---|---|
 | 1 | Can the webview frame be derived from native geometry instead of WDA? | `scorpius`, entry 4 | untested |
-| 2 | Are §7's Iterable modals hosted `WKWebView`s or out-of-process? Determines whether entry 3 covers them. | `scorpius`, entry 3 | untested |
+| 2 | Are §7's Iterable modals hosted `WKWebView`s or out-of-process? | **Answered** — hosted `WKWebView`s, but the SDK never sets `isInspectable` and exposes no seam, so Web Inspector cannot reach them. | entry 7 | answered |
 | 3 | Does any hosted `WKWebView` refuse inspection despite the app opting in? | `scorpius`, entry 3 | untested |
 | 4 | Should Quern detect the poisoned-bridge signature and auto-recover? | #66 | proposed in #66 |
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
