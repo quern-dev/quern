@@ -1,0 +1,100 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit is free for public repositories, which this is.
+# Docs: https://docs.coderabbit.ai/configure-coderabbit/
+
+language: en-US
+
+tone_instructions: >-
+  Be direct and specific. Prefer naming the failure mode and the conditions that
+  trigger it over general advice. If a claim is uncertain, say so rather than
+  asserting it. Skip praise.
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  poem: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    # Generated or vendored — reviewing these produces noise, not findings.
+    - "!mcp/dist/**"
+    - "!**/node_modules/**"
+    - "!.venv/**"
+    - "!**/*.lock"
+    - "!mcp/package-lock.json"
+
+  path_instructions:
+    - path: "server/**"
+      instructions: |
+        Async/await throughout, type hints on all signatures, Pydantic models for
+        API schemas. Imports grouped stdlib → third-party → local.
+
+        Flag any code that assumes an operation is retryable when it is not.
+        sim-bridge commands split into idempotent reads (describe-ui, screenshot,
+        probe-point, list) and non-idempotent writes (tap, type, swipe, button,
+        home, lock, siri, volume*, applepay). A timeout on a write is ambiguous:
+        the command was already written to stdin and may have executed. See #74.
+
+    - path: "server/device/sim_bridge.py"
+      instructions: |
+        The asyncio.Lock serialising commands is load bearing, not tidiness. The
+        wire protocol carries no request IDs — sim-bridge.swift reads with
+        `while let line = readLine()` and replies via `respond()`, and _dispatch
+        resolves a single _pending_response future with whatever arrives. Two
+        in-flight commands would resolve each other's futures. Removing the
+        serialisation requires adding correlation IDs to both sides.
+
+        One SimBridgeManager serves every simulator, so any concurrency budget
+        here is server-wide rather than per-device.
+
+    - path: "mcp/src/tools/**"
+      instructions: |
+        A tool's `description` is the interface an agent reads to decide whether
+        to call it — a stale description is a functional bug, not a docs nit. If
+        a change alters what a tool supports (platforms, parameters, return
+        shape), check that the description and every parameter `.describe()`
+        still match. This has bitten before: scroll_to_element kept saying
+        "Android-only" after iOS support shipped, making working functionality
+        unreachable through MCP.
+
+    - path: "README.md"
+      instructions: |
+        The MCP tool table, the endpoint tables and the CLI command block are
+        verified against the source by tests/test_readme_sync.py. If a change
+        here fails that test, the fix is usually the source of truth, not the
+        test.
+
+    - path: "docs/api-reference.md"
+      instructions: |
+        Generated from the source — every tool with the endpoint behind it,
+        derived from each tool's own apiRequest call. Hand-edits get overwritten.
+        Changes belong in the generator or the tool definitions.
+
+    - path: "docs/release-channels.md"
+      instructions: |
+        Fast-forward every channel branch you intend to move BEFORE creating the
+        GitHub Release. GitHub permanently refuses to move a branch onto a commit
+        that already has a published Release, and this has stranded release/beta
+        once already.
+
+    - path: "tests/**"
+      instructions: |
+        pytest with pytest-asyncio. Mock subprocesses — never call real
+        simctl/idb/adb in tests.
+
+        Prefer tests that fail rather than hang when the behaviour under test is
+        absent: bound anything that waits on an event or a lock. A test that
+        blocks forever when a guard is removed is not a working test.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: local
