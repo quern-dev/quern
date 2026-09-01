@@ -578,6 +578,72 @@ It is ~1s, state-preserving, idempotent, scoped to the affected simulator, and s
 loaded pool. The remaining care needed is entry 9's Q10 — an auto-recovery that *retries
 hard* after killing could trip sim-bridge's unbounded queue. Kill, then issue **one** query.
 
+### Entry 12 — version data from the second machine, three tools that cannot self-report, and a gap in `doctor` · *(work machine)* · 2026-09-01T06:38Z
+
+**MEASURED.** Input for #67 stage 1.
+
+**`quern doctor` on this machine, verbatim:**
+
+```
+Device tools:
+  * adb          * devicectl   * idb        * pymobiledevice3
+  * sim_bridge   * simctl      x tunneld
+```
+
+Booleans, exactly as #67 describes. But there is a second gap worth folding into stage 1:
+**three tools in #67's scope are not reported by `doctor` at all.** `check_tools()`
+(`server/device/controller.py:71`) covers `simctl`, `idb`, `devicectl`, `pymobiledevice3`,
+`tunneld`, `adb`, `sim_bridge` — so `mitmproxy`, `node` and the `libimobiledevice` family are
+absent. Stage 1 is therefore not only "add a version field", it is also "add the missing
+tools", and the second half is where the drift actually bit us: `pymobiledevice3` is covered,
+but `node` is not.
+
+**Versions here, for the drift table:**
+
+| Tool | Resolved path | Version |
+|---|---|---|
+| `pymobiledevice3` | `~/.local/bin` (pipx) | **7.7.1** |
+| `node` | `~/.nvm/.../v20.20.2` | **v20.20.2** |
+| `adb` | Android SDK platform-tools | 1.0.41 |
+| `idevice_id` | `/opt/homebrew/bin` | 1.3.0 |
+| `ideviceinstaller` | `/opt/homebrew/bin` | 1.1.1 |
+| `idb` | `~/.pyenv/shims` | **1.1.7** — not from the CLI |
+| `mitmproxy` | `~/.pyenv/shims` | **11.0.2** — not from the CLI |
+
+**`node` is a second axis of drift**: v20.20.2 here against v22.22.2 on `scorpius`. Two
+majors apart, unreported by `doctor`, and `nvm` means it can differ per shell on one machine.
+
+**Three tools break naive CLI parsing:**
+
+1. **`idb --version` does not exist.** It prints seven lines of `usage:` text and exits
+   zero, so first-non-empty-line parsing yields `usage: idb [-h] ...`. The version is only
+   in package metadata: `pip show fb-idb` gives `1.1.7`.
+
+2. **`mitmdump --version` fails outright here.** A `passlib`/`bcrypt` incompatibility dumps
+   a traceback and **exits 1**; with stderr suppressed, stdout is empty. The tool cannot
+   self-report at all in this environment. `pip show mitmproxy` gives `11.0.2`.
+
+3. **`idb_companion --version` returns no version** — it emits a build stamp,
+   `build_time` and `build_date`, with no semver. Note this is the **patched** companion
+   built from source for the Group-children fix, so the meaningful identity here is *which
+   patch*, which no version string expresses. A build date may be the honest answer for
+   locally-built tools, and `sim-bridge` — also built by Quern — has the same shape.
+
+**Suggestion for stage 1:** prefer **package metadata over CLI invocation** wherever the tool
+is a Python package (`fb-idb`, `mitmproxy`, `pymobiledevice3`). One stable format, faster,
+does not execute the tool, and does not break when the tool's own dependencies do — which is
+exactly the `mitmdump` case. Reserve CLI parsing for tools with no package metadata (`adb`,
+the `libimobiledevice` family, `node`).
+
+Also worth printing the **resolved path** beside the version. Four install mechanisms are in
+play here — pipx, homebrew, pyenv shims, nvm — and "which `node`" answers a drift question as
+directly as "which version". #67 already notes Quern must resolve tools the way it does
+internally rather than through `PATH`; the path it resolved is the useful thing to surface.
+
+*Falsifiable by:* `mitmdump --version` working on `scorpius`, which would make that a local
+environment fault rather than a general hazard — and would change whether stage 1 needs a
+metadata fallback or should simply prefer one.
+
 ---
 
 ## Open questions
