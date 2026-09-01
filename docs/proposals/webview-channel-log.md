@@ -759,6 +759,80 @@ improvement, but a separate change.
 *Falsifiable by:* a device-pool workload that trips the limit in normal use, which
 would mean 6 is simply too low rather than the design being wrong.
 
+### Entry 14 — decision: library, not CLI, not iwdp, no fork · *(work machine)* · 2026-09-01T06:48Z
+
+**MEASURED.** Supersedes entry 13's sequencing recommendation. Entry 13 suggested shipping on
+`ios_webkit_debug_proxy` first and treating the upstream PR as a separate good deed. That was
+optimising for speed we do not need, and it missed a fourth option that is strictly better.
+
+**Reproduced entry 5's PoC independently, on `pymobiledevice3` 7.7.1** — three majors older
+than `scorpius`'s 9.15.1 — with **completely unmodified** library code:
+
+```python
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(sim_webinspectord_socket)
+svc = ServiceConnection(sock)                       # public API, no patch
+svc.send_plist({"__selector": "_rpc_reportIdentifier:",
+                "__argument": {"WIRConnectionIdentifierKey": conn_id}})
+```
+
+```
+_rpc_reportCurrentState:
+_rpc_reportConnectedApplicationList:
+_rpc_reportConnectedDriverList:
+_rpc_applicationConnected:
+```
+
+**The API shape is identical across 7.7.1 and 9.15.1**, independently verified on two machines:
+
+| | 7.7.1 (work) | 9.15.1 (`scorpius`) |
+|---|---|---|
+| `ServiceConnection.__init__(sock, mux_device=None)` | yes | yes |
+| `send_plist` / `recv_plist` | yes | yes |
+| `WebinspectorService.__init__` requires lockdown | yes | yes |
+
+Two independent confirmations three majors apart is meaningful stability for an API we would
+be depending on.
+
+**The decision: consume `pymobiledevice3` as a library, not as a CLI.**
+
+The lockdown friction in `WebinspectorService.__init__` — open question 6, and the thing
+entry 5 flagged as needing a maintainer conversation — **disappears, because we do not need
+`WebinspectorService` at all.** It is a convenience wrapper over a transport plus a small set
+of RPC selectors. We bring our own transport and drive `ServiceConnection` directly. Nothing
+to subclass, nothing to patch, nothing to ask permission for.
+
+Ruled out, and why:
+
+- **`ios_webkit_debug_proxy`** — a new binary dependency on a C tool with roughly annual
+  releases, to save implementation time we are not short of. Its `-s` flag proves the
+  transport works; that was its job and it is done.
+- **Fork** — never warranted. Nothing needs changing.
+- **Monkey-patch** — impossible anyway (entry 13: Quern shells out, so there is no shared
+  process), and unnecessary now.
+- **Upstream PR then shell out to the CLI** — still worth doing for that project, but it is
+  no longer on Quern's path. It would buy a *worse* integration than the library gives us
+  today: subprocess boundary, JSON-over-stdout parsing, and whatever version happens to be
+  installed.
+
+**Two consequences worth accepting deliberately:**
+
+1. **`pymobiledevice3` becomes a declared Python dependency** of the server, where today it is
+   CLI-only and undeclared. This is a *change*, but arguably an improvement for #67: a
+   declared dependency in `pyproject.toml` can be pinned or floored, whereas the current CLI
+   install drifts silently and invisibly. It moves one tool out of the drift problem.
+2. **We own the RPC selector set we use.** Small and well-bounded — identifier report,
+   application list, socket setup and data forwarding — but ours to maintain. The
+   `Target.sendMessageToTarget` wrapping sits above this and is needed regardless of transport.
+
+**The upstream PR is now optional.** Recommend sending it anyway: `scorpius` has a working
+PoC, nobody has claimed it, and it helps that project's other users. But it should be framed
+as a contribution rather than as work Quern is waiting on.
+
+*Falsifiable by:* `ServiceConnection.__init__` changing signature in 10.x or 11.x — worth a
+five-minute check against 11.3.0 before committing, since neither machine has tested above
+9.15.1 and that is the version a fresh `quern setup` would install today.
+
 ---
 
 ## Open questions
@@ -771,7 +845,7 @@ would mean 6 is simply too low rather than the design being wrong.
 | 8 | Can accessibility read vendor webviews we cannot opt into inspection? | **Answered — yes.** XCTest reads Iterable modals fully; sim-bridge sees 1 element. | entry 8 | answered |
 | 4 | Should Quern detect the poisoned-bridge signature and auto-recover? | #66 | proposed in #66 |
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
-| 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open — still the right question for the upstream PR, but see entry 13: Quern shells out rather than imports, so the answer does not gate Quern |
+| 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? | **Moot for Quern** — we drive `ServiceConnection` directly and never construct `WebinspectorService`. Still the right question for the upstream PR. | entry 14 | closed for Quern |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | **filed as #67** — answer is "no, pinning is wrong"; report versions and record what was tested instead |
 | 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | **Fixed — PR #69**, review requested (entry 12) |
 | 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Closed** — 1.02s with 6 sims at load avg 672; no degradation, no cross-simulator disturbance. | entries 10, 11 | closed |
