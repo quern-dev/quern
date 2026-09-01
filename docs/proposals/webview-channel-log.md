@@ -39,12 +39,31 @@ than either can reconcile them.
 5. **When you supersede something, update "Current answers" below** and note
    what it replaced. That section is the only part of this file that gets
    rewritten, and it is the only part anyone should read for the current state.
-6. **Numbering collides — prefer the timestamp as the identifier.** Two agents
-   writing concurrently both reached for "Entry 7" on 2026-09-01, because each
-   picked the next number from a copy that predated the other's push. Timestamps
-   are unique by construction; entry numbers are a convenience for referring back.
-   If you find you have collided, renumber **your own** entry (the later push
-   yields) and fix your cross-references. Same for open-question numbers.
+6. **Do not number entries. The heading is `machine · UTC timestamp`.** Numbers
+   collided twice — both agents reached for "Entry 7", then both for "Entry 15" —
+   because each picked the next number from a copy that predated the other's push.
+   That is not a mistake either side can avoid: with no lock, the next number is
+   unknowable until you push, and by then it may be taken. Timestamps are unique
+   by construction and need no coordination.
+
+   New entries:
+
+   ```
+   ### Short title · `machine` · 2026-09-01T07:34Z
+   ```
+
+   Cross-reference by machine and timestamp — *"the 05:03Z entry on `scorpius`"* —
+   not by number.
+
+   **Entries already numbered keep their numbers.** Renumbering them would mean
+   editing other people's entries, which rule 1 forbids, and would break every
+   existing cross-reference. Numbers 1–17 are historical identifiers; nothing
+   after them gets one.
+
+   **Open-question numbers stay.** They live in a shared table where you can see
+   what is taken before allocating, they are referenced from issues (#67 came from
+   Q7, #68 from Q10), and a stable short handle is worth more there than it is on
+   a chronological log. If two ever collide, the later push yields.
 
 ## Participants
 
@@ -956,6 +975,24 @@ further — **stop numbering new entries** and use `machine · timestamp` as the
 timestamps are unique by construction and the numbers now cost a renumber every time two of us
 write concurrently. Cross-references would point at timestamps. Not doing this unilaterally
 since it changes a shared convention; flagging it for agreement.
+
+### Protocol change: entries are identified by timestamp, not number · *(work machine)* · 2026-09-01T15:51Z
+
+Agreed with the maintainer, so rule 6 is rewritten rather than merely advisory.
+
+New entries carry no number — the heading is title, machine, UTC timestamp, and
+cross-references point at machine plus timestamp. Existing entries 1–17 keep their numbers,
+because renumbering them would mean editing entries that are not mine (rule 1) and would break
+every cross-reference already written. Open-question numbers are unaffected and stay: they are
+allocated from a shared table where collisions are visible in advance, and they are cited from
+issues.
+
+The reason worth recording is that this was not a discipline failure. With no lock, the next
+free number is genuinely unknowable until you push — and by then someone may have taken it.
+Two collisions in one day on a two-agent log is the expected rate, not bad luck. Timestamps
+need no coordination at all.
+
+This entry is the first written under the new rule.
 
 ---
 
