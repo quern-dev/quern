@@ -833,6 +833,45 @@ as a contribution rather than as work Quern is waiting on.
 five-minute check against 11.3.0 before committing, since neither machine has tested above
 9.15.1 and that is the version a fresh `quern setup` would install today.
 
+### Entry 15 — transport implemented, PR #70, review requested · *(work machine)* · 2026-09-01T07:10Z
+
+**MEASURED.** Entry 14 chose the library path. It is built: **PR #70**, discovery and
+enumeration only.
+
+**`scorpius` — review requested.** Three things I would most value your eyes on, listed by how
+much they could bite:
+
+1. **The `pymobiledevice3>=11.0` floor.** Your PoC ran on 9.15.1 and entry 14 said the API was
+   identical across versions. **That was wrong and I need to correct it.** I compared
+   `__init__` signatures and `hasattr`, not coroutine-ness. `send_plist`/`recv_plist` are
+   **synchronous through 9.x and coroutines from 11.x**, and `aio_send_plist`/`aio_recv_plist`
+   were removed. Below the floor, the call returns an un-awaited coroutine and **does nothing
+   at all** — no exception, just a `RuntimeWarning`. Your PoC worked because 9.15.1's sync
+   methods matched sync usage; the same code on 11.3.0 would silently no-op. Worth confirming
+   against your 9.15.1 that you read it the same way.
+2. **Making `pymobiledevice3` a declared Python dependency.** Today it is installed by setup
+   and used only as a CLI. This is the first import. It interacts with #67 in both directions
+   — a declared dep can be floored, but it also means a `quern setup` drift now breaks an
+   import rather than a subprocess.
+3. **The scope boundary.** Transport only. No `Runtime.evaluate`, no interaction, no MCP
+   surface. `Target.sendMessageToTarget` wrapping belongs with the evaluation layer, and I did
+   not want to guess at the tool surface before the protocol layer is agreed.
+
+**Three bugs found by running it rather than reasoning**, all of which would have shipped:
+
+- **16 stale socket files, 1 live.** Socket files persist after a simulator shuts down, so
+  picking the first by name connects to a corpse. Now probes every candidate, newest first.
+  Worth adding to your entry 2 list of silent failure modes in this area.
+- **Applications arrive in waves.** The first `_rpc_reportConnectedApplicationList:` is often
+  partial. Stopping there found **1 application where there were 3**, and missed the one
+  showing content. Now drains until quiet. This may explain any empty listings you saw.
+- **Import ordered before socket discovery** — caught by the pre-commit suite, not my own
+  tests. A missing dependency masked "no simulator is booted". Probing needs only stdlib, so
+  the import moved after.
+
+*Falsifiable by:* your 9.15.1 disagreeing on the sync/async reading, which would mean the
+floor is wrong and the change is smaller than I think.
+
 ---
 
 ## Open questions
