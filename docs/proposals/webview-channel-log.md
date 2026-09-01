@@ -63,9 +63,10 @@ Rewrite this section as things settle. Everything else in the file is append-onl
 | Does XCUITest/WDA see it? | Yes — 47 vs 5, and 63 vs 5 by two separate measurements. | MEASURED | spike findings |
 | Does Web Inspector (iwdp) work on simulators? | Yes, with `-s` pointed at the `webinspectord_sim` socket. | MEASURED | spike findings; reproduced on `scorpius` |
 | Does it work on **third-party** content? | **Yes.** Inspectability is a property of the hosting app, not the content. | MEASURED | entry 3 below |
-| Does running WDA poison the a11y bridge? | Yes — but recoverable in ~10s, **not** "until reboot". | MEASURED | #66 root cause |
+| Does running WDA poison the a11y bridge? | Yes — recoverable in **under a second**, state preserved. Not "until reboot", and not ~10s. | MEASURED | #66; entry 6 |
 | Does Web Inspector poison it? | No. It composes with sim-bridge. | MEASURED | spike findings; reproduced on `scorpius` |
 | Do our pages ship testids? | No — 0 on Geocaching Shareables, 0 on joinmastodon.org. | MEASURED | spike findings; entry 3 |
+| Can `CoreSimulatorBridge` be reloaded instead of killed? | **No** — no reload affordance, `SIGHUP` unhandled. Does not matter: respawn is on-demand and sub-second. | MEASURED | entry 6 |
 | Can `pymobiledevice3` reach the simulator inspector? | **Yes, with no protocol work.** `ServiceConnection` already accepts a raw socket; the sim path is the same length-prefixed plist. | MEASURED | entry 5 below |
 
 ---
@@ -258,6 +259,59 @@ simulator+webinspector returns **0** issues or PRs. Nobody is working on it.
 turning out to depend on lockdown somewhere I did not find. I grepped for
 `self.lockdown` and got one hit (the notification proxy above); a subclass or
 mixin could still reach for it.
+
+### Entry 6 — the bridge cannot be reloaded, but it does not need to be · *(work machine)* · 2026-09-01T05:26Z
+
+**MEASURED.** Answering a question raised off-log: can `CoreSimulatorBridge` be made to
+rebuild its stale AX port cache rather than being killed?
+
+**No graceful reload exists.** `CSBAccessibilityBridgeManager` is the class handling the
+bridge, but the port cache is not its own — `_AXGetPortFromCache` lives in the AX runtime
+loaded *into* the process, so the bridge exposes no handle to invalidate it. Nothing in the
+binary suggests a flush, purge or reload affordance. `SIGHUP` is not handled: it terminates
+the process like any unhandled signal, and launchd respawns it. So every route is
+kill-and-respawn.
+
+**But the cost is far lower than #66 currently states.** I wrote "~10s" there from a
+`sleep 10` I never questioned. Measured properly by polling from the moment of the kill:
+
+```
+kill -9 $(pgrep -x CoreSimulatorBridge)
+→ recovered after 0.6s with 16 elements (first poll)
+```
+
+The bridge is launchd-on-demand: the next accessibility query triggers the respawn and
+succeeds against a fresh cache. **No sleep is needed at all** — just re-issue the query.
+A poisoned simulator recovered the same way within one poll.
+
+This should change two of the open questions below:
+
+- **Q4 (auto-recover on detection)** — much stronger now. A sub-second, state-preserving,
+  idempotent recovery is cheap enough to run automatically whenever the poisoned signature
+  is detected, rather than surfacing an error for a human to act on.
+- **Q5 (allow `WdaBackend` on simulators)** — the objection was WDA's bridge poisoning.
+  At 0.6s recovery with app state intact, that cost is close to noise. The remaining
+  arguments against WDA are the ones that were always the real ones: it gives roles and
+  labels but not DOM identity, testids, or JS state, and it adds a running `xcodebuild`
+  per device. Decide it on those, not on poisoning.
+
+Superseding note for **entry 1**: its "~10s" figure came from #66 and carries the same
+error. The ladder row is better stated as *"briefly; recoverable in under a second without
+losing state."*
+
+*Falsifiable by:* the respawn taking materially longer on a loaded machine, or under
+several booted simulators — `CoreSimulatorBridge` is per-host, so a machine running a
+device pool may behave differently from this single-simulator measurement.
+
+**One trap worth recording**, since it cost me a process: use `pgrep -x CoreSimulatorBridge`.
+A loose `ps aux | grep CoreSimulatorBridge` also matches your own shell running that
+command, and `kill -9` on the first match kills your shell instead.
+
+**On Q7 (pinning `pymobiledevice3`):** confirming the drift from this side — the work
+machine has the CLI at **7.7.1** via pipx, three majors behind `scorpius` at 9.15.1 and four
+behind PyPI's 11.3.0. Its `webinspector` subcommand exists here (`opened-tabs`, `js-shell`,
+`cdp`) but is lockdown/RSD-only and raises against a booted simulator, which matches your
+reading of the code. Agreed this wants deciding independently of the feature.
 
 ---
 
