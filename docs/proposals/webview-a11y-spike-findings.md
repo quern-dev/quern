@@ -142,3 +142,94 @@ xcodebuild -workspace Geocaching.xcworkspace -scheme "Internal (UI only)" -sdk i
 `-skipPackagePluginValidation` is required: without it the build fails on SwiftLint plugin
 trust validation, and both xcodebuild and Quern's `build_and_install` report
 "Build failed. 0 error(s)" with no cause.
+
+---
+
+# Follow-up spike: Safari Web Inspector on the simulator
+
+**Result: the full DOM channel works today, off the shelf, and it does not disturb the
+accessibility bridge.**
+
+## What it took
+
+1. One line in the app, on the internal build only:
+
+   ```swift
+   #if INTERNAL
+   webView.isInspectable = true   // defaults to false since iOS 16.4
+   #endif
+   ```
+
+   **Use `#if INTERNAL`, not `#if DEBUG`.** This codebase compiles with `-DINTERNAL` and does
+   not define `DEBUG`; a `#if DEBUG` guard silently compiles the line away, the build still
+   succeeds, and no inspectable target ever appears. Verify the symbol landed — and note Xcode 16
+   puts app code in `Geocaching.debug.dylib`, not the thin launcher binary, so check the dylib.
+
+2. Google's `ios_webkit_debug_proxy` (not an Apple tool; `brew install ios-webkit-debug-proxy`),
+   pointed at the simulator's socket:
+
+   ```bash
+   SOCK=$(lsof -U | grep -o "/private/tmp/com.apple.launchd.[^ ]*/com.apple.webinspectord_sim.socket" | head -1)
+   ios_webkit_debug_proxy -s "unix:$SOCK" -c null:9221,:9222-9250
+   curl -s http://localhost:9222/json
+   ```
+
+   The `-s/--simulator-webinspector` flag is required. Without it the proxy enumerates over
+   usbmux, finds no devices, and reports `ssl recv failed`.
+
+3. A WebSocket client speaking the **Target-wrapped** WebKit protocol. Flat
+   `Runtime.evaluate` fails with `'Runtime' domain was not found`; commands must be wrapped in
+   `Target.sendMessageToTarget` with the `targetId` from `Target.targetCreated`, and replies
+   arrive inside `Target.dispatchMessageFromTarget`. Roughly 20 lines — this is the quirk
+   `appium-remote-debugger` exists to absorb, but it is not a large lift.
+
+## What it gives
+
+Against Shareables, live:
+
+| | |
+|---|---|
+| `document.title` | `Shareables` |
+| `document.readyState` | `complete` — **JS readiness, which the a11y tree cannot express** |
+| `location.href` | `https://staging.geocaching.com/play/shareables/received?hideLayout=true` |
+| elements with `id` | 116 |
+| **`[data-testid]`** | **0** |
+| buttons | `Learn more`, `Feedback`, `Settings`, `Filter`, plus hidden modal content (`Share experience feedback`, `Cancel`, `Submit`, `Ok`) |
+
+Arbitrary JS evaluation, the real DOM, and console access — everything §3 lists as missing from
+the accessibility tree.
+
+**The zero testids confirm §6.** "Testid convention — do this first" is not premature: the page
+ships none today. Selection would fall back to `id` attributes (116 present) or CSS/text, which
+is exactly the brittleness the convention is meant to remove.
+
+## This channel does not corrupt the accessibility bridge
+
+Important, because it distinguishes the two options at runtime.
+
+**WDA does corrupt it.** After running WDA (and the XCUITest probe), Quern's `get_ui_tree`
+returned a bare Application with one element. Killing WDA did not restore it; only a full
+simulator reboot did. This matches the known post-XCUITest AX-bridge corruption.
+
+**Web Inspector does not.** After a full session of proxy + WebSocket + JS evaluation, Quern
+still returned its normal 5 native elements and `identify_screen` matched Shareables at
+confidence `exact`.
+
+That has a direct design consequence: **a runtime hybrid that switches between sim-bridge and
+WDA per screen is probably unworkable**, since starting WDA poisons the native tree for the rest
+of the boot. Either pick one backend per session, or prefer the Web Inspector channel precisely
+because it composes with sim-bridge instead of displacing it.
+
+Open question worth answering before building either: is the corruption caused by WDA
+specifically, or by any XCTest process starting and stopping on the simulator?
+
+## Revised cost ladder
+
+| Tier | Cost | Gives | Disturbs a11y bridge |
+|---|---|---|---|
+| 1. WDA backend on simulators | Quern change only | roles, labels, taps | **Yes — poisons it until reboot** |
+| 2. Web Inspector via iwdp | 1 app line + ~20 lines of protocol glue | DOM, testids, JS eval, console, readiness | **No** |
+| 3. Agent in the web bundle | web-team coordination + bundle change | cleanest API, transport-independent | No |
+
+Tier 2 turns out to be far cheaper than "fallback only" implied, and is the only option that
+composes cleanly with the existing simulator backend.
