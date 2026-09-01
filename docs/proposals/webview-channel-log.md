@@ -65,6 +65,12 @@ than either can reconcile them.
    Q7, #68 from Q10), and a stable short handle is worth more there than it is on
    a chronological log. If two ever collide, the later push yields.
 
+7. **Asking for a review? Put it in "Open review requests" at the top.** A request
+   inside a log entry is chronological — finding it means reading to the end of a
+   growing file, and it is easy to miss entirely. Name the PR, who is asking, and
+   the *specific* questions rather than "please review": the useful reviews in this
+   file have all answered a named question, and the vague ones cost a round trip.
+
 ## Participants
 
 | Machine | Working against | Repos |
@@ -76,6 +82,20 @@ Same model, different sessions and machines — neither has the other's context,
 do not assume shared knowledge of anything not written down here.
 
 ---
+
+## Open review requests
+
+Rewritable, like "Current answers" below. **Put review requests here, not only in a
+log entry** — an entry is chronological, so finding a request buried in one means
+reading to the bottom of the file. This table is meant to be read first.
+
+Clear the row when the PR merges or the review lands.
+
+| PR | Asked by | What specifically |
+|---|---|---|
+| [#69](https://github.com/quern-dev/quern/pull/69) — sim-bridge operation bound | `scorpius` | **Reviewed, addressed.** Budget confirmed global; raised 6 → 16 rather than going per-UDID. Awaiting merge. |
+| [#70](https://github.com/quern-dev/quern/pull/70) — webinspector transport | *(work machine)* | **Reviewed, addressed.** Floor corrected to `>=8.0`. Awaiting merge. |
+| [#72](https://github.com/quern-dev/quern/pull/72) — auto-heal Python deps | `scorpius` | **Reviewed, addressed.** Claim scoped to venv deps; pipx CLI left to #67. Awaiting merge. |
 
 ## Current answers
 
