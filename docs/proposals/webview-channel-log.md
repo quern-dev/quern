@@ -72,7 +72,8 @@ Rewrite this section as things settle. Everything else in the file is append-onl
 | Does running WDA poison the a11y bridge? | Yes — recoverable in **under a second**, state preserved. Not "until reboot", and not ~10s. | MEASURED | #66; entry 6 |
 | Does Web Inspector poison it? | No. It composes with sim-bridge. | MEASURED | spike findings; reproduced on `scorpius` |
 | Do our pages ship testids? | No — 0 on Geocaching Shareables, 0 on joinmastodon.org. | MEASURED | spike findings; entry 3 |
-| Can `CoreSimulatorBridge` be reloaded instead of killed? | **No** — no reload affordance, `SIGHUP` unhandled. Does not matter: respawn is on-demand and sub-second. | MEASURED | entry 6 |
+| Can `CoreSimulatorBridge` be reloaded instead of killed? | **No** — no reload affordance, `SIGHUP` unhandled. Does not matter: the first query after the kill succeeds (0.6s quiet, 1.16s at load avg 45.9). | MEASURED | entries 6, 9, 10 |
+| Is `CoreSimulatorBridge` per-host or per-simulator? | **Per-simulator.** Killing one does not disturb other booted sims. Corrects a claim in #66. | MEASURED | entry 10 |
 | Can `pymobiledevice3` reach the simulator inspector? | **Yes, with no protocol work.** `ServiceConnection` already accepts a raw socket; the sim path is the same length-prefixed plist. | MEASURED | entry 5 below |
 
 ---
@@ -484,6 +485,64 @@ the bridge could trip exactly this if it retries hard. Filed as Q10.
 *Falsifiable by:* sim-bridge turning out to have a queue bound or cancellation I
 did not find; I read the timing from `~/.quern/server.log`, not from the source.
 
+### Entry 10 — CSB is per-simulator, and Q11 answered on a loaded host · *(work machine)* · 2026-09-01T05:50Z
+
+**MEASURED.** Two results. The first corrects something I wrote in #66; the second
+addresses entry 9's untested falsification condition.
+
+**First, accepting entry 9's correction of my method.** My 0.6s came from the *first poll
+succeeding*, which means it contains idb's own query latency. So 0.6s was always an **upper
+bound including measurement overhead**, not the respawn time — the same class of confound
+entry 9 identified, just smaller. The operationally true claim is narrower and is what
+matters for implementation: **the first query issued after the kill succeeds.** No sleep,
+no retry loop. Entry 9 is right that the underlying respawn cost has not been isolated, and
+it probably does not need to be.
+
+**`CoreSimulatorBridge` is per-simulator, not per-host.**
+
+```
+1 simulator booted  → 1 CoreSimulatorBridge
+2 simulators booted → 2 CoreSimulatorBridge   (mapped to UDIDs via lsof)
+```
+
+I stated the opposite in #66, and used it to argue auto-recovery should be gated in a
+device-pool context. **That objection does not hold.** Killing one simulator's bridge left
+the other completely untouched:
+
+| | before kill | after killing the 18.6 bridge only |
+|---|---|---|
+| iPhone 16 Pro / iOS 18.6 | 13 | **16** (recovered) |
+| iPhone 17 Pro / iOS 26.5 | 16 | **16** (undisturbed) |
+
+To target the right one, map by UDID rather than killing every match:
+
+```bash
+for P in $(pgrep -x CoreSimulatorBridge); do
+  lsof -p $P 2>/dev/null | grep -q "$UDID" && kill -9 $P
+done
+```
+
+**Q11 — loaded host, multiple simulators.** This ran at load average **24.32 20.03 13.05** with two
+simulators booted, which is a genuinely loaded machine rather than a quiet one. First query
+after the kill: **1.16s**. Slower than 0.6s, still nowhere near the 10s that entry 9's
+quantised samples suggested. Recovery does not appear to degrade meaningfully under load.
+
+Not fully closed: I did not test the pathological case of many simulators, and I did not
+isolate respawn from query latency (per the caveat above). But the practical claim holds on
+a loaded host with a pool of two.
+
+**This makes Q4 easier.** Auto-recovery is sub-2s, state-preserving, idempotent, **and
+scoped to the affected simulator**. The last was the main reason to be cautious about doing
+it automatically in a pool. I will correct #66.
+
+*Falsifiable by:* a host running enough simulators that launchd respawn contends, or a CI
+box under sustained heavy load where the 1.16s figure grows materially.
+
+**On entry 9's separate finding (Q10, 182s queue drain):** worth flagging that this is the
+more dangerous of the two problems. A poisoned bridge is a clear failure; an unbounded
+queue that drains healthy results minutes later looks like a hang and points nowhere near
+its cause. Agreed it should be filed separately from #66.
+
 ---
 
 ## Open questions
@@ -499,4 +558,4 @@ did not find; I read the timing from `~/.quern/server.log`, not from the source.
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | open |
 | 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | open |
-| 11 | Entry 6's multi-simulator / loaded-host falsification condition — still untested. | entry 6 | open |
+| 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Partly answered** — 1.16s at load avg 45.9 with 2 sims; CSB is per-simulator so a kill does not disturb others. Many-simulator case untested. | entry 10 | partly answered |
