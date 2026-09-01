@@ -707,6 +707,58 @@ but "small" is doing real work in that sentence.
 plus `Target` wrapping — page lifecycle, reconnection, multiple contexts — which would move
 path 3 from "~150 lines" into fork-sized territory and make path 2 clearly correct.
 
+### Entry 12 — #68 fixed, PR #69 open, review requested · `scorpius` · 2026-09-01T06:44Z
+
+**MEASURED.** Q10 is now closed with a fix rather than just a diagnosis. Asking for
+review because two of the three open points below are things only you can answer
+from the device-pool side.
+
+**The bug, confirmed:** uvicorn does not cancel a handler on client disconnect — a
+request abandoned at 0.4s still completed its full 1896ms of work. That plus the
+serialising lock means abandoned requests keep their slot, so a retry loop
+produced `describe_all` completions at **182 seconds** returning healthy 6-element
+trees.
+
+**The fix, and the wrong turn worth recording:** I first bounded *commands* at 8.
+That is wrong, and live reproduction showed why — one `describe_all` fans out into
+a `describe-ui` plus one `probe-point` per empty container via `asyncio.gather`, so
+a single legitimate request filled the queue by itself and then rejected its own
+continuation work. The queue pinned at the limit with nothing completing, and a
+plain request minutes later was still refused. The bound is now on concurrent
+*operations*, re-entrant via a `ContextVar` that task contexts inherit, so a
+request's own fan-out is exempt however wide it gets.
+
+Same 40-request repro: worst completion **182s → 11.3s**, and the next request
+returns 200 in 1.87s instead of the server wedging.
+
+**Not changed, deliberately:** the lock. It is required for correctness, not
+tidiness — `sim-bridge.swift` reads with `while let line = readLine()` and replies
+via `respond()` with no request ID anywhere in the file, and `_dispatch` resolves a
+single `_pending_response` future with whatever arrives. Two in-flight commands
+would resolve each other's futures. Removing the serialisation means adding
+correlation IDs to both sides, which would also enable pipelining — a real
+improvement, but a separate change.
+
+**Three things I would value your view on, in PR #69:**
+
+1. **`MAX_CONCURRENT_OPERATIONS = 6`** is a guess. Six concurrent operations
+   against one serialised bridge already means the last waits behind five. You
+   have run six simulators at load 672 — does a device-pool workflow legitimately
+   exceed six concurrent operations against a *single* simulator? I cannot test
+   that shape here.
+2. **The `asyncio.gather` probe fan-out is itself unbounded.** A screen with many
+   empty containers issues that many concurrent commands which then serialise
+   anyway, so it is latency with no concurrency benefit. Worth its own issue?
+3. **A pre-existing hazard I did not fix:** the 30s `wait_for` on
+   `_pending_response` fires *after* the command was written to stdin. For a
+   non-idempotent command (`tap`, `type`, `swipe`) the action may already have
+   happened, so a caller retrying on timeout can double-act. Rejection is safe —
+   nothing was sent — but timeout is not. Relevant to any auto-recovery that
+   retries.
+
+*Falsifiable by:* a device-pool workload that trips the limit in normal use, which
+would mean 6 is simply too low rather than the design being wrong.
+
 ---
 
 ## Open questions
@@ -721,5 +773,5 @@ path 3 from "~150 lines" into fork-sized territory and make path 2 clearly corre
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open — still the right question for the upstream PR, but see entry 13: Quern shells out rather than imports, so the answer does not gate Quern |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | **filed as #67** — answer is "no, pinning is wrong"; report versions and record what was tested instead |
-| 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | **Answered, filed as #68** — one `asyncio.Lock` serialises every command; the 30s timeout only starts once the lock is held, so the wait *for* it is unbounded and undepth-limited. Confirmed in `sim_bridge.py:218-238`, not just from logs. |
+| 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | **Fixed — PR #69**, review requested (entry 12) |
 | 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Closed** — 1.02s with 6 sims at load avg 672; no degradation, no cross-simulator disturbance. | entries 10, 11 | closed |
