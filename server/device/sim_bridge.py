@@ -45,7 +45,20 @@ STREAM_LIMIT = 32 * 1024 * 1024
 # legitimately fan out into a describe-ui plus one probe-point per empty
 # container, dispatched concurrently via asyncio.gather — bounding commands
 # rejects a request's own continuation work, which is both wrong and confusing.
-MAX_CONCURRENT_OPERATIONS = 6
+# Global, deliberately: there is one SimBridgeManager (controller.py:38) driving
+# one subprocess behind one lock, serving every booted simulator — commands carry
+# `udid` per call rather than there being a bridge per device. A per-UDID budget
+# would look fairer and be worse: six devices at six operations each is 36 queued
+# against a single serialised subprocess, which is the pile-up this bound exists
+# to prevent, reached by a longer path.
+#
+# The number follows from LOCK_WAIT_TIMEOUT rather than being picked: at roughly
+# 2s per operation, ~10 is as deep as a queue can get before the head of it is
+# describing a screen that has since moved, and the wait timeout rejects beyond
+# that anyway. 16 leaves room for a real device pool — `ensure_devices` makes a
+# six-simulator workflow a supported thing — while staying an order of magnitude
+# below a runaway retry loop, which produced 40+ concurrent in the #68 repro.
+MAX_CONCURRENT_OPERATIONS = 16
 
 # Backstop for the few-but-slow case: a caller that has waited this long behind
 # other commands would receive a tree describing a screen that has since moved.
@@ -255,7 +268,8 @@ class SimBridgeManager:
         if self._operations >= MAX_CONCURRENT_OPERATIONS:
             raise SimBridgeSaturatedError(
                 f"sim-bridge is saturated: {self._operations} operations already in "
-                f"flight (limit {MAX_CONCURRENT_OPERATIONS}). The device is responsive — "
+                f"flight (limit {MAX_CONCURRENT_OPERATIONS}, shared across all booted "
+                f"devices — one subprocess serves them all). Devices are responsive; "
                 f"there is simply more queued than is useful. Stop retrying and let it drain.",
                 queued=self._operations,
             )

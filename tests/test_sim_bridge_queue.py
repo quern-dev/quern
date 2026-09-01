@@ -133,6 +133,8 @@ async def test_the_message_says_to_stop_retrying(backend, mgr, monkeypatch):
     assert "saturated" in msg
     assert "retrying" in msg
     assert "responsive" in msg      # must not read as a device failure
+    # The budget is server-wide, not per-device; the message must say so.
+    assert "shared across all booted" in msg
 
     release.set()
     await asyncio.gather(*inflight)
@@ -168,6 +170,33 @@ async def test_slot_is_released_when_the_operation_raises(backend, mgr, monkeypa
             await backend._send({"cmd": "tap"})
 
     assert mgr._operations == 0, "operation slots leaked on the error path"
+
+
+async def test_the_budget_is_shared_across_devices_by_design(backend, mgr, monkeypatch):
+    """Regression for the review finding on #69.
+
+    There is one SimBridgeManager driving one subprocess behind one lock, with
+    `udid` carried per command — so the budget is server-wide and operations on
+    different simulators contend. That is deliberate: a per-UDID budget would be
+    N times larger against the same single serialised subprocess, which is the
+    pile-up the bound exists to prevent.
+
+    This pins the behaviour so a future per-UDID refactor has to be a decision
+    rather than an accident.
+    """
+    release = _block(monkeypatch, backend)
+    inflight = [
+        asyncio.create_task(backend._send({"cmd": "tap", "udid": f"SIM-{i}"}))
+        for i in range(MAX_CONCURRENT_OPERATIONS)
+    ]
+    await asyncio.sleep(0.05)
+
+    # A different simulator entirely — still refused, because the subprocess is shared.
+    with pytest.raises(SimBridgeSaturatedError):
+        await asyncio.wait_for(backend._send({"cmd": "tap", "udid": "SIM-OTHER"}), timeout=2)
+
+    release.set()
+    await asyncio.gather(*inflight)
 
 
 async def test_normal_sequential_traffic_is_unaffected(backend, mgr, monkeypatch):
