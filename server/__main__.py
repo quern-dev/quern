@@ -48,6 +48,101 @@ def _maybe_reexec_in_venv() -> None:
     os.execv(str(venv_python), [str(venv_python), "-m", "server"] + sys.argv[1:])
 
 
+DEPS_STAMP_NAME = ".deps-stamp"
+
+
+def python_deps_state(project_root: Path | None = None) -> dict:
+    """Report whether the venv is in sync with pyproject.toml. Read-only.
+
+    Mirrors how _ensure_mcp_built decides whether node_modules is stale: an
+    mtime stamp, not a resolver run. Two stat() calls, no network, no pip.
+
+    The stamp is written only after a successful install, so a failed install
+    is never remembered as done — the next start retries by itself. That is
+    what makes recovery automatic rather than something a user has to trigger.
+
+    Returns a dict with:
+        applicable: False when there is no venv to reconcile (tarball/system install)
+        in_sync:    stamp exists and is at least as new as pyproject.toml
+        reason:     short human-readable explanation
+    """
+    if project_root is None:
+        project_root = _find_project_root()
+    if project_root is None:
+        return {"applicable": False, "in_sync": True, "reason": "project root not found"}
+
+    venv_pip = project_root / ".venv" / "bin" / "pip"
+    if not venv_pip.exists():
+        return {"applicable": False, "in_sync": True, "reason": "no venv — nothing to reconcile"}
+
+    pyproject = project_root / "pyproject.toml"
+    stamp = project_root / ".venv" / DEPS_STAMP_NAME
+
+    if not pyproject.exists():
+        return {"applicable": False, "in_sync": True, "reason": "no pyproject.toml"}
+    if not stamp.exists():
+        return {"applicable": True, "in_sync": False,
+                "reason": "dependencies have never been reconciled"}
+    if pyproject.stat().st_mtime > stamp.stat().st_mtime:
+        return {"applicable": True, "in_sync": False,
+                "reason": "pyproject.toml is newer than the last successful install"}
+    return {"applicable": True, "in_sync": True, "reason": "up to date"}
+
+
+def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
+    """Install declared Python dependencies when the venv has fallen behind.
+
+    Covers the cases `quern update` cannot reach — a manual `git pull`, a branch
+    switch, an update that returned early because the workspace was not
+    pullable, and an earlier install that failed. Runs on every start; when
+    nothing has changed it costs two stat() calls.
+
+    Args:
+        quiet: only print on an actual install or failure.
+        force: install regardless of the stamp (used by `quern doctor --fix`).
+
+    Returns:
+        True if the venv is in sync, False if an install was needed and failed.
+    """
+    import subprocess
+
+    project_root = _find_project_root()
+    state = python_deps_state(project_root)
+    if not state["applicable"]:
+        return True
+    if state["in_sync"] and not force:
+        return True
+
+    venv_pip = project_root / ".venv" / "bin" / "pip"
+    if not quiet:
+        print(f"Installing Python dependencies ({state['reason']})...")
+
+    try:
+        result = subprocess.run(
+            [str(venv_pip), "install", "-e", "."],
+            cwd=str(project_root), capture_output=True, text=True, timeout=300,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"Error: dependency install failed: {exc}")
+        return False
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        print("Error: dependency install failed. Quern will start, but features "
+              "needing the missing packages will fail.")
+        if err:
+            print(f"  {err.splitlines()[-1][:200]}")
+        print("  This is usually a network problem. Once it is reachable, "
+              "starting Quern again will retry automatically.")
+        return False
+
+    # Only on success — a failed install must not look done to the next start.
+    (project_root / ".venv" / DEPS_STAMP_NAME).touch()
+    if not quiet:
+        print("Python dependencies up to date.")
+    return True
+
+
 def _ensure_mcp_built(quiet: bool = False) -> bool:
     """Build the MCP TypeScript server.
 

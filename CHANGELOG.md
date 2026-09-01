@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The daily update check now asks about your channel** — `update_check.py` sent only the version and HEAD SHA, and quern.dev compared that SHA against `refs/heads/main`. Neither side knew about channels, so a fully up-to-date stable user was told an update was available the moment any commit landed on `main`, while `quern update` — which compares against `release/stable` — correctly answered "Already up to date." Same data, opposite answers, and it went live as soon as `main` moved past the v0.14.0 tag. The client now sends `channel=`, and the endpoint compares against that channel's pointer branch. Requires the matching quern.dev deployment; older deployments simply ignore the parameter.
 - **"Update available" now names the version** — the endpoint returns `latest_version`, so the message reads `Update available (v0.14.1-beta.2) — run "quern update" to install it` instead of an unqualified "a newer version exists". The client already persisted a `latest_version` field that quern.dev never populated; it does now, and the message falls back to the old wording when it's absent.
 
+## [Unreleased]
+
+### Fixed
+- **Python dependencies now reconcile themselves** — a new declared dependency could silently fail to install, leaving a server that starts happily and then fails at the point of use. `quern update`'s `pip install` failure was only a warning, so the update reported success onto a stale venv; and it skipped the reinstall entirely when the workspace was not pullable (the feature-branch case from #40). Neither path saw a manual `git pull` or a branch switch at all. `_ensure_python_deps()` now runs on every server start, mirroring how `_ensure_mcp_built` already handles `node_modules`: an mtime stamp at `.venv/.deps-stamp` decides whether work is needed, so the common case costs two `stat()` calls and no network. The stamp is written **only after a successful install**, so a failed one is never remembered as done and the next start retries by itself — recovery needs no user intervention, and the only lasting failure is genuinely unreachable packages. The updater's separate `pip install` is gone; it delegates to the same helper, so there is one implementation and one failure semantic.
+
+### Added
+- **`quern doctor` reports Python dependency state**, and `quern doctor --fix` repairs it. `--fix` runs exactly what server startup runs — deliberately not `quern setup`, which prompts in twenty places, can escalate to `sudo`, and can delete and recreate the venv. Repairing a stale dependency should not be able to end in any of those. Plain `doctor` stays read-only, which is the property that makes it safe to reach for when something is already broken.
+
 ## [0.14.1-beta.2] - 2026-08-31
 
 ### Documentation

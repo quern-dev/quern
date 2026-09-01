@@ -713,8 +713,13 @@ def _is_our_process(pid: int) -> bool:
 
 def _cmd_start(args: argparse.Namespace) -> None:
     """Start the server (daemon or foreground)."""
+    # Reconcile Python deps before anything imports them. Cheap when in sync
+    # (two stat calls); self-healing when not, including after a manual git
+    # pull or a branch switch, which `quern update` never sees.
+    from server.__main__ import _ensure_mcp_built, _ensure_python_deps
+    _ensure_python_deps(quiet=True)
+
     # Always rebuild MCP server to ensure dist/ is current
-    from server.__main__ import _ensure_mcp_built
     if not _ensure_mcp_built(quiet=True):
         print("Warning: MCP server build failed — MCP tools may be stale")
 
@@ -1042,7 +1047,50 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     print("Device tools:")
     for name, ok in sorted(tools.items()):
         print(f"  {'✓' if ok else '✗'} {name}")
+
+    _report_python_deps(getattr(args, "fix", False))
     sys.exit(0)
+
+
+def _report_python_deps(fix: bool) -> None:
+    """Report whether the venv matches pyproject.toml, and optionally repair it.
+
+    Read-only by default — `doctor` is documented as read-only diagnostics, and
+    a tool you reach for when things are broken should not change state while
+    you are looking at it.
+
+    `--fix` runs exactly what server startup runs, nothing more. It is
+    deliberately not `quern setup`: setup prompts in twenty places, can use
+    sudo, and can delete and recreate the venv. Repairing a stale dependency
+    should not be able to end in any of those.
+    """
+    from server.__main__ import _ensure_python_deps, python_deps_state
+
+    state = python_deps_state()
+    print()
+    print("Python dependencies:")
+
+    if not state["applicable"]:
+        print(f"  - not applicable ({state['reason']})")
+        return
+
+    if state["in_sync"]:
+        print("  ✓ in sync with pyproject.toml")
+        if fix:
+            print("    --fix: nothing to do")
+        return
+
+    print(f"  ✗ out of sync — {state['reason']}")
+    if not fix:
+        print("    Repair with: quern doctor --fix")
+        print("    (starting the server also reconciles this automatically)")
+        return
+
+    if _ensure_python_deps(quiet=False, force=True):
+        print("  ✓ repaired")
+    else:
+        print("  ✗ repair failed — see the error above")
+        sys.exit(1)
 
 
 def _cmd_enable_local_capture(process_names: list[str]) -> None:
@@ -1139,8 +1187,13 @@ def cli() -> None:
     subparsers.add_parser("status", help="Show server status")
 
     # doctor
-    subparsers.add_parser(
+    doctor_parser = subparsers.add_parser(
         "doctor", help="Report device-tool availability (read-only diagnostics)"
+    )
+    doctor_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Reconcile Python dependencies if they are stale (same action as server startup)",
     )
 
     # setup

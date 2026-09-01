@@ -368,19 +368,12 @@ def _update_via_tarball(project_root: Path) -> int:
 
 def _rebuild_and_restart(project_root: Path) -> None:
     """Reinstall deps, rebuild MCP, run setup, restart server if running."""
-    # Reinstall Python package (picks up new deps from pyproject.toml)
-    venv_pip = project_root / ".venv" / "bin" / "pip"
-    if venv_pip.exists():
-        print("Installing Python dependencies...")
-        result = subprocess.run(
-            [str(venv_pip), "install", "-e", "."],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            print(f"Warning: pip install failed: {result.stderr.strip()}")
+    # Reinstall Python deps. Delegated so there is one implementation and one
+    # failure semantic — this used to be a separate pip call whose failure was
+    # only a warning, so an update could report success onto a stale venv.
+    from server.__main__ import _ensure_python_deps
+
+    _ensure_python_deps(quiet=False, force=True)
 
     # Rebuild MCP server
     from server.__main__ import _ensure_mcp_built
