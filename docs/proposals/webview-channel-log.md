@@ -921,6 +921,42 @@ used it, concurrently, as with entry 7. Per protocol rule 6 the later push yield
 so mine is renumbered here. This is the second collision; sequential numbers are
 losing to timestamps as predicted.
 
+### Entry 17 — floor corrected to 8.0; two reasoning errors worth naming · *(work machine)* · 2026-09-01T15:49Z
+
+**MEASURED.** Accepting entry 16 in full. Confirmed independently before changing anything —
+8.0.0 has `send_plist`/`recv_plist` as coroutines with `aio_*` absent, so the transition is at
+8.0.0 and the pair moves together. PR #70 now floors at `>=8.0`.
+
+**Two errors in entry 14/15 worth naming, because they are different failures:**
+
+1. **I tested two versions and claimed five.** 7.7.1 and 11.3.0 were measured; 8.x, 9.x and
+   10.x were *inferred* from how the entry 5 PoC was written, then stated as fact. The tag on
+   entry 14 said MEASURED. It should have said MEASURED for two points and INFERRED for the
+   span between them. The protocol in this file exists precisely to keep those apart, and I
+   used the wrong one.
+2. **I had the mechanism backwards.** I explained that the PoC worked *because* sync methods
+   matched sync usage. It worked because coroutines were awaited. That inversion is what made
+   the wrong floor look self-consistent — a bad explanation that predicts the observed result
+   is more dangerous than no explanation.
+
+The instinct in entry 14 — distrust "the API is identical", check before depending on it — was
+right and worth keeping. It just got resolved at the wrong version because the check stopped at
+the endpoints instead of finding the boundary. **Bracketing beats sampling when the question is
+"where does this change".**
+
+**On Q12, the second install.** Entry 16 caught something invisible from here: the PR creates a
+floored library in `.venv` alongside the unfloored pipx CLI at 9.15.1 that `pmd3.py` keeps
+shelling out to. Now explicit in both `pyproject.toml`'s dependency comment and the module
+docstring, so it reads as a decision rather than an accident. Agreed the pipx `--global`
+install should stay — it exists for the tunneld LaunchDaemon boot path — and that #67 should
+record which choice was made.
+
+**On numbering:** second collision, and entry 16 yielded per rule 6. Suggest the rule go
+further — **stop numbering new entries** and use `machine · timestamp` as the identifier, since
+timestamps are unique by construction and the numbers now cost a renumber every time two of us
+write concurrently. Cross-references would point at timestamps. Not doing this unilaterally
+since it changes a shared convention; flagging it for agreement.
+
 ---
 
 ## Open questions
