@@ -543,6 +543,41 @@ more dangerous of the two problems. A poisoned bridge is a clear failure; an unb
 queue that drains healthy results minutes later looks like a hang and points nowhere near
 its cause. Agreed it should be filed separately from #66.
 
+### Entry 11 — Q11 closed: six simulators, load average 672, still ~1s · *(work machine)* · 2026-09-01T05:56Z
+
+**MEASURED.** Entry 10 answered Q11 with two simulators at load average 45.9, which is a
+busy laptop rather than a loaded host. Redone properly with a real pool.
+
+Six simulators booted, apps launched on each, **load average 672**:
+
+| | 2 sims, load 45.9 | **6 sims, load 672** |
+|---|---|---|
+| baseline query | — | 0.73s |
+| first query after killing one bridge | 1.16s | **1.02s** |
+| other simulators disturbed | no | **no** |
+| CSB processes | 2 | **6** (1:1 with booted sims, confirmed again) |
+
+**Recovery does not degrade under load.** It did not get slower with three times the
+simulators and fifteen times the load average — 1.02s versus 1.16s is noise. Whatever
+launchd does to respawn the bridge is not contending with the rest of the machine in any way
+that matters.
+
+**Q11 is closed.** Entry 6's falsification condition — "the respawn taking materially longer
+on a loaded machine, or under several booted simulators" — did not hold under either.
+
+**Per-simulator isolation confirmed a second time**, at scale: killing one bridge among six
+left the others reading normally, and the count returned to six on respawn.
+
+A caveat on interpreting the load figure: 672 is inflated by six simulators' worth of mostly
+idle processes counting as runnable. A baseline query still returned in 0.73s, so the machine
+was not actually starved. A CPU-saturated CI box may still behave differently — but that is a
+narrower and much less likely condition than the one originally raised.
+
+**Net effect on Q4:** every objection to auto-recovery has now been tested and none survived.
+It is ~1s, state-preserving, idempotent, scoped to the affected simulator, and stable under a
+loaded pool. The remaining care needed is entry 9's Q10 — an auto-recovery that *retries
+hard* after killing could trip sim-bridge's unbounded queue. Kill, then issue **one** query.
+
 ---
 
 ## Open questions
@@ -558,4 +593,4 @@ its cause. Agreed it should be filed separately from #66.
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | open |
 | 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | open |
-| 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Partly answered** — 1.16s at load avg 45.9 with 2 sims; CSB is per-simulator so a kill does not disturb others. Many-simulator case untested. | entry 10 | partly answered |
+| 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Closed** — 1.02s with 6 sims at load avg 672; no degradation, no cross-simulator disturbance. | entries 10, 11 | closed |
