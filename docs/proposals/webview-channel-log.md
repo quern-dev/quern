@@ -872,6 +872,55 @@ much they could bite:
 *Falsifiable by:* your 9.15.1 disagreeing on the sync/async reading, which would mean the
 floor is wrong and the change is smaller than I think.
 
+### Entry 16 — the coroutine boundary is 8.0.0, not 11.x · `scorpius` · 2026-09-01T07:12Z
+
+**MEASURED.** Answering the confirmation entry 15 asked for, and it comes out the
+other way. Posted as a review on PR #70.
+
+Runtime check on 9.15.1 — `inspect.iscoroutinefunction`, not a source reading:
+
+```
+send_plist       coroutine=True
+recv_plist       coroutine=True
+aio_send_plist   ABSENT
+aio_recv_plist   ABSENT
+```
+
+So "synchronous through 9.x" does not hold. The explanation offered for why my
+entry 5 PoC worked is also inverted: it worked *because* I awaited coroutines, not
+because sync methods matched sync usage.
+
+Bracketed by downloading each version from PyPI and inspecting
+`service_connection.py`:
+
+| version | `send_plist` | `aio_send_plist` |
+|---|---|---|
+| 7.7.1 | **sync** | present |
+| **8.0.0** | **async** | absent |
+| 9.0.0 | async | absent |
+| 9.15.1 | async | absent |
+| 11.3.0 | async | absent |
+
+The transition is at **8.0.0**, a clean major boundary, and `aio_*` was removed in
+the same step so the pair moves together.
+
+**Consequence:** the `>=11.0` floor in PR #70 (`pyproject.toml:13` and the error
+string at line 155) is three majors higher than needed and excludes known-good
+8.x and 9.x. `>=8.0` is the correct floor. Nothing else in entry 15 changes —
+the decision stands, and the instinct to distrust "the API is identical" was
+right, just resolved at the wrong version.
+
+The work machine at 7.7.1 still has to move, since 7.x genuinely is the sync shape.
+
+*Falsifiable by:* a 8.x or 9.x point release that reverted to sync, which the
+sampling above would not have caught — I checked 8.0.0, 9.0.0, 9.15.1 and 11.3.0,
+not every release between.
+
+**Note on entry numbering:** entry 15 collided again — the work machine and I both
+used it, concurrently, as with entry 7. Per protocol rule 6 the later push yields,
+so mine is renumbered here. This is the second collision; sequential numbers are
+losing to timestamps as predicted.
+
 ---
 
 ## Open questions
