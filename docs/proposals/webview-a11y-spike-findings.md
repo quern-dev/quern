@@ -233,3 +233,44 @@ specifically, or by any XCTest process starting and stopping on the simulator?
 
 Tier 2 turns out to be far cheaper than "fallback only" implied, and is the only option that
 composes cleanly with the existing simulator backend.
+
+## Choosing a WebKit protocol client
+
+Three candidates, evaluated 2026-08-31.
+
+| | `ios_webkit_debug_proxy` | `appium-remote-debugger` | `pymobiledevice3` |
+|---|---|---|---|
+| Origin | Google | Appium | community |
+| Language | C binary | TypeScript library | Python |
+| Version | 1.9.2 (Jul 2025) | 17.4.1 (published 2026-08-31) | 7.7.1 installed, 11.3.0 latest |
+| Activity | ~annual releases, last commit Jun 2025, 20 open issues | very active | active |
+| **Simulator support** | **Yes — `-s/--simulator-webinspector`** | Yes (28 source references) | **No** |
+| Interface | HTTP + WebSocket daemon, language-neutral | library, must be embedded | CLI + library (`cdp`, `js-shell`, `opened-tabs`) |
+| Already a Quern dependency | no | no | **yes** |
+
+**`ios_webkit_debug_proxy` is the only one proven working against a simulator**, and it was
+proven here rather than assumed — see the session above. It is also the easiest fit for a Python
+server: it exposes an HTTP endpoint for target discovery and a WebSocket per page, so Quern can
+drive it without adding a language runtime.
+
+Its drawbacks are real but manageable: an extra binary dependency, a slow release cadence, and a
+surface that is CDP-*shaped* rather than CDP — the `Target.sendMessageToTarget` wrapping still
+has to be handled on our side.
+
+**`appium-remote-debugger` is the better reference implementation than dependency.** It is
+actively maintained and handles the protocol's quirks properly, but it is a Node library rather
+than a daemon. Adopting it means putting Node in Quern's runtime path, which is a large cost for
+one feature. Reading it to get the protocol details right is worthwhile regardless.
+
+**`pymobiledevice3` would be the ideal fit if it supported simulators.** It is already a Quern
+dependency, it is Python, and its `webinspector` subcommand already exposes exactly the surface
+we want (`cdp`, `js-shell`, `opened-tabs`). But it reaches devices over usbmux/RSD/tunnels only:
+run `pymobiledevice3 webinspector opened-tabs` against a booted simulator and it raises rather
+than finding anything.
+
+**That gap is worth considering as an upstream contribution.** Simulator web inspection is a
+Unix domain socket at
+`/private/tmp/com.apple.launchd.*/com.apple.webinspectord_sim.socket` — no usbmux, no pairing,
+no developer disk image. Teaching `pymobiledevice3` to attach to it would give Quern a
+Python-native path with no new runtime dependency, and would likely be useful to that project's
+other consumers. Until then, `ios_webkit_debug_proxy` is the pragmatic choice.
