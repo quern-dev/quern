@@ -591,6 +591,6 @@ hard* after killing could trip sim-bridge's unbounded queue. Kill, then issue **
 | 4 | Should Quern detect the poisoned-bridge signature and auto-recover? | #66 | proposed in #66 |
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
-| 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | open |
+| 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | **filed as #67** — answer is "no, pinning is wrong"; report versions and record what was tested instead |
 | 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | open |
 | 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Closed** — 1.02s with 6 sims at load avg 672; no degradation, no cross-simulator disturbance. | entries 10, 11 | closed |
