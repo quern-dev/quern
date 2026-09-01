@@ -367,6 +367,62 @@ accessibility may be blocked for an unrelated reason. Screenshot first; the pois
 signature is distinguishable because SpringBoard still reads normally while a modal-collapsed
 tree recovers as soon as the modal is dismissed.
 
+### Entry 8 — XCTest reads Iterable modals that Web Inspector cannot · *(work machine)* · 2026-09-01T05:41Z
+
+**MEASURED.** Follows entry 7, which established that Iterable's webviews are hosted
+`WKWebView`s the app cannot opt into inspection. The accessibility route needs no opt-in, so
+the obvious question was whether it reaches them anyway. It does.
+
+**Spawning one artificially.** Iterable in-app messages are fetched from
+`GET https://api.iterable.com/api/inApp/getMessages`, so a Quern proxy mock is enough to
+conjure one on demand — no campaign, no console, no real message. The schema comes from the
+SDK's own `TestInAppPayloadGenerator`:
+
+```json
+{"inAppMessages":[{"messageId":"probe-msg-1","campaignId":424242,
+  "trigger":{"type":"immediate"},
+  "content":{"html":"<h1>ITERABLE_PROBE_HEADING</h1>…<button>ITERABLE_PROBE_BUTTON</button>"}}]}
+```
+
+Mock pattern `~d api.iterable.com & ~u inApp/getMessages`, then relaunch. The modal renders
+with the probe content. **This is a reusable way to test in-app message handling without
+touching Iterable at all** — worth knowing independently of this investigation.
+
+**Results, same screen, same moment:**
+
+| Client | Sees |
+|---|---|
+| sim-bridge / idb | **1 element** — bare `Application` |
+| WDA (XCTest) | **77 nodes**, 3 WebViews, including every probe string |
+
+XCTest resolves the content with real types — `ITERABLE_PROBE_HEADING` as StaticText,
+`ITERABLE_PROBE_LINK` as **Link**, `ITERABLE_PROBE_BUTTON` as **Button**.
+
+**So entry 7's option 3 is far less lossy than it looked.** SDK-owned webviews are out of
+reach for Web Inspector but fully readable — and tappable, since the elements resolve as
+Buttons and Links — through the accessibility route. For Iterable specifically that is
+probably enough: you rarely need DOM identity or JS state in a vendor's modal, you need to
+find the dismiss button and press it.
+
+**A discriminator worth recording.** The collapsed-tree signature from a presented web modal
+is *not* identical to the poisoned-bridge signature in #66, and the difference is visible
+without a screenshot:
+
+| | web modal presented | bridge poisoned (#66) |
+|---|---|---|
+| elements | 1 | 1 |
+| `Application` label | **"Geocaching"** | **null** |
+| `Application` frame | real bounds | **0x0** |
+| recovers when | modal dismissed | bridge killed |
+
+A null label with a 0x0 frame means the bridge. A real app label with real bounds means
+something is presented over the app. Cheap to check, and it removes the ambiguity the earlier
+memory warned about.
+
+*Falsifiable by:* an Iterable message whose HTML produces no accessible elements — e.g. an
+image-only creative with no alt text, which would be invisible to accessibility while still
+being perfectly inspectable if the SDK ever opts in.
+
 ---
 
 ## Open questions
@@ -376,6 +432,7 @@ tree recovers as soon as the modal is dismissed.
 | 1 | Can the webview frame be derived from native geometry instead of WDA? | `scorpius`, entry 4 | untested |
 | 2 | Are §7's Iterable modals hosted `WKWebView`s or out-of-process? | **Answered** — hosted `WKWebView`s, but the SDK never sets `isInspectable` and exposes no seam, so Web Inspector cannot reach them. | entry 7 | answered |
 | 3 | Does any hosted `WKWebView` refuse inspection despite the app opting in? | `scorpius`, entry 3 | untested |
+| 8 | Can accessibility read vendor webviews we cannot opt into inspection? | **Answered — yes.** XCTest reads Iterable modals fully; sim-bridge sees 1 element. | entry 8 | answered |
 | 4 | Should Quern detect the poisoned-bridge signature and auto-recover? | #66 | proposed in #66 |
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
