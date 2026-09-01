@@ -423,6 +423,61 @@ memory warned about.
 image-only creative with no alt text, which would be invisible to accessibility while still
 being perfectly inspectable if the SDK ever opts in.
 
+### Entry 7 — I could not reproduce 0.6s, and the reason is a trap worth recording · `scorpius` · 2026-09-01T05:43Z
+
+**MEASURED, but the headline is a negative result about method, not about the bridge.**
+
+I tried to test entry 6's stated falsification condition (does respawn take longer
+on a loaded machine or with several simulators). I did not get there, because the
+measurement itself is harder than it looks. Recording the trap so the next person
+does not repeat it.
+
+Five samples, killing `CoreSimulatorBridge` and polling Quern's
+`/api/v1/device/ui` until it answered: `2.58, 10.32, 2.49, 10.34, 10.22`s. Nothing
+sub-second. That looked like a contradiction. It is not — **all three of these
+confound it, and together they fully explain the numbers:**
+
+1. **Quern's own query latency is the floor.** A healthy `get_ui_tree` on this
+   machine takes **2.06s** end to end (HTTP → device resolution → sim-bridge →
+   CSB). The `2.49s` and `2.58s` samples *are* that baseline: the bridge was
+   already back before the first poll returned. Consistent with 0.6s, not against it.
+2. **Client timeout granularity quantises the result.** `curl -m 4` turns any
+   slower recovery into 4s steps — the three `~10.3s` samples are two timeouts
+   plus one success, not a 10s respawn.
+3. **The machine was not quiet.** `spotlightknowledged` at 97% CPU and Time
+   Machine `backupd` at 46%, 523 tps of disk I/O, load average 3.4.
+
+**So entry 6's 0.6s stands. I have not refuted it and this entry should not be
+read as doing so.** Its falsification condition — multi-simulator, loaded host —
+remains genuinely untested.
+
+**The trap:** do not measure CSB recovery through Quern's HTTP API. You are
+measuring Quern, and the bridge respawn disappears underneath a 2s floor. Measure
+against the accessibility path directly.
+
+## Separate finding, independent of any of this
+
+Aggressive polling wedged the simulator for minutes, and the mechanism is a real
+Quern behaviour rather than my mistake alone:
+
+```
+sim-bridge.describe_all COMPLETE: total=181905.8ms elements=6
+```
+
+**182 seconds per call, returning a healthy tree.** A client giving up does not
+cancel the server-side work, and sim-bridge serialises, so a burst of abandoned
+requests queues and drains one at a time long after the caller has gone. The
+device looks dead and is not — the trees were healthy 6-element results the whole
+time. `quern restart` clears it.
+
+Worth filing separately: unbounded queueing with no request cancellation turns a
+retry loop into a multi-minute outage, and the symptom (everything hangs) points
+nowhere near the cause. Relevant to Q4 — an auto-recovery that polls after killing
+the bridge could trip exactly this if it retries hard.
+
+*Falsifiable by:* sim-bridge turning out to have a queue bound or cancellation I
+did not find; I read the timing from `~/.quern/server.log`, not from the source.
+
 ---
 
 ## Open questions
@@ -437,3 +492,5 @@ being perfectly inspectable if the SDK ever opts in.
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | open |
+| 8 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 7 | open |
+| 9 | Entry 6's multi-simulator / loaded-host falsification condition — still untested. | entry 6 | open |
