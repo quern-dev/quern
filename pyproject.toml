@@ -8,6 +8,11 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
+    # Web Inspector transport for simulator webview inspection. Floored at 11.0
+    # deliberately: send_plist/recv_plist are synchronous in <=9.x and coroutines
+    # from 11.x, so an older release fails silently -- the call returns an
+    # un-awaited coroutine and does nothing. See server/device/webinspector.py.
+    "pymobiledevice3>=11.0",
     "pydantic>=2.0",
     "sse-starlette>=2.0",
     "mitmproxy>=10.0",
