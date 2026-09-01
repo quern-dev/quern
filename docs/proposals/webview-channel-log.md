@@ -644,6 +644,69 @@ internally rather than through `PATH`; the path it resolved is the useful thing 
 environment fault rather than a general hazard — and would change whether stage 1 needs a
 metadata fallback or should simply prefer one.
 
+### Entry 13 — monkey-patching is not an option, and the upstream PR helps less than entry 5 assumed · *(work machine)* · 2026-09-01T06:42Z
+
+**MEASURED.** On how to implement the simulator socket support. One structural fact settles
+most of it.
+
+**Quern never imports `pymobiledevice3`. It shells out to the CLI.**
+
+`server/device/pmd3.py` is, by its own docstring, an *"async wrapper around pymobiledevice3
+**CLI** for physical device services"*, and `pymobiledevice3` appears in **no** dependency
+list — `pyproject.toml` declares `fastapi` and `uvicorn[standard]`, nothing else relevant.
+
+Two consequences:
+
+**Monkey-patching is impossible, not merely inadvisable.** A monkey patch lives in the
+patching process; `pymobiledevice3` runs in a subprocess. There is nothing to patch.
+
+**Entry 5's framing needs one correction.** It described upstream support as giving Quern
+*"a Python-native path with no new runtime dependency"* — that only holds if Quern imports
+the library. It does not. After an upstream release, Quern would shell out to
+`pymobiledevice3 webinspector cdp --simulator`, which is architecturally identical to
+shelling out to `ios_webkit_debug_proxy`: another subprocess. The genuine advantage is
+narrower but real — `pymobiledevice3` is **already installed by setup**, so it adds no *new*
+tool, whereas iwdp does.
+
+**Also relevant: subprocess is Quern's normal pattern, not a compromise.** Eighteen modules
+under `server/device/` shell out to external CLIs — `adb`, `idb`, `simctl`, `devicectl`,
+`wda`, `usbmux`, `plutil` and the rest. Adding one more is consistent with the architecture
+rather than a wart.
+
+**Three paths, and none is a fork:**
+
+| | New dependency | Available | Control |
+|---|---|---|---|
+| 1. Shell out to `ios_webkit_debug_proxy` | **yes** — one binary | **now, proven** | none over the tool |
+| 2. Upstream PR, then shell out to `pymobiledevice3` | no — already installed | after PR + release | none, and their cadence |
+| 3. Implement the plist RPC in Quern directly | **none** | ~150 lines | full |
+
+**Path 3 deserves more weight than it has had.** The simulator transport is an `AF_UNIX`
+socket carrying length-prefixed plists — `socket`, `struct` and `plistlib`, all stdlib, and
+Quern **already uses `plistlib`** in `server/device/plist.py`. Everything `pymobiledevice3`
+adds beyond that is device transport: usbmux, lockdown, RSD, tunnels, pairing. **A simulator
+needs none of it.** So writing it directly is plausibly *less* code than adapting a library
+built for the case we do not have, and it sidesteps #67 entirely — no version to drift.
+
+The cost is owning a WebKit protocol client, including the `Target.sendMessageToTarget`
+wrapping and whatever else surfaces. Entry 5's PoC and iwdp both prove the shape is small,
+but "small" is doing real work in that sentence.
+
+**Suggested sequencing**, given the goal of avoiding a fork:
+
+1. **Ship on iwdp now.** Proven this session end to end, language-neutral, consistent with
+   how Quern consumes every other tool. Accept one binary dependency.
+2. **Send the upstream PR anyway** — `scorpius` has a working PoC, the change is genuinely
+   small, and a GitHub search shows nobody has claimed it. It is worth doing as a
+   contribution to that project on its own merits, independent of whether Quern ever calls it.
+3. **Revisit path 3 only if iwdp becomes a problem** — its ~annual release cadence, or the
+   simulator flag breaking. At that point the stdlib implementation is the escape hatch that
+   needs no upstream and no fork.
+
+*Falsifiable by:* the WebKit protocol turning out to need materially more than the handshake
+plus `Target` wrapping — page lifecycle, reconnection, multiple contexts — which would move
+path 3 from "~150 lines" into fork-sized territory and make path 2 clearly correct.
+
 ---
 
 ## Open questions
@@ -656,7 +719,7 @@ metadata fallback or should simply prefer one.
 | 8 | Can accessibility read vendor webviews we cannot opt into inspection? | **Answered — yes.** XCTest reads Iterable modals fully; sim-bridge sees 1 element. | entry 8 | answered |
 | 4 | Should Quern detect the poisoned-bridge signature and auto-recover? | #66 | proposed in #66 |
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
-| 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
+| 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open — still the right question for the upstream PR, but see entry 13: Quern shells out rather than imports, so the answer does not gate Quern |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | **filed as #67** — answer is "no, pinning is wrong"; report versions and record what was tested instead |
 | 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | **Answered, filed as #68** — one `asyncio.Lock` serialises every command; the 30s timeout only starts once the lock is held, so the wait *for* it is unbounded and undepth-limited. Confirmed in `sim_bridge.py:218-238`, not just from logs. |
 | 11 | Entry 6's multi-simulator / loaded-host falsification condition. | **Closed** — 1.02s with 6 sims at load avg 672; no degradation, no cross-simulator disturbance. | entries 10, 11 | closed |
