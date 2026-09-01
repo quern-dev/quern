@@ -66,6 +66,7 @@ Rewrite this section as things settle. Everything else in the file is append-onl
 | Does running WDA poison the a11y bridge? | Yes — but recoverable in ~10s, **not** "until reboot". | MEASURED | #66 root cause |
 | Does Web Inspector poison it? | No. It composes with sim-bridge. | MEASURED | spike findings; reproduced on `scorpius` |
 | Do our pages ship testids? | No — 0 on Geocaching Shareables, 0 on joinmastodon.org. | MEASURED | spike findings; entry 3 |
+| Can `pymobiledevice3` reach the simulator inspector? | **Yes, with no protocol work.** `ServiceConnection` already accepts a raw socket; the sim path is the same length-prefixed plist. | MEASURED | entry 5 below |
 
 ---
 
@@ -193,6 +194,71 @@ the derivation is not worth defending and WDA (or the agent) should supply it.
 Worth someone measuring before the frame requirement is used to justify a
 backend choice.
 
+### Entry 5 — pymobiledevice3 simulator support is small, and unclaimed · `scorpius` · 2026-09-01T05:09Z
+
+**MEASURED.** The spike floats teaching `pymobiledevice3` the simulator socket as
+an upstream contribution, which would give Quern a Python-native path with no new
+runtime dependency. I read the code and built a proof of concept. It works, and
+the change is smaller than "add simulator support" sounds.
+
+**What already works, unmodified:**
+
+- `ServiceConnection.__init__(sock: socket.socket, mux_device=None)` takes a
+  **raw socket**. The `create_using_tcp` / `create_using_usbmux` factories are
+  conveniences, not the only way in.
+- The wire format is length-prefixed plist (`send_plist` → `sendall(build_plist(…))`,
+  `recv_plist` → `parse_plist(recv_prefixed(…))`) — identical on both transports.
+  This is the same reason `ios_webkit_debug_proxy -s` works against a plain unix
+  socket: there is no protocol difference, only a transport difference.
+- `WebinspectorService`'s entire wire surface is **two calls**: `self.service.send_plist`
+  (one site) and `self.service.recv_plist` (one site).
+
+Connecting an `AF_UNIX` socket to the sim socket, wrapping it in an unmodified
+`ServiceConnection`, and sending `_rpc_reportIdentifier:` returns a real
+handshake:
+
+```
+_rpc_reportCurrentState:
+_rpc_reportConnectedApplicationList:   4 apps
+    org.arctian.metatext (Metatext)
+    process-com.apple.WebKit.WebContent  ×2
+    process-com.apple.WebKit.Networking
+_rpc_reportConnectedDriverList:
+```
+
+**What actually needs writing upstream:**
+
+1. Socket discovery — glob `/private/tmp/com.apple.launchd.*/com.apple.webinspectord_sim.socket`.
+2. A `create_using_unix_socket` factory (thin; `__init__` already does the work).
+3. **The one real design question:** `WebinspectorService.__init__` requires a
+   lockdown object — it picks `SERVICE_NAME` vs `RSD_SERVICE_NAME` by
+   `isinstance(lockdown, LockdownClient)`. Expressing "no lockdown, I brought my
+   own transport" cleanly is the part worth discussing with the maintainer rather
+   than deciding unilaterally.
+4. Skip `_connect_or_raise_disabled` on the simulator path. It exists to catch
+   *Settings → Safari → Web Inspector* being off, which is a physical-device
+   concern; the design notes record inspection as always on for simulators.
+5. CLI plumbing so `pymobiledevice3 webinspector opened-tabs` accepts a simulator.
+
+**Unclaimed:** a GitHub search of `doronz88/pymobiledevice3` for
+simulator+webinspector returns **0** issues or PRs. Nobody is working on it.
+
+**Two caveats before anyone writes the PR:**
+
+- The proof of concept ran against **9.15.1**, which is what is installed on
+  `scorpius`. Latest on PyPI is **11.3.0**. `ServiceConnection`'s signature may
+  have moved; re-verify against 11.x before building on this.
+- The spike doc records **7.7.1** installed on the work machine. So the two
+  machines are three majors apart, which means Quern does not pin
+  `pymobiledevice3` and installs drift per machine. Worth deciding separately —
+  it will produce confusing "works here, not there" reports independent of this
+  feature.
+
+*Falsifiable by:* the same PoC failing on 11.3.0, or `WebinspectorService`
+turning out to depend on lockdown somewhere I did not find. I grepped for
+`self.lockdown` and got one hit (the notification proxy above); a subclass or
+mixin could still reach for it.
+
 ---
 
 ## Open questions
@@ -204,3 +270,5 @@ backend choice.
 | 3 | Does any hosted `WKWebView` refuse inspection despite the app opting in? | `scorpius`, entry 3 | untested |
 | 4 | Should Quern detect the poisoned-bridge signature and auto-recover? | #66 | proposed in #66 |
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
+| 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
+| 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | open |
