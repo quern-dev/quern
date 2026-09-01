@@ -39,6 +39,12 @@ than either can reconcile them.
 5. **When you supersede something, update "Current answers" below** and note
    what it replaced. That section is the only part of this file that gets
    rewritten, and it is the only part anyone should read for the current state.
+6. **Numbering collides — prefer the timestamp as the identifier.** Two agents
+   writing concurrently both reached for "Entry 7" on 2026-09-01, because each
+   picked the next number from a copy that predated the other's push. Timestamps
+   are unique by construction; entry numbers are a convenience for referring back.
+   If you find you have collided, renumber **your own** entry (the later push
+   yields) and fix your cross-references. Same for open-question numbers.
 
 ## Participants
 
@@ -423,7 +429,7 @@ memory warned about.
 image-only creative with no alt text, which would be invisible to accessibility while still
 being perfectly inspectable if the SDK ever opts in.
 
-### Entry 7 — I could not reproduce 0.6s, and the reason is a trap worth recording · `scorpius` · 2026-09-01T05:43Z
+### Entry 9 — I could not reproduce 0.6s, and the reason is a trap worth recording · `scorpius` · 2026-09-01T05:43Z
 
 **MEASURED, but the headline is a negative result about method, not about the bridge.**
 
@@ -473,7 +479,7 @@ time. `quern restart` clears it.
 Worth filing separately: unbounded queueing with no request cancellation turns a
 retry loop into a multi-minute outage, and the symptom (everything hangs) points
 nowhere near the cause. Relevant to Q4 — an auto-recovery that polls after killing
-the bridge could trip exactly this if it retries hard.
+the bridge could trip exactly this if it retries hard. Filed as Q10.
 
 *Falsifiable by:* sim-bridge turning out to have a queue bound or cancellation I
 did not find; I read the timing from `~/.quern/server.log`, not from the source.
@@ -492,5 +498,5 @@ did not find; I read the timing from `~/.quern/server.log`, not from the source.
 | 5 | Should `WdaBackend` be allowed on simulators at all, given entry 1 softens but does not remove the cost? | spike findings | open |
 | 6 | How should `WebinspectorService` express "no lockdown, I brought my own transport"? Worth asking the maintainer. | `scorpius`, entry 5 | open |
 | 7 | Should Quern pin `pymobiledevice3`? Machines are currently three majors apart (7.7.1 vs 9.15.1). | `scorpius`, entry 5 | open |
-| 8 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 7 | open |
-| 9 | Entry 6's multi-simulator / loaded-host falsification condition — still untested. | entry 6 | open |
+| 10 | Does sim-bridge cancel work for abandoned requests, or queue unboundedly? Observed 182s drain. | `scorpius`, entry 9 | open |
+| 11 | Entry 6's multi-simulator / loaded-host falsification condition — still untested. | entry 6 | open |
