@@ -43,7 +43,7 @@ reviews:
 
     - path: "server/device/sim_bridge.py"
       instructions: |
-        The asyncio.Lock serialising commands is load bearing, not tidiness. The
+        The asyncio.Lock serialising commands is load-bearing, not tidiness. The
         wire protocol carries no request IDs — sim-bridge.swift reads with
         `while let line = readLine()` and replies via `respond()`, and _dispatch
         resolves a single _pending_response future with whatever arrives. Two
@@ -52,6 +52,17 @@ reviews:
 
         One SimBridgeManager serves every simulator, so any concurrency budget
         here is server-wide rather than per-device.
+
+        Killing the subprocess when a command times out or is cancelled is
+        required, not defensive. The command was already written to stdin, so a
+        response may still arrive; releasing the lock without terminating lets
+        that late response resolve the NEXT command's future, handing a caller a
+        well-formed reply to a request it never made. Flag any change that drops
+        the kill, and reject the two remedies that look sufficient and are not:
+        clearing `_pending_response` (the next command installs its own future
+        before the late response lands) and draining before release (a response
+        absent for 30s may never arrive). Only correlation IDs on both sides make
+        the kill unnecessary — see #74.
 
     - path: "mcp/src/tools/**"
       instructions: |
@@ -82,6 +93,55 @@ reviews:
         GitHub Release. GitHub permanently refuses to move a branch onto a commit
         that already has a published Release, and this has stranded release/beta
         once already.
+
+    - path: "CHANGELOG.md"
+      instructions: |
+        Exactly one `## [Unreleased]` heading, and one of each `### Section`
+        under it. Add entries to the existing section rather than opening a
+        second one — markdownlint MD024 catches the duplicate heading, but not
+        the more common cause, which is a merge.
+
+        This is the specific failure mode: two branches each append a `### Fixed`
+        block under `## [Unreleased]`, git merges both cleanly because they touch
+        different lines, and main ends up with the section twice. It has happened
+        twice. When reviewing a branch that adds a changelog section, check
+        whether the base already has that section under `## [Unreleased]`.
+
+    - path: "server/device/webinspector.py"
+      instructions: |
+        `pymobiledevice3>=8.0` is a hard floor with a specific reason:
+        `ServiceConnection.send_plist`/`recv_plist` are synchronous in 7.x and
+        became coroutines in 8.0.0, so the `await`s here fail against 7.x. Do not
+        soften the floor, and do not restate the rationale from memory — it was
+        written backwards once and the version boundary was wrong before it was
+        checked empirically.
+
+        The `ServiceConnection(sock)` construction deliberately bypasses
+        lockdown: this is a simulator, reached through the `webinspectord_sim`
+        unix socket, so there is no device to pair with. The import is lazy on
+        purpose — "no simulator is booted" is a more useful error than a missing
+        dependency, and the socket probing above it needs only the stdlib.
+
+    - path: "server/lifecycle/updater.py"
+      instructions: |
+        Every step that can fail must propagate that failure to `run_update`'s
+        exit code. Reporting a successful update over a half-installed
+        environment is worse than reporting the failure, because the user stops
+        looking. A helper whose result is ignored is the bug to watch for: this
+        file shipped exactly that once, discarding a dependency-install failure
+        two lines below a comment describing that same class of bug.
+
+    - path: "server/__main__.py"
+      instructions: |
+        The mtime stamps (`.venv/.deps-stamp`, `node_modules/.install-stamp`) are
+        touched only after the install command succeeds. A stamp written
+        unconditionally makes a failed install look complete on every subsequent
+        run, which is the failure it exists to prevent.
+
+        Functions called from `quern doctor` must stay read-only unless `--fix`
+        was passed. Verify that claim by reading the code path, not by running
+        the command — running `quern start` first heals the state and makes a
+        broken check look correct.
 
     - path: "tests/**"
       instructions: |
