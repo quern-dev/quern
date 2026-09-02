@@ -1042,6 +1042,10 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     tools = data.get("tools", {})
     if not tools:
         print("No device tools reported (device controller unavailable).")
+        # Still report dependencies — an installation without a device
+        # controller is exactly one where a missing dependency is plausible,
+        # so this is the worst possible place to skip the check.
+        _report_python_deps(getattr(args, "fix", False))
         sys.exit(0)
 
     print("Device tools:")

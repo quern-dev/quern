@@ -152,3 +152,38 @@ def test_no_venv_heals_trivially(tmp_path, monkeypatch):
     monkeypatch.setattr("server.__main__._find_project_root", lambda: tmp_path)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("pip should not run"))
     assert _ensure_python_deps(quiet=True) is True
+
+
+# --------------------------------------------------------------------------
+# The updater must not report success onto a stale venv (#72 review finding)
+# --------------------------------------------------------------------------
+
+
+def test_updater_propagates_a_failed_install(tmp_path, monkeypatch, capsys):
+    """`quern update` must fail when dependencies could not be installed.
+
+    This is the exact failure the PR exists to remove: the old code's pip call
+    printed a warning and carried on, so an update announced success onto a
+    venv that had not been reconciled. Delegating to _ensure_python_deps fixed
+    the duplication but re-created the bug by discarding its return value.
+    """
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_find_project_root", lambda: tmp_path)
+    monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
+    monkeypatch.setattr(updater, "_update_via_git", lambda _p: 0)
+    monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: False)
+
+    assert updater.run_update() == 1
+    assert "Update incomplete" in capsys.readouterr().out
+
+
+def test_updater_reports_success_when_deps_install(tmp_path, monkeypatch):
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_find_project_root", lambda: tmp_path)
+    monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
+    monkeypatch.setattr(updater, "_update_via_git", lambda _p: 0)
+    monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: True)
+
+    assert updater.run_update() == 0
