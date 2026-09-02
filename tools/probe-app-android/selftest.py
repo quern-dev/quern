@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Quern Probe (Android) self-test — drives the probe through Quern's REST API.
+
+Identifier-based throughout: no coordinates, no uiautomator shelling out. The
+point is to exercise the same path an agent uses, so a regression in the tools
+fails here rather than in someone's session.
+
+Usage:  python3 selftest.py [--serial emulator-5554]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PKG = "com.quern.probe"
+BASE = "http://localhost:9100/api/v1"
+
+_passed: list[str] = []
+_failed: list[str] = []
+
+
+def api(path: str, payload: dict | None = None, timeout: int = 90) -> dict:
+    key = (Path.home() / ".quern" / "api-key").read_text().strip()
+    url = f"{BASE}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 "User-Agent": "quern-probe-selftest/1.0"},
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"_http_error": e.code, "detail": e.read().decode()[:400]}
+
+
+def check(name: str, ok: bool, detail: str = "") -> bool:
+    (_passed if ok else _failed).append(name)
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}{'  — ' + detail if detail and not ok else ''}")
+    return ok
+
+
+def walk(node):
+    """Yield every dict in an arbitrarily nested tree."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from walk(v)
+
+
+def find(serial: str, suffix: str) -> dict | None:
+    """Find an element whose identifier ends with `suffix`.
+
+    Fields come back as explicit nulls rather than missing keys, so `or ""` is
+    load bearing: `.get("identifier", "")` returns None, not "".
+    """
+    tree = api(f"/device/ui?udid={serial}")
+    for n in walk(tree):
+        ident = n.get("identifier") or n.get("resource_id") or ""
+        if ident.endswith(suffix):
+            return n
+    return None
+
+
+def wait_for(serial: str, suffix: str, timeout: float = 30.0) -> dict | None:
+    """Poll until an element appears, or give up.
+
+    A fixed sleep encodes one machine's speed. The WebView checks used
+    `time.sleep(4)` and passed on a warm emulator, then failed on a cold one
+    running software rendering — the DOM was simply not up yet, and the test
+    reported it as missing. Polling states the intent ("wait until it is there")
+    instead of guessing how long that takes.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = find(serial, suffix)
+        if found is not None:
+            return found
+        time.sleep(1.0)
+    return None
+
+
+def text_of(serial: str, suffix: str) -> str | None:
+    el = find(serial, suffix)
+    if el is None:
+        return None
+    return el.get("label") or el.get("text") or el.get("value")
+
+
+def tap(serial: str, label: str) -> dict:
+    return api("/device/ui/tap-element", {"udid": serial, "label": label})
+
+
+def open_url(serial: str, url: str, bundle_id: str | None = None) -> dict:
+    body = {"udid": serial, "url": url}
+    if bundle_id:
+        body["bundle_id"] = bundle_id
+    return api("/device/open-url", body)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--serial", default="emulator-5554")
+    args = ap.parse_args()
+    s = args.serial
+
+    api("/device/app/launch", {"udid": s, "bundle_id": PKG})
+    time.sleep(3)
+
+    print("\nDeep links")
+    tap(s, "Links")
+    time.sleep(2)
+    before = text_of(s, "link_count")
+    if not check("Links tab reachable", before is not None, "link_count not in the UI tree"):
+        return 1
+    start = int(before)
+
+    # Control case: a scheme the manifest registers. Must land.
+    resp = open_url(s, "quernprobe://open/product/abc123")
+    time.sleep(3)
+    raw = text_of(s, "link_count")
+    if not check("link_count still on screen after the deep link", raw is not None,
+                 "element vanished — the activity was recreated rather than resumed"):
+        return 1
+    after = int(raw)
+    check("registered scheme reaches the app", after == start + 1, f"count {start} -> {after}")
+    check("registered scheme URI recorded",
+          (text_of(s, "link_last_uri") or "").startswith("quernprobe://"),
+          f"got {text_of(s, 'link_last_uri')!r}")
+
+    # Regression guard for #78. `am start` exits 0 when it cannot resolve an
+    # intent, so open_url answers {"status": "ok"} for a URL nothing handles.
+    # The app is the only honest witness: the counter must not move.
+    before2_raw = text_of(s, "link_count")
+    resp = open_url(s, "nonexistentapp12345://foo/bar")
+    time.sleep(3)
+    after2_raw = text_of(s, "link_count")
+    if not check("link_count readable either side of the unresolvable URL",
+                 before2_raw is not None and after2_raw is not None,
+                 f"before={before2_raw!r} after={after2_raw!r}"):
+        return 1
+    check("unresolvable scheme does not reach the app", int(after2_raw) == int(before2_raw),
+          f"count {before2_raw} -> {after2_raw}")
+
+    # This is the bug, asserted so the fix is visible when it lands: today the
+    # tool claims success. When #78 is fixed this check flips and should be
+    # inverted, not deleted.
+    reported_ok = resp.get("status") == "ok"
+    check("KNOWN BUG #78: unresolvable URL still reports ok", reported_ok,
+          f"open_url returned {resp}")
+
+    # The https filter carries no autoVerify, which is the state a debug build
+    # is genuinely in: the signing key is not in any assetlinks.json, so a
+    # package-less VIEW intent falls through to a browser. Naming the package is
+    # what delivers it. Without this check the whole documented debug path could
+    # break and every other assertion would still pass.
+    print("\nApp Links (unverified https, package-targeted)")
+    before3 = text_of(s, "link_count")
+    open_url(s, "https://probe.quern.dev/product/abc123", bundle_id=PKG)
+    time.sleep(3)
+    after3 = text_of(s, "link_count")
+    if check("link_count readable around the https link",
+             before3 is not None and after3 is not None,
+             f"before={before3!r} after={after3!r}"):
+        check("package-targeted https link reaches the app",
+              int(after3) == int(before3) + 1, f"count {before3} -> {after3}")
+        check("https URI recorded",
+              (text_of(s, "link_last_uri") or "").startswith("https://probe.quern.dev"),
+              f"got {text_of(s, 'link_last_uri')!r}")
+
+    print("\nUI surfaces")
+    tap(s, "Controls")
+    check("controls tab renders", wait_for(s, "control_switch", 15) is not None)
+    tap(s, "Scroll")
+    check("scroll list renders", wait_for(s, "scroll_list", 15) is not None)
+    tap(s, "Web")
+    # Assert on DOM content, not on the WebView container. Once the page loads,
+    # Android flattens the WebView into its document nodes and the container's
+    # resource-id disappears from the tree -- so `find("web_view")` passed only
+    # while the page was still blank, which is a false pass that gets weaker the
+    # faster the machine is.
+    #
+    # Worth recording: Android's accessibility tree does descend into WebView
+    # DOM. That is the opposite of what sim-bridge sees for WKWebView on iOS.
+    heading = wait_for(s, "web_heading")
+    check("web view DOM reachable in the a11y tree", heading is not None,
+          "web_heading never appeared within 30s")
+    check("web view DOM is more than the heading", find(s, "web_paragraph") is not None)
+
+    print(f"\n{len(_passed)} passed, {len(_failed)} failed")
+    for f in _failed:
+        print(f"  failed: {f}")
+    return 1 if _failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

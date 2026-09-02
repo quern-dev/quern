@@ -1,0 +1,13 @@
+2026-02-21 21:22:45.272141 LogTester{Foundation}[2915] <NOTICE>: [PROBE-NSLOG] tick=1 NSLog()
+2026-09-02 07:14:02.100001 QuernProbe[4410] <NOTICE>: [PROBE-OSLOG-DEFAULT] tick=1
+2026-09-02 07:14:02.100002 QuernProbe{com.quern.probe}[4410] <NOTICE>: [PROBE-OSLOG-SUBSYSTEM] tick=1
+2026-09-02 07:14:02.100003 QuernProbe{com.quern.probe}[4410] <INFO>: [PROBE-OSLOG-INFO] tick=1
+2026-09-02 07:14:02.100004 QuernProbe{com.quern.probe}[4410] <DEBUG>: [PROBE-OSLOG-DEBUG] tick=1
+2026-09-02 07:14:02.100005 QuernProbe{com.quern.probe}[4410] <ERROR>: [PROBE-OSLOG-ERROR] tick=1
+2026-09-02 07:14:02.100006 QuernProbe{swift-logger}[4410] <NOTICE>: [PROBE-LOGGER] tick=1
+2026-09-02 07:14:02.100007 QuernProbe{swift-logger}[4410] <FAULT>: [PROBE-LOGGER-FAULT] tick=1
+2026-09-02 07:14:02.100008 QuernProbe{swift-logger}[4410] <WARNING>: [PROBE-LOGGER-WARN] tick=1
+2026-09-02 07:14:02.100009 SpringBoard{BackBoardServices}[112] <NOTICE>: Application state changed
+2026-09-02 07:14:02.100010 QuernProbe[4410] <NOTICE>: message with {braces} and [brackets] inline
+2026-09-02 07:14:02.100011 QuernProbe[4410] <NOTICE>:
+this line has no timestamp and should still surface
