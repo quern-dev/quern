@@ -27,24 +27,34 @@ done
 if [ -n "$FORCE" ]; then
   echo "Skipping the review gate deliberately (--force)."
 else
-  # Ask for a review if this PR has moved since its last one. Automatic
-  # incremental reviews are off (see .coderabbit.yaml): review runs are capped
-  # per hour, and fixing findings means pushing, so reviewing every push spends
-  # the budget on intermediate states nobody merges. Requesting it here spends
-  # it on the commit that actually ships.
-  if ! python3 scripts/pr-review-status.py "$PR" >/dev/null 2>&1; then
+  # 0 clean · 2 pending · 3 unresolved findings · 4 undeterminable.
+  #
+  # Only 2 is worth a review request. Reacting to any nonzero code would ask
+  # for a re-review of a PR whose findings nobody has read yet, and again when
+  # gh cannot answer -- spending capped review runs on the two cases a review
+  # cannot help. Automatic incremental reviews are off (.coderabbit.yaml), so
+  # this is the request that gets made, and it should be the useful one.
+  python3 scripts/pr-review-status.py "$PR" || STATE=$?
+  STATE="${STATE:-0}"
+
+  if [ "$STATE" = "2" ]; then
     echo "Requesting a review of #$PR..."
     gh pr comment "$PR" --repo jerimiah797/quern --body "@coderabbitai review" >/dev/null
-    WAIT="--wait"
+    python3 scripts/pr-review-status.py "$PR" --wait || STATE=$?
   fi
+
+  case "${STATE:-0}" in
+    0) ;;
+    3) echo; echo "Not merging #$PR: it has unresolved findings. Read them first."; exit 1 ;;
+    4) echo; echo "Not merging #$PR: could not determine its review state."; exit 1 ;;
+    *) echo; echo "Not merging #$PR: still awaiting review."; exit 1 ;;
+  esac
 fi
 
-if [ -z "$FORCE" ] && ! python3 scripts/pr-review-status.py "$PR" $WAIT; then
-  echo
-  echo "Not merging #$PR: its review is not current, or it has unresolved findings."
-  echo "  --wait   block until the review lands"
-  echo "  --force  merge anyway"
-  exit 1
-fi
-
-gh pr merge "$PR" --repo jerimiah797/quern --merge --delete-branch
+# Bind the merge to the commit that was reviewed. Between the check above and
+# the merge below, a push can land -- and merging then ships a commit nothing
+# reviewed, which is the exact hole this script exists to close. GitHub refuses
+# the merge if the head has moved.
+HEAD_SHA=$(gh pr view "$PR" --repo jerimiah797/quern --json headRefOid -q .headRefOid)
+gh pr merge "$PR" --repo jerimiah797/quern --merge --delete-branch \
+  --match-head-commit "$HEAD_SHA"

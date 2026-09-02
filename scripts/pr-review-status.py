@@ -9,8 +9,9 @@ reads exactly like "all clear". Merging on it means merging unreviewed code.
     scripts/pr-review-status.py --wait    # block until every PR is current
     scripts/pr-review-status.py 85        # a specific PR
 
-Exit code is 0 only when every PR examined is reviewed-and-clean, so this can
-gate a merge in a script.
+Exit codes: 0 reviewed and clean, 2 pending a review, 3 has unresolved
+findings, 4 could not be determined. Only 0 permits a merge, and only 2 is
+worth waiting on.
 
 Do not pipe it when you care about that exit code: `... | tail` reports tail's
 status, not this script's, so a still-pending PR reads as success. merge-pr.sh
@@ -31,6 +32,17 @@ import time
 from datetime import datetime
 
 REPO = "jerimiah797/quern"
+
+# Distinct exit codes, so a caller can tell *why* a PR is not mergeable.
+# merge-pr.sh needs that: requesting a review helps a pending PR and is pure
+# waste for one with unresolved findings, which was spending capped review runs
+# on PRs a review could not help.
+EXIT_OK = 0
+EXIT_PENDING = 2
+EXIT_FINDINGS = 3
+EXIT_UNKNOWN = 4
+_EXIT = {"ok": EXIT_OK, "pending": EXIT_PENDING,
+         "findings": EXIT_FINDINGS, "unknown": EXIT_UNKNOWN}
 
 
 class GhError(RuntimeError):
@@ -105,14 +117,17 @@ def _status(number: int) -> tuple[str, str]:
     return "ok", f"#{number} {title} — reviewed, clean"
 
 
-def report(numbers: list[int]) -> bool:
-    all_ok = True
+def report(numbers: list[int]) -> int:
+    """Returns the worst exit code across the PRs examined."""
+    worst = EXIT_OK
     for n in numbers:
         state, detail = status(n)
         mark = {"ok": "OK  ", "pending": "WAIT", "findings": "READ", "unknown": "FAIL"}[state]
         print(f"  {mark} {detail}")
-        all_ok &= state == "ok"
-    return all_ok
+        # Unknown outranks findings outranks pending: the least understood
+        # state is the one a caller should act most cautiously on.
+        worst = max(worst, _EXIT[state])
+    return worst
 
 
 def main() -> int:
@@ -131,10 +146,13 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     while True:
         print(f"— review status @ {datetime.now().strftime('%H:%M:%S')}")
-        if report(numbers):
-            return 0
-        if not args.wait or time.monotonic() > deadline:
-            return 1
+        code = report(numbers)
+        if code == EXIT_OK:
+            return EXIT_OK
+        # Only pending resolves by waiting. Findings need a human, and unknown
+        # means the check itself could not see the data.
+        if not args.wait or code != EXIT_PENDING or time.monotonic() > deadline:
+            return code
         time.sleep(30)
 
 
