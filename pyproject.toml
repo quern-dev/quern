@@ -10,10 +10,12 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     # Web Inspector transport for simulator webview inspection. Floored at 8.0
     # deliberately: send_plist/recv_plist are synchronous in 7.x and coroutines
-    # from 8.0 onward, so a 7.x install fails silently -- the call returns an
-    # un-awaited coroutine and does nothing. Verified at 7.7.1, 8.0.0, 9.15.1 and
-    # 11.3.0. Note this is a library import; server/device/pmd3.py separately
-    # shells out to a pipx-installed CLI, which is a different install.
+    # from 8.0 onward. webinspector.py awaits them, so on 7.x the await lands on
+    # a plain return value and raises TypeError ("object NoneType can't be used
+    # in 'await' expression"). Loud, but only at call time, and the message does
+    # not mention the version -- hence the floor. Verified at 7.7.1, 8.0.0,
+    # 9.15.1 and 11.3.0. Note this is a library import; server/device/pmd3.py
+    # separately shells out to a pipx-installed CLI, a different install.
     "pymobiledevice3>=8.0",
     "pydantic>=2.0",
     "sse-starlette>=2.0",

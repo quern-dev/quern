@@ -218,8 +218,17 @@ class SimulatorWebInspector:
             "WIRConnectionIdentifierKey": self._connection_id,
             "WIRApplicationIdentifierKey": application_id,
         })
-        for _ in range(8):
-            message = await self._recv()
+        # Bounded by time, not message count. The daemon interleaves unrelated
+        # reports, and a busy one can emit more than a handful before the
+        # listing arrives - a fixed iteration cap silently returns "no pages"
+        # for an app that has them. Same reasoning as _drain_handshake.
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                message = await asyncio.wait_for(self._service.recv_plist(), timeout=remaining)
+            except TimeoutError:
+                break
             if message is None:
                 break
             if message.get("__selector") == "_rpc_applicationSentListing:":
