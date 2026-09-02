@@ -57,9 +57,103 @@ def soft_keyboard_visible(udid: str) -> bool:
     return any(el.get("identifier") == "shift" for el in data.get("elements", []))
 
 
+def visible_labels(udid: str) -> set[str]:
+    def walk(node):
+        if isinstance(node, dict):
+            yield node
+            for v in node.values():
+                yield from walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from walk(v)
+
+    tree = call("GET", "/device/ui", udid=udid)
+    return {n.get("label") for n in walk(tree) if n.get("label")}
+
+
+def goto(udid: str, label: str, marker: str | None = None) -> None:
+    """Select a tab by label, going through More when it is not on the bar.
+
+    Three things make this less trivial than it looks, all of them real iOS
+    behaviour an agent has to handle:
+
+    * The bar shows five items; the rest live in a More list.
+    * The More tab keeps its own navigation stack, so selecting it again
+      returns to whatever was pushed rather than to the list. Popping needs the
+      nav back button.
+    * "More" names two different elements — the tab (RadioButton) and that back
+      button (Button) — so taps have to say which.
+
+    `scroll_to_find=False` matters too: it defaults on, so asking for a label
+    that is not present spends the full 60s timeout trying to scroll it into
+    view instead of failing.
+    """
+    if marker and element_text(udid, marker) is not None:
+        return
+
+    tab_id = f"tab_{label.lower()}"
+    labels = visible_labels(udid)
+    if label in labels:
+        call("POST", "/device/ui/tap-element", udid=udid, identifier=tab_id,
+             scroll_to_find=False)
+        time.sleep(1.2)
+        return
+
+    call("POST", "/device/ui/tap-element", udid=udid, label="More",
+         element_type="RadioButton", scroll_to_find=False)
+    time.sleep(1.2)
+    if "More" in visible_labels(udid):
+        try:  # pop whatever the More stack was left on
+            call("POST", "/device/ui/tap-element", udid=udid, label="More",
+                 element_type="Button", scroll_to_find=False)
+            time.sleep(1.0)
+        except requests.HTTPError:
+            pass  # already on the list
+    call("POST", "/device/ui/tap-element", udid=udid, label=label, scroll_to_find=False)
+    time.sleep(1.2)
+
+
+def element_text(udid: str, identifier: str) -> str | None:
+    """Read an element's visible text, tolerating a missing element."""
+    try:
+        found = call("GET", "/device/ui/element", udid=udid, identifier=identifier)
+        el = found.get("element") or {}
+    except requests.HTTPError:
+        return None
+    return el.get("label") or el.get("value") or el.get("text")
+
+
+def open_url(udid: str, url: str) -> tuple[bool, str]:
+    """Open a URL and clear iOS's confirmation prompt. Returns (reported_ok, detail).
+
+    iOS puts up an "Open in "QuernProbe"?" alert for a custom-scheme link
+    rather than dispatching it silently, and until it is answered the alert
+    blocks every other query — a run that dies mid-test leaves the simulator
+    wedged behind it, which is how this was found.
+
+    Worth knowing generally: a deep link on iOS is not necessarily one action,
+    and automation that opens one without handling the confirmation will look
+    like it hung.
+    """
+    try:
+        call("POST", "/device/open-url", udid=udid, url=url)
+        reported, detail = True, "ok"
+    except requests.HTTPError as e:
+        reported, detail = False, str(e)[:120]
+
+    time.sleep(1.5)
+    if "Open" in visible_labels(udid):
+        call("POST", "/device/ui/tap-element", udid=udid, label="Open")
+        time.sleep(1.5)
+    return reported, detail
+
+
 def check(name: str, ok: bool, detail: str = "") -> bool:
     marker = "PASS" if ok else "FAIL"
-    print(f"  [{marker}] {name}" + (f" — {detail}" if detail else ""))
+    # Only on failure: a detail printed beside PASS reads as a reason the check
+    # nearly failed, which is how "[PASS] Links tab reachable — link_count not
+    # found" happened.
+    print(f"  [{marker}] {name}" + (f" — {detail}" if detail and not ok else ""))
     return ok
 
 
@@ -128,6 +222,49 @@ def main() -> int:
     except requests.HTTPError:
         row0_present = False
     results.append(check("row_0 present", row0_present))
+
+    # -- Deep links --
+    # The iOS half of the story the Android probe tells. Here simctl reports an
+    # unresolvable scheme as an error, so the tool is a usable witness; on
+    # Android it answers "ok" regardless (quern #78). Asserting the app's own
+    # counter on both platforms keeps the test honest either way.
+    print("deep links:")
+    goto(udid, "Links", marker="link_count")
+    before = element_text(udid, "link_count")
+    if check("Links tab reachable", before is not None, "link_count not found"):
+        reported, _ = open_url(udid, "quernprobe://open/product/abc123")
+        time.sleep(2.0)
+        goto(udid, "Links", marker="link_count")
+        after = element_text(udid, "link_count")
+        results.append(check("registered scheme reaches the app",
+                             after is not None and int(after) == int(before) + 1,
+                             f"count {before} -> {after}"))
+        results.append(check("registered scheme URI recorded",
+                             (element_text(udid, "link_last_uri") or "").startswith("quernprobe://"),
+                             f"got {element_text(udid, 'link_last_uri')!r}"))
+
+        held = element_text(udid, "link_count")
+        reported, detail = open_url(udid, "nonexistentapp12345://foo/bar")
+        time.sleep(2.0)
+        goto(udid, "Links", marker="link_count")
+        results.append(check("unresolvable scheme does not reach the app",
+                             element_text(udid, "link_count") == held,
+                             f"count {held} -> {element_text(udid, 'link_count')}"))
+        # Contrast with Android, where this is the KNOWN BUG check: iOS surfaces
+        # the failure, so open_url is trustworthy here and must stay that way.
+        results.append(check("unresolvable scheme is reported as an error",
+                             not reported, "open_url reported success"))
+    else:
+        results.append(False)
+
+    # -- Logs and web surfaces present --
+    print("logs and web:")
+    goto(udid, "Logs", marker="log_status")
+    results.append(check("log controls present", element_text(udid, "log_status") is not None))
+    goto(udid, "Web", marker="web_view")
+    time.sleep(1.5)
+    results.append(check("web view present", element_text(udid, "web_view") is not None
+                         or call("GET", "/device/ui", udid=udid).get("element_count", 0) > 0))
 
     # Restore the default keyboard state (software keyboard available).
     call("POST", "/device/keyboard", udid=udid, enabled=False)

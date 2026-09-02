@@ -146,8 +146,20 @@ def main() -> int:
     time.sleep(2)
     check("scroll list renders", find(s, "scroll_list") is not None)
     tap(s, "Web")
-    time.sleep(3)
-    check("web view present", find(s, "web_view") is not None)
+    time.sleep(4)
+    # Assert on DOM content, not on the WebView container. Once the page loads,
+    # Android flattens the WebView into its document nodes and the container's
+    # resource-id disappears from the tree -- so `find("web_view")` passed only
+    # while the page was still blank, which is a false pass that gets weaker the
+    # faster the machine is.
+    #
+    # Worth recording: Android's accessibility tree does descend into WebView
+    # DOM. That is the opposite of what sim-bridge sees for WKWebView on iOS.
+    heading = find(s, "web_heading")
+    check("web view DOM reachable in the a11y tree", heading is not None,
+          "web_heading not found — did the page load?")
+    para = find(s, "web_paragraph")
+    check("web view DOM is more than the heading", para is not None)
 
     print(f"\n{len(_passed)} passed, {len(_failed)} failed")
     for f in _failed:
