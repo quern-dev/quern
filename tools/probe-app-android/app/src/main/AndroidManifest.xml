@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="Quern Probe"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Registered custom scheme. Always resolves; the control case. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="quernprobe" android:host="open" />
+            </intent-filter>
+
+            <!-- An https filter WITHOUT autoVerify, which is the situation a
+                 debug build is normally in: no assetlinks.json entry for this
+                 signing key, so Android will not treat it as a verified App
+                 Link and a package-less VIEW intent falls through to a browser
+                 or a disambiguation dialog. Targeting the package explicitly is
+                 what drives the link into the app: the behaviour the deep
+                 link guide describes. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="probe.quern.dev" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
