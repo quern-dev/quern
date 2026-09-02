@@ -69,8 +69,13 @@ def main() -> int:
     if not args.android_only:
         udid = booted_simulator()
         if udid:
-            results.append(run("iOS — QuernProbe", HERE / "probe-app" / "selftest.py",
-                               ["--udid", udid]))
+            ios = HERE / "probe-app" / "selftest.py"
+            results.append(run("iOS — app-delegate lifecycle", ios, ["--udid", udid]))
+            # The same suite against the scene bundle. Which delegate callbacks
+            # fire is decided at build time, so one binary cannot cover both,
+            # and the guidance we publish about scene delivery is only verified
+            # if something runs it.
+            results.append(run("iOS — scene lifecycle", ios, ["--udid", udid, "--scene"]))
         else:
             skipped.append("iOS (no booted simulator)")
 

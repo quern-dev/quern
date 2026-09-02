@@ -19,10 +19,20 @@ final class DeepLinkStore {
 
     private(set) var lastURI: String = "none"
     private(set) var count: Int = 0
+
+    /// Which callback delivered the last link.
+    ///
+    /// The point of the scene-based bundle: a test can assert not just that the
+    /// link arrived but that it arrived *the way the documentation says it
+    /// does*. Without this the two lifecycles are indistinguishable from
+    /// outside, and a guide claiming `scene(_:openURLContexts:)` handles warm
+    /// delivery would read as verified when nothing had checked it.
+    private(set) var lastRoute: String = "none"
     var onChange: (() -> Void)?
 
-    func record(_ url: URL) {
+    func record(_ url: URL, via route: String) {
         lastURI = url.absoluteString
+        lastRoute = route
         count += 1
         onChange?()
     }

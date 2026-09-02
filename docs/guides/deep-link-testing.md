@@ -137,14 +137,35 @@ with no error anywhere.
 
 | | |
 |---|---|
-| Cold | `launchOptions[.url]` in `didFinishLaunching` |
+| Cold | `launchOptions[.url]` in `didFinishLaunching` **and then** `application(_:open:options:)` |
 | Warm | `application(_:open:options:)` |
 | Universal link | `application(_:continue:restorationHandler:)` |
+
+**A cold launch here delivers the URL twice.** Measured against a fixture that
+counts every delivery: one `openurl` at a terminated app-delegate app produced
+**two** recorded links — `didFinishLaunching` sees it in `launchOptions`, and
+then `application(_:open:options:)` is called with the same URL. An app that
+handles both without deduplicating will run its deep link routing twice per cold
+launch, which shows up as a doubled analytics event, a duplicated navigation
+push, or a repeated network call rather than as an error.
+
+The scene lifecycle does not do this: the same test against the scene-based
+bundle recorded the link **once**, through `scene(_:willConnectTo:options:)`
+only. If you are migrating, that is one behaviour that quietly gets better.
 
 Note that `application(_:open:options:)` is legacy — Apple's direction is to
 handle URL delivery in the scene delegate, and on recent SDKs the app-delegate
 method is deprecated. If a scene-based app implements only the app-delegate
 callbacks, they are simply never called.
+
+**Implementing `application(_:configurationForConnecting:options:)` switches
+the lifecycle on its own.** The Info.plist manifest is not the only trigger —
+adding that method to an app delegate is enough to make UIKit use scenes, after
+which none of the app-delegate URL callbacks fire. Measured: a bundle with no
+`UIApplicationSceneManifest` at all reported delivery through
+`scene(_:willConnectTo:options:)` until the method was compiled out. If your
+deep links stopped arriving after an unrelated refactor, check whether that
+method appeared.
 
 **SwiftUI** apps can use `.onOpenURL` on the root view, which covers both cold
 and warm delivery without touching either delegate.
