@@ -99,6 +99,23 @@ def _status(number: int) -> tuple[str, str]:
     reviews = json.loads(gh("api", f"repos/{REPO}/pulls/{number}/reviews"))
     reviewed = max((ts(r.get("submitted_at")) for r in reviews), default=0.0)
 
+    # A clean review leaves no review object.
+    #
+    # CodeRabbit submits a formal review only when it has findings — across a
+    # dozen PRs there was never a zero-finding review object — so comparing
+    # review timestamps against commits blocks forever on exactly the PRs that
+    # are ready. Its own reply gives the game away: "Already reviewed the last
+    # commit", for a PR this check was reporting as unreviewed.
+    #
+    # The summary comment it maintains is edited when a review completes, so
+    # its updated_at is the signal that survives a clean pass.
+    comments = json.loads(gh("api", f"repos/{REPO}/issues/{number}/comments"))
+    for c in comments:
+        if "coderabbit" not in (c.get("user", {}).get("login", "")).lower():
+            continue
+        if "summarize by coderabbit" in c.get("body", ""):
+            reviewed = max(reviewed, ts(c.get("updated_at")))
+
     owner, name = REPO.split("/")
     query = (
         f'{{repository(owner:"{owner}", name:"{name}")'
