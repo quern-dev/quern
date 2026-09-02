@@ -101,6 +101,58 @@ These are app-level issues where the URL is received but handled incorrectly:
 - **Stale state**: The app was already running with cached data, and the deep link to a different context doesn't refresh properly
 - **Parameter parsing**: The app doesn't handle URL-encoded characters, query parameters, or fragments correctly
 
+### iOS asks before it opens
+
+A custom-scheme link on iOS can raise a system alert — *Open in "YourApp"?* with
+Cancel and Open — instead of dispatching straight through. Until it is answered
+it sits above everything, and **every subsequent UI query returns the alert
+rather than your app**, so automation that does not expect it looks like it hung
+against a wedged simulator.
+
+Two consequences worth planning for:
+
+- Follow an `open_url` with a check for the alert and tap **Open**, the same way
+  you would handle any other system prompt.
+- A run that dies between opening a link and answering the alert leaves the
+  simulator stuck behind it. The next run then fails somewhere unrelated. If a
+  simulator starts returning a screen with three elements and a question mark,
+  look for a leftover prompt before debugging anything else.
+
+### Cold launch and warm launch arrive by different routes
+
+The advice to test both is not only about app state. On iOS they are literally
+different entry points, and **which ones depends on your app's lifecycle** —
+getting this wrong is a common way to lose links on exactly one path, silently,
+with no error anywhere.
+
+**Scene-based apps** (`UIScene`, the default for UIKit apps since iOS 13):
+
+| | |
+|---|---|
+| Cold | `connectionOptions.urlContexts` in `scene(_:willConnectTo:options:)` |
+| Warm | `scene(_:openURLContexts:)` |
+| Universal link | `connectionOptions.userActivities`, or `scene(_:continue:)` |
+
+**App-delegate apps** (no scene manifest):
+
+| | |
+|---|---|
+| Cold | `launchOptions[.url]` in `didFinishLaunching` |
+| Warm | `application(_:open:options:)` |
+| Universal link | `application(_:continue:restorationHandler:)` |
+
+Note that `application(_:open:options:)` is legacy — Apple's direction is to
+handle URL delivery in the scene delegate, and on recent SDKs the app-delegate
+method is deprecated. If a scene-based app implements only the app-delegate
+callbacks, they are simply never called.
+
+**SwiftUI** apps can use `.onOpenURL` on the root view, which covers both cold
+and warm delivery without touching either delegate.
+
+The practical test consequence is the same either way: a deep link suite that
+only ever runs against an already-open app exercises one path and tells you
+nothing about the other. Terminate the app between cases.
+
 ### Simulator / Emulator Specific
 
 - **iOS simulator**: `tel:` and `mailto:` URIs fail because Phone and Mail apps aren't installed on simulators. This is expected — test these on physical devices.

@@ -399,7 +399,7 @@ Label matching modes (mutually exclusive — use only one):
       scroll_to_find: z
         .boolean()
         .default(true)
-        .describe("If the element isn't in the current view, scroll it into view (via the no-dump swipe loop) and then tap. Supported on Android and iOS. Set false to fail fast without scrolling."),
+        .describe("If the element isn't in the current view, scroll it into view (via the no-dump swipe loop) and then tap. Supported on Android and iOS. Set false to fail fast without scrolling. Note the cost of leaving this on: asking for an element that does not exist at all is indistinguishable from one that is merely off-screen, so the search runs until the request times out (~60s) and reads like a hung server rather than a missing element. When you are checking whether something is present, pass false."),
       include_screen_context: z
         .boolean()
         .default(false)
