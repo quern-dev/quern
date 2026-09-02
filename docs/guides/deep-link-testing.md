@@ -120,17 +120,38 @@ Two consequences worth planning for:
 
 ### Cold launch and warm launch arrive by different routes
 
-The guide's advice to test both is not only about app state — on iOS they are
-literally different entry points:
+The advice to test both is not only about app state. On iOS they are literally
+different entry points, and **which ones depends on your app's lifecycle** —
+getting this wrong is a common way to lose links on exactly one path, silently,
+with no error anywhere.
 
-- **Warm** (app already running): `application(_:open:options:)`
-- **Cold** (app not running): the URL is in `launchOptions[.url]` on
-  `didFinishLaunching`, and `application(_:open:options:)` is never called
+**Scene-based apps** (`UIScene`, the default for UIKit apps since iOS 13):
 
-Handle one and not the other and the link is lost silently on that path, with no
-error anywhere. Universal links add a third: `application(_:continue:...)` with
-an `NSUserActivity`. A deep link test that only ever runs against an app that is
-already open will not notice any of this.
+| | |
+|---|---|
+| Cold | `connectionOptions.urlContexts` in `scene(_:willConnectTo:options:)` |
+| Warm | `scene(_:openURLContexts:)` |
+| Universal link | `connectionOptions.userActivities`, or `scene(_:continue:)` |
+
+**App-delegate apps** (no scene manifest):
+
+| | |
+|---|---|
+| Cold | `launchOptions[.url]` in `didFinishLaunching` |
+| Warm | `application(_:open:options:)` |
+| Universal link | `application(_:continue:restorationHandler:)` |
+
+Note that `application(_:open:options:)` is legacy — Apple's direction is to
+handle URL delivery in the scene delegate, and on recent SDKs the app-delegate
+method is deprecated. If a scene-based app implements only the app-delegate
+callbacks, they are simply never called.
+
+**SwiftUI** apps can use `.onOpenURL` on the root view, which covers both cold
+and warm delivery without touching either delegate.
+
+The practical test consequence is the same either way: a deep link suite that
+only ever runs against an already-open app exercises one path and tells you
+nothing about the other. Terminate the app between cases.
 
 ### Simulator / Emulator Specific
 
