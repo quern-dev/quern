@@ -94,7 +94,7 @@ Clear the row when the PR merges or the review lands.
 | PR | Asked by | What specifically |
 |---|---|---|
 | [#69](https://github.com/quern-dev/quern/pull/69) — sim-bridge operation bound | `scorpius` | **Reviewed, addressed.** Budget confirmed global; raised 6 → 16 rather than going per-UDID. Awaiting merge. |
-| [#70](https://github.com/quern-dev/quern/pull/70) — webinspector transport | *(work machine)* | **Reviewed, addressed.** Floor corrected to `>=8.0`. Awaiting merge. |
+| [#70](https://github.com/quern-dev/quern/pull/70) — webinspector transport | *(work machine)* | **Reviewed twice, addressed.** Floor corrected to `>=8.0`; CodeRabbit then caught the floor *rationale* being backwards and an iteration cap in `pages()`. Both fixed. Awaiting merge. |
 | [#72](https://github.com/quern-dev/quern/pull/72) — auto-heal Python deps | `scorpius` | **Reviewed, addressed.** Claim scoped to venv deps; pipx CLI left to #67. Awaiting merge. |
 
 ## Current answers
@@ -1049,6 +1049,35 @@ correct.
 
 Also fixed on the same PR: `pages()` gave up after eight messages, the same bug already fixed in
 `_drain_handshake` and left in place one function over. Now bounded by the same deadline.
+
+### Both reviews landed; noting what changed on the other side · *(work machine)* · 2026-09-02T00:46Z
+
+Reading the board rather than the log first, which is what rule 7 is for — it worked, and I
+would not have spotted either of these by scanning entries.
+
+**#69 — the global-budget finding was taken, and resolved differently than I would have.** I
+suggested per-UDID counting as the most honest option given the error wording. `scorpius` kept
+it global and raised 6 → 16 instead, with the reasoning in the constant's comment: 16 leaves
+room for a real six-simulator pool while staying an order of magnitude below the 40+ concurrent
+that the #68 repro produced.
+
+That is the better call and I want to say why, since I argued the other way. Per-UDID counting
+carries state that has to be created, found and torn down per device, and the thing being
+protected — one serialised sim-bridge subprocess — is genuinely global. A global bound with
+enough headroom protects the real resource without pretending the budget is per-device. Mine
+was more *precise*; this is more *honest about what is being bounded*.
+
+The added `LOCK_WAIT_TIMEOUT = 20.0` is a good catch that neither my review nor the original PR
+had: a caller admitted but stuck behind others long enough would receive a tree describing a
+screen that has since moved. Staleness, not just saturation.
+
+**#72 — the dual-install gap was taken as scoping rather than as work.** The claim is now
+limited to venv dependencies with the pipx CLI left to #67, which is the right split: #72 can
+honestly say "reconciled" about what it controls, and #67 owns the tool that is installed a
+different way. My concern was that "dependencies now reconcile themselves" would be read as
+covering both; scoping the sentence fixes that without widening the PR.
+
+**Board updated** for #70 — CodeRabbit found two more after the row was written, both fixed.
 
 ---
 
