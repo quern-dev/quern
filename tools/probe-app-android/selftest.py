@@ -72,6 +72,24 @@ def find(serial: str, suffix: str) -> dict | None:
     return None
 
 
+def wait_for(serial: str, suffix: str, timeout: float = 30.0) -> dict | None:
+    """Poll until an element appears, or give up.
+
+    A fixed sleep encodes one machine's speed. The WebView checks used
+    `time.sleep(4)` and passed on a warm emulator, then failed on a cold one
+    running software rendering — the DOM was simply not up yet, and the test
+    reported it as missing. Polling states the intent ("wait until it is there")
+    instead of guessing how long that takes.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = find(serial, suffix)
+        if found is not None:
+            return found
+        time.sleep(1.0)
+    return None
+
+
 def text_of(serial: str, suffix: str) -> str | None:
     el = find(serial, suffix)
     if el is None:
@@ -140,13 +158,10 @@ def main() -> int:
 
     print("\nUI surfaces")
     tap(s, "Controls")
-    time.sleep(2)
-    check("controls tab renders", find(s, "control_switch") is not None)
+    check("controls tab renders", wait_for(s, "control_switch", 15) is not None)
     tap(s, "Scroll")
-    time.sleep(2)
-    check("scroll list renders", find(s, "scroll_list") is not None)
+    check("scroll list renders", wait_for(s, "scroll_list", 15) is not None)
     tap(s, "Web")
-    time.sleep(4)
     # Assert on DOM content, not on the WebView container. Once the page loads,
     # Android flattens the WebView into its document nodes and the container's
     # resource-id disappears from the tree -- so `find("web_view")` passed only
@@ -155,11 +170,10 @@ def main() -> int:
     #
     # Worth recording: Android's accessibility tree does descend into WebView
     # DOM. That is the opposite of what sim-bridge sees for WKWebView on iOS.
-    heading = find(s, "web_heading")
+    heading = wait_for(s, "web_heading")
     check("web view DOM reachable in the a11y tree", heading is not None,
-          "web_heading not found — did the page load?")
-    para = find(s, "web_paragraph")
-    check("web view DOM is more than the heading", para is not None)
+          "web_heading never appeared within 30s")
+    check("web view DOM is more than the heading", find(s, "web_paragraph") is not None)
 
     print(f"\n{len(_passed)} passed, {len(_failed)} failed")
     for f in _failed:

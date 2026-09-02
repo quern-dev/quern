@@ -89,12 +89,45 @@ PASS  KNOWN BUG #78: unresolvable URL still reports ok
 It asserts the *current, wrong* behaviour. When #78 is fixed this check will
 fail, which is the signal to invert it rather than delete it.
 
-## Emulator note
-
-The emulator's Vulkan path proved unstable on at least one host — QEMU threads
-hung and the process died mid-run. Headless with software rendering has been
-reliable, and is the better default for automation anyway:
+## Emulator
 
 ```sh
-emulator -avd <name> -no-window -no-audio -gpu swiftshader_indirect -no-boot-anim
+./start-emulator.sh [Pixel_7]
 ```
+
+The default graphics path (`gpu auto`, which selects Vulkan/lavapipe) has hung
+twice on this hardware, both times with the same signature: repeated VkInstance
+create/destroy, then
+
+```
+ERROR | detected a hanging thread 'QEMU2 main loop'. No response for 15017 ms
+```
+
+and the process dies, taking the run with it. Software rendering has not
+reproduced it in any run. That is a good trade here — the probe draws almost
+nothing, so the GPU is not what makes a run slow.
+
+These are launch flags rather than edits to the AVD's `config.ini`, so the same
+AVD stays fast for interactive use.
+
+Two related things, both worth knowing because they cost an hour between them:
+
+* **A crashed emulator leaves a consent dialog queued.** The next launch prints
+  `Showing crashdialog to get consent` and never boots — it is waiting on a
+  window nobody is looking at. `-no-metrics` avoids it; clearing
+  `/tmp/android-jham/emu-crash-*.db` recovers from it.
+* **AVD configs store absolute paths.** After this machine's home directory moved
+  from `/Users/jham` to `/Volumes/Home/jham`, ten files under `~/.android` still
+  pointed at the old location — including `skin.path`, which produced
+  `unknown skin name 'pixel_7'` even though the skin was installed. The `.ini`
+  files survived only because the emulator falls back to `path.rel`. If an
+  emulator misbehaves after a home move, grep `~/.android` for the old path
+  before believing anything else.
+
+## Timing
+
+The self-test polls with `wait_for()` rather than sleeping a fixed interval.
+The WebView checks originally used `time.sleep(4)`, which passed on a warm
+emulator and failed on a cold one under software rendering — the DOM simply was
+not up yet, and the test reported it as missing. A fixed sleep encodes one
+machine's speed; polling states the intent.
