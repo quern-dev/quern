@@ -11,6 +11,15 @@ reads exactly like "all clear". Merging on it means merging unreviewed code.
 
 Exit code is 0 only when every PR examined is reviewed-and-clean, so this can
 gate a merge in a script.
+
+Do not pipe it when you care about that exit code: `... | tail` reports tail's
+status, not this script's, so a still-pending PR reads as success. merge-pr.sh
+calls it directly for exactly this reason.
+
+Note on cadence: CodeRabbit allows a limited number of review runs per hour
+(10 at time of writing), so a push can sit queued rather than being reviewed
+promptly. Several small pushes to the same branch spend that budget faster than
+one considered push, and leave every intermediate state unreviewed.
 """
 from __future__ import annotations
 
