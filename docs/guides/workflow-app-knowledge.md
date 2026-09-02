@@ -42,7 +42,7 @@ Your agent logs in, handles any onboarding screens, and arrives at the home scre
 
 - *"That screen has a detail section that expands when you tap the username"*
 - *"The first time you interact with each item type, an explainer modal pops up"*
-- *"That's a web view — the accessibility tree won't see the content inside it"*
+- *"That's a web view — on iOS the accessibility tree won't see the content inside it"*
 - *"There's also a celebration screen that appears after every successful submission"*
 
 These corrections become the most valuable entries in the knowledge base.
@@ -271,5 +271,5 @@ You don't need to redo the full tour. When the agent encounters something on scr
 - **Flow testing is non-negotiable.** Flows find interceptors that screen-by-screen tours miss. Always execute your flows on the simulator before considering them done.
 - **Save checkpoints aggressively.** A checkpoint takes seconds to create and saves minutes every time it's restored. Save one after any multi-step setup you don't want to repeat.
 - **The plist discovery is worth the time.** 20 minutes mapping coaching flags gives you programmatic control over every modal in the app. That's a permanent capability.
-- **Web view screens are a known limitation.** The accessibility tree can't see into web views. Document these prominently so agents know to use coordinate-based tapping or skip them.
+- **Web view screens are a limitation on iOS, not on Android.** On iOS, sim-bridge does not descend into a `WKWebView`, so the accessibility tree stops at the container and the content inside is unreachable — document those screens prominently so agents know to fall back to coordinates. On Android the opposite is true: the accessibility tree *does* expose the document, so a web view's headings, paragraphs and buttons are addressable by their DOM ids like any other element. Measured on API 33 against a fixture web view: `web_heading` and `web_paragraph` both come back in the tree. Reaching for coordinates there gives up working identifier-based interaction for nothing.
 - **Share the knowledge base with the team.** It's not just for agents — the identifier audit, state flag reference, and flow documentation are useful for any developer working on the app.

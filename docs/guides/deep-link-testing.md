@@ -101,6 +101,37 @@ These are app-level issues where the URL is received but handled incorrectly:
 - **Stale state**: The app was already running with cached data, and the deep link to a different context doesn't refresh properly
 - **Parameter parsing**: The app doesn't handle URL-encoded characters, query parameters, or fragments correctly
 
+### iOS asks before it opens
+
+A custom-scheme link on iOS can raise a system alert — *Open in "YourApp"?* with
+Cancel and Open — instead of dispatching straight through. Until it is answered
+it sits above everything, and **every subsequent UI query returns the alert
+rather than your app**, so automation that does not expect it looks like it hung
+against a wedged simulator.
+
+Two consequences worth planning for:
+
+- Follow an `open_url` with a check for the alert and tap **Open**, the same way
+  you would handle any other system prompt.
+- A run that dies between opening a link and answering the alert leaves the
+  simulator stuck behind it. The next run then fails somewhere unrelated. If a
+  simulator starts returning a screen with three elements and a question mark,
+  look for a leftover prompt before debugging anything else.
+
+### Cold launch and warm launch arrive by different routes
+
+The guide's advice to test both is not only about app state — on iOS they are
+literally different entry points:
+
+- **Warm** (app already running): `application(_:open:options:)`
+- **Cold** (app not running): the URL is in `launchOptions[.url]` on
+  `didFinishLaunching`, and `application(_:open:options:)` is never called
+
+Handle one and not the other and the link is lost silently on that path, with no
+error anywhere. Universal links add a third: `application(_:continue:...)` with
+an `NSUserActivity`. A deep link test that only ever runs against an app that is
+already open will not notice any of this.
+
 ### Simulator / Emulator Specific
 
 - **iOS simulator**: `tel:` and `mailto:` URIs fail because Phone and Mail apps aren't installed on simulators. This is expected — test these on physical devices.
