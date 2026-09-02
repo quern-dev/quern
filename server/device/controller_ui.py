@@ -280,6 +280,15 @@ class DeviceControllerUI:
         )
         return None
 
+    # The progress check runs exactly once, around the first blind swipe.
+    # Repeating it was measured breaking long scrolls: each check costs a tree
+    # read (~1.8s), and inserting that between swipes kills the fling momentum
+    # that successive swipes chain together. With checks on every iteration a
+    # row 60 down went from reliably found in 17s to intermittently not found
+    # at all in 90s. Checking once, before the sweep gets going, costs two reads
+    # and leaves the remaining swipes back to back.
+    _BLIND_PROGRESS_CHECKS = 1
+
     async def _ios_scroll_to_element(
         self,
         resolved: str,
@@ -342,6 +351,26 @@ class DeviceControllerUI:
             matches = find_element(els, label=label, identifier=identifier)
             return matches[0] if matches else None
 
+        async def _signature() -> tuple | None:
+            """A fingerprint of on-screen geometry, for progress detection.
+
+            Deliberately a second, unfiltered read rather than reusing _fetch's.
+            Sharing one unfiltered read between both jobs looked like a free
+            halving of the loop's cost and was measured breaking it: a target
+            60 rows down that main finds in 17s was not found at all in 88s.
+            The filtered read is not merely _fetch's result minus other
+            elements, so client-side matching over an unfiltered tree is not
+            equivalent. The saving was not worth owning that difference.
+
+            Vertical positions only: a blinking caret changes the tree's text
+            but not its geometry, and geometry is what scrolling changes.
+            """
+            try:
+                els, _ = await self.get_ui_elements(resolved, use_cache=False)
+            except Exception:
+                return None  # never let the progress check break the scroll
+            return _sign(els)
+
         def _visible(el: UIElement) -> bool:
             # In view = the top edge clears the top chrome (not scrolled under
             # the nav/status bar) AND the tap point clears the home indicator.
@@ -357,6 +386,14 @@ class DeviceControllerUI:
             await self._ui_backend(resolved).swipe(resolved, mid_x, y1, mid_x, y2, 0.3)
             self._invalidate_ui_cache(resolved)
 
+        def _sign(els: list[UIElement]) -> tuple:
+            return tuple(
+                sorted(
+                    (e.identifier or e.label or "", round(e.frame["y"]))
+                    for e in els if e.frame
+                )
+            )
+
         el = await _fetch()
         if el is not None and _visible(el):
             return el
@@ -364,6 +401,16 @@ class DeviceControllerUI:
         last_cy: float | None = None
         stalls = 0
         blind_steps = 0
+        # Progress detection for the blind branch. Sampling costs a tree read,
+        # so it is bounded: a screen that cannot scroll reveals itself in the
+        # first couple of swipes, and after that the cost would be pure waste on
+        # a container that is scrolling perfectly well.
+        # Set on the first blind iteration and compared on the next, so a
+        # static screen costs two swipes rather than the full budget. Seeding it
+        # from the caller's tree was tried and dropped: tap_element's read is
+        # filtered to the missing target, so the list is always empty there.
+        blind_signature: tuple | None = None
+        progress_checked = False
         blind_down = max_swipes          # sweep down for the first budget...
         blind_total = max_swipes * 3     # ...then up for twice as long
 
@@ -396,8 +443,26 @@ class DeviceControllerUI:
                 blind_steps += 1
                 last_cy = None
                 stalls = 0
+                if blind_steps == self._BLIND_PROGRESS_CHECKS and not progress_checked:
+                    blind_signature = await _signature()
 
             await _swipe(y1, y2)
+
+            if el is None and not progress_checked and blind_steps > self._BLIND_PROGRESS_CHECKS:
+                progress_checked = True
+                signature = await _signature()
+                if signature:
+                    if blind_signature is not None and signature == blind_signature:
+                        # A swipe over scrollable content always moves geometry.
+                        # Identical positions mean nothing scrolled, so the
+                        # remaining budget would repeat this exact no-op.
+                        logger.info(
+                            "ios scroll-to-element: screen unchanged after a swipe "
+                            "— nothing scrollable here, aborting after %d", blind_steps,
+                        )
+                        return None
+                    blind_signature = signature
+
             el = await _fetch()
             if el is not None and _visible(el):
                 # Settle and re-confirm: a swipe can leave the container
