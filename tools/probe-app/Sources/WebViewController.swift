@@ -25,6 +25,16 @@ final class WebViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
+        // A native marker on the screen itself. Asserting only on DOM content
+        // cannot distinguish "the web view is missing" from "the page has not
+        // loaded yet", and asserting on a non-empty screen distinguishes
+        // nothing at all.
+        let heading = UILabel(frame: CGRect(x: 20, y: 60, width: view.bounds.width - 40, height: 30))
+        heading.text = "Web View"
+        heading.accessibilityIdentifier = "web_heading_native"
+        heading.font = .systemFont(ofSize: 20, weight: .bold)
+        view.addSubview(heading)
+
         webView = WKWebView(frame: CGRect(x: 0, y: 100,
                                           width: view.bounds.width,
                                           height: view.bounds.height - 100))

@@ -29,7 +29,6 @@ Bundle id: `com.quern.probe`.
 | Tab | Identifier | Exercises |
 |---|---|---|
 | Text | `tab_text` | Typing fidelity per keyboard type (`field_default`, `field_url`, `field_email`, `field_secure`); `text_event_log` echoes the last UITextField delegate event |
-| Location | `tab_location` | `set_location` / simulated movement — live lat/lon/speed labels (`location_lat`, ...) and an update counter (`location_count`) |
 | Controls | `tab_controls` | Element state and value-aware taps: `control_switch`, `control_slider`, `control_segment`, `control_stepper`; alert/sheet dismissal via `control_show_alert` / `control_show_sheet` |
 | Scroll | `tab_scroll` | Scroll/swipe and scroll-to-element against 200 stable rows (`row_0` … `row_199`) |
 | Links | `tab_links` | Deep link landing surface — `link_count`, `link_last_uri` |

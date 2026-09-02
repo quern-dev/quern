@@ -99,7 +99,7 @@ The default graphics path (`gpu auto`, which selects Vulkan/lavapipe) has hung
 twice on this hardware, both times with the same signature: repeated VkInstance
 create/destroy, then
 
-```
+```text
 ERROR | detected a hanging thread 'QEMU2 main loop'. No response for 15017 ms
 ```
 
@@ -114,8 +114,10 @@ Two related things, both worth knowing because they cost an hour between them:
 
 * **A crashed emulator leaves a consent dialog queued.** The next launch prints
   `Showing crashdialog to get consent` and never boots — it is waiting on a
-  window nobody is looking at. `-no-metrics` avoids it; clearing
-  `/tmp/android-jham/emu-crash-*.db` recovers from it.
+  window nobody is looking at. `-no-metrics` avoids it. To recover, delete the crash
+  database — the directory is named after the current user, so find it rather
+  than copying a path: `rm -f "${TMPDIR:-/tmp}"/android-$(id -un)/emu-crash-*.db`,
+  or `find /tmp -name 'emu-crash-*.db' 2>/dev/null` if that misses.
 * **AVD configs store absolute paths.** After this machine's home directory moved
   from `/Users/jham` to `/Volumes/Home/jham`, ten files under `~/.android` still
   pointed at the old location — including `skin.path`, which produced

@@ -21,8 +21,14 @@ HERE = Path(__file__).resolve().parent
 
 
 def booted_simulator() -> str | None:
-    out = subprocess.run(["xcrun", "simctl", "list", "devices", "booted"],
-                         capture_output=True, text=True).stdout
+    # A host without Xcode has no xcrun at all. Raising here would take the
+    # Android run down with it, which is the opposite of the skip-don't-fail
+    # behaviour this runner exists to provide.
+    try:
+        out = subprocess.run(["xcrun", "simctl", "list", "devices", "booted"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
     for line in out.splitlines():
         if "(Booted)" in line and "(" in line:
             return line.split("(")[1].split(")")[0]

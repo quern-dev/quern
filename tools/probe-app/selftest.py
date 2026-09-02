@@ -261,10 +261,12 @@ def main() -> int:
     print("logs and web:")
     goto(udid, "Logs", marker="log_status")
     results.append(check("log controls present", element_text(udid, "log_status") is not None))
-    goto(udid, "Web", marker="web_view")
+    goto(udid, "Web", marker="web_heading_native")
     time.sleep(1.5)
-    results.append(check("web view present", element_text(udid, "web_view") is not None
-                         or call("GET", "/device/ui", udid=udid).get("element_count", 0) > 0))
+    # The previous version fell back to "any non-empty screen", so a failed
+    # goto("Web") reported success. Assert a marker that exists only here.
+    results.append(check("web screen reached",
+                         element_text(udid, "web_heading_native") is not None))
 
     # Restore the default keyboard state (software keyboard available).
     call("POST", "/device/keyboard", udid=udid, enabled=False)

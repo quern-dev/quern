@@ -101,8 +101,11 @@ def tap(serial: str, label: str) -> dict:
     return api("/device/ui/tap-element", {"udid": serial, "label": label})
 
 
-def open_url(serial: str, url: str) -> dict:
-    return api("/device/open-url", {"udid": serial, "url": url})
+def open_url(serial: str, url: str, bundle_id: str | None = None) -> dict:
+    body = {"udid": serial, "url": url}
+    if bundle_id:
+        body["bundle_id"] = bundle_id
+    return api("/device/open-url", body)
 
 
 def main() -> int:
@@ -155,6 +158,25 @@ def main() -> int:
     reported_ok = resp.get("status") == "ok"
     check("KNOWN BUG #78: unresolvable URL still reports ok", reported_ok,
           f"open_url returned {resp}")
+
+    # The https filter carries no autoVerify, which is the state a debug build
+    # is genuinely in: the signing key is not in any assetlinks.json, so a
+    # package-less VIEW intent falls through to a browser. Naming the package is
+    # what delivers it. Without this check the whole documented debug path could
+    # break and every other assertion would still pass.
+    print("\nApp Links (unverified https, package-targeted)")
+    before3 = text_of(s, "link_count")
+    open_url(s, "https://probe.quern.dev/product/abc123", bundle_id=PKG)
+    time.sleep(3)
+    after3 = text_of(s, "link_count")
+    if check("link_count readable around the https link",
+             before3 is not None and after3 is not None,
+             f"before={before3!r} after={after3!r}"):
+        check("package-targeted https link reaches the app",
+              int(after3) == int(before3) + 1, f"count {before3} -> {after3}")
+        check("https URI recorded",
+              (text_of(s, "link_last_uri") or "").startswith("https://probe.quern.dev"),
+              f"got {text_of(s, 'link_last_uri')!r}")
 
     print("\nUI surfaces")
     tap(s, "Controls")
