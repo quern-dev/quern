@@ -5,7 +5,12 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.1] - 2026-09-02
+
+Twenty-one commits since 0.14.1-beta.2. The theme is correctness under
+concurrency: two of these are bugs that returned wrong answers rather than
+errors, which is the kind that costs the most to diagnose because nothing looks
+broken while it happens.
 
 ### Added
 - **`quern doctor` reports Python dependency state**, and `quern doctor --fix` repairs it. `--fix` runs exactly what server startup runs — deliberately not `quern setup`, which prompts in twenty places, can escalate to `sudo`, and can delete and recreate the venv. Repairing a stale dependency should not be able to end in any of those. Plain `doctor` stays read-only, which is the property that makes it safe to reach for when something is already broken.
@@ -21,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The app-state guide names `include_keychain`** — it described capturing the keychain only in the guide's agent-prompt voice ("including the keychain"), which left anyone driving the MCP tool or REST endpoint directly without the parameter name. Now states it for both calls, along with the defaults that differ between them: `save_app_state` defaults to false, while `restore_app_state` defaults to restoring whatever the checkpoint carries and takes an explicit false to start logged out.
 
 ### Notes
+- `server/device/webinspector.py` ships but is not yet wired into any route or MCP tool — nothing outside its own tests imports it. It is the transport half of simulator webview DOM access: a direct `ServiceConnection` over the `webinspectord_sim` unix socket, which needs no lockdown pairing because a simulator has no device to pair with. It is here so the protocol work can be reviewed and tested on its own, ahead of the tool surface that will use it. Requires `pymobiledevice3>=8.0`, where `send_plist`/`recv_plist` became coroutines.
 - Terminating the subprocess on timeout is a blunt remedy chosen deliberately over the lighter-looking alternatives, because the others do not close the race. Clearing `_pending_response` on timeout is not enough: the next command sets its own future before the late response arrives, so there is still a future waiting to be wrongly resolved. Draining the stale response before releasing the lock is not enough either, since a response that has not arrived in 30s may never arrive. Absent correlation, a late response is indistinguishable from a fresh one, so the only thing that reliably prevents the mismatch is ensuring it can never be delivered. Adding request IDs to `sim-bridge.swift` and `_dispatch` would make this cheap and is the right follow-up (#74); until then the cost is bounded, because reaching this path requires 30 seconds of silence, which already means something is wrong.
 - The bound is on operations rather than individual commands, and that distinction is load-bearing. A first attempt bounded commands and was wrong: one `describe_all` fans out into a `describe-ui` plus one `probe-point` per empty container via `asyncio.gather`, so a single legitimate request filled an 8-command queue by itself and then rejected its own continuation work. Admission is re-entrant via a `ContextVar`, which task contexts inherit, so follow-on commands inside an admitted operation are exempt however many there are.
 - The lock itself is deliberately unchanged. It is required for correctness, not tidiness: the wire protocol carries no request IDs — `sim-bridge.swift` reads with `while let line = readLine()` and replies via `respond()` with no correlation, and `_dispatch` resolves a single `_pending_response` future with whatever arrives — so two in-flight commands would resolve each other's futures. Removing the serialisation means adding request IDs to both sides.
@@ -273,7 +279,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.1-beta.2...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.1...main
+[0.14.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1
 [0.14.1-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.2
 [0.14.1-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.1
 [0.14.0]: https://github.com/quern-dev/quern/releases/tag/v0.14.0
