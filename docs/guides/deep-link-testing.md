@@ -51,13 +51,17 @@ This is where it gets subtle. When you use `open_url` with an HTTPS URL:
 
 So `open_url` with an HTTPS URL tests whether verification is actually working — **for a build where verification is supposed to work.** On a release build, the browser opening instead of your app means something in the chain (server config → OS verification → app entitlements) is broken.
 
-**On a debug or staging build, the browser opening is usually correct behaviour, not a bug.** Debug builds are typically signed with a different keystore than the one in your `assetlinks.json`, and staging domains often have no verification files at all, so the link genuinely is not a verified App Link. Chasing an AASA or assetlinks problem here means debugging something that is working as configured.
+**On a debug or staging build, the browser opening is often correct behaviour rather than a bug** — but for different reasons per platform, and only Android gives you a way around it.
 
-To drive an https deep link into a build like that, name the app and bypass verification entirely:
+**Android.** Debug builds are usually signed with a keystore whose certificate hash is absent from `assetlinks.json`, and staging domains frequently host no verification file at all, so the link genuinely is not a verified App Link. Auditing assetlinks here means debugging something that is working as configured. To drive the link into the app anyway, name the package:
 
 > "Open https://staging.myapp.com/product/abc123 on the emulator, targeting com.myapp.debug"
 
-`open_url` takes a package (Android) or bundle ID (iOS), which delivers the intent straight to that app. Use it to test your **routing** — does the path land on the right screen, are the parameters parsed — separately from testing **verification**, which needs a properly signed build against the real domain. They fail independently and are worth testing independently.
+`open_url` accepts a package that is passed straight to `am start`, delivering the intent to that app and bypassing verification entirely.
+
+**iOS has no equivalent bypass.** `open_url` calls `simctl openurl`, which takes only a URL — the `bundle_id` parameter is accepted by the API but **ignored on iOS**, so passing it changes nothing and gives no warning that it did nothing. If Safari opens on iOS, that is a real signal about your Associated Domains entitlement and AASA file, not something to wave away as "just a debug build". Test iOS routing through your custom scheme, and test universal links with a build whose entitlements actually match the domain.
+
+Either way, keep the two questions apart: **routing** (does the path reach the right screen with the right parameters) and **verification** (does the OS agree the domain belongs to your app). They fail independently, so testing them together tells you less than testing them separately.
 
 ### Testing Both for the Same Screen
 
@@ -151,7 +155,7 @@ Deep links live in a single structured registry at `deep-links/deep_links.json` 
 
 The field that earns its keep is `verify`: it holds `wait_for_element` keyword arguments confirming the landing screen, which is exactly the check Android's silent success makes mandatory. `lands_on` is a plain path to a screen doc, not a wikilink. Use separate arrays alongside `deep_links` when an app has distinct link families with different URL patterns.
 
-See the [app knowledge base guide](app-knowledge.md) for the full schema.
+See [`docs/app-knowledge-guide.md`](https://github.com/quern-dev/quern/blob/main/docs/app-knowledge-guide.md#documenting-deep-links) for the full field list — it is the authoring reference and is not published to this site.
 
 ## Tips
 
