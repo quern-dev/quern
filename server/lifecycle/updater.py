@@ -366,21 +366,18 @@ def _update_via_tarball(project_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _rebuild_and_restart(project_root: Path) -> None:
-    """Reinstall deps, rebuild MCP, run setup, restart server if running."""
-    # Reinstall Python package (picks up new deps from pyproject.toml)
-    venv_pip = project_root / ".venv" / "bin" / "pip"
-    if venv_pip.exists():
-        print("Installing Python dependencies...")
-        result = subprocess.run(
-            [str(venv_pip), "install", "-e", "."],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            print(f"Warning: pip install failed: {result.stderr.strip()}")
+def _rebuild_and_restart(project_root: Path) -> bool:
+    """Reinstall deps, rebuild MCP, run setup, restart server if running.
+
+    Returns False if dependency installation failed, so the caller can report
+    the update as unsuccessful rather than announcing success onto a stale venv.
+    """
+    # Reinstall Python deps. Delegated so there is one implementation and one
+    # failure semantic — this used to be a separate pip call whose failure was
+    # only a warning, so an update could report success onto a stale venv.
+    from server.__main__ import _ensure_python_deps
+
+    deps_ok = _ensure_python_deps(quiet=False, force=True)
 
     # Rebuild MCP server
     from server.__main__ import _ensure_mcp_built
@@ -408,6 +405,8 @@ def _rebuild_and_restart(project_root: Path) -> None:
     else:
         print("Server is not running — start it with: quern start")
 
+    return deps_ok
+
 
 def run_update() -> int:
     """Pull latest changes and rebuild.
@@ -429,5 +428,9 @@ def run_update() -> int:
     if rc == 2:
         return 0  # Already up to date — nothing to rebuild
 
-    _rebuild_and_restart(project_root)
+    if not _rebuild_and_restart(project_root):
+        # The source is updated but the venv is not. Saying "success" here is
+        # the exact failure this reporting exists to prevent.
+        print("Update incomplete: dependencies could not be installed.")
+        return 1
     return 0

@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The lock itself is deliberately unchanged. It is required for correctness, not tidiness: the wire protocol carries no request IDs — `sim-bridge.swift` reads with `while let line = readLine()` and replies via `respond()` with no correlation, and `_dispatch` resolves a single `_pending_response` future with whatever arrives — so two in-flight commands would resolve each other's futures. Removing the serialisation means adding request IDs to both sides.
 
 
+### Fixed
+- **Python dependencies now reconcile themselves** — a new declared dependency could silently fail to install, leaving a server that starts happily and then fails at the point of use. `quern update`'s `pip install` failure was only a warning, so the update reported success onto a stale venv; and it skipped the reinstall entirely when the workspace was not pullable (the feature-branch case from #40). Neither path saw a manual `git pull` or a branch switch at all. `_ensure_python_deps()` now runs on every server start, mirroring how `_ensure_mcp_built` already handles `node_modules`: an mtime stamp at `.venv/.deps-stamp` decides whether work is needed, so the common case costs two `stat()` calls and no network. The stamp is written **only after a successful install**, so a failed one is never remembered as done and the next start retries by itself — recovery needs no user intervention, and the only lasting failure is genuinely unreachable packages. The updater's separate `pip install` is gone; it delegates to the same helper, so there is one implementation and one failure semantic.
+
+### Added
+- **`quern doctor` reports Python dependency state**, and `quern doctor --fix` repairs it. `--fix` runs exactly what server startup runs — deliberately not `quern setup`, which prompts in twenty places, can escalate to `sudo`, and can delete and recreate the venv. Repairing a stale dependency should not be able to end in any of those. Plain `doctor` stays read-only, which is the property that makes it safe to reach for when something is already broken.
+
 ## [0.14.1-beta.2] - 2026-08-31
 
 ### Documentation
