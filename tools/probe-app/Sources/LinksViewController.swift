@@ -11,6 +11,7 @@ import UIKit
 final class LinksViewController: UIViewController {
     private let lastURILabel = UILabel()
     private let countLabel = UILabel()
+    private let routeLabel = UILabel()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -39,6 +40,18 @@ final class LinksViewController: UIViewController {
         countLabel.accessibilityIdentifier = "link_count"
         countLabel.font = .systemFont(ofSize: 28, weight: .semibold)
         view.addSubview(countLabel)
+        y += 50
+
+        let routeCaption = UILabel(frame: CGRect(x: 20, y: y, width: width, height: 24))
+        routeCaption.text = "Delivered via:"
+        view.addSubview(routeCaption)
+        y += 28
+
+        routeLabel.frame = CGRect(x: 20, y: y, width: width, height: 40)
+        routeLabel.accessibilityIdentifier = "link_route"
+        routeLabel.numberOfLines = 2
+        routeLabel.adjustsFontSizeToFitWidth = true
+        view.addSubview(routeLabel)
 
         DeepLinkStore.shared.onChange = { [weak self] in
             DispatchQueue.main.async { self?.render() }
@@ -54,5 +67,6 @@ final class LinksViewController: UIViewController {
     private func render() {
         lastURILabel.text = DeepLinkStore.shared.lastURI
         countLabel.text = String(DeepLinkStore.shared.count)
+        routeLabel.text = DeepLinkStore.shared.lastRoute
     }
 }

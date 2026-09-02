@@ -21,6 +21,7 @@ import requests
 
 BASE = "http://localhost:9100/api/v1"
 BUNDLE_ID = "com.quern.probe"
+SCENE_BUNDLE_ID = "com.quern.probe.scene"
 SHIFT_TEXT = "ab_CD!2@x"
 
 
@@ -160,6 +161,8 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--udid", default=None, help="Target simulator UDID")
+    parser.add_argument("--scene", action="store_true",
+                        help="Exercise the scene-lifecycle bundle instead")
     args = parser.parse_args()
 
     udid = args.udid
@@ -168,13 +171,17 @@ def main() -> int:
     print(f"target simulator: {udid}")
 
     here = Path(__file__).parent
-    subprocess.run([str(here / "build.sh"), "--install", udid], check=True)
+    bundle_id = SCENE_BUNDLE_ID if args.scene else BUNDLE_ID
+    scheme = "quernprobescene" if args.scene else "quernprobe"
+    build = [str(here / "build.sh")] + (["--scene"] if args.scene else []) + ["--install", udid]
+    subprocess.run(build, check=True)
+    print(f"lifecycle: {'scene' if args.scene else 'app delegate'} ({bundle_id})")
 
     try:
-        call("POST", "/device/app/terminate", udid=udid, bundle_id=BUNDLE_ID)
+        call("POST", "/device/app/terminate", udid=udid, bundle_id=bundle_id)
     except requests.HTTPError:
         pass  # not running — fine
-    call("POST", "/device/app/launch", udid=udid, bundle_id=BUNDLE_ID)
+    call("POST", "/device/app/launch", udid=udid, bundle_id=bundle_id)
     time.sleep(1.5)
 
     results: list[bool] = []
@@ -232,7 +239,7 @@ def main() -> int:
     goto(udid, "Links", marker="link_count")
     before = element_text(udid, "link_count")
     if check("Links tab reachable", before is not None, "link_count not found"):
-        reported, _ = open_url(udid, "quernprobe://open/product/abc123")
+        reported, _ = open_url(udid, f"{scheme}://open/product/abc123")
         time.sleep(2.0)
         goto(udid, "Links", marker="link_count")
         after = element_text(udid, "link_count")
@@ -240,8 +247,13 @@ def main() -> int:
                              after is not None and int(after) == int(before) + 1,
                              f"count {before} -> {after}"))
         results.append(check("registered scheme URI recorded",
-                             (element_text(udid, "link_last_uri") or "").startswith("quernprobe://"),
+                             (element_text(udid, "link_last_uri") or "").startswith(f"{scheme}://"),
                              f"got {element_text(udid, 'link_last_uri')!r}"))
+
+        route = element_text(udid, "link_route")
+        expected = "scene:openURLContexts" if args.scene else "appdelegate:open"
+        results.append(check(f"warm delivery routed via {expected}",
+                             route == expected, f"got {route!r}"))
 
         held = element_text(udid, "link_count")
         reported, detail = open_url(udid, "nonexistentapp12345://foo/bar")

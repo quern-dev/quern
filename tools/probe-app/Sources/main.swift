@@ -10,12 +10,14 @@
 
 import UIKit
 
-@main
-final class AppDelegate: UIResponder, UIApplicationDelegate {
-    var window: UIWindow?
-
-    func application(_ application: UIApplication,
-                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+/// Tab construction, shared by both lifecycles.
+///
+/// The app-delegate bundle builds this from `didFinishLaunching`; the
+/// scene-based bundle builds it from `scene(_:willConnectTo:)`. Keeping one
+/// definition is why the scene variant is a second Info.plist rather than a
+/// second app.
+enum ProbeTabs {
+    static func makeRootViewController() -> UIViewController {
         let tabs: [(UIViewController, String, String)] = [
             // Order matters: an iPhone tab bar shows five items and moves the
             // rest into a More list, which keeps its own navigation stack and
@@ -40,36 +42,60 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             nav.tabBarItem.accessibilityIdentifier = "tab_\(title.lowercased())"
             return nav
         }
+        return tabBarController
+    }
+}
 
+@main
+final class AppDelegate: UIResponder, UIApplicationDelegate {
+    var window: UIWindow?
+
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = tabBarController
+        window.rootViewController = ProbeTabs.makeRootViewController()
         window.makeKeyAndVisible()
         self.window = window
 
-        // A URL supplied at launch arrives here rather than through
-        // application(_:open:options:), which only fires for an already-running
-        // app. Missing this is how a cold-launch deep link goes unrecorded.
+        // Cold launch on the app-delegate lifecycle. The URL arrives here
+        // rather than through application(_:open:options:), which only fires
+        // for an already-running app.
         if let url = launchOptions?[.url] as? URL {
-            DeepLinkStore.shared.record(url)
+            DeepLinkStore.shared.record(url, via: "appdelegate:launchOptions")
         }
         return true
     }
 
     func application(_ app: UIApplication, open url: URL,
                      options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
-        DeepLinkStore.shared.record(url)
+        DeepLinkStore.shared.record(url, via: "appdelegate:open")
         return true
     }
 
     func application(_ application: UIApplication,
                      continue userActivity: NSUserActivity,
                      restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
-        // Universal links arrive as an activity rather than an openURL call.
         if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
            let url = userActivity.webpageURL {
-            DeepLinkStore.shared.record(url)
+            DeepLinkStore.shared.record(url, via: "appdelegate:continue")
             return true
         }
         return false
     }
+
+    #if SCENE_LIFECYCLE
+    // Compile-time, not runtime. Merely *implementing* this method opts the app
+    // into the scene lifecycle even with no UIApplicationSceneManifest in the
+    // Info.plist — measured: the manifest-free bundle reported
+    // scene:willConnectTo until this was removed from its build. A runtime
+    // guard cannot help, because the decision is made from the method's
+    // presence before any of our code runs.
+    func application(_ application: UIApplication,
+                     configurationForConnecting session: UISceneSession,
+                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let config = UISceneConfiguration(name: "Default", sessionRole: session.role)
+        config.delegateClass = SceneDelegate.self
+        return config
+    }
+    #endif
 }
