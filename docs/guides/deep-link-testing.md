@@ -31,7 +31,14 @@ This is the simplest case. The OS looks up which app registered the `myapp://` s
 
 > "Open the deep link, then check if we landed on the order detail screen for order 12345"
 
-If the scheme isn't registered, the OS returns an error — on iOS you'll get an `LSApplicationWorkspaceErrorDomain` error, on Android a `No Activity found to handle Intent` error. Both are surfaced clearly in the `open_url` response.
+What happens when nothing handles the scheme differs by platform, and the difference matters:
+
+- **iOS** fails loudly. `simctl` exits non-zero and Quern raises, so you get an error containing `NSOSStatusErrorDomain, code=-10814` and `Simulator device failed to open <url>`.
+- **Android currently reports success.** `am start` exits 0 even when it cannot resolve the intent — it writes `Error: Activity not started, unable to resolve Intent` to stderr and returns 0 anyway — so `open_url` answers `{"status": "ok"}` for a URL nothing can open. It is indistinguishable from a working deep link.
+
+So on Android, **do not treat `status: ok` as evidence the link resolved.** Verify the destination instead: follow the call with `get_screen_summary` (or `wait_for_element` on something only the target screen has) and assert you actually landed there. That is the right habit on both platforms, and on Android it is the only signal you have.
+
+This is tracked as [#78](https://github.com/quern-dev/quern/issues/78); once it's fixed, a failed Android dispatch will raise like iOS does.
 
 ### Testing Universal Links / App Links
 
@@ -42,7 +49,15 @@ This is where it gets subtle. When you use `open_url` with an HTTPS URL:
 - **On Android**: `am start -a android.intent.action.VIEW` sends the URL through the intent resolver. If the app has a verified App Link for that domain, the app opens directly. If not, the user gets a disambiguation dialog (or it opens in the browser).
 - **On iOS**: `simctl openurl` dispatches through the same system as link taps. If the app has a valid universal link registration for the domain, the app opens. If not, Safari opens.
 
-So `open_url` with an HTTPS URL tests whether the universal link / app link verification is actually working. If your app opens, great — the full chain (server config → OS verification → app entitlements) is intact. If the browser opens instead, something in that chain is broken.
+So `open_url` with an HTTPS URL tests whether verification is actually working — **for a build where verification is supposed to work.** On a release build, the browser opening instead of your app means something in the chain (server config → OS verification → app entitlements) is broken.
+
+**On a debug or staging build, the browser opening is usually correct behaviour, not a bug.** Debug builds are typically signed with a different keystore than the one in your `assetlinks.json`, and staging domains often have no verification files at all, so the link genuinely is not a verified App Link. Chasing an AASA or assetlinks problem here means debugging something that is working as configured.
+
+To drive an https deep link into a build like that, name the app and bypass verification entirely:
+
+> "Open https://staging.myapp.com/product/abc123 on the emulator, targeting com.myapp.debug"
+
+`open_url` takes a package (Android) or bundle ID (iOS), which delivers the intent straight to that app. Use it to test your **routing** — does the path land on the right screen, are the parameters parsed — separately from testing **verification**, which needs a properly signed build against the real domain. They fail independently and are worth testing independently.
 
 ### Testing Both for the Same Screen
 
@@ -104,7 +119,7 @@ Testing that the app handles deep links gracefully when preconditions aren't met
 
 ### Deep Link + App Knowledge Base
 
-If you've built an [app knowledge base](app-knowledge.md), deep links are documented in the `deep-links/` directory with their URL patterns, which screens they land on, and what preconditions they require. Your agent can use this to:
+If you've built an [app knowledge base](app-knowledge.md), deep links are registered in `deep-links/deep_links.json` with their paths, the screen each one lands on, the elements that confirm it, and any caveats. Your agent can use this to:
 
 - Test every documented deep link automatically
 - Verify deep links still land on the correct screen after app changes
@@ -112,18 +127,31 @@ If you've built an [app knowledge base](app-knowledge.md), deep links are docume
 
 ## Documenting Deep Links
 
-The knowledge base includes a `deep-links/` template for each link:
+Deep links live in a single structured registry at `deep-links/deep_links.json` — not one markdown file per link, unlike screens and alerts. The file carries the domains once at the top level, and each entry describes a path under them:
 
-```yaml
-deep_link: "Product Detail"
-url_scheme: "myapp://product/{id}"
-universal_link: "https://myapp.com/product/{id}"
-skips_screens: ["home", "category"]
-lands_on: "[[screens/product-detail]]"
-preconditions: ["app must be installed"]
+```json
+{
+  "production_domain": "myapp.com",
+  "staging_domain": "staging.myapp.com",
+  "associated_domains": ["applinks:myapp.com"],
+  "deep_links": [
+    {
+      "name": "product-detail",
+      "description": "Open a product by ID.",
+      "path": "/product/abc123",
+      "lands_on": "screens/product-detail",
+      "skips_screens": ["home", "category"],
+      "verify": {"identifier": "product_header"},
+      "premium_gated": false,
+      "caveats": ["Shows onboarding on first visit"]
+    }
+  ]
+}
 ```
 
-This captures both the custom scheme and universal link form, which screens the link bypasses, and where it lands. Your agent uses this to test both paths and verify the landing screen.
+The field that earns its keep is `verify`: it holds `wait_for_element` keyword arguments confirming the landing screen, which is exactly the check Android's silent success makes mandatory. `lands_on` is a plain path to a screen doc, not a wikilink. Use separate arrays alongside `deep_links` when an app has distinct link families with different URL patterns.
+
+See the [app knowledge base guide](app-knowledge.md) for the full schema.
 
 ## Tips
 
