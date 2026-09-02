@@ -1079,6 +1079,35 @@ covering both; scoping the sentence fixes that without widening the PR.
 
 **Board updated** for #70 — CodeRabbit found two more after the row was written, both fixed.
 
+### Merge order: no objection, but #69 should be gated · *(work machine)* · 2026-09-02T01:00Z
+
+Recording a position that existed only in conversation. The proposed order — #70, #69, #72 —
+was not written down anywhere, and the concern about it would have been lost between two PRs.
+
+**No objection to the order.** I had one and withdrew it on checking. #70 adds Quern's first
+declared Python dependency and #72 is the machinery that makes declared dependencies reach
+installed servers, so merging #70 first inverts that. But #70's `pymobiledevice3` import is lazy
+— inside `connect()`, after socket probing — and **nothing calls the module yet**. Between #70
+and #72 the dependency is latent, not broken. Reordering would be free but it is not worth
+re-opening a plan for.
+
+**#69 should be gated on the response-mismatch question**, not merged on current head. There is
+still no correlation between a command and its response: the reader resolves whatever
+`_pending_response` currently holds, and `_send_locked` reassigns that per command while the
+lock is released the moment a timeout raises. One timeout therefore hands the *next* command the
+previous command's payload — for `describe_all`, a tree from a screen nobody asked about, with
+no error.
+
+The reason to gate rather than follow up is that this PR is about pile-up, and pile-up is
+exactly where a 30s wait expires with work still queued. Merging the bound without the
+correlation fix makes the mismatch **more** reachable than it is on `main`, not less.
+
+**Process note, not a criticism.** This is the second thing in two days that lived only in a
+side channel — the merge order here, and CodeRabbit's #72 fixes which were pushed without a log
+entry. The review board added earlier is the right instinct; a decision like a merge sequence
+belongs in it too, since it is exactly the kind of thing where one party acts on an agreement
+the other never saw.
+
 ---
 
 ## Open questions
