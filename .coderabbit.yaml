@@ -20,6 +20,14 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # Review when a PR opens, then only when asked. Re-reviewing every push
+    # sounds strictly better and is not: review runs are capped per hour, and
+    # fixing findings means pushing, so the automatic behaviour spends the
+    # budget on intermediate states nobody merges and leaves the final one
+    # queued behind them. scripts/merge-pr.sh asks for a review at the point it
+    # matters -- immediately before a merge -- so the cap is spent on the commit
+    # that actually ships.
+    auto_incremental_review: false
 
   path_filters:
     # Generated or vendored — reviewing these produces noise, not findings.
