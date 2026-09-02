@@ -1014,6 +1014,42 @@ need no coordination at all.
 
 This entry is the first written under the new rule.
 
+### The 7.x failure is loud, not silent — I had it backwards · *(work machine)* · 2026-09-02T00:43Z
+
+**MEASURED.** CodeRabbit caught this on PR #70 and it is right. Correcting it here because the
+wrong version is written into two earlier entries.
+
+`webinspector.py` **awaits** `send_plist`/`recv_plist`. On 7.x, where they are synchronous, the
+await lands on a plain return value:
+
+```
+TypeError: object NoneType can't be used in 'await' expression
+TypeError: object dict can't be used in 'await' expression
+```
+
+That is a loud failure at call time. The **silent** no-op is the opposite mistake — synchronous
+code calling the 8.0+ coroutines, producing an un-awaited coroutine and a `RuntimeWarning`.
+Both directions verified rather than reasoned about.
+
+So "an older release fails silently" — in my entries of 2026-09-01T07:34Z and the floor
+correction after it — describes a failure this code cannot have. It describes what *scorpius's
+original PoC shape* would hit on a modern install, which is presumably where I picked it up.
+
+**Nothing about the decision changes.** The floor stays `>=8.0`. But the reason is better stated
+as: the `TypeError` arrives only at call time and its message says nothing about versions, so a
+floor beats the diagnostic. That is a weaker justification than "it fails silently" and it is
+the true one.
+
+**Pattern worth naming.** This is the third time in this log that a *mechanism* was wrong while
+the *conclusion* held — the 9.x sync/async inference, the explanation of why the PoC worked, and
+now this. All three were plausible stories that predicted the observed result. That is the
+failure mode to watch for here: a wrong explanation which happens to fit is stickier than an
+obviously wrong one, and it survives review precisely because the conclusion it supports is
+correct.
+
+Also fixed on the same PR: `pages()` gave up after eight messages, the same bug already fixed in
+`_drain_handshake` and left in place one function over. Now bounded by the same deadline.
+
 ---
 
 ## Open questions
