@@ -443,12 +443,16 @@ class DeviceControllerUI:
                 blind_steps += 1
                 last_cy = None
                 stalls = 0
-                if blind_steps == self._BLIND_PROGRESS_CHECKS and not progress_checked:
+                if blind_steps == 1 and not progress_checked:
+                    # Fingerprint BEFORE the first swipe, so one swipe is enough
+                    # to answer "does anything here move". Capturing it after
+                    # the first swipe instead costs a second swipe to reach the
+                    # same conclusion, and swipes are the visible part.
                     blind_signature = await _signature()
 
             await _swipe(y1, y2)
 
-            if el is None and not progress_checked and blind_steps > self._BLIND_PROGRESS_CHECKS:
+            if el is None and not progress_checked and blind_signature is not None:
                 progress_checked = True
                 signature = await _signature()
                 if signature:
