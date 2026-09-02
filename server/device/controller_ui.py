@@ -295,6 +295,7 @@ class DeviceControllerUI:
         label: str | None,
         identifier: str | None,
         max_swipes: int,
+        target_known_absent: bool = False,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -352,24 +353,37 @@ class DeviceControllerUI:
             return matches[0] if matches else None
 
         async def _signature() -> tuple | None:
-            """A fingerprint of on-screen geometry, for progress detection.
+            """Fingerprint the screen by hit-testing a few points.
 
-            Deliberately a second, unfiltered read rather than reusing _fetch's.
-            Sharing one unfiltered read between both jobs looked like a free
-            halving of the loop's cost and was measured breaking it: a target
-            60 rows down that main finds in 17s was not found at all in 88s.
-            The filtered read is not merely _fetch's result minus other
-            elements, so client-side matching over an unfiltered tree is not
-            equivalent. The saving was not worth owning that difference.
+            A full tree read costs ~1.8s; a hit-test is ~85ms, so sampling
+            three points either side of one swipe costs about a tenth of a
+            single tree read. The first version of this check used describe_all
+            and cost more than the 30 swipes it was replacing — measured at no
+            net improvement.
 
-            Vertical positions only: a blinking caret changes the tree's text
-            but not its geometry, and geometry is what scrolling changes.
+            Three points rather than one because a single sample can land on
+            fixed chrome: a nav bar or a pinned header never moves, whether or
+            not the content beneath it scrolls.
             """
-            try:
-                els, _ = await self.get_ui_elements(resolved, use_cache=False)
-            except Exception:
-                return None  # never let the progress check break the scroll
-            return _sign(els)
+            backend = self._ui_backend(resolved)
+            out: list[tuple[str, int]] = []
+            for fraction in (0.35, 0.55, 0.75):
+                try:
+                    hit = await backend.describe_point(
+                        resolved, mid_x, screen_height * fraction,
+                    )
+                except Exception:
+                    return None  # never let the progress check break the scroll
+                if not hit:
+                    out.append(("", -1))
+                    continue
+                frame = hit.get("frame") or {}
+                out.append((
+                    hit.get("AXUniqueId") or hit.get("identifier")
+                    or hit.get("AXLabel") or hit.get("label") or "",
+                    round(frame.get("y", -1)),
+                ))
+            return tuple(out)
 
         def _visible(el: UIElement) -> bool:
             # In view = the top edge clears the top chrome (not scrolled under
@@ -386,15 +400,11 @@ class DeviceControllerUI:
             await self._ui_backend(resolved).swipe(resolved, mid_x, y1, mid_x, y2, 0.3)
             self._invalidate_ui_cache(resolved)
 
-        def _sign(els: list[UIElement]) -> tuple:
-            return tuple(
-                sorted(
-                    (e.identifier or e.label or "", round(e.frame["y"]))
-                    for e in els if e.frame
-                )
-            )
-
-        el = await _fetch()
+        # tap_element has just run the identical filtered query and found
+        # nothing, so repeating it here spends a full describe_all (~1.8s)
+        # re-learning what the caller already knows. scroll_to_element calls in
+        # cold with no prior read, so it still needs this check.
+        el = None if target_known_absent else await _fetch()
         if el is not None and _visible(el):
             return el
 
@@ -1235,6 +1245,7 @@ class DeviceControllerUI:
         ):
             scrolled = await self._ios_scroll_to_element(
                 resolved, label=label, identifier=identifier, max_swipes=10,
+                target_known_absent=True,
             )
             if scrolled is not None:
                 matches = [scrolled]

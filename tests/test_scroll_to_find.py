@@ -55,6 +55,13 @@ def controller(monkeypatch):
                 if self.scrolls:
                     self.offset -= 50.0   # content moves under the finger
             backend.swipe = AsyncMock(side_effect=swipe)
+
+            async def describe_point(_udid, _x, y):
+                # The progress check hit-tests instead of reading the tree:
+                # ~85ms versus ~1.8s. Whatever sits under the point moves with
+                # the content, so its reported y is the signal.
+                return {"identifier": "row", "frame": {"y": y + self.offset}}
+            backend.describe_point = AsyncMock(side_effect=describe_point)
             return backend
 
     return Harness()
