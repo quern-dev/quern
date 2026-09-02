@@ -25,6 +25,7 @@ from server.models import (
     SetLocaleRequest,
     SetLocationRequest,
     ShutdownDeviceRequest,
+    SimBridgeSaturatedError,
     StartDeviceLogRequest,
     StartSimLogRequest,
     StopDeviceLogRequest,
@@ -92,6 +93,11 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
     """Map a DeviceError to an appropriate HTTPException."""
     msg = str(e)
     # Type-based routing for WDA errors (more reliable than string matching)
+    if isinstance(e, SimBridgeSaturatedError):
+        # 503, not 500: the device is healthy and the request was valid, there is
+        # just more queued than is worth serving. Retrying immediately makes it
+        # worse, which is why the message says so.
+        return HTTPException(status_code=503, detail=msg)
     if isinstance(e, WdaElementNotFoundError):
         return HTTPException(status_code=404, detail=msg)
     if isinstance(e, WdaInvalidSessionError):

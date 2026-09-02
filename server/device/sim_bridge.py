@@ -16,9 +16,13 @@ import json
 import logging
 import shutil
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from server.device import probing
+from server.models import SimBridgeSaturatedError
 
 logger = logging.getLogger("quern-debug-server.sim-bridge")
 
@@ -33,6 +37,38 @@ _SOURCE_CANDIDATES = [
 # (e.g. a map with hundreds of annotations) easily exceeds that, which made
 # readline() raise LimitOverrunError and killed the reader task.
 STREAM_LIMIT = 32 * 1024 * 1024
+
+# sim-bridge serialises every command through a single lock, and an abandoned
+# HTTP request is not cancelled by uvicorn — it keeps its slot and runs to
+# completion. Without a bound a retry loop becomes a multi-minute outage (#68).
+#
+# The bound is on concurrent *operations*, not commands. One describe_all can
+# legitimately fan out into a describe-ui plus one probe-point per empty
+# container, dispatched concurrently via asyncio.gather — bounding commands
+# rejects a request's own continuation work, which is both wrong and confusing.
+# Global, deliberately: there is one SimBridgeManager (controller.py:38) driving
+# one subprocess behind one lock, serving every booted simulator — commands carry
+# `udid` per call rather than there being a bridge per device. A per-UDID budget
+# would look fairer and be worse: six devices at six operations each is 36 queued
+# against a single serialised subprocess, which is the pile-up this bound exists
+# to prevent, reached by a longer path.
+#
+# The number follows from LOCK_WAIT_TIMEOUT rather than being picked: at roughly
+# 2s per operation, ~10 is as deep as a queue can get before the head of it is
+# describing a screen that has since moved, and the wait timeout rejects beyond
+# that anyway. 16 leaves room for a real device pool — `ensure_devices` makes a
+# six-simulator workflow a supported thing — while staying an order of magnitude
+# below a runaway retry loop, which produced 40+ concurrent in the #68 repro.
+MAX_CONCURRENT_OPERATIONS = 16
+
+# Backstop for the few-but-slow case: a caller that has waited this long behind
+# other commands would receive a tree describing a screen that has since moved.
+LOCK_WAIT_TIMEOUT = 20.0
+
+# Marks that we are already inside an admitted operation, so follow-on commands
+# are not re-admitted. Task contexts inherit this, which is what makes the
+# gather-based probe fan-out exempt.
+_in_operation: ContextVar[bool] = ContextVar("sim_bridge_in_operation", default=False)
 
 
 def _find_source() -> Path | None:
@@ -53,6 +89,7 @@ class SimBridgeManager:
         self._lock = asyncio.Lock()
         self._binary_path = QUERN_BIN_DIR / BINARY_NAME
         self._pending_response: asyncio.Future | None = None
+        self._operations = 0
 
     async def is_available(self) -> bool:
         """Check if sim-bridge can be compiled and used."""
@@ -215,27 +252,99 @@ class SimBridgeManager:
         if self._pending_response is not None and not self._pending_response.done():
             self._pending_response.set_result(msg)
 
+    @asynccontextmanager
+    async def admit(self) -> AsyncGenerator[None, None]:
+        """Admission gate for one logical operation.
+
+        Re-entrant by design: an operation that fans out into further commands
+        (describe_all probing empty containers) is admitted once, at the top.
+        Bounding individual commands instead would reject a request's own
+        continuation work — observed live, where one describe_all's probe
+        fan-out filled an 8-command queue by itself.
+        """
+        if _in_operation.get():
+            yield
+            return
+
+        if self._operations >= MAX_CONCURRENT_OPERATIONS:
+            raise SimBridgeSaturatedError(
+                f"sim-bridge is saturated: {self._operations} operations already in "
+                f"flight (limit {MAX_CONCURRENT_OPERATIONS}, shared across all booted "
+                f"devices — one subprocess serves them all). Devices are responsive; "
+                f"there is simply more queued than is useful. Stop retrying and let it drain.",
+                queued=self._operations,
+            )
+
+        self._operations += 1
+        token = _in_operation.set(True)
+        try:
+            yield
+        finally:
+            self._operations -= 1
+            _in_operation.reset(token)
+
     async def send(self, cmd: dict) -> dict:
-        """Send a command and wait for the response. Thread-safe via lock."""
-        async with self._lock:
-            await self._ensure_process()
+        """Send a command and wait for the response. Serialised via lock.
 
-            if self._process is None or self._process.stdin is None:
-                raise RuntimeError("sim-bridge process not available")
+        The lock is load bearing rather than merely tidy: the wire protocol
+        carries no request IDs, so two in-flight commands would resolve each
+        other's futures. It cannot be removed without changing both sides.
+        """
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=LOCK_WAIT_TIMEOUT)
+        except TimeoutError:
+            raise SimBridgeSaturatedError(
+                f"sim-bridge did not become available within {LOCK_WAIT_TIMEOUT:.0f}s. "
+                f"Any result would describe a screen that has since changed.",
+                queued=self._operations,
+            ) from None
+        try:
+            return await self._send_locked(cmd)
+        finally:
+            self._lock.release()
 
-            loop = asyncio.get_event_loop()
-            self._pending_response = loop.create_future()
+    async def _send_locked(self, cmd: dict) -> dict:
+        """Body of send(), with the lock already held."""
+        await self._ensure_process()
 
-            line = json.dumps(cmd, separators=(",", ":")) + "\n"
-            self._process.stdin.write(line.encode())
-            await self._process.stdin.drain()
+        if self._process is None or self._process.stdin is None:
+            raise RuntimeError("sim-bridge process not available")
 
-            try:
-                result = await asyncio.wait_for(self._pending_response, timeout=30.0)
-            except TimeoutError:
-                raise RuntimeError(f"sim-bridge command timed out: {cmd.get('cmd')}")
+        loop = asyncio.get_event_loop()
+        self._pending_response = loop.create_future()
 
-            return result
+        line = json.dumps(cmd, separators=(",", ":")) + "\n"
+        self._process.stdin.write(line.encode())
+        await self._process.stdin.drain()
+
+        try:
+            result = await asyncio.wait_for(self._pending_response, timeout=30.0)
+        except (TimeoutError, asyncio.CancelledError):
+            # The command was already written, so a response may still be in
+            # flight. There is no correlation between request and response --
+            # _dispatch resolves whatever future is current -- so if we simply
+            # released the lock, the next command would set its own future and
+            # then receive THIS command's payload. Not an error: a well-formed
+            # response for a different request, which the caller cannot detect.
+            #
+            # Killing the subprocess is the only sound remedy while the protocol
+            # carries no request ids: it guarantees the stale response can never
+            # arrive. _ensure_process respawns lazily on the next command. The
+            # cost is bounded because this path requires 30s of silence, which
+            # already means something is wrong.
+            self._pending_response = None
+            await self._kill_process()
+            self._cleanup_state()
+            raise RuntimeError(
+                f"sim-bridge command timed out: {cmd.get('cmd')}. The command was "
+                f"already sent, so it may have executed — this outcome is ambiguous "
+                f"and must not be retried automatically for a state-changing command "
+                f"(tap, type, swipe, button, home, lock, siri, volume*, applepay). "
+                f"The subprocess was restarted to prevent the late response being "
+                f"matched to the next command."
+            ) from None
+
+        return result
 
     async def stop(self) -> None:
         """Stop the subprocess."""
@@ -287,6 +396,10 @@ class SimBridgeBackend:
         self._mgr = manager
 
     async def _send(self, cmd: dict) -> dict:
+        async with self._mgr.admit():
+            return await self._send_admitted(cmd)
+
+    async def _send_admitted(self, cmd: dict) -> dict:
         result = await self._mgr.send(cmd)
         if not result.get("ok", False):
             error = result.get("error", "unknown error")
@@ -306,36 +419,38 @@ class SimBridgeBackend:
         `IdbBackend.describe_all` so downstream consumers don't need to
         care which backend is active.
         """
-        start = time.perf_counter()
+        async with self._mgr.admit():
+            start = time.perf_counter()
 
-        nested = await self._fetch_nested(udid)
-        empty_containers = probing.find_empty_containers(nested)
-        flat = probing.flatten_nested(nested)
+            nested = await self._fetch_nested(udid)
+            empty_containers = probing.find_empty_containers(nested)
+            flat = probing.flatten_nested(nested)
 
-        if empty_containers:
+            if empty_containers:
+                logger.info(
+                    "[PERF] sim-bridge.describe_all: probing %d empty containers",
+                    len(empty_containers),
+                )
+                probe_tasks = [
+                    probing.probe_container(udid, c, self.describe_point)
+                    for c in empty_containers
+                ]
+                probe_results = await asyncio.gather(*probe_tasks)
+                probed = [el for batch in probe_results for el in batch]
+                probing.merge_probed_into_flat(flat, probed)
+
             logger.info(
-                "[PERF] sim-bridge.describe_all: probing %d empty containers",
-                len(empty_containers),
+                "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms elements=%d",
+                (time.perf_counter() - start) * 1000, len(flat),
             )
-            probe_tasks = [
-                probing.probe_container(udid, c, self.describe_point)
-                for c in empty_containers
-            ]
-            probe_results = await asyncio.gather(*probe_tasks)
-            probed = [el for batch in probe_results for el in batch]
-            probing.merge_probed_into_flat(flat, probed)
-
-        logger.info(
-            "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms elements=%d",
-            (time.perf_counter() - start) * 1000, len(flat),
-        )
-        return flat
+            return flat
 
     async def describe_all_nested(
         self, udid: str, *, snapshot_depth: int | None = None,
     ) -> list[dict]:
         """Return nested tree with children arrays preserved (no probing)."""
-        return await self._fetch_nested(udid)
+        async with self._mgr.admit():
+            return await self._fetch_nested(udid)
 
     async def _fetch_nested(self, udid: str) -> list[dict]:
         result = await self._send({
@@ -353,8 +468,9 @@ class SimBridgeBackend:
         source_timeout: float | None = None,
     ) -> list[dict]:
         """Same as describe_all — sim-bridge has only one tree-fetch path."""
-        return await self.describe_all(udid, snapshot_depth=snapshot_depth,
-                                       source_timeout=source_timeout)
+        async with self._mgr.admit():
+            return await self.describe_all(udid, snapshot_depth=snapshot_depth,
+                                           source_timeout=source_timeout)
 
     async def describe_point(
         self, udid: str, x: float, y: float,
@@ -368,10 +484,15 @@ class SimBridgeBackend:
 
         Misses (no element under the point) return None rather than raising.
         """
-        result = await self._mgr.send({
-            "cmd": "probe-point", "udid": udid,
-            "x": float(x), "y": float(y), "nested": False,
-        })
+        # Admitted like any other operation. Re-entrant, so the probe fan-out
+        # inside describe_all is unaffected — but controller_ui calls this
+        # directly on the hit-test fast path, and that route would otherwise
+        # bypass the bound entirely and queue on the lock until it times out.
+        async with self._mgr.admit():
+            result = await self._mgr.send({
+                "cmd": "probe-point", "udid": udid,
+                "x": float(x), "y": float(y), "nested": False,
+            })
         if not result.get("ok"):
             return None
         tree = result.get("tree")

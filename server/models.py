@@ -815,6 +815,24 @@ class DeviceError(Exception):
         super().__init__(message)
 
 
+class SimBridgeSaturatedError(DeviceError):
+    """Raised when sim-bridge has more queued work than it can usefully serve.
+
+    sim-bridge serialises every command through one lock, and an abandoned HTTP
+    request is not cancelled — it keeps its place in the queue and runs to
+    completion long after the caller has gone. Without a bound, a retry loop
+    turns into a multi-minute outage in which the device looks hung while
+    returning correct results minutes late (see #68).
+
+    Distinct from a timeout on purpose: the device is fine and the work would
+    have succeeded, there is simply too much of it queued to be worth doing.
+    """
+
+    def __init__(self, message: str, queued: int = 0):
+        self.queued = queued
+        super().__init__(message, tool="sim-bridge")
+
+
 class WdaError(DeviceError):
     """Base for all WDA-specific errors. Carries the W3C error code."""
 
