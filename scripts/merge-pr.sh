@@ -29,19 +29,12 @@ if [ -n "$FORCE" ]; then
 else
   # 0 clean · 2 pending · 3 unresolved findings · 4 undeterminable.
   #
-  # Only 2 is worth a review request. Reacting to any nonzero code would ask
-  # for a re-review of a PR whose findings nobody has read yet, and again when
-  # gh cannot answer -- spending capped review runs on the two cases a review
-  # cannot help. Automatic incremental reviews are off (.coderabbit.yaml), so
-  # this is the request that gets made, and it should be the useful one.
-  python3 scripts/pr-review-status.py "$PR" || STATE=$?
-  STATE="${STATE:-0}"
-
-  if [ "$STATE" = "2" ]; then
-    echo "Requesting a review of #$PR..."
-    gh pr comment "$PR" --repo jerimiah797/quern --body "@coderabbitai review" >/dev/null
-    python3 scripts/pr-review-status.py "$PR" --wait || STATE=$?
-  fi
+  # --ask lets the check put the question to CodeRabbit directly when the PR
+  # looks stale. Nothing else in the API answers it: a clean review leaves no
+  # review object, and the summary comment refreshes on every push whether or
+  # not a review ran. Asking costs a comment, which is why the plain status
+  # check stays read-only and only the merge path pays it.
+  python3 scripts/pr-review-status.py "$PR" --ask $WAIT || STATE=$?
 
   case "${STATE:-0}" in
     0) ;;

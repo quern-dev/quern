@@ -5,9 +5,10 @@ The failure this exists to prevent: CodeRabbit re-reviews on every push, so a
 "0 unresolved threads" reading taken before the latest push is stale — and
 reads exactly like "all clear". Merging on it means merging unreviewed code.
 
-    scripts/pr-review-status.py           # one shot
+    scripts/pr-review-status.py           # one shot, read-only
     scripts/pr-review-status.py --wait    # block until every PR is current
     scripts/pr-review-status.py 85        # a specific PR
+    scripts/pr-review-status.py 85 --ask  # ask CodeRabbit directly (posts a comment)
 
 Exit codes: 0 reviewed and clean, 2 pending a review, 3 has unresolved
 findings, 4 could not be determined. Only 0 permits a merge, and only 2 is
@@ -81,7 +82,62 @@ def open_prs() -> list[int]:
     return [p["number"] for p in json.loads(raw or "[]")]
 
 
-def status(number: int) -> tuple[str, str]:
+
+# CodeRabbit's replies to "@coderabbitai review", observed. It answers whether
+# the current head has been reviewed, which nothing else in the API does.
+_ALREADY_REVIEWED = "already reviewed the last commit"
+_FINISHED = "review finished"
+_TRIGGERED = "review triggered"
+
+
+def _ask_for_review(number: int) -> None:
+    gh("pr", "comment", str(number), "--repo", REPO, "--body", "@coderabbitai review")
+
+
+def _latest_reply(number: int, after: float) -> str:
+    """The newest CodeRabbit reply to a review request, lowercased."""
+    pages = json.loads(gh("api", "--paginate", "--slurp",
+                          f"repos/{REPO}/issues/{number}/comments"))
+    newest, body = after, ""
+    for c in [c for page in pages for c in page]:
+        user = c.get("user") or {}
+        if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
+            continue
+        text = c.get("body", "")
+        if "review command invocation" not in text.lower() and "action" not in text.lower():
+            continue
+        when = ts(c.get("created_at"))
+        if when > newest:
+            newest, body = when, text
+    return body.lower()
+
+
+def _reviewed_by_asking(number: int, timeout: float = 600.0) -> bool:
+    """Ask whether the head commit is reviewed, waiting if a review starts.
+
+    Returns True when CodeRabbit reports the current head as reviewed. A
+    request costs a comment, so this runs only when the cheaper signals already
+    say the PR looks stale.
+    """
+    asked_at = time.time()
+    _ask_for_review(number)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(20)
+        reply = _latest_reply(number, asked_at)
+        if _ALREADY_REVIEWED in reply or _FINISHED in reply:
+            return True
+        if _TRIGGERED in reply:
+            # A review is running. It leaves a review object only if it finds
+            # something, so ask again rather than watching for one.
+            time.sleep(40)
+            asked_at = time.time()
+            _ask_for_review(number)
+    return False
+
+
+def status(number: int, ask: bool = False) -> tuple[str, str]:
     """Returns (state, detail) where state is ok | pending | findings | unknown.
 
     Every failure path returns "unknown", never "ok". A gate that cannot see
@@ -89,12 +145,12 @@ def status(number: int) -> tuple[str, str]:
     exactly when it matters, and both are common here.
     """
     try:
-        return _status(number)
+        return _status(number, ask)
     except (GhError, json.JSONDecodeError, KeyError, ValueError) as exc:
         return "unknown", f"#{number} — could not determine review state: {exc}"
 
 
-def _status(number: int) -> tuple[str, str]:
+def _status(number: int, ask: bool = False) -> tuple[str, str]:
     raw = gh("pr", "view", str(number), "--repo", REPO, "--json", "title")
     pr = json.loads(raw)
 
@@ -110,44 +166,19 @@ def _status(number: int) -> tuple[str, str]:
     reviewed = max((ts(r.get("submitted_at")) for r in reviews
                     if (r.get("user") or {}).get("id") == CODERABBIT_ID), default=0.0)
 
-    # A clean review leaves no review object.
+    # Whether the newest commit has been reviewed is not inferable from the
+    # API, and every proxy tried here was wrong in one direction or the other:
     #
-    # CodeRabbit submits a formal review only when it has findings — across a
-    # dozen PRs there was never a zero-finding review object — so comparing
-    # review timestamps against commits blocks forever on exactly the PRs that
-    # are ready. Its own reply gives the game away: "Already reviewed the last
-    # commit", for a PR this check was reporting as unreviewed.
+    #   review objects        a clean review creates none, so a ready PR looks
+    #                         unreviewed forever
+    #   summary comment       its updated_at refreshes on every push whether or
+    #                         not a review ran, so unreviewed code looks
+    #                         reviewed — measured nine seconds after a push
     #
-    # The summary comment it maintains is edited when a review completes, so
-    # its updated_at is the signal that survives a clean pass.
-    #
-    # --paginate because GitHub returns 30 comments per page and these PRs run
-    # well past that; --slurp yields one array per page, hence the flatten.
-    comment_pages = json.loads(gh("api", "--paginate", "--slurp",
-                                  f"repos/{REPO}/issues/{number}/comments"))
-    for c in [c for page in comment_pages for c in page]:
-        user = c.get("user") or {}
-        if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
-            continue
-        if "summarize by coderabbit" in c.get("body", ""):
-            reviewed = max(reviewed, ts(c.get("updated_at")))
-
-    # A clean review leaves no review object.
-    #
-    # CodeRabbit submits a formal review only when it has findings — across a
-    # dozen PRs there was never a zero-finding review object — so comparing
-    # review timestamps against commits blocks forever on exactly the PRs that
-    # are ready. Its own reply gives the game away: "Already reviewed the last
-    # commit", for a PR this check was reporting as unreviewed.
-    #
-    # The summary comment it maintains is edited when a review completes, so
-    # its updated_at is the signal that survives a clean pass.
-    comments = json.loads(gh("api", f"repos/{REPO}/issues/{number}/comments"))
-    for c in comments:
-        if "coderabbit" not in (c.get("user", {}).get("login", "")).lower():
-            continue
-        if "summarize by coderabbit" in c.get("body", ""):
-            reviewed = max(reviewed, ts(c.get("updated_at")))
+    # CodeRabbit will simply say, though, if asked. Its reply to a review
+    # request is the authoritative signal, so ask instead of guessing.
+    if reviewed < pushed and ask:
+        reviewed = pushed if _reviewed_by_asking(number) else reviewed
 
     owner, name = REPO.split("/")
     query = (
@@ -167,11 +198,11 @@ def _status(number: int) -> tuple[str, str]:
     return "ok", f"#{number} {title} — reviewed, clean"
 
 
-def report(numbers: list[int]) -> int:
+def report(numbers: list[int], ask: bool = False) -> int:
     """Returns the worst exit code across the PRs examined."""
     worst = EXIT_OK
     for n in numbers:
-        state, detail = status(n)
+        state, detail = status(n, ask)
         mark = {"ok": "OK  ", "pending": "WAIT", "findings": "READ", "unknown": "FAIL"}[state]
         print(f"  {mark} {detail}")
         # Unknown outranks findings outranks pending: the least understood
@@ -185,6 +216,10 @@ def main() -> int:
     ap.add_argument("prs", nargs="*", type=int)
     ap.add_argument("--wait", action="store_true",
                     help="poll until every PR is reviewed and clean")
+    ap.add_argument("--ask", action="store_true",
+                    help="ask CodeRabbit whether the head is reviewed. Posts a "
+                         "comment, so it is off by default: a status check "
+                         "should not change the thing it reports on.")
     ap.add_argument("--timeout", type=int, default=900)
     args = ap.parse_args()
 
@@ -196,7 +231,7 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     while True:
         print(f"— review status @ {datetime.now().strftime('%H:%M:%S')}")
-        code = report(numbers)
+        code = report(numbers, args.ask)
         if code == EXIT_OK:
             return EXIT_OK
         # Only pending resolves by waiting. Findings need a human, and unknown
