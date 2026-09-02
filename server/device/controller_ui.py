@@ -465,8 +465,23 @@ class DeviceControllerUI:
             if el is None and not progress_checked and blind_signature is not None:
                 progress_checked = True
                 signature = await _signature()
-                if signature:
-                    if blind_signature is not None and signature == blind_signature:
+                if signature is not None:
+                    # An unchanged screen after a *downward* swipe is not enough
+                    # to call it static: a list already scrolled to the bottom
+                    # cannot move further down while content above it is still
+                    # reachable. Probe the other direction before concluding,
+                    # otherwise targets above the viewport report not_found.
+                    if signature == blind_signature:
+                        await _swipe(y_near, y_far)
+                        reverse = await _signature()
+                        if reverse is not None and reverse != blind_signature:
+                            blind_signature = reverse  # it moves; carry on
+                            el = await _fetch()
+                            if el is not None and _visible(el):
+                                return el
+                            continue
+                        signature = blind_signature  # neither direction moved
+                    if signature == blind_signature:
                         # A swipe over scrollable content always moves geometry.
                         # Identical positions mean nothing scrolled, so the
                         # remaining budget would repeat this exact no-op.
@@ -1223,6 +1238,7 @@ class DeviceControllerUI:
 
         # Traditional path: fetch full UI tree
         filter_label = _effective_filter_label(label, label_contains, label_prefix)
+        cache_hits_before = self._cache_hits
         elements, resolved = await self.get_ui_elements(
             udid,
             filter_label=filter_label,
@@ -1230,6 +1246,7 @@ class DeviceControllerUI:
             filter_type=element_type,
             source_timeout=source_timeout,
         )
+        served_from_cache = self._cache_hits > cache_hits_before
 
         # Use shared search helper
         matches = find_element(
@@ -1249,9 +1266,13 @@ class DeviceControllerUI:
             and not self._is_android(resolved)
             and (label or identifier)
         ):
+            # The miss above is only authoritative if that read reached the
+            # device. With the cache live it can be served from an entry up to
+            # the TTL old, and an element that appeared in that window would be
+            # skipped entirely if the scroll loop also declined to look.
             scrolled = await self._ios_scroll_to_element(
                 resolved, label=label, identifier=identifier, max_swipes=10,
-                target_known_absent=True,
+                target_known_absent=not served_from_cache,
             )
             if scrolled is not None:
                 matches = [scrolled]

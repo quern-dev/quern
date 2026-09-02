@@ -36,7 +36,9 @@ def controller(monkeypatch):
         def __init__(self):
             self.swipes = 0
             self.offset = 0.0
-            self.scrolls = False   # does the screen move when swiped?
+            self.scrolls = False        # does the screen move when swiped?
+            self.only_upward = False    # already at the bottom: only a reverse
+                                        # swipe reveals anything
 
         async def _get_screen_dimensions(self, _udid):
             return {"width": 393, "height": 852}
@@ -50,9 +52,13 @@ def controller(monkeypatch):
         def _ui_backend(self, _udid):
             backend = MagicMock()
 
-            async def swipe(*_a, **_k):
+            async def swipe(_udid, _x1, y1, _x2, y2, *_a, **_k):
                 self.swipes += 1
-                if self.scrolls:
+                reverse = y2 > y1        # near -> far reveals content above
+                if self.only_upward:
+                    if reverse:
+                        self.offset += 50.0
+                elif self.scrolls:
                     self.offset -= 50.0   # content moves under the finger
             backend.swipe = AsyncMock(side_effect=swipe)
 
@@ -113,3 +119,22 @@ async def test_progress_checks_are_bounded(controller):
     run on every iteration of a long, legitimately scrolling sweep."""
     from server.device.controller_ui import DeviceControllerUI
     assert DeviceControllerUI._BLIND_PROGRESS_CHECKS <= 5
+
+
+async def test_a_list_at_the_bottom_is_not_mistaken_for_a_static_screen(controller):
+    """The false-abort the reverse probe exists to prevent.
+
+    A container already scrolled to the end cannot move further in the sweep's
+    first direction, so one downward probe looks exactly like a screen with
+    nothing scrollable. Content above it is still reachable, and calling it
+    static there makes tap_element report not_found for targets the user can
+    plainly see by swiping up.
+    """
+    controller.only_upward = True
+    found = await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=10,
+    )
+    assert found is None
+    assert controller.swipes > 3, (
+        f"gave up after {controller.swipes} swipes; the reverse direction still moved"
+    )
