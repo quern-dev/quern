@@ -461,10 +461,15 @@ class SimBridgeBackend:
 
         Misses (no element under the point) return None rather than raising.
         """
-        result = await self._mgr.send({
-            "cmd": "probe-point", "udid": udid,
-            "x": float(x), "y": float(y), "nested": False,
-        })
+        # Admitted like any other operation. Re-entrant, so the probe fan-out
+        # inside describe_all is unaffected — but controller_ui calls this
+        # directly on the hit-test fast path, and that route would otherwise
+        # bypass the bound entirely and queue on the lock until it times out.
+        async with self._mgr.admit():
+            result = await self._mgr.send({
+                "cmd": "probe-point", "udid": udid,
+                "x": float(x), "y": float(y), "nested": False,
+            })
         if not result.get("ok"):
             return None
         tree = result.get("tree")

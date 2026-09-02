@@ -199,6 +199,41 @@ async def test_the_budget_is_shared_across_devices_by_design(backend, mgr, monke
     await asyncio.gather(*inflight)
 
 
+async def test_describe_point_is_admitted_on_the_direct_path(mgr, monkeypatch):
+    """Regression for the CodeRabbit finding on #69.
+
+    controller_ui.py:464 calls describe_point directly on the hit-test fast
+    path, outside any admission scope. It reaches SimBridgeManager.send()
+    without going through SimBridgeBackend._send, so before this it bypassed
+    the bound entirely and queued on the lock until the 20s timeout.
+
+    Re-entrancy means the probe fan-out inside describe_all is unaffected;
+    this covers only the standalone route.
+    """
+    backend = SimBridgeBackend(mgr)
+    release = asyncio.Event()
+
+    async def blocked(_cmd):
+        await release.wait()
+        return {"ok": True, "tree": []}
+
+    monkeypatch.setattr(mgr, "send", blocked)
+
+    inflight = [
+        asyncio.create_task(backend.describe_point(f"SIM-{i}", 1.0, 2.0))
+        for i in range(MAX_CONCURRENT_OPERATIONS)
+    ]
+    await asyncio.sleep(0.05)
+    assert mgr._operations == MAX_CONCURRENT_OPERATIONS
+
+    with pytest.raises(SimBridgeSaturatedError):
+        await asyncio.wait_for(backend.describe_point("SIM-X", 1.0, 2.0), timeout=2)
+
+    release.set()
+    await asyncio.gather(*inflight)
+    assert mgr._operations == 0
+
+
 async def test_normal_sequential_traffic_is_unaffected(backend, mgr, monkeypatch):
     calls = []
 
