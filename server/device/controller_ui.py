@@ -280,12 +280,22 @@ class DeviceControllerUI:
         )
         return None
 
+    # The progress check runs exactly once, around the first blind swipe.
+    # Repeating it was measured breaking long scrolls: each check costs a tree
+    # read (~1.8s), and inserting that between swipes kills the fling momentum
+    # that successive swipes chain together. With checks on every iteration a
+    # row 60 down went from reliably found in 17s to intermittently not found
+    # at all in 90s. Checking once, before the sweep gets going, costs two reads
+    # and leaves the remaining swipes back to back.
+    _BLIND_PROGRESS_CHECKS = 1
+
     async def _ios_scroll_to_element(
         self,
         resolved: str,
         label: str | None,
         identifier: str | None,
         max_swipes: int,
+        target_known_absent: bool = False,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -342,6 +352,39 @@ class DeviceControllerUI:
             matches = find_element(els, label=label, identifier=identifier)
             return matches[0] if matches else None
 
+        async def _signature() -> tuple | None:
+            """Fingerprint the screen by hit-testing a few points.
+
+            A full tree read costs ~1.8s; a hit-test is ~85ms, so sampling
+            three points either side of one swipe costs about a tenth of a
+            single tree read. The first version of this check used describe_all
+            and cost more than the 30 swipes it was replacing — measured at no
+            net improvement.
+
+            Three points rather than one because a single sample can land on
+            fixed chrome: a nav bar or a pinned header never moves, whether or
+            not the content beneath it scrolls.
+            """
+            backend = self._ui_backend(resolved)
+            out: list[tuple[str, int]] = []
+            for fraction in (0.35, 0.55, 0.75):
+                try:
+                    hit = await backend.describe_point(
+                        resolved, mid_x, screen_height * fraction,
+                    )
+                except Exception:
+                    return None  # never let the progress check break the scroll
+                if not hit:
+                    out.append(("", -1))
+                    continue
+                frame = hit.get("frame") or {}
+                out.append((
+                    hit.get("AXUniqueId") or hit.get("identifier")
+                    or hit.get("AXLabel") or hit.get("label") or "",
+                    round(frame.get("y", -1)),
+                ))
+            return tuple(out)
+
         def _visible(el: UIElement) -> bool:
             # In view = the top edge clears the top chrome (not scrolled under
             # the nav/status bar) AND the tap point clears the home indicator.
@@ -357,13 +400,27 @@ class DeviceControllerUI:
             await self._ui_backend(resolved).swipe(resolved, mid_x, y1, mid_x, y2, 0.3)
             self._invalidate_ui_cache(resolved)
 
-        el = await _fetch()
+        # tap_element has just run the identical filtered query and found
+        # nothing, so repeating it here spends a full describe_all (~1.8s)
+        # re-learning what the caller already knows. scroll_to_element calls in
+        # cold with no prior read, so it still needs this check.
+        el = None if target_known_absent else await _fetch()
         if el is not None and _visible(el):
             return el
 
         last_cy: float | None = None
         stalls = 0
         blind_steps = 0
+        # Progress detection for the blind branch. Sampling costs a tree read,
+        # so it is bounded: a screen that cannot scroll reveals itself in the
+        # first couple of swipes, and after that the cost would be pure waste on
+        # a container that is scrolling perfectly well.
+        # Set on the first blind iteration and compared on the next, so a
+        # static screen costs two swipes rather than the full budget. Seeding it
+        # from the caller's tree was tried and dropped: tap_element's read is
+        # filtered to the missing target, so the list is always empty there.
+        blind_signature: tuple | None = None
+        progress_checked = False
         blind_down = max_swipes          # sweep down for the first budget...
         blind_total = max_swipes * 3     # ...then up for twice as long
 
@@ -396,8 +453,45 @@ class DeviceControllerUI:
                 blind_steps += 1
                 last_cy = None
                 stalls = 0
+                if blind_steps == 1 and not progress_checked:
+                    # Fingerprint BEFORE the first swipe, so one swipe is enough
+                    # to answer "does anything here move". Capturing it after
+                    # the first swipe instead costs a second swipe to reach the
+                    # same conclusion, and swipes are the visible part.
+                    blind_signature = await _signature()
 
             await _swipe(y1, y2)
+
+            if el is None and not progress_checked and blind_signature is not None:
+                progress_checked = True
+                signature = await _signature()
+                if signature is not None:
+                    # An unchanged screen after a *downward* swipe is not enough
+                    # to call it static: a list already scrolled to the bottom
+                    # cannot move further down while content above it is still
+                    # reachable. Probe the other direction before concluding,
+                    # otherwise targets above the viewport report not_found.
+                    if signature == blind_signature:
+                        await _swipe(y_near, y_far)
+                        reverse = await _signature()
+                        if reverse is not None and reverse != blind_signature:
+                            blind_signature = reverse  # it moves; carry on
+                            el = await _fetch()
+                            if el is not None and _visible(el):
+                                return el
+                            continue
+                        signature = blind_signature  # neither direction moved
+                    if signature == blind_signature:
+                        # A swipe over scrollable content always moves geometry.
+                        # Identical positions mean nothing scrolled, so the
+                        # remaining budget would repeat this exact no-op.
+                        logger.info(
+                            "ios scroll-to-element: screen unchanged after a swipe "
+                            "— nothing scrollable here, aborting after %d", blind_steps,
+                        )
+                        return None
+                    blind_signature = signature
+
             el = await _fetch()
             if el is not None and _visible(el):
                 # Settle and re-confirm: a swipe can leave the container
@@ -673,8 +767,14 @@ class DeviceControllerUI:
             # Parse full tree for caching
             elements = parse_elements(raw)
 
-            # Cache the full tree
-            self._ui_cache[resolved] = (elements, now)
+            # Stamped when the read COMPLETED, not when it started.
+            #
+            # `now` is taken at function entry, and describe_all takes ~1.8s on
+            # a simulator — so entries stamped with it were born 1.8s old and
+            # could never satisfy the 300ms TTL. The cache was effectively dead
+            # on this path: a not-found did two full reads back to back, the
+            # second of them for screen context, both ~1.8s.
+            self._ui_cache[resolved] = (elements, time.time())
 
             # Apply filters in memory if needed
             if has_filters:
@@ -1138,6 +1238,7 @@ class DeviceControllerUI:
 
         # Traditional path: fetch full UI tree
         filter_label = _effective_filter_label(label, label_contains, label_prefix)
+        cache_hits_before = self._cache_hits
         elements, resolved = await self.get_ui_elements(
             udid,
             filter_label=filter_label,
@@ -1145,6 +1246,7 @@ class DeviceControllerUI:
             filter_type=element_type,
             source_timeout=source_timeout,
         )
+        served_from_cache = self._cache_hits > cache_hits_before
 
         # Use shared search helper
         matches = find_element(
@@ -1164,8 +1266,13 @@ class DeviceControllerUI:
             and not self._is_android(resolved)
             and (label or identifier)
         ):
+            # The miss above is only authoritative if that read reached the
+            # device. With the cache live it can be served from an entry up to
+            # the TTL old, and an element that appeared in that window would be
+            # skipped entirely if the scroll loop also declined to look.
             scrolled = await self._ios_scroll_to_element(
                 resolved, label=label, identifier=identifier, max_swipes=10,
+                target_known_absent=not served_from_cache,
             )
             if scrolled is not None:
                 matches = [scrolled]

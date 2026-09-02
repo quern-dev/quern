@@ -1318,6 +1318,9 @@ class TestTapElementIosScroll:
         assert result["tapped"]["identifier"] == "_SignOut button"
         ctrl._ios_scroll_to_element.assert_awaited_once_with(
             "AAAA-1111", label=None, identifier="_SignOut button", max_swipes=10,
+            # tap_element has already established the element is absent, so the
+            # scroll loop skips its own opening lookup — a full tree read.
+            target_known_absent=True,
         )
         backend.tap.assert_awaited_once()
 
