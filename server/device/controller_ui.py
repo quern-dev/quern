@@ -752,8 +752,14 @@ class DeviceControllerUI:
             # Parse full tree for caching
             elements = parse_elements(raw)
 
-            # Cache the full tree
-            self._ui_cache[resolved] = (elements, now)
+            # Stamped when the read COMPLETED, not when it started.
+            #
+            # `now` is taken at function entry, and describe_all takes ~1.8s on
+            # a simulator — so entries stamped with it were born 1.8s old and
+            # could never satisfy the 300ms TTL. The cache was effectively dead
+            # on this path: a not-found did two full reads back to back, the
+            # second of them for screen context, both ~1.8s.
+            self._ui_cache[resolved] = (elements, time.time())
 
             # Apply filters in memory if needed
             if has_filters:
