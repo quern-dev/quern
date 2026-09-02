@@ -90,50 +90,72 @@ _FINISHED = "review finished"
 _TRIGGERED = "review triggered"
 
 
-def _ask_for_review(number: int) -> None:
-    gh("pr", "comment", str(number), "--repo", REPO, "--body", "@coderabbitai review")
+def _ask_for_review(number: int) -> str:
+    """Post the request and return GitHub's timestamp for it.
+
+    Posted through the API rather than `gh pr comment` so the created_at comes
+    back: anchoring the reply search on a local clock invites skew against
+    GitHub's, and the anchor decides which replies count.
+    """
+    created = json.loads(gh("api", f"repos/{REPO}/issues/{number}/comments",
+                            "-f", "body=@coderabbitai review"))
+    return created.get("created_at", "")
 
 
-def _latest_reply(number: int, after: float) -> str:
-    """The newest CodeRabbit reply to a review request, lowercased."""
-    pages = json.loads(gh("api", "--paginate", "--slurp",
-                          f"repos/{REPO}/issues/{number}/comments"))
-    newest, body = after, ""
+def _reply_after(number: int, since: str) -> str:
+    """CodeRabbit's newest reply to a review command, lowercased.
+
+    Only replies to the review command count. Its summary comment also contains
+    the word "action", so a looser match picks the summary up whenever one is
+    newer than the completion reply — and then this waits out the full timeout
+    while the answer sits one comment away.
+    """
+    args = ["api", "--paginate", "--slurp",
+            f"repos/{REPO}/issues/{number}/comments"]
+    if since:
+        args += ["-X", "GET", "-f", f"since={since}"]
+    pages = json.loads(gh(*args))
+
+    best, body = since, ""
     for c in [c for page in pages for c in page]:
         user = c.get("user") or {}
         if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
             continue
         text = c.get("body", "")
-        if "review command invocation" not in text.lower() and "action" not in text.lower():
-            continue
-        when = ts(c.get("created_at"))
-        if when > newest:
-            newest, body = when, text
+        if "review command invocation" not in text.lower():
+            continue  # a summary comment, not an answer to the request
+        when = c.get("created_at", "")
+        if when > best:
+            best, body = when, text
     return body.lower()
 
 
+# Two at most per merge attempt: one to trigger, one to confirm afterwards.
+# Re-asking on every poll would stack requests against a review that is simply
+# still running, and each one is a comment on the PR.
+_MAX_ASKS = 2
+
+
 def _reviewed_by_asking(number: int, timeout: float = 600.0) -> bool:
-    """Ask whether the head commit is reviewed, waiting if a review starts.
+    """Ask whether the head commit is reviewed, and wait if a review starts.
 
-    Returns True when CodeRabbit reports the current head as reviewed. A
-    request costs a comment, so this runs only when the cheaper signals already
-    say the PR looks stale.
+    Returns True once CodeRabbit reports the current head as reviewed.
     """
-    asked_at = time.time()
-    _ask_for_review(number)
-
+    since = _ask_for_review(number)
+    asks = 1
     deadline = time.monotonic() + timeout
+
     while time.monotonic() < deadline:
         time.sleep(20)
-        reply = _latest_reply(number, asked_at)
+        reply = _reply_after(number, since)
         if _ALREADY_REVIEWED in reply or _FINISHED in reply:
             return True
-        if _TRIGGERED in reply:
+        if _TRIGGERED in reply and asks < _MAX_ASKS:
             # A review is running. It leaves a review object only if it finds
-            # something, so ask again rather than watching for one.
-            time.sleep(40)
-            asked_at = time.time()
-            _ask_for_review(number)
+            # something, so the way to learn it finished is to ask again — once.
+            time.sleep(60)
+            since = _ask_for_review(number)
+            asks += 1
     return False
 
 
