@@ -16,6 +16,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PR="${1:?usage: merge-pr.sh <number> [--wait] [--force]}"; shift
+
+# Make sure the local view of the remote is current before anything compares
+# against it; the staleness check below is only as good as this.
+git fetch origin --quiet
 WAIT=""; FORCE=""
 for a in "$@"; do
   case "$a" in

@@ -173,8 +173,26 @@ def status(number: int, ask: bool = False) -> tuple[str, str]:
 
 
 def _status(number: int, ask: bool = False) -> tuple[str, str]:
-    raw = gh("pr", "view", str(number), "--repo", REPO, "--json", "title")
+    raw = gh("pr", "view", str(number), "--repo", REPO,
+             "--json", "title,headRefName,headRefOid")
     pr = json.loads(raw)
+
+    # GitHub does not register a push instantly, and this check tends to run
+    # right after one. Reading commits inside that window returns the *previous*
+    # head, whose review looks current — which merged an unreviewed commit six
+    # seconds after it was pushed. Comparing the API's head against the local
+    # ref makes the staleness visible instead of invisible.
+    head = pr.get("headRefOid") or ""
+    branch = pr.get("headRefName") or ""
+    if branch and head:
+        local = subprocess.run(["git", "rev-parse", f"origin/{branch}"],
+                               capture_output=True, text=True)
+        local_sha = local.stdout.strip()
+        if local.returncode == 0 and local_sha and local_sha != head:
+            raise ValueError(
+                f"the API still reports head {head[:8]} while origin/{branch} is "
+                f"{local_sha[:8]} — it has not caught up with the push"
+            )
 
     commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits"))
     dates = [c["committedDate"] for c in commits["commits"]]
