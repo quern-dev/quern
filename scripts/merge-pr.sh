@@ -7,9 +7,11 @@
 # risky moment is the merge, not the push -- so the check lives here, where
 # acting on stale data actually costs something.
 #
-#   scripts/merge-pr.sh 85            # refuses if the review is not current
-#   scripts/merge-pr.sh 85 --wait     # waits for the review, then merges
+#   scripts/merge-pr.sh 85            # asks for a review if stale, waits, merges
 #   scripts/merge-pr.sh 85 --force    # merge anyway, deliberately
+#
+# --wait is implied when a review has to be requested; pass it explicitly to
+# wait on a review someone else already triggered.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,7 +26,20 @@ done
 
 if [ -n "$FORCE" ]; then
   echo "Skipping the review gate deliberately (--force)."
-elif ! python3 scripts/pr-review-status.py "$PR" $WAIT; then
+else
+  # Ask for a review if this PR has moved since its last one. Automatic
+  # incremental reviews are off (see .coderabbit.yaml): review runs are capped
+  # per hour, and fixing findings means pushing, so reviewing every push spends
+  # the budget on intermediate states nobody merges. Requesting it here spends
+  # it on the commit that actually ships.
+  if ! python3 scripts/pr-review-status.py "$PR" >/dev/null 2>&1; then
+    echo "Requesting a review of #$PR..."
+    gh pr comment "$PR" --repo jerimiah797/quern --body "@coderabbitai review" >/dev/null
+    WAIT="--wait"
+  fi
+fi
+
+if [ -z "$FORCE" ] && ! python3 scripts/pr-review-status.py "$PR" $WAIT; then
   echo
   echo "Not merging #$PR: its review is not current, or it has unresolved findings."
   echo "  --wait   block until the review lands"
