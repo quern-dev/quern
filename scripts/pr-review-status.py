@@ -37,6 +37,14 @@ REPO = "jerimiah797/quern"
 # merge-pr.sh needs that: requesting a review helps a pending PR and is pure
 # waste for one with unresolved findings, which was spending capped review runs
 # on PRs a review could not help.
+# The exact bot, not a substring. A login merely *containing* "coderabbit" is
+# something anyone can register, and this marker advances the reviewed
+# timestamp -- so a lookalike commenter could make an unreviewed PR look
+# reviewed and walk it through the gate. The numeric id is the stable identity;
+# the login is checked too so a mismatch is obvious in a diff.
+CODERABBIT_ID = 136622811
+CODERABBIT_LOGIN = "coderabbitai[bot]"
+
 EXIT_OK = 0
 EXIT_PENDING = 2
 EXIT_FINDINGS = 3
@@ -96,8 +104,33 @@ def _status(number: int) -> tuple[str, str]:
         raise ValueError("the PR reported no commits")
     pushed = max(ts(d) for d in dates)
 
-    reviews = json.loads(gh("api", f"repos/{REPO}/pulls/{number}/reviews"))
-    reviewed = max((ts(r.get("submitted_at")) for r in reviews), default=0.0)
+    review_pages = json.loads(gh("api", "--paginate", "--slurp",
+                                 f"repos/{REPO}/pulls/{number}/reviews"))
+    reviews = [r for page in review_pages for r in page]
+    reviewed = max((ts(r.get("submitted_at")) for r in reviews
+                    if (r.get("user") or {}).get("id") == CODERABBIT_ID), default=0.0)
+
+    # A clean review leaves no review object.
+    #
+    # CodeRabbit submits a formal review only when it has findings — across a
+    # dozen PRs there was never a zero-finding review object — so comparing
+    # review timestamps against commits blocks forever on exactly the PRs that
+    # are ready. Its own reply gives the game away: "Already reviewed the last
+    # commit", for a PR this check was reporting as unreviewed.
+    #
+    # The summary comment it maintains is edited when a review completes, so
+    # its updated_at is the signal that survives a clean pass.
+    #
+    # --paginate because GitHub returns 30 comments per page and these PRs run
+    # well past that; --slurp yields one array per page, hence the flatten.
+    comment_pages = json.loads(gh("api", "--paginate", "--slurp",
+                                  f"repos/{REPO}/issues/{number}/comments"))
+    for c in [c for page in comment_pages for c in page]:
+        user = c.get("user") or {}
+        if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
+            continue
+        if "summarize by coderabbit" in c.get("body", ""):
+            reviewed = max(reviewed, ts(c.get("updated_at")))
 
     # A clean review leaves no review object.
     #
