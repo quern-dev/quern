@@ -16,6 +16,7 @@ import json
 import logging
 import shutil
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -252,7 +253,7 @@ class SimBridgeManager:
             self._pending_response.set_result(msg)
 
     @asynccontextmanager
-    async def admit(self):
+    async def admit(self) -> AsyncGenerator[None, None]:
         """Admission gate for one logical operation.
 
         Re-entrant by design: an operation that fans out into further commands
