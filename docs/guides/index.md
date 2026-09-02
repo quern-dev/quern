@@ -11,6 +11,7 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 - [Installation & Setup](getting-started.md) — Get Quern running and connected to your AI agent
 - [Device Pool & Resolution](device-pool.md) — How Quern manages devices, the iOS 17+ complexity it hides, and what you should know
 - [Build & Install](build-and-install.md) — Building and deploying to multiple devices at once
+- [Update Channels](update-channels.md) — Staying on stable, or opting into beta to see releases early
 
 ---
 
