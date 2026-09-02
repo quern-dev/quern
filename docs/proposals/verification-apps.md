@@ -85,15 +85,17 @@ different tooling and should not be folded into this.
 
 Ordered by where the evidence says the holes are, not by what is easiest.
 
-1. **Bring LogTester into the repo** as `tools/log-probe/`. It is unversioned,
-   unreferenced by name, and already underpins a production regex. This is the
-   only item that is strictly a risk fix rather than an improvement, and it is
-   cheap.
+1. **Bring LogTester into the repo**, as a Logs tab and a Diagnostics tab inside
+   QuernProbe rather than as a second app. It is currently unversioned and
+   already underpins a production regex, so getting it into git is the one item
+   here that is a risk fix rather than an improvement. Emitters idle until
+   started; crash triggers behind an explicit control.
 
-2. **An Android probe app.** Every bug in this cycle that a fixture would have
-   caught was on Android, and there is no Android fixture at all. Same contract
-   as QuernProbe — stable identifiers, deterministic, offline — built with
-   Gradle rather than bare `swiftc`.
+2. **An Android probe app**, built in the combined shape from the start — UI
+   surfaces, logging surfaces and diagnostics in one artifact. Every bug in this
+   cycle that a fixture would have caught was on Android, and there is no Android
+   fixture at all. Same contract as QuernProbe — stable identifiers,
+   deterministic, offline — built with Gradle rather than bare `swiftc`.
 
 3. **A deep-link surface on both probes**, including a deliberately unregistered
    scheme. That single case is #78, and it costs almost nothing to add.
@@ -116,10 +118,31 @@ Ordered by where the evidence says the holes are, not by what is easiest.
   better for the docs and the site. **Recommendation: regression detection.** The
   fixtures already lean that way, and demo material can come from Metatext.
 
-- **One app per platform, or one per concern?** QuernProbe and LogTester are
-  already split by concern, and that split has worked — a logging fixture wants
-  to emit continuously, a UI fixture wants to sit still. **Recommendation: keep
-  the split**, and mirror it on Android rather than merging into one app.
+- **One app per platform, or one per concern?** **Recommendation: one app per
+  platform.** Merge LogTester into QuernProbe as additional tabs, and build the
+  Android probe in that combined shape from the start.
+
+  An earlier draft of this proposal argued the opposite — that a logging fixture
+  wants to emit continuously while a UI fixture wants to sit still, so the
+  concerns should stay separate. That does not survive examination. Continuous
+  emission is a *mode*, not an app boundary: a Logs tab whose emitters are idle
+  until started gives the same isolation, and gives it under the test's control
+  rather than the app's. Wanting known log volume during a log-capture test is an
+  argument for a start/stop switch, not for a second app.
+
+  The cost of the split is the real problem. Two apps means two builds, two
+  installs, two launches, two bundle IDs and two harnesses — and operational cost
+  is precisely why the self-test does not run automatically today. LogTester
+  never got a harness at all. One app is one CI job.
+
+  The one genuine complication is the crash button, since `fatalError()`
+  terminates the process and takes any in-progress UI test with it. That is
+  solved by ordering rather than separation: keep crash triggers behind an
+  explicit control, run them in their own phase, and relaunch afterwards. The
+  self-test already has to handle app lifecycle.
+
+  UIKit versus SwiftUI is not a barrier — `UIHostingController` hosts the
+  existing SwiftUI view as a tab unchanged.
 
 - **Does the Android probe need a physical device?** The emulator covers intent
   resolution and UI automation. It does not cover everything a real handset does.
