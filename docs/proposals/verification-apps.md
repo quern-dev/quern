@@ -144,6 +144,29 @@ Ordered by where the evidence says the holes are, not by what is easiest.
   UIKit versus SwiftUI is not a barrier — `UIHostingController` hosts the
   existing SwiftUI view as a tab unchanged.
 
+- **Same repo, or a repo of their own?** **Decided: same repo**, until something
+  forces the question. Repo weight is not the reason — `tools/` is 276K, an
+  Android Gradle project adds a couple hundred more, and everything heavy (SDK,
+  caches, APKs) is gitignored. `pyproject.toml` packages only `server*`, so
+  fixtures never reach the pip package either way.
+
+  The reason is atomicity. `selftest.py` asserts against Quern's REST API
+  responses, so a change to a tool and the change to its fixture assertion have
+  to land together. Across two repos they cannot, and the gap between them is
+  where drift lives — the same shape as the external-version problem in #67.
+
+  And the cautionary example is already in hand: LogTester drifted, went
+  unversioned and quietly became load-bearing for `device_log.py` precisely
+  because it lived somewhere else. A separate repo is far better than a loose
+  directory, but it is still elsewhere, and the person editing that regex still
+  would not trip over the fixture that defines it.
+
+  **What would justify revisiting:** if the probes become useful on their own —
+  something people clone to try Quern against, or to exercise other automation
+  tools — then they are a product rather than a fixture, and they should have
+  their own repo, README and release cadence. Nothing about starting in-repo
+  forecloses that.
+
 - **Does the Android probe need a physical device?** The emulator covers intent
   resolution and UI automation. It does not cover everything a real handset does.
   Out of scope for a first pass, but worth knowing it is a known gap rather than
