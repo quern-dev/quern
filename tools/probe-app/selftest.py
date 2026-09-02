@@ -269,6 +269,37 @@ def main() -> int:
     else:
         results.append(False)
 
+    # -- Cold launch: the app is terminated, and the URL starts it --
+    # This is the path the guide describes and nothing exercised. It is also
+    # where the lifecycles genuinely differ, so a test that only ever opens
+    # links into a running app would not have caught either behaviour.
+    print("cold launch:")
+    try:
+        call("POST", "/device/app/terminate", udid=udid, bundle_id=bundle_id)
+    except requests.HTTPError:
+        pass
+    time.sleep(2.0)
+    open_url(udid, f"{scheme}://open/cold/1")
+    time.sleep(3.0)
+    goto(udid, "Links", marker="link_count")
+    cold_count = element_text(udid, "link_count")
+    cold_route = element_text(udid, "link_route")
+
+    if args.scene:
+        # connectionOptions.urlContexts, delivered once.
+        results.append(check("cold launch reaches the app", cold_count == "1",
+                             f"link_count={cold_count}"))
+        results.append(check("cold launch routed via scene:willConnectTo",
+                             cold_route == "scene:willConnectTo", f"got {cold_route!r}"))
+    else:
+        # didFinishLaunching sees it in launchOptions, then open(_:) is called
+        # with the same URL. An app that handles both without deduplicating
+        # runs its routing twice per cold launch.
+        results.append(check("cold launch delivers the URL twice", cold_count == "2",
+                             f"link_count={cold_count} (expected 2)"))
+        results.append(check("the later delivery is appdelegate:open",
+                             cold_route == "appdelegate:open", f"got {cold_route!r}"))
+
     # -- Logs and web surfaces present --
     print("logs and web:")
     goto(udid, "Logs", marker="log_status")

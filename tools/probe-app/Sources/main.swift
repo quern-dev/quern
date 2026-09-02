@@ -57,9 +57,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         window.makeKeyAndVisible()
         self.window = window
 
-        // Cold launch on the app-delegate lifecycle. The URL arrives here
-        // rather than through application(_:open:options:), which only fires
-        // for an already-running app.
+        // Cold launch on the app-delegate lifecycle. The URL arrives here in
+        // launchOptions — and then application(_:open:options:) is called with
+        // the same URL, so a cold launch delivers it TWICE. Measured: one
+        // simctl openurl at a terminated app leaves link_count at 2.
+        //
+        // An earlier version of this comment said open(_:) "only fires for an
+        // already-running app", which is the same thing the guide said until
+        // this fixture disproved it. Both callbacks are kept precisely so the
+        // double delivery stays visible rather than being deduplicated away.
         if let url = launchOptions?[.url] as? URL {
             DeepLinkStore.shared.record(url, via: "appdelegate:launchOptions")
         }
