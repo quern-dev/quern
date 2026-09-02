@@ -247,3 +247,90 @@ async def test_normal_sequential_traffic_is_unaffected(backend, mgr, monkeypatch
 
     assert len(calls) == MAX_CONCURRENT_OPERATIONS * 4
     assert mgr._operations == 0
+
+
+# --------------------------------------------------------------------------
+# Response mismatch after a timeout (#69 review, verified empirically)
+# --------------------------------------------------------------------------
+
+
+class _FakeStdin:
+    def write(self, _b): pass
+    async def drain(self): pass
+
+
+class _FakeProc:
+    returncode = None
+    stdin = _FakeStdin()
+
+
+async def test_a_late_response_cannot_be_matched_to_the_next_command(mgr, monkeypatch):
+    """The failure this guards against is silent, not an error.
+
+    _dispatch resolves whatever future is current, and _send_locked reassigns
+    that future per command. Before the fix: command A times out, the lock is
+    released, command B sets its own future, A's response finally arrives, and
+    the reader hands A's payload to B. B returns a well-formed response for a
+    request it never made — a UI tree for a screen the caller never asked about.
+
+    Killing the subprocess on timeout is the only sound remedy while the wire
+    protocol carries no request ids.
+    """
+    mgr._process = _FakeProc()
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(mgr, "_ensure_process", noop)
+
+    killed = []
+
+    async def fake_kill():
+        killed.append(True)
+        mgr._process = None
+
+    monkeypatch.setattr(mgr, "_kill_process", fake_kill)
+    monkeypatch.setattr(mgr, "_cleanup_state", lambda: None)
+
+    # Shrink the 30s response wait so the test is fast.
+    real_wait_for = asyncio.wait_for
+
+    async def short_wait(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout=0.15 if timeout == 30.0 else timeout)
+
+    monkeypatch.setattr("server.device.sim_bridge.asyncio.wait_for", short_wait)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        await mgr.send({"cmd": "describe-ui", "udid": "SIM-A"})
+
+    assert killed, "the subprocess must be killed before the lock is released"
+    assert mgr._pending_response is None, "a late response must have nothing to resolve"
+
+
+async def test_the_timeout_message_warns_against_auto_retry(mgr, monkeypatch):
+    """The command was already written, so the outcome is ambiguous. A caller
+    that cannot tell 'never sent' from 'sent, no reply' will retry and may
+    double-act on a state-changing command."""
+    mgr._process = _FakeProc()
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(mgr, "_ensure_process", noop)
+    monkeypatch.setattr(mgr, "_kill_process", noop)
+    monkeypatch.setattr(mgr, "_cleanup_state", lambda: None)
+
+    real_wait_for = asyncio.wait_for
+
+    async def short_wait(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout=0.15 if timeout == 30.0 else timeout)
+
+    monkeypatch.setattr("server.device.sim_bridge.asyncio.wait_for", short_wait)
+
+    with pytest.raises(RuntimeError) as exc:
+        await mgr.send({"cmd": "tap", "udid": "SIM-A"})
+
+    msg = str(exc.value)
+    assert "already sent" in msg
+    assert "must not be retried automatically" in msg
+    assert "restarted" in msg

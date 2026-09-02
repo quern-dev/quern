@@ -318,8 +318,30 @@ class SimBridgeManager:
 
         try:
             result = await asyncio.wait_for(self._pending_response, timeout=30.0)
-        except TimeoutError:
-            raise RuntimeError(f"sim-bridge command timed out: {cmd.get('cmd')}")
+        except (TimeoutError, asyncio.CancelledError):
+            # The command was already written, so a response may still be in
+            # flight. There is no correlation between request and response --
+            # _dispatch resolves whatever future is current -- so if we simply
+            # released the lock, the next command would set its own future and
+            # then receive THIS command's payload. Not an error: a well-formed
+            # response for a different request, which the caller cannot detect.
+            #
+            # Killing the subprocess is the only sound remedy while the protocol
+            # carries no request ids: it guarantees the stale response can never
+            # arrive. _ensure_process respawns lazily on the next command. The
+            # cost is bounded because this path requires 30s of silence, which
+            # already means something is wrong.
+            self._pending_response = None
+            await self._kill_process()
+            self._cleanup_state()
+            raise RuntimeError(
+                f"sim-bridge command timed out: {cmd.get('cmd')}. The command was "
+                f"already sent, so it may have executed — this outcome is ambiguous "
+                f"and must not be retried automatically for a state-changing command "
+                f"(tap, type, swipe, button, home, lock, siri, volume*, applepay). "
+                f"The subprocess was restarted to prevent the late response being "
+                f"matched to the next command."
+            ) from None
 
         return result
 
