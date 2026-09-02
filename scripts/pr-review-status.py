@@ -33,8 +33,21 @@ from datetime import datetime
 REPO = "jerimiah797/quern"
 
 
+class GhError(RuntimeError):
+    """A gh invocation failed. Raised rather than returned, because the caller
+    treating an empty result as data is precisely how this gate failed open:
+    a failed query produced no commits, no commits produced a push time of 0,
+    and any prior review then looked newer than the latest push."""
+
+
 def gh(*args: str) -> str:
-    return subprocess.run(["gh", *args], capture_output=True, text=True).stdout.strip()
+    try:
+        result = subprocess.run(["gh", *args], capture_output=True, text=True)
+    except OSError as exc:  # gh not installed, not on PATH, not executable
+        raise GhError(f"could not run gh: {exc}") from exc
+    if result.returncode != 0:
+        raise GhError(f"gh {' '.join(args[:3])}: {result.stderr.strip()[:160]}")
+    return result.stdout.strip()
 
 
 def ts(value: str | None) -> float:
@@ -49,17 +62,29 @@ def open_prs() -> list[int]:
 
 
 def status(number: int) -> tuple[str, str]:
-    """Returns (state, detail) where state is ok | pending | findings | unknown."""
-    raw = gh("pr", "view", str(number), "--repo", REPO,
-             "--json", "headRefOid,title,statusCheckRollup")
-    if not raw:
-        return "unknown", "could not read the PR"
+    """Returns (state, detail) where state is ok | pending | findings | unknown.
+
+    Every failure path returns "unknown", never "ok". A gate that cannot see
+    the data must refuse, not approve — rate limiting and network trouble are
+    exactly when it matters, and both are common here.
+    """
+    try:
+        return _status(number)
+    except (GhError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        return "unknown", f"#{number} — could not determine review state: {exc}"
+
+
+def _status(number: int) -> tuple[str, str]:
+    raw = gh("pr", "view", str(number), "--repo", REPO, "--json", "title")
     pr = json.loads(raw)
 
-    commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits") or "{}")
-    pushed = max((ts(c["committedDate"]) for c in commits.get("commits", [])), default=0.0)
+    commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits"))
+    dates = [c["committedDate"] for c in commits["commits"]]
+    if not dates:
+        raise ValueError("the PR reported no commits")
+    pushed = max(ts(d) for d in dates)
 
-    reviews = json.loads(gh("api", f"repos/{REPO}/pulls/{number}/reviews") or "[]")
+    reviews = json.loads(gh("api", f"repos/{REPO}/pulls/{number}/reviews"))
     reviewed = max((ts(r.get("submitted_at")) for r in reviews), default=0.0)
 
     owner, name = REPO.split("/")
@@ -68,9 +93,8 @@ def status(number: int) -> tuple[str, str]:
         f"{{pullRequest(number:{number}){{"
         "reviewThreads(last:60){nodes{isResolved isOutdated}}}}}"
     )
-    threads = json.loads(gh("api", "graphql", "-f", f"query={query}") or "{}")
-    nodes = (threads.get("data", {}).get("repository", {}).get("pullRequest", {})
-             .get("reviewThreads", {}).get("nodes", []))
+    threads = json.loads(gh("api", "graphql", "-f", f"query={query}"))
+    nodes = threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
     unresolved = sum(1 for n in nodes if not n["isResolved"] and not n["isOutdated"])
 
     title = pr.get("title", "")[:44]
@@ -85,7 +109,7 @@ def report(numbers: list[int]) -> bool:
     all_ok = True
     for n in numbers:
         state, detail = status(n)
-        mark = {"ok": "OK  ", "pending": "WAIT", "findings": "READ", "unknown": "??  "}[state]
+        mark = {"ok": "OK  ", "pending": "WAIT", "findings": "READ", "unknown": "FAIL"}[state]
         print(f"  {mark} {detail}")
         all_ok &= state == "ok"
     return all_ok
