@@ -920,10 +920,12 @@ class UIElement(BaseModel):
     verbatim before the per-platform normalizer collapses them. Useful for
     debugging the normalizer itself — e.g., checking whether an Android node
     has selected="true" without reaching for adb shell uiautomator dump.
-    Populated only for Android (uiautomator2 XML attributes); idb output on
-    iOS is already in our canonical shape, so this is None there. Stripped
-    from API responses unless include_raw=true is passed, to keep payloads
-    small in the common case."""
+    Populated for Android (uiautomator2 XML attributes), and on iOS for web
+    elements read by get_web_content, which carry source="web-inspector" plus
+    their DOM identity (dom_id, tag, href, page_id) -- none of which the native
+    accessibility tree can supply. Otherwise None: idb output on iOS is already
+    in our canonical shape. Stripped from API responses unless include_raw=true
+    is passed, to keep payloads small in the common case."""
 
 
 # ---------------------------------------------------------------------------
