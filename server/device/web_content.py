@@ -22,6 +22,9 @@ sits at a different origin.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
+
+from server.device.probing import DescribePointFn, frame_key
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             "tag": element.get("tag"),
             "href": element.get("href"),
             "interactive": bool(element.get("interactive")),
+            "value": element.get("value"),
             "page_id": page_id,
         })
     return projected
@@ -107,7 +111,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
 
 # Enough probes to cross a screen at roughly one per text block, and few enough
 # that a screen with no reachable web content costs well under a second.
-MAX_ANCHOR_PROBES = 10
+MAX_ANCHOR_PROBES = 26
 
 # A per-page ceiling, so one page that is not on screen cannot spend the whole
 # budget before a page that is has been tried at all.
@@ -116,6 +120,22 @@ MAX_PROBES_PER_PAGE = 4
 # A truncated accessibility label has to be this long before it is allowed to
 # identify a DOM node by prefix alone. Short prefixes match far too much.
 MIN_PREFIX_MATCH = 12
+
+# Probes spent looking for an origin that geometry could not suggest. Only paid
+# when the cheap path has already failed.
+MAX_FALLBACK_PROBES = 14
+
+# Independent probes that must agree before a probed offset is believed.
+MIN_PROBE_AGREEMENT = 2
+
+# Accessibility frames are rounded, so agreement is approximate.
+ANCHOR_TOLERANCE_PT = 2.0
+
+# Fractions of the screen width to sweep. Centre first because body text lives
+# there, then the gutters: a short left-aligned heading has an accessibility
+# frame only as wide as its glyphs, so a centre probe falls outside it and is
+# correctly rejected.
+ANCHOR_COLUMNS = (0.5, 0.25, 0.75)
 
 # Two agreeing probes is the point of diminishing returns: the first establishes
 # the offset and the second rules out a coincidental text match.
@@ -197,7 +217,7 @@ def anchor_verification_targets(contents: dict, limit: int = 3) -> list[dict]:
 
 async def confirm_anchor(
     udid: str,
-    describe_point,
+    describe_point: DescribePointFn,
     contents: dict,
     candidates: list[Anchor],
     *,
@@ -246,6 +266,26 @@ async def confirm_anchor(
     return None, probes
 
 
+class InspectorLike(Protocol):
+    """What collection needs from a Web Inspector connection.
+
+    A Protocol rather than the concrete class, because every test here drives
+    this with a fake -- the real one needs a booted simulator and a live socket.
+    """
+
+    async def connected_applications(self) -> list[dict]: ...
+
+    async def pages(self, application_id: str) -> list[dict]: ...
+
+    async def page_contents(self, application_id: str, page_id: int) -> dict | None: ...
+
+
+class AttributeUdidFn(Protocol):
+    """Maps an inspector application id to the simulator hosting it."""
+
+    async def __call__(self, application_id: str) -> str | None: ...
+
+
 # The Web Inspector reports WebKit's own helper processes alongside real apps.
 # They are never what a caller means by "the app".
 _HELPER_PREFIXES = ("process-", "com.apple.WebKit")
@@ -256,15 +296,128 @@ def _is_app(application: dict) -> bool:
     return bool(bundle) and not bundle.startswith(_HELPER_PREFIXES)
 
 
+def _unique_texts(dom: list[dict]) -> dict[str, dict]:
+    """DOM elements indexed by text, dropping any text that appears twice.
+
+    An ambiguous label identifies nothing: two elements sharing text sit at
+    different page rects, so an offset derived from one may be wrong by the
+    distance between them.
+    """
+    seen: dict[str, dict | None] = {}
+    for element in dom:
+        key = normalise(element.get("text"))
+        if not key:
+            continue
+        seen[key] = None if key in seen else element
+    return {text: el for text, el in seen.items() if el is not None}
+
+
+async def anchor_by_probe(
+    udid: str,
+    describe_point: DescribePointFn,
+    contents: dict,
+    screen: dict,
+    *,
+    max_probes: int = MAX_FALLBACK_PROBES,
+    min_agreement: int = MIN_PROBE_AGREEMENT,
+) -> tuple[Anchor | None, int]:
+    """Find an origin by sweeping, when geometry cannot suggest one.
+
+    An out-of-process web view carries its own chrome -- an address bar above, a
+    toolbar below -- and none of it appears in the native tree, so neither
+    "below the top chrome" nor "as tall as its viewport, anchored to the foot of
+    the screen" describes where the page starts. Measured on GoToSocial's
+    settings page inside SFSafariViewController: a 402x685 viewport on a 402x874
+    screen sits at y=106, while bottom-anchoring predicts 189.
+
+    Matching here is **exact only**. An earlier design accepted containment and
+    paired a logo labelled "Mastodon" with a paragraph beginning "Mastodon is
+    not a single website...", anchoring the page 215pt from where it sat. Two
+    independent probes must also agree, so a single freak match cannot decide
+    the offset on its own.
+    """
+    index = _unique_texts(contents.get("elements") or [])
+    if not index:
+        return None, 0
+
+    left, top = screen.get("x", 0), screen.get("y", 0)
+    width, height = screen.get("width", 0), screen.get("height", 0)
+    if width <= 0 or height <= 0 or max_probes < 1:
+        return None, 0
+
+    step = height / (max_probes + 1)
+    # Offset plus the frame it came from. Two sweep rows can land inside one
+    # tall element and yield identical offsets; counting those as two agreeing
+    # probes would be counting the same evidence twice, which is exactly what
+    # the agreement rule exists to prevent.
+    candidates: list[tuple[tuple[float, float], tuple[int, int, int, int]]] = []
+    probes = 0
+    for i in range(max_probes):
+        x = left + width * ANCHOR_COLUMNS[i % len(ANCHOR_COLUMNS)]
+        y = top + step * (i + 1)
+        hit = await describe_point(udid, x, y)
+        probes += 1
+        if not hit or not _contains(hit.get("frame"), x, y):
+            continue
+        element = index.get(normalise(hit.get("AXLabel")))
+        if element is None:
+            continue
+        frame = hit["frame"]
+        key = frame_key(frame)
+        if key is None:
+            continue
+        candidates.append(((
+            float(frame.get("x", 0)) - float(element.get("x", 0)),
+            float(frame.get("y", 0)) - float(element.get("y", 0)),
+        ), key))
+        best = _largest_cluster(candidates)
+        if len({key for _, key in best}) >= min_agreement:
+            offsets = [offset for offset, _ in best]
+            return Anchor(
+                dx=sum(o[0] for o in offsets) / len(offsets),
+                dy=sum(o[1] for o in offsets) / len(offsets),
+                matched=len({key for _, key in best}),
+            ), probes
+    return None, probes
+
+
+def _largest_cluster(
+    candidates: list[tuple[tuple[float, float], tuple[int, int, int, int]]],
+    tolerance: float = ANCHOR_TOLERANCE_PT,
+) -> list[tuple[tuple[float, float], tuple[int, int, int, int]]]:
+    """The biggest group of mutually-agreeing offsets, ranked by distinct hits.
+
+    Averaging every candidate would land the page between the truth and any
+    outlier -- wrong for every element rather than wrong for one. Ranking by
+    distinct source frames rather than sample count keeps a single tall element
+    sampled twice from outvoting two genuinely different ones.
+    """
+    best: list[tuple[tuple[float, float], tuple[int, int, int, int]]] = []
+    for (pivot, _) in candidates:
+        group = [
+            (offset, key) for offset, key in candidates
+            if abs(offset[0] - pivot[0]) <= tolerance
+            and abs(offset[1] - pivot[1]) <= tolerance
+        ]
+        if len({k for _, k in group}) > len({k for _, k in best}):
+            best = group
+    return best
+
+
+def _contains(frame: dict | None, x: float, y: float) -> bool:
+    from server.device.web_probing import hit_contains
+    return hit_contains(frame, x, y)
+
+
 async def collect_web_content(
     udid: str,
     bundle_id: str | None,
-    describe_point,
-    inspector,
+    describe_point: DescribePointFn,
+    inspector: InspectorLike,
     native: list[dict],
     *,
     max_probes: int = MAX_ANCHOR_PROBES,
-    attribute_udid=None,
+    attribute_udid: AttributeUdidFn | None = None,
     require_device_match: bool = False,
 ) -> dict:
     """Read every inspectable page on screen and place it in screen coordinates.
@@ -368,8 +521,13 @@ async def collect_web_content(
 
     # Each page is anchored on its own: two web views on one screen have
     # different origins, and an offset confirmed for one says nothing about
-    # the other. A page whose content is scrolled out of view simply fails to
-    # confirm and is reported rather than guessed at.
+    # the other.
+    #
+    # Two phases, because the passes cost very differently. Every page gets the
+    # cheap geometry pass first; only if none of them anchored does any page pay
+    # for a sweep. Interleaving them would let a page that is not on screen
+    # spend the whole budget sweeping before a page that is has been looked at
+    # at all -- the same starvation the per-page cap exists to prevent.
     screen = app_frame(native) or {"x": 0, "y": 0, "width": 0, "height": 0}
     budget = max_probes
     for page, page_contents in contents:
@@ -386,6 +544,25 @@ async def collect_web_content(
             continue
         result["anchored"] = True
         result["elements"].extend(project(page_contents, anchor, page_id=page["page_id"]))
+
+    if not result["anchored"]:
+        # Geometry suggested nothing that held. Sweep for an origin instead --
+        # the only route for a web view whose chrome the native tree cannot see,
+        # which is every out-of-process one.
+        for page, page_contents in contents:
+            if budget <= 0:
+                break
+            anchor, extra = await anchor_by_probe(
+                udid, describe_point, page_contents, screen,
+                max_probes=min(budget, MAX_FALLBACK_PROBES),
+            )
+            result["probes"] += extra
+            budget -= extra
+            if anchor is None:
+                continue
+            result["anchored"] = True
+            result["elements"].extend(
+                project(page_contents, anchor, page_id=page["page_id"]))
 
     if not result["anchored"]:
         result["reason"] = (

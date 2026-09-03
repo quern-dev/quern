@@ -410,3 +410,91 @@ async def test_a_matching_attribution_proceeds():
     )
     assert result["device_verified"] is True
     assert [e["AXLabel"] for e in result["elements"]] == ["Servers"]
+
+
+# ------------------------------------------------- sweeping for an origin
+
+async def test_a_swept_origin_needs_two_probes_to_agree():
+    """One match is not evidence. A page and a native screen can share a string
+    by coincidence, and the offset derived from that pairing is arbitrary --
+    which is how the deleted search-based design put a page 215pt out."""
+    contents = page([dom("Shared", 0, 100, 402, 40), dom("Unique", 0, 300, 402, 40)])
+    # Full-width so the sweep actually lands inside it; only this one element
+    # can ever match, because nothing else on screen shares any DOM text.
+    screen = FakeScreen([native_el("StaticText", "Shared", 0, 206, 402, 40)])
+    from server.device.web_content import anchor_by_probe
+    # 14 probes so a sweep row (y=233) genuinely lands inside the element --
+    # with a coarser budget none of them do, and the test would pass because
+    # nothing matched rather than because one match was refused.
+    anchor, probes = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
+    assert anchor is None, "a lone match must not decide the offset"
+    assert probes == 14
+
+
+async def test_two_agreeing_probes_fix_the_origin():
+    contents = page([dom("Alpha", 0, 100, 402, 40), dom("Beta", 0, 300, 402, 40)])
+    screen = FakeScreen([
+        native_el("StaticText", "Alpha", 0, 206, 402, 40),
+        native_el("StaticText", "Beta", 0, 406, 402, 40),
+    ])
+    from server.device.web_content import anchor_by_probe
+    anchor, _ = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
+    assert anchor is not None
+    assert anchor.dy == 106.0 and anchor.matched >= 2
+
+
+async def test_sweeping_matches_exactly_never_by_containment():
+    """The measured failure that killed the earlier design: a short label that
+    is a prefix of a longer one is not the same element."""
+    contents = page([dom("Mastodon is not a single website", 0, 100, 402, 40),
+                     dom("Other text entirely", 0, 300, 402, 40)])
+    screen = FakeScreen([native_el("Link", "Mastodon", 0, 206, 402, 40)])
+    from server.device.web_content import anchor_by_probe
+    anchor, _ = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=8)
+    assert anchor is None
+
+
+async def test_two_samples_of_one_element_are_not_two_agreeing_probes():
+    """A tall element can swallow two sweep rows and hand back the same offset
+    twice. Counting that as corroboration is counting one piece of evidence
+    twice, which is precisely what the agreement rule is for."""
+    contents = page([dom("Tall block", 0, 100, 402, 300)])
+    screen = FakeScreen([native_el("StaticText", "Tall block", 0, 206, 402, 300)])
+    from server.device.web_content import anchor_by_probe
+    anchor, _ = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
+    assert anchor is None, "one element sampled repeatedly is still one element"
+
+
+async def test_the_sweep_cannot_exceed_the_remaining_budget():
+    """A page that is not on screen must not sweep away the budget."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 1, "title": "A", "url": "u"}, {"page_id": 2, "title": "B", "url": "u"}],
+        {1: page([dom(f"x{i}", 0, i * 40, 402, 30) for i in range(4)]),
+         2: page([dom(f"y{i}", 0, i * 40, 402, 30) for i in range(4)])})
+    screen = FakeScreen([native_el("Other", "matches nothing", 0, 0, 402, 874)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)], max_probes=9)
+    assert result["anchored"] is False
+    assert result["probes"] <= 9, f"spent {result['probes']} of a 9 probe budget"
+
+
+async def test_every_page_gets_a_cheap_pass_before_any_page_sweeps():
+    """Otherwise the first page listed sweeps away the budget and a later page
+    that geometry would have located instantly is never tried."""
+    inspector = FakeInspector(
+        [APP],
+        [{"page_id": 1, "title": "Offscreen", "url": "u"},
+         {"page_id": 2, "title": "Visible", "url": "u"}],
+        {1: page([dom(f"hidden{i}", 0, i * 40, 402, 30) for i in range(4)]),
+         2: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)])
+    assert result["anchored"] is True
+    assert [e["AXLabel"] for e in result["elements"]] == ["Servers"]

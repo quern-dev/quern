@@ -25,6 +25,7 @@ are different installs and are floored independently.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import glob
 import json
 import logging
@@ -126,6 +127,15 @@ _COLLECT_JS = """
     var atPoint = document.elementFromPoint(
       box.left + box.width / 2, box.top + box.height / 2);
     if (atPoint && atPoint !== n && !n.contains(atPoint) && !atPoint.contains(n)) continue;
+    // Accessibility names a form control from its associated <label>, not from
+    // its value, so collecting the value as the element's text makes every
+    // input fail a label comparison. Measured on GoToSocial's settings page: an
+    // <input> holding "https://social.arctian.org" is reported as "Instance".
+    var named = '';
+    if (tag === 'input' || tag === 'select' || tag === 'textarea') {
+      if (n.labels && n.labels.length) named = (n.labels[0].innerText || '').trim();
+      if (!named) named = n.getAttribute('aria-label') || n.getAttribute('placeholder') || '';
+    }
     out.push({
       tag: tag,
       id: n.id || null,
@@ -133,7 +143,9 @@ _COLLECT_JS = """
       role: n.getAttribute('role'),
       type: n.getAttribute('type'),
       href: tag === 'a' ? n.getAttribute('href') : null,
-      text: (own || n.getAttribute('aria-label') || n.value || '').slice(0, 200),
+      text: (named || own || n.getAttribute('aria-label') || n.value || '').slice(0, 200),
+      value: (tag === 'input' || tag === 'textarea' || tag === 'select')
+        ? (n.value || null) : null,
       x: box.left, y: box.top, width: box.width, height: box.height,
       interactive: !!interactive
     });
@@ -253,12 +265,28 @@ class SimulatorWebInspector:
         await self._drain_handshake()
 
     async def close(self) -> None:
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            finally:
-                self._sock = None
-                self._service = None
+        """Release the connection, transport included.
+
+        ServiceConnection owns an asyncio transport over the same descriptor.
+        Closing only the raw socket leaves that transport polling a descriptor
+        the OS is then free to hand to the next socket, and the following
+        connect() dies with "File descriptor ... is used by transport" -- so
+        one reconnect would poison the inspector until the server restarted.
+        """
+        service, sock = self._service, self._sock
+        self._service = None
+        self._sock = None
+        # Sessions and targets are keyed to the connection that opened them.
+        self._sessions.clear()
+        self._targets.clear()
+        self._applications.clear()
+        if service is not None:
+            with contextlib.suppress(Exception):
+                await service.close()
+        if sock is not None:
+            with contextlib.suppress(Exception):
+                if sock.fileno() != -1:
+                    sock.close()
 
     async def _send(self, selector: str, argument: dict) -> None:
         await self._service.send_plist({"__selector": selector, "__argument": argument})

@@ -107,3 +107,80 @@ async def test_a_parent_walk_cannot_loop_forever(monkeypatch):
 async def test_non_pid_application_ids_are_not_attributed():
     assert await webinspector.simulator_udid_for_application("com.example.app") is None
     assert await webinspector.simulator_udid_for_application("") is None
+
+
+# ------------------------------------------------- releasing the connection
+
+class _FakeService:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeSock:
+    def __init__(self):
+        self.closed = False
+
+    def fileno(self):
+        return -1 if self.closed else 11
+
+    def close(self):
+        self.closed = True
+
+
+async def test_closing_releases_the_service_transport_not_just_the_socket():
+    """ServiceConnection owns an asyncio transport over the same descriptor.
+
+    Closing only the raw socket leaves that transport polling a descriptor the
+    OS may reissue, and the next connect() then fails with "File descriptor ...
+    is used by transport" -- one reconnect poisoning the inspector until the
+    server restarts. Reproduced live during an OAuth flow.
+    """
+    inspector = webinspector.SimulatorWebInspector()
+    service, sock = _FakeService(), _FakeSock()
+    inspector._service, inspector._sock = service, sock
+
+    await inspector.close()
+
+    assert service.closed, "the transport was left polling the descriptor"
+    assert inspector._service is None
+    assert inspector._sock is None
+
+
+async def test_closing_forgets_state_tied_to_the_old_connection():
+    """Sessions and targets are keyed to the connection that opened them; a
+    reconnect that kept them would address pages through a dead session."""
+    inspector = webinspector.SimulatorWebInspector()
+    inspector._service, inspector._sock = _FakeService(), _FakeSock()
+    inspector._sessions.add(("PID:1", 1))
+    inspector._targets[("PID:1", 1)] = "target"
+    inspector._applications["PID:1"] = {"bundle_id": "x"}
+
+    await inspector.close()
+
+    assert not inspector._sessions
+    assert not inspector._targets
+    assert not inspector._applications
+
+
+async def test_closing_twice_is_harmless():
+    inspector = webinspector.SimulatorWebInspector()
+    inspector._service, inspector._sock = _FakeService(), _FakeSock()
+    await inspector.close()
+    await inspector.close()
+
+
+async def test_a_service_that_fails_to_close_still_releases_the_socket():
+    """Otherwise a raising transport would strand the descriptor for good."""
+    class Exploding:
+        async def close(self):
+            raise OSError("already gone")
+
+    inspector = webinspector.SimulatorWebInspector()
+    sock = _FakeSock()
+    inspector._service, inspector._sock = Exploding(), sock
+    await inspector.close()
+    assert sock.closed
+    assert inspector._service is None
