@@ -488,7 +488,9 @@ async def clear_text(request: Request, body: ClearTextRequest):
     """Clear text in the currently focused text field (select-all + delete)."""
     controller = _get_controller(request)
     try:
-        resolved = await controller.clear_text(udid=body.udid)
+        resolved = await controller.clear_text(
+            udid=body.udid, label=body.label, identifier=body.identifier,
+        )
         return {"status": "ok", "udid": resolved}
     except DeviceError as e:
         raise _handle_device_error(e)

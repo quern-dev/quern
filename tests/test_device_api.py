@@ -801,7 +801,9 @@ class TestClearText:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         assert resp.json()["udid"] == "AAAA-1111"
-        mock_controller.clear_text.assert_called_once_with(udid=None)
+        mock_controller.clear_text.assert_called_once_with(
+            udid=None, label=None, identifier=None,
+        )
 
     async def test_clear_text_with_udid(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
@@ -812,7 +814,9 @@ class TestClearText:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        mock_controller.clear_text.assert_called_once_with(udid="BBBB-2222")
+        mock_controller.clear_text.assert_called_once_with(
+            udid="BBBB-2222", label=None, identifier=None,
+        )
 
     async def test_clear_text_no_auth(self, app):
         transport = ASGITransport(app=app)

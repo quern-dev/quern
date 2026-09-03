@@ -279,6 +279,12 @@ not follow the rule you would guess:
 | `SFSafariViewController` | **yes, with no opt-in from the app** | yes |
 | `ASWebAuthenticationSession` | **no — reports no connected application at all** | yes |
 
+`get_web_content` tries both, Inspector first, and reports which answered in
+`route`. Recording `reachable_by` still pays: a screen known to be
+`hit_test`-only skips a failing Inspector attempt, and the probe route costs a
+screenshot, text recognition and a dozen or so hit-tests — around 2s, against
+~0.2s for an Inspector page with a recorded origin.
+
 The middle row is the surprising one. The app has no handle on a
 `SFSafariViewController`, yet WebKit still publishes it for inspection under
 `com.apple.SafariViewService`. The bottom row is the one to record loudest:

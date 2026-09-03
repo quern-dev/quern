@@ -1475,7 +1475,7 @@ class DeviceControllerUI:
             # own path: confirm it is still where it was read, then tap. The
             # stability re-fetch below cannot help here -- re-reading the tree
             # returns the same overlay, because the tree never saw the page.
-            if (el.extra_attrs or {}).get("source") == "web-inspector":
+            if (el.extra_attrs or {}).get("source") in ("web-inspector", "web-probe"):
                 if not await self._web_element_still_there(resolved, el):
                     self._web_overlay.pop(resolved, None)
                     return {
@@ -1495,7 +1495,8 @@ class DeviceControllerUI:
                     "status": "ok",
                     "tapped": {
                         "type": el.type, "label": el.label,
-                        "x": cx, "y": cy, "source": "web-inspector",
+                        "x": cx, "y": cy,
+                        "source": (el.extra_attrs or {}).get("source"),
                     },
                 }
 
@@ -1691,6 +1692,28 @@ class DeviceControllerUI:
             except Exception:
                 logger.debug("web inspector close failed", exc_info=True)
 
+    async def _sweep_web_content(self, udid: str, native: list[dict]):
+        """Find on-screen content by hit-testing, aimed with a screenshot.
+
+        The route of last resort, and the only one for a web view that no
+        process publishes for inspection. Full scale rather than the default
+        half: the aiming is Vision text recognition, and halving the pixels
+        costs it the small text.
+        """
+        from server.device.web_probing import sweep_web_content
+
+        async def capture() -> bytes | None:
+            try:
+                image, _ = await self.screenshot(udid=udid, format="png", scale=1.0)
+            except Exception:
+                logger.debug("web sweep: screenshot failed", exc_info=True)
+                return None
+            return image
+
+        return await sweep_web_content(
+            udid, self._ui_backend(udid).describe_point, capture, native,
+        )
+
     async def _booted_simulator_count(self) -> int:
         try:
             devices = await self.simctl.list_devices()
@@ -1715,7 +1738,7 @@ class DeviceControllerUI:
         `WebView`, and physical iOS devices are reached over a different
         transport, so on both the ordinary UI tree is the right tool.
         """
-        from server.device.web_content import collect_web_content
+        from server.device.web_content import collect_web_content, from_probe
         from server.device.webinspector import (
             WebInspectorError,
             simulator_udid_for_application,
@@ -1780,6 +1803,29 @@ class DeviceControllerUI:
 
         if result.get("device_mismatch"):
             raise DeviceError(result["reason"], tool="web-content")
+
+        result["route"] = "inspector" if result.get("elements") else None
+
+        # Nothing came back through the Inspector. That is not necessarily a
+        # failure: an ASWebAuthenticationSession is presented with no connected
+        # application at all, so the OAuth screen every app has is exactly the
+        # one the Inspector cannot describe. Hit-testing still reaches it, so
+        # sweep for the content directly. The elements are already in screen
+        # coordinates -- there is no page space to anchor.
+        if not result.get("elements"):
+            swept = await self._sweep_web_content(resolved, native)
+            result["probes"] += swept.probes
+            result["sweep_ms"] = round(swept.elapsed_ms, 1)
+            if swept.elements:
+                result["elements"] = from_probe(swept.elements)
+                result["route"] = "probe"
+                result["reason"] = None
+                result["truncated"] = swept.truncated
+            elif swept.reason:
+                result["reason"] = (
+                    f"{result.get('reason') or 'the Web Inspector returned nothing'}; "
+                    f"hit-testing found nothing either ({swept.reason})"
+                )
 
         result["udid"] = resolved
         # Make the elements addressable by label through the ordinary UI path.
@@ -1873,30 +1919,47 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # UI changed (text field value updated)
         return resolved
 
-    async def clear_text(self, udid: str | None = None) -> str:
-        """Clear text in the currently focused text field.
+    _TEXT_FIELD_TYPES = ("TextField", "SecureTextField", "TextArea", "SearchField")
 
-        Finds a text field with content, triple-taps to select all, then
-        presses Backspace. Returns the resolved udid.
+    async def clear_text(
+        self,
+        udid: str | None = None,
+        label: str | None = None,
+        identifier: str | None = None,
+    ) -> str:
+        """Clear a text field: triple-tap to select, then Backspace.
+
+        Name the field with `label` or `identifier` on any screen holding more
+        than one. Without a selector this picks the first field that has a
+        value, which is not the same thing as the focused field: on a sign-in
+        form, clearing before typing the password finds the *email* field and
+        empties that instead. It cannot tell which field has focus, because the
+        accessibility tree does not report it.
         """
         resolved = await self.resolve_udid(udid)
 
-        # Find the focused text field by looking for TextField/SecureTextField with a value
         elements, _ = await self.get_ui_elements(udid=resolved)
         text_fields = [
             e for e in elements
-            if e.type in ("TextField", "SecureTextField", "TextArea", "SearchField")
-            and e.frame
+            if e.type in self._TEXT_FIELD_TYPES and e.frame
         ]
 
-        # Prefer fields with a value (text to clear), fall back to first text field
         target = None
-        for tf in text_fields:
-            if tf.value:
-                target = tf
-                break
-        if target is None and text_fields:
-            target = text_fields[0]
+        if label or identifier:
+            matches = find_element(text_fields, label=label, identifier=identifier)
+            if not matches:
+                raise DeviceError(
+                    f"No text field matching {label or identifier!r} to clear",
+                    tool="wda" if self._is_physical(resolved) else "idb",
+                )
+            target = matches[0]
+        else:
+            for tf in text_fields:
+                if tf.value:
+                    target = tf
+                    break
+            if target is None and text_fields:
+                target = text_fields[0]
 
         if target is None or target.frame is None:
             tool = "wda" if self._is_physical(resolved) else "idb"

@@ -409,6 +409,44 @@ def _contains(frame: dict | None, x: float, y: float) -> bool:
     return hit_contains(frame, x, y)
 
 
+# Accessibility types that answer a tap. A probed element carries no DOM, so
+# interactivity has to be read off the type the platform reports.
+_INTERACTIVE_TYPES = frozenset({
+    "Button", "Link", "TextField", "SearchField", "TextArea", "Switch",
+    "Slider", "RadioButton", "CheckBox", "SegmentedControl", "Cell", "MenuItem",
+})
+
+
+def from_probe(hits: list[dict]) -> list[dict]:
+    """Probed hits in the shape projected pages already use.
+
+    A sweep returns accessibility elements in screen coordinates, so there is
+    nothing to anchor -- but the caller should not have to care which route
+    found an element, so both arrive looking the same. What differs is what is
+    knowable: a probe has no DOM, so there is no id, tag or href to report.
+    """
+    elements: list[dict] = []
+    for hit in hits:
+        frame = hit.get("frame") or {}
+        if not frame.get("width") or not frame.get("height"):
+            continue
+        element_type = hit.get("type") or "Other"
+        elements.append({
+            "type": element_type,
+            "AXLabel": normalise(hit.get("AXLabel")),
+            "frame": frame,
+            "enabled": bool(hit.get("enabled", True)),
+            "source": "web-probe",
+            "dom_id": None,
+            "tag": None,
+            "href": None,
+            "interactive": element_type in _INTERACTIVE_TYPES,
+            "page_id": None,
+            "value": hit.get("AXValue"),
+        })
+    return elements
+
+
 def _anchor_hint_for(hints: list | None, page: dict) -> Anchor | None:
     """A recorded origin for this page, matched by URL.
 

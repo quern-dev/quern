@@ -1109,6 +1109,11 @@ class ClearTextRequest(BaseModel):
     """Request body for POST /device/ui/clear."""
 
     udid: str | None = None
+    label: str | None = None
+    identifier: str | None = None
+    """Which field to clear. Needed on any screen with more than one: without a
+    selector the first field holding a value is chosen, which on a sign-in form
+    is the email field rather than the password one you just tapped."""
 
 
 class PressButtonRequest(BaseModel):

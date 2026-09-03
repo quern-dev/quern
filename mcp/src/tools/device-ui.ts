@@ -509,7 +509,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("get_web_content", {
-    description: `Read web content inside a WKWebView on an iOS simulator, which get_ui_tree cannot see. The accessibility tree walk stops at the web view — it is absent from the tree entirely, not empty — so a screen built around one looks like nothing but its native chrome. This reads the live DOM through the simulator's Web Inspector and returns elements with real screen frames, including DOM ids and icon-only controls that carry only an aria-label. The results are merged into subsequent UI reads for about a minute, so tap_element, get_ui_tree and get_screen_summary all see them and you can tap by label as usual. That overlay is dropped as soon as anything changes the screen -- a tap, swipe, scroll or launch -- so call this again after each interaction with the page. A tap on a web element is verified against the live screen first, and returns not_found with reason "stale_web_content" rather than tapping the wrong thing if the page moved underneath it. Requires the app to set webView.isInspectable = true; that is a per-WKWebView-instance property, so one web view opting in says nothing about another in the same app. Simulator only: Android's accessibility tree already descends into WebView, and physical iOS devices use a different transport — on both, use get_ui_tree. Costs roughly a second on top of a UI tree read, so call it when a screen looks emptier than it should, then again after navigating or scrolling the page. If it reports anchored=false, the page was found but its position on screen could not be confirmed; the elements are withheld rather than returned at a guessed offset.`,
+    description: `Read web content inside a WKWebView on an iOS simulator, which get_ui_tree cannot see. The accessibility tree walk stops at the web view — it is absent from the tree entirely, not empty — so a screen built around one looks like nothing but its native chrome. This reads the live DOM through the simulator's Web Inspector and returns elements with real screen frames, including DOM ids and icon-only controls that carry only an aria-label. The results are merged into subsequent UI reads for about a minute, so tap_element, get_ui_tree and get_screen_summary all see them and you can tap by label as usual. That overlay is dropped as soon as anything changes the screen -- a tap, swipe, scroll or launch -- so call this again after each interaction with the page. A tap on a web element is verified against the live screen first, and returns not_found with reason "stale_web_content" rather than tapping the wrong thing if the page moved underneath it. Two routes, tried in that order. The Web Inspector gives real DOM ids and icon-only controls, and reaches an in-process WKWebView when the app sets webView.isInspectable = true (per instance, so one view opting in says nothing about another) and an SFSafariViewController with no opt-in at all, under bundle_id com.apple.SafariViewService. When the Inspector sees nothing, this falls back to hit-testing the screen, aimed by text recognition -- slower, and label-only with no DOM, but it is the only route into an ASWebAuthenticationSession, which is presented with no connected application at all. The response says which route answered, under "route". Simulator only: Android's accessibility tree already descends into WebView, and physical iOS devices use a different transport — on both, use get_ui_tree. Costs roughly a second on top of a UI tree read, so call it when a screen looks emptier than it should, then again after navigating or scrolling the page. If it reports anchored=false, the page was found but its position on screen could not be confirmed; the elements are withheld rather than returned at a guessed offset.`,
     inputSchema: strictParams({
       bundle_id: z
         .string()
@@ -663,16 +663,26 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("clear_text", {
-    description: `Clear all text in the currently focused input field (select-all + delete). Use this before type_text when a field has pre-existing content you want to replace. Note: Secure text fields (passwords) may not support select-all.`,
+    description: `Clear a text field (select-all + delete), before type_text when the field already holds content. Pass label or identifier to say WHICH field: without one this picks the first field that has a value, which is not the field you just tapped -- on a sign-in form, clearing before typing the password finds the email field and empties that instead. Focus cannot be detected; the accessibility tree does not report it. Select-all takes a line at a time, so a long or wrapped value may need clearing more than once; check the value and repeat. Secure text fields (passwords) may not support select-all at all.`,
     inputSchema: strictParams({
+      label: z
+        .string()
+        .optional()
+        .describe("Exact visible text or content-description of the field to clear"),
+      identifier: z
+        .string()
+        .optional()
+        .describe("Accessibility identifier of the field to clear"),
       udid: z
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
     }),
-  }, async ({ udid }) => {
+  }, async ({ label, identifier, udid }) => {
     try {
       const body: Record<string, unknown> = {};
+      if (label) body.label = label;
+      if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
 
       const data = await apiRequest(
