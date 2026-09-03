@@ -49,6 +49,12 @@ class DeviceController(DeviceControllerUI):
             logger.info("Restored active device: %s", persisted[:8])
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
+        # One long-lived Web Inspector connection. Reconnecting per request cost
+        # ~3.4s of handshake, and webinspectord did not re-report its connected
+        # applications to a connection opened immediately after the previous one
+        # closed, so alternate calls saw no apps at all.
+        self._web_inspector: object | None = None
+        self._web_inspector_lock = asyncio.Lock()
         self._cache_ttl: float = 0.3  # 300ms cache TTL
         self._cache_hits: int = 0
         self._cache_misses: int = 0

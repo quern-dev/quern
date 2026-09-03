@@ -1481,6 +1481,110 @@ class DeviceControllerUI:
             ),
         }
 
+    async def _connected_web_inspector(self):
+        """The shared Web Inspector connection, opening one if needed."""
+        from server.device.webinspector import SimulatorWebInspector
+
+        async with self._web_inspector_lock:
+            if self._web_inspector is None:
+                inspector = SimulatorWebInspector()
+                await inspector.connect()
+                self._web_inspector = inspector
+            return self._web_inspector
+
+    async def _close_web_inspector(self) -> None:
+        async with self._web_inspector_lock:
+            inspector, self._web_inspector = self._web_inspector, None
+        if inspector is not None:
+            try:
+                await inspector.close()
+            except Exception:
+                logger.debug("web inspector close failed", exc_info=True)
+
+    async def _booted_simulator_count(self) -> int:
+        try:
+            devices = await self.simctl.list_devices()
+        except Exception:
+            return 0
+        return sum(1 for d in devices if str(getattr(d, "state", "")).lower().endswith("booted"))
+
+    async def get_web_content(
+        self,
+        udid: str | None = None,
+        bundle_id: str | None = None,
+    ) -> dict:
+        """Read web content the accessibility tree cannot see.
+
+        A `WKWebView` is absent from the tree walk entirely on iOS simulators,
+        so a screen built around one looks empty apart from its native chrome.
+        The Web Inspector can read the DOM, but reports geometry in page space;
+        this pairs the two, returning elements with real screen frames.
+
+        Simulator-only. Android's accessibility tree already descends into
+        `WebView`, and physical iOS devices are reached over a different
+        transport, so on both the ordinary UI tree is the right tool.
+        """
+        from server.device.web_content import collect_web_content
+        from server.device.webinspector import (
+            WebInspectorError,
+            find_simulator_sockets,
+        )
+
+        resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            raise DeviceError(
+                "get_web_content is for iOS simulators. Android's accessibility "
+                "tree already includes WebView contents, so use get_ui_tree.",
+                tool="web-content",
+            )
+        if self._is_physical(resolved):
+            raise DeviceError(
+                "get_web_content is for iOS simulators; the Web Inspector service "
+                "used here is the simulator's. Use get_ui_tree on a physical device.",
+                tool="web-content",
+            )
+
+        elements, resolved = await self.get_ui_elements(resolved)
+        native = [
+            {"type": e.type, "AXLabel": e.label, "frame": e.frame}
+            for e in elements if e.frame
+        ]
+
+        async def attempt() -> dict:
+            inspector = await self._connected_web_inspector()
+            return await collect_web_content(
+                resolved, bundle_id, self._ui_backend(resolved).describe_point,
+                inspector, native,
+            )
+
+        try:
+            result = await attempt()
+            # A reused connection can outlive the app it was reporting on -- the
+            # simulator reboots, the app relaunches -- and the symptom is an
+            # empty application list rather than an error. Retry once on a fresh
+            # connection before believing it.
+            if not result.get("pages"):
+                await self._close_web_inspector()
+                result = await attempt()
+        except WebInspectorError as exc:
+            await self._close_web_inspector()
+            raise DeviceError(
+                f"could not reach the simulator's Web Inspector: {exc}",
+                tool="web-content",
+            ) from exc
+
+        result["udid"] = resolved
+        # The webinspectord socket carries no UDID, so with more than one
+        # simulator booted the connection may not be the device asked about.
+        # Say so rather than return another simulator's page as this one's.
+        if len(find_simulator_sockets()) > 1 and await self._booted_simulator_count() > 1:
+            result["warning"] = (
+                "more than one simulator is booted and the Web Inspector socket "
+                "carries no UDID, so this content may come from another one. "
+                "Shut down the others to be certain."
+            )
+        return result
+
     async def swipe(
         self,
         start_x: float,

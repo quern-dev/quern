@@ -24,6 +24,7 @@ from server.models import (
     TapRequest,
     TypeTextRequest,
     WaitForElementRequest,
+    WebContentRequest,
 )
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -383,6 +384,35 @@ async def tap_element(request: Request, body: TapElementRequest):
     except DeviceError as e:
         end = time.perf_counter()
         logger.error(f"[PERF] API /ui/tap-element ERROR: {(end-start)*1000:.1f}ms, error={e}")
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/web-content")
+async def get_web_content(request: Request, body: WebContentRequest):
+    """Read web content that the accessibility tree cannot see.
+
+    On iOS simulators a WKWebView is absent from the UI tree entirely, so a
+    screen built around one appears to hold only its native chrome. This reads
+    the page through the simulator's Web Inspector and returns its elements with
+    real screen frames, so they can be tapped like any other element.
+    """
+    start = time.perf_counter()
+    logger.info(f"[PERF] API /ui/web-content START: bundle_id={body.bundle_id}")
+
+    controller = _get_controller(request)
+    try:
+        result = await controller.get_web_content(udid=body.udid, bundle_id=body.bundle_id)
+        elapsed = (time.perf_counter() - start) * 1000
+        logger.info(
+            f"[PERF] API /ui/web-content SUCCESS: {elapsed:.1f}ms, "
+            f"anchored={result.get('anchored')}, elements={len(result.get('elements', []))}, "
+            f"probes={result.get('probes')}"
+        )
+        return {"status": "ok", "elapsed_ms": round(elapsed, 1), **result}
+    except DeviceError as e:
+        logger.error(
+            f"[PERF] API /ui/web-content ERROR: {(time.perf_counter()-start)*1000:.1f}ms, error={e}"
+        )
         raise _handle_device_error(e)
 
 
