@@ -15,6 +15,11 @@ import pytest
 
 from server.device import ax_recovery
 
+# Canonical simctl UDIDs: the code refuses anything else, because a loose match
+# against a short placeholder is exactly how it would kill the wrong bridge.
+SIM_A = "F5AF3736-C05F-493F-AA52-CA883B13B18C"
+SIM_B = "C5D36699-A47F-4A03-8D1C-01503E10DD2F"
+
 
 def _app(width=0.0, height=0.0, label=None, type_="Application"):
     return {"type": type_, "AXLabel": label,
@@ -60,14 +65,14 @@ async def test_only_the_bridge_serving_this_simulator_is_killed():
             return 0, "111\n222\n"
         if args[0] == "lsof":
             pid = args[2]
-            return 0, ("/path/AAAA-1111/data" if pid == "111" else "/path/BBBB-2222/data")
+            return 0, (f"/path/{SIM_A}/data" if pid == "111" else f"/path/{SIM_B}/data")
         if args[0] == "kill":
             killed.append(args[2])
             return 0, ""
         return 1, ""
 
     with patch.object(ax_recovery, "_run", side_effect=fake_run):
-        assert await ax_recovery.reset_bridge("AAAA-1111") is True
+        assert await ax_recovery.reset_bridge(SIM_A) is True
     assert killed == ["111"], f"killed {killed}, expected only the matching bridge"
 
 
@@ -77,11 +82,11 @@ async def test_nothing_is_killed_when_no_bridge_matches():
         if args[0] == "pgrep":
             return 0, "111\n"
         if args[0] == "lsof":
-            return 0, "/path/OTHER-SIM/data"
+            return 0, f"/path/{SIM_B}/data"
         raise AssertionError(f"should not have run {args[0]}")
 
     with patch.object(ax_recovery, "_run", side_effect=fake_run):
-        assert await ax_recovery.reset_bridge("AAAA-1111") is False
+        assert await ax_recovery.reset_bridge(SIM_A) is False
 
 
 async def test_recovery_is_attempted_once_and_not_looped():
@@ -99,7 +104,7 @@ async def test_recovery_is_attempted_once_and_not_looped():
 
     with patch.object(backend, "_fetch_nested", side_effect=always_poisoned), \
          patch.object(ax_recovery, "reset_bridge", AsyncMock(return_value=True)) as reset:
-        result = await backend.describe_all("AAAA-1111")
+        result = await backend.describe_all(SIM_A)
 
     assert reset.await_count == 1, "recovery must not loop"
     assert calls["fetch"] == 2, "one original read plus exactly one retry"
@@ -118,7 +123,49 @@ async def test_a_healthy_tree_after_recovery_is_returned(healthy_second_read):
 
     with patch.object(backend, "_fetch_nested", side_effect=two_reads), \
          patch.object(ax_recovery, "reset_bridge", AsyncMock(return_value=True)):
-        result = await backend.describe_all("AAAA-1111")
+        result = await backend.describe_all(SIM_A)
 
     assert not ax_recovery.looks_poisoned(result)
     assert result[0]["AXLabel"] == "Probe"
+
+
+async def test_an_empty_udid_kills_nothing():
+    """The dangerous input. `"" in files` is true for every lsof line, so a
+    loose match would SIGKILL every simulator's bridge to recover none."""
+    async def fake_run(*args, timeout=5.0):
+        raise AssertionError(f"should not have run {args[0]} for an empty udid")
+
+    with patch.object(ax_recovery, "_run", side_effect=fake_run):
+        assert await ax_recovery.bridge_pids_for("") == []
+        assert await ax_recovery.reset_bridge("") is False
+
+
+@pytest.mark.parametrize("udid", [
+    "not-a-uuid",
+    "F5AF3736",                                  # a prefix, not the whole thing
+    "f5af3736-c05f-493f-aa52-ca883b13b18c",      # simctl emits uppercase
+    "../../etc",
+])
+async def test_non_canonical_identifiers_are_refused(udid):
+    async def fake_run(*args, timeout=5.0):
+        raise AssertionError(f"should not have run {args[0]} for {udid!r}")
+
+    with patch.object(ax_recovery, "_run", side_effect=fake_run):
+        assert await ax_recovery.bridge_pids_for(udid) == []
+
+
+async def test_a_partial_udid_overlap_does_not_match_another_simulator():
+    """Matched as a path component, so one UDID cannot match a longer one."""
+    target = "F5AF3736-C05F-493F-AA52-CA883B13B18C"
+
+    async def fake_run(*args, timeout=5.0):
+        if args[0] == "pgrep":
+            return 0, "111\n"
+        if args[0] == "lsof":
+            # A different simulator whose path merely contains the target as a
+            # substring of a longer component.
+            return 0, f"/data/Devices/{target}EXTRA/data/foo\n"
+        raise AssertionError("should not have killed anything")
+
+    with patch.object(ax_recovery, "_run", side_effect=fake_run):
+        assert await ax_recovery.bridge_pids_for(target) == []

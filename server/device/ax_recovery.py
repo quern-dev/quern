@@ -27,8 +27,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 logger = logging.getLogger("quern-debug-server.device")
+
+# simctl UDIDs are canonical uppercase UUIDs. Anything else is refused rather
+# than matched loosely: an empty string is a substring of every lsof line, so
+# `udid in files` would match every bridge and SIGKILL the lot. A short or
+# partial identifier has the same shape of problem against a neighbouring
+# simulator.
+_SIM_UDID = re.compile(r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$")
 
 
 def looks_poisoned(elements: list[dict]) -> bool:
@@ -68,6 +76,14 @@ async def bridge_pids_for(udid: str) -> list[int]:
     `pgrep -x` rather than a `ps | grep`: a loose match also matches the shell
     running the grep, and killing the first hit kills the caller.
     """
+    if not _SIM_UDID.match(udid or ""):
+        logger.warning(
+            "refusing to look for an accessibility bridge for %r: not a canonical "
+            "simulator UDID, and a loose match here kills unrelated simulators",
+            udid,
+        )
+        return []
+
     rc, out = await _run("pgrep", "-x", "CoreSimulatorBridge")
     if rc != 0:
         return []
@@ -82,7 +98,10 @@ async def bridge_pids_for(udid: str) -> list[int]:
         # directory it holds open. Killing every match would disturb every
         # other booted simulator for no reason.
         _, files = await _run("lsof", "-p", str(pid), timeout=10.0)
-        if udid in files:
+        # As a path component, not a bare substring: the UDID appears in the
+        # bridge's open data directory, and anchoring on the separators keeps a
+        # partial overlap with another simulator's UDID from matching.
+        if f"/{udid}/" in files or files.rstrip().endswith(f"/{udid}"):
             pids.append(pid)
     return pids
 
