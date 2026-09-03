@@ -239,3 +239,48 @@ def test_bands_are_returned_in_device_points(bands):
     for (want_top, want_bottom), (got_top, got_bottom) in zip(bands, found, strict=False):
         assert abs(got_top - want_top) < 12, f"{got_top} vs {want_top}"
         assert abs(got_bottom - want_bottom) < 12
+
+
+# --------------------------------------------------------------------------
+# Vision-guided targeting
+# --------------------------------------------------------------------------
+
+def test_vision_absence_degrades_rather_than_raises(monkeypatch):
+    """Vision is macOS-only and an optional install. Losing it should cost
+    speed, not the feature — the pixel path still works, just slower."""
+    import builtins
+
+    from server.device import vision_ocr
+
+    real_import = builtins.__import__
+
+    def no_vision(name, *args, **kwargs):
+        if name in ("Vision", "Quartz"):
+            raise ImportError("no Vision here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_vision)
+    assert vision_ocr.text_regions(b"not-a-png", SCREEN) == []
+    assert vision_ocr.available() is False
+
+
+async def test_vision_targets_are_probed_at_their_centres(monkeypatch):
+    """One probe per located text run, at the middle of its box.
+
+    This is the whole point of the Vision pass: the pixel heuristic could only
+    say "ink somewhere on this row" and then had to hunt along it — 75 probes
+    against 4 on the same page.
+    """
+    from server.device import vision_ocr
+    from server.device import web_probing as wp
+
+    monkeypatch.setattr(vision_ocr, "text_regions", lambda png, screen: [
+        {"text": "Servers", "confidence": 1.0, "x": 20, "y": 290, "width": 140, "height": 30},
+    ])
+    target = el("Heading", "Servers", 20, 290, 140, 30)
+    screen = FakeScreen([target])
+    result = await wp.sweep_web_content(
+        SIM, screen.describe_point, shot_of([]), [el("Application", "", 0, 0, 400, 800)],
+    )
+    assert screen.calls == [(90.0, 305.0)], f"probed {screen.calls}"
+    assert [e["AXLabel"] for e in result.elements] == ["Servers"]

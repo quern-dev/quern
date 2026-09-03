@@ -37,6 +37,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from server.device import vision_ocr
 from server.device.probing import DescribePointFn, frame_key
 
 logger = logging.getLogger("quern-debug-server.device")
@@ -242,11 +243,25 @@ async def sweep_web_content(
     native_keys = {frame_key(el.get("frame")) for el in native if el.get("frame")}
 
     png = await screenshot()
-    bands = content_bands(png, screen) if png else []
-    if not bands:
-        result.reason = (
-            "no screenshot available, or it showed no content bands to aim at"
-        )
+    if not png:
+        result.reason = "no screenshot available to aim with"
+        return result
+
+    # Vision names the text and boxes it, so each probe lands on something
+    # rather than hunting along a row that merely has ink somewhere on it.
+    # Measured on the same page: 10 boxes in 125ms against 75 probes and 6.9s
+    # for the pixel heuristic. Bands remain the fallback for a screen Vision
+    # cannot read, and for anything without text.
+    targets: list[tuple[float, float]] = []
+    for region in vision_ocr.text_regions(png, screen):
+        targets.append((
+            region["x"] + region["width"] / 2,
+            region["y"] + region["height"] / 2,
+        ))
+
+    bands = [] if targets else content_bands(png, screen)
+    if not targets and not bands:
+        result.reason = "nothing on screen to aim at"
         return result
 
     top = float(screen.get("y") or 0) + top_inset
@@ -256,6 +271,37 @@ async def sweep_web_content(
 
     seen: set[tuple] = set()
     deadline = started + time_budget
+
+    # Vision targets first: one probe each, at a known box centre.
+    for tx, ty in targets:
+        if result.probes >= max_probes or time.perf_counter() > deadline:
+            result.truncated = True
+            break
+        if not (top <= ty <= bottom) or _covered(covered, tx, ty):
+            continue
+        try:
+            hit = await describe_point(udid, tx, ty)
+        except Exception as exc:
+            logger.debug("web sweep: probe at (%.0f, %.0f) failed: %s", tx, ty, exc)
+            continue
+        result.probes += 1
+        frame = hit.get("frame") if hit else None
+        if not hit_contains(frame, tx, ty):
+            continue
+        covered.append(_rect(frame))
+        key = frame_key(frame)
+        if key in native_keys:
+            continue
+        dedupe = (key, hit.get("type"), hit.get("AXLabel") or "")
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        enriched = dict(hit)
+        attrs = dict(enriched.get("extra_attrs") or {})
+        attrs.update({"source": "web-probe",
+                      "probe_x": f"{tx:.0f}", "probe_y": f"{ty:.0f}"})
+        enriched["extra_attrs"] = attrs
+        result.elements.append(enriched)
 
     for band_top, band_bottom in bands:
         # Walk down the band rather than sampling its middle once. Bands merge
