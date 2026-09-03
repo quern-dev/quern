@@ -388,7 +388,7 @@ async def tap_element(request: Request, body: TapElementRequest):
 
 
 @router.post("/ui/web-content")
-async def get_web_content(request: Request, body: WebContentRequest):
+async def get_web_content(request: Request, body: WebContentRequest) -> dict:
     """Read web content that the accessibility tree cannot see.
 
     On iOS simulators a WKWebView is absent from the UI tree entirely, so a

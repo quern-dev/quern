@@ -264,6 +264,8 @@ async def collect_web_content(
     native: list[dict],
     *,
     max_probes: int = MAX_ANCHOR_PROBES,
+    attribute_udid=None,
+    require_device_match: bool = False,
 ) -> dict:
     """Read every inspectable page on screen and place it in screen coordinates.
 
@@ -305,6 +307,32 @@ async def collect_web_content(
             return result
         application = apps[0]
     result["bundle_id"] = application.get("bundle_id")
+    result["application_id"] = application.get("application_id")
+
+    # The webinspectord socket is not labelled with a UDID, so a connection can
+    # belong to a different booted simulator than the one asked about. Returning
+    # that simulator's page as this one's would be wrong in a way no caller
+    # could detect, so it is refused rather than reported.
+    if attribute_udid is not None:
+        owner = await attribute_udid(application.get("application_id"))
+        result["device_verified"] = owner == udid
+        if owner is not None and owner != udid:
+            result["device_mismatch"] = True
+            result["reason"] = (
+                f"the Web Inspector connection belongs to simulator {owner}, not "
+                f"{udid}. The webinspectord socket carries no UDID, so with more "
+                "than one simulator booted the connection cannot be steered; shut "
+                "the others down."
+            )
+            return result
+        if owner is None and require_device_match:
+            result["device_mismatch"] = True
+            result["reason"] = (
+                "more than one simulator is booted and this Web Inspector "
+                f"connection could not be attributed to {udid}, so its content "
+                "may belong to another device. Shut the others down."
+            )
+            return result
 
     application_id = application.get("application_id")
     listing = await inspector.pages(application_id)

@@ -55,6 +55,11 @@ class DeviceController(DeviceControllerUI):
         # closed, so alternate calls saw no apps at all.
         self._web_inspector: object | None = None
         self._web_inspector_lock = asyncio.Lock()
+        # Held for a whole web-content transaction. The connection is shared and
+        # the protocol interleaves replies, so two concurrent collections would
+        # read each other's messages -- and one finding an empty result would
+        # close the connection out from under the other.
+        self._web_inspector_op_lock = asyncio.Lock()
         self._cache_ttl: float = 0.3  # 300ms cache TTL
         self._cache_hits: int = 0
         self._cache_misses: int = 0

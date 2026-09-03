@@ -330,3 +330,83 @@ async def test_pages_that_cannot_be_located_are_reported_not_guessed():
     assert result["anchored"] is False
     assert result["elements"] == []
     assert "position on screen is unknown" in result["reason"]
+
+
+# ------------------------------------------------- which simulator answered
+
+async def test_content_from_another_simulator_is_refused():
+    """The webinspectord socket carries no UDID, so a connection can belong to a
+    different booted simulator. Returning its page as this device's would be
+    wrong in a way no caller could detect."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 1, "title": "T", "url": "u"}],
+        {1: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+
+    async def attribute(_application_id):
+        return "SOME-OTHER-SIM"
+
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        attribute_udid=attribute,
+    )
+    assert result["device_mismatch"] is True
+    assert result["elements"] == []
+    assert "SOME-OTHER-SIM" in result["reason"]
+
+
+async def test_an_unattributable_connection_is_refused_when_it_matters():
+    """With several simulators booted, "could not tell" has to fail closed."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 1, "title": "T", "url": "u"}],
+        {1: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+
+    async def unknown(_application_id):
+        return None
+
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        attribute_udid=unknown, require_device_match=True,
+    )
+    assert result["device_mismatch"] is True
+
+
+async def test_an_unattributable_connection_is_allowed_when_only_one_is_booted():
+    """With a single simulator there is nothing to confuse it with, and failing
+    would make the tool unusable on the ordinary setup."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 1, "title": "T", "url": "u"}],
+        {1: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+
+    async def unknown(_application_id):
+        return None
+
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        attribute_udid=unknown, require_device_match=False,
+    )
+    assert not result.get("device_mismatch")
+    assert result["anchored"] is True
+
+
+async def test_a_matching_attribution_proceeds():
+    inspector = FakeInspector(
+        [APP], [{"page_id": 1, "title": "T", "url": "u"}],
+        {1: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+
+    async def attribute(_application_id):
+        return "SIM"
+
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        attribute_udid=attribute, require_device_match=True,
+    )
+    assert result["device_verified"] is True
+    assert [e["AXLabel"] for e in result["elements"]] == ["Servers"]

@@ -29,6 +29,7 @@ import glob
 import json
 import logging
 import os
+import re
 import socket
 import uuid
 from typing import Any
@@ -92,13 +93,30 @@ _COLLECT_JS = """
     // a 394pt row reports an accessibility frame only as wide as the word
     // "Apps", so probing the row centre answers with a neighbouring element.
     // The text box is inside the control either way, so it is the safer target.
+    // Measure the same direct child text nodes `own` was built from, one Range
+    // each. selectNodeContents on the element would include its element
+    // children: for <li>Label <div>...tall card...</div></li> the union is
+    // close to the original border box, so the centre lands on the card rather
+    // than the glyphs -- reintroducing the very defect this block prevents.
     var box = r;
     if (own) {
       try {
-        var range = document.createRange();
-        range.selectNodeContents(n);
-        var textRect = range.getBoundingClientRect();
-        if (textRect.width >= 2 && textRect.height >= 2) box = textRect;
+        var union = null;
+        for (var c2 = n.firstChild; c2; c2 = c2.nextSibling) {
+          if (c2.nodeType !== 3 || !c2.nodeValue.trim()) continue;
+          var rg = document.createRange();
+          rg.selectNodeContents(c2);
+          var b = rg.getBoundingClientRect();
+          if (b.width < 1 || b.height < 1) continue;
+          union = union ? {
+            left: Math.min(union.left, b.left), top: Math.min(union.top, b.top),
+            right: Math.max(union.right, b.right), bottom: Math.max(union.bottom, b.bottom),
+          } : {left: b.left, top: b.top, right: b.right, bottom: b.bottom};
+        }
+        if (union && union.right - union.left >= 2 && union.bottom - union.top >= 2) {
+          box = {left: union.left, top: union.top,
+                 width: union.right - union.left, height: union.bottom - union.top};
+        }
       } catch (e) {}
     }
     // An element under an overlay is still in the DOM with a valid box, but a
@@ -493,3 +511,41 @@ class SimulatorWebInspector:
                 ]
             self._absorb(message)
         return []
+
+
+# The webinspectord socket carries no UDID, but an application id is the host
+# app's pid, and every simulator process descends from a `launchd_sim` whose
+# command line names the device directory. That is enough to tell which
+# simulator a connection is actually reporting on.
+_LAUNCHD_SIM_UDID = re.compile(
+    r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/", re.IGNORECASE)
+
+_MAX_PARENT_WALK = 8
+
+
+async def _process_field(pid: str, field: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "ps", "-o", f"{field}=", "-p", pid,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return out.decode(errors="replace").strip()
+
+
+async def simulator_udid_for_application(application_id: str) -> str | None:
+    """Which simulator an inspector application belongs to, or None if unknown."""
+    if not application_id or not application_id.startswith("PID:"):
+        return None
+    pid = application_id[4:].strip()
+    if not pid.isdigit():
+        return None
+    for _ in range(_MAX_PARENT_WALK):
+        command = await _process_field(pid, "command")
+        match = _LAUNCHD_SIM_UDID.search(command)
+        if match:
+            return match.group(1).upper()
+        parent = await _process_field(pid, "ppid")
+        if not parent.isdigit() or parent in ("0", "1") or parent == pid:
+            return None
+        pid = parent
+    return None

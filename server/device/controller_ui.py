@@ -1527,7 +1527,7 @@ class DeviceControllerUI:
         from server.device.web_content import collect_web_content
         from server.device.webinspector import (
             WebInspectorError,
-            find_simulator_sockets,
+            simulator_udid_for_application,
         )
 
         resolved = await self.resolve_udid(udid)
@@ -1550,39 +1550,42 @@ class DeviceControllerUI:
             for e in elements if e.frame
         ]
 
+        # More than one booted simulator means the connection cannot be steered
+        # by UDID, so attribution stops being advisory and becomes required.
+        require_match = await self._booted_simulator_count() > 1
+
         async def attempt() -> dict:
             inspector = await self._connected_web_inspector()
             return await collect_web_content(
                 resolved, bundle_id, self._ui_backend(resolved).describe_point,
                 inspector, native,
+                attribute_udid=simulator_udid_for_application,
+                require_device_match=require_match,
             )
 
-        try:
-            result = await attempt()
-            # A reused connection can outlive the app it was reporting on -- the
-            # simulator reboots, the app relaunches -- and the symptom is an
-            # empty application list rather than an error. Retry once on a fresh
-            # connection before believing it.
-            if not result.get("pages"):
-                await self._close_web_inspector()
+        # One transaction at a time: the connection is shared, and a retry
+        # closes it. Concurrent callers would read each other's replies.
+        async with self._web_inspector_op_lock:
+            try:
                 result = await attempt()
-        except WebInspectorError as exc:
-            await self._close_web_inspector()
-            raise DeviceError(
-                f"could not reach the simulator's Web Inspector: {exc}",
-                tool="web-content",
-            ) from exc
+                # A reused connection can outlive the app it was reporting on --
+                # the simulator reboots, the app relaunches -- and the symptom is
+                # an empty application list rather than an error. Retry once on a
+                # fresh connection before believing it.
+                if not result.get("pages") and not result.get("device_mismatch"):
+                    await self._close_web_inspector()
+                    result = await attempt()
+            except WebInspectorError as exc:
+                await self._close_web_inspector()
+                raise DeviceError(
+                    f"could not reach the simulator's Web Inspector: {exc}",
+                    tool="web-content",
+                ) from exc
+
+        if result.get("device_mismatch"):
+            raise DeviceError(result["reason"], tool="web-content")
 
         result["udid"] = resolved
-        # The webinspectord socket carries no UDID, so with more than one
-        # simulator booted the connection may not be the device asked about.
-        # Say so rather than return another simulator's page as this one's.
-        if len(find_simulator_sockets()) > 1 and await self._booted_simulator_count() > 1:
-            result["warning"] = (
-                "more than one simulator is booted and the Web Inspector socket "
-                "carries no UDID, so this content may come from another one. "
-                "Shut down the others to be certain."
-            )
         return result
 
     async def swipe(
