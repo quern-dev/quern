@@ -8,6 +8,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.device.probing import frame_key
 from server.device.screenshots import annotate_screenshot
 from server.device.ui_elements import (
     find_children_of,
@@ -655,7 +656,137 @@ class DeviceControllerUI:
 
         return elements, elapsed
 
+    # How long web elements stay usable without being re-read. Generous, because
+    # correctness does not rest on it: a tap against a stale overlay is caught by
+    # the probe in tap_element, so the TTL only bounds how long a page that
+    # changed underneath us keeps offering elements that will then be refused.
+    _WEB_OVERLAY_TTL = 60.0
+
+    def _merge_web_overlay(
+        self,
+        udid: str,
+        elements: list[UIElement],
+        *,
+        filter_label: str | None = None,
+        filter_identifier: str | None = None,
+        filter_type: str | None = None,
+    ) -> list[UIElement]:
+        """Append web elements to a native element list."""
+        entry = self._web_overlay.get(udid)
+        if entry is None:
+            return elements
+        web, stored_at = entry
+        if time.time() - stored_at > self._WEB_OVERLAY_TTL:
+            self._web_overlay.pop(udid, None)
+            return elements
+
+        if filter_label or filter_identifier or filter_type:
+            web = find_element(web, label=filter_label, identifier=filter_identifier,
+                               element_type=filter_type)
+        if not web:
+            return elements
+
+        # A web element whose frame the native tree already reports is the same
+        # thing seen twice, and a duplicate would make tap_element ambiguous.
+        seen = {frame_key(e.frame) for e in elements if e.frame}
+        merged = list(elements)
+        for element in web:
+            key = frame_key(element.frame)
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            merged.append(element)
+        return merged
+
+    def _store_web_overlay(self, udid: str, web_elements: list[dict]) -> None:
+        """Keep web content addressable by later UI reads."""
+        parsed: list[UIElement] = []
+        for element in web_elements:
+            attrs = {
+                key: str(value)
+                for key, value in (
+                    ("source", element.get("source")),
+                    ("dom_id", element.get("dom_id")),
+                    ("page_id", element.get("page_id")),
+                    ("href", element.get("href")),
+                    ("tag", element.get("tag")),
+                )
+                if value is not None
+            }
+            parsed.append(UIElement(
+                type=element.get("type") or "Other",
+                label=element.get("AXLabel") or "",
+                # A DOM id is not an accessibility identifier and must not
+                # masquerade as one: it never appears in the native tree, so
+                # letting it match `identifier=` would make a web-only lookup
+                # look like an ordinary one.
+                identifier=None,
+                frame=element.get("frame"),
+                enabled=True,
+                extra_attrs=attrs or None,
+            ))
+        if parsed:
+            self._web_overlay[udid] = (parsed, time.time())
+        else:
+            self._web_overlay.pop(udid, None)
+
+    async def _web_element_still_there(self, udid: str, element: UIElement) -> bool:
+        """One probe, before tapping something the tree cannot see.
+
+        The overlay records where a page's elements were when it was read. If the
+        page has scrolled, navigated or been covered since, those coordinates now
+        belong to something else -- and a tap would land on it silently. Paying
+        ~93ms to be told otherwise is the difference between a wrong action and
+        an honest error.
+        """
+        from server.device.web_content import _texts_correspond, normalise
+        from server.device.web_probing import hit_contains
+
+        frame = element.frame or {}
+        x = frame.get("x", 0) + frame.get("width", 0) / 2
+        y = frame.get("y", 0) + frame.get("height", 0) / 2
+        try:
+            hit = await self._ui_backend(udid).describe_point(udid, x, y)
+        except Exception:
+            logger.debug("web element verification probe failed", exc_info=True)
+            return False
+        if not hit or not hit_contains(hit.get("frame"), x, y):
+            return False
+        label = normalise(hit.get("AXLabel"))
+        # An unlabelled control (an icon-only button) cannot be confirmed by
+        # text; landing inside the expected frame is all the evidence there is.
+        if not element.label:
+            return True
+        return _texts_correspond(label, normalise(element.label))
+
     async def get_ui_elements(
+        self,
+        udid: str | None = None,
+        use_cache: bool = True,
+        filter_label: str | None = None,
+        filter_identifier: str | None = None,
+        filter_type: str | None = None,
+        snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
+        mode: str | None = None,
+    ) -> tuple[list[UIElement], str]:
+        """Native UI elements, plus any web content read by get_web_content.
+
+        The merge happens here rather than in the cache so every consumer --
+        tap_element, screen summaries, landmark matching, annotated screenshots
+        -- sees web elements, while the cached tree stays purely native.
+        """
+        elements, resolved = await self._native_ui_elements(
+            udid, use_cache, filter_label, filter_identifier, filter_type,
+            snapshot_depth, source_timeout, mode,
+        )
+        return self._merge_web_overlay(
+            resolved, elements,
+            filter_label=filter_label, filter_identifier=filter_identifier,
+            filter_type=filter_type,
+        ), resolved
+
+    async def _native_ui_elements(
         self,
         udid: str | None = None,
         use_cache: bool = True,
@@ -1309,6 +1440,34 @@ class DeviceControllerUI:
         if len(matches) == 1:
             el = matches[0]
 
+            # A web element comes from the overlay, not the tree, so it gets its
+            # own path: confirm it is still where it was read, then tap. The
+            # stability re-fetch below cannot help here -- re-reading the tree
+            # returns the same overlay, because the tree never saw the page.
+            if (el.extra_attrs or {}).get("source") == "web-inspector":
+                if not await self._web_element_still_there(resolved, el):
+                    self._web_overlay.pop(resolved, None)
+                    return {
+                        "status": "not_found",
+                        "reason": "stale_web_content",
+                        "message": (
+                            f"'{el.label}' was read from web content that has since "
+                            "moved, been covered or navigated away. The stale "
+                            "elements have been dropped; call get_web_content again "
+                            "to re-read the page."
+                        ),
+                    }
+                cx, cy = get_tap_point(el)
+                await self._ui_backend(resolved).tap(resolved, cx, cy)
+                self._invalidate_ui_cache(resolved)
+                return {
+                    "status": "ok",
+                    "tapped": {
+                        "type": el.type, "label": el.label,
+                        "x": cx, "y": cy, "source": "web-inspector",
+                    },
+                }
+
             # Value check for switches/toggles: skip tap if already in desired state
             if value is not None:
                 current_value = el.value or ""
@@ -1544,7 +1703,11 @@ class DeviceControllerUI:
                 tool="web-content",
             )
 
-        elements, resolved = await self.get_ui_elements(resolved)
+        # Deliberately the unmerged read. get_ui_elements would fold in the
+        # previous overlay, and those elements feed page-title ranking,
+        # app_frame and the candidate origins -- so a stale read would help
+        # decide where the next one thinks the page is.
+        elements, resolved = await self._native_ui_elements(resolved)
         native = [
             {"type": e.type, "AXLabel": e.label, "frame": e.frame}
             for e in elements if e.frame
@@ -1586,6 +1749,8 @@ class DeviceControllerUI:
             raise DeviceError(result["reason"], tool="web-content")
 
         result["udid"] = resolved
+        # Make the elements addressable by label through the ordinary UI path.
+        self._store_web_overlay(resolved, result.get("elements") or [])
         return result
 
     async def swipe(

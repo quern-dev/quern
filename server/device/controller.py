@@ -60,6 +60,11 @@ class DeviceController(DeviceControllerUI):
         # read each other's messages -- and one finding an empty result would
         # close the connection out from under the other.
         self._web_inspector_op_lock = asyncio.Lock()
+        # Web elements from the last get_web_content, merged into UI reads so
+        # tap_element can resolve them. Kept beside the UI cache rather than in
+        # it, so a cached native tree is never polluted with web content that
+        # may already be stale.
+        self._web_overlay: dict[str, tuple[list[UIElement], float]] = {}
         self._cache_ttl: float = 0.3  # 300ms cache TTL
         self._cache_hits: int = 0
         self._cache_misses: int = 0
@@ -173,9 +178,14 @@ class DeviceController(DeviceControllerUI):
         """Invalidate UI tree cache for a device (or all devices if udid=None)."""
         if udid:
             self._ui_cache.pop(udid, None)
+            # Anything that changed the native tree can have moved, replaced or
+            # dismissed the page too, and a web element's position is only
+            # meaningful for the layout it was measured against.
+            self._web_overlay.pop(udid, None)
             logger.debug(f"UI cache invalidated for device {udid[:8]}")
         else:
             self._ui_cache.clear()
+            self._web_overlay.clear()
             logger.debug("UI cache cleared for all devices")
 
     def get_cache_stats(self) -> dict:
