@@ -246,45 +246,80 @@ This is a separate issue from identifier reliability. The label is *correct*, bu
 ### Documenting Web Views
 
 A screen built on web content looks almost empty to `get_ui_tree`: on iOS the
-accessibility tree does not descend into a `WKWebView`, and the out-of-process
-hosts are not in the app's hierarchy at all. The failure mode is a
-misdiagnosis, not an error — a near-empty tree reads as "the screen failed to
-load" or "every landmark drifted", and the agent goes looking for a problem
-that isn't there.
+accessibility tree does not descend into a `WKWebView`, and out-of-process hosts
+are not in the app's hierarchy at all — a settings page presented in
+`SFSafariViewController` reports **one** element, the Application. The failure
+mode is a misdiagnosis, not an error: a near-empty tree reads as "the screen
+failed to load" or "every landmark drifted", and the agent goes looking for a
+problem that isn't there.
 
-Record it in the screen's `web_content:` block. The facts that matter are ones
-only the source can answer, which is exactly what a knowledge base is for.
+`get_web_content` reads the page and returns its elements with real screen
+frames. What it cannot work out for itself is which process hosts the view and
+whether it can be inspected at all — so record that.
 
 ```yaml
 web_content:
-  - host: "WKWebView"
-    in_process: true
-    inspectable: "debug"
-    url: "https://joinmastodon.org/servers"
-    page_offset: [0, 100]
+  - host: "SFSafariViewController"
+    process: "com.apple.SafariViewService"
+    reachable_by: [inspector, hit_test]
+    url: "https://social.arctian.org/settings"
+    anchor:
+      origin: [0, 106]
+      viewport: [402, 685]
+      measured_on: "iPhone 16 Pro - iOS 18.6"
 ```
 
-**`in_process` decides everything else.** When the app constructs the view, it
-can opt it into remote inspection and the page's own DOM becomes available.
-When the system constructs it — `SFSafariViewController`,
-`ASWebAuthenticationSession` — the app has no handle on it, so that route is
-closed no matter what the app does.
+**`reachable_by` is the field worth having.** There are three cases and they do
+not follow the rule you would guess:
 
-**`inspectable` is about the view, not the content.** Since iOS 16.4 a
-`WKWebView` is only inspectable if the app sets `isInspectable` on it. That is
-the app's decision about a view it owns, so it can be true even when the HTML
-comes from a third party the team has no control over. Use `"debug"` when it is
-behind `#if DEBUG`, which is where it belongs.
+| view | Web Inspector | hit-test |
+|---|---|---|
+| in-process `WKWebView` | yes — but only if the app sets `isInspectable` | yes |
+| `SFSafariViewController` | **yes, with no opt-in from the app** | yes |
+| `ASWebAuthenticationSession` | **no — reports no connected application at all** | yes |
 
-**Why record `page_offset`.** DOM geometry is viewport-relative, so it cannot be
-tapped directly. One accessibility hit-test on any element recovers the offset
-between page and screen space; writing it down saves doing that every session.
-Re-derive it if the screen's layout changes.
+The middle row is the surprising one. The app has no handle on a
+`SFSafariViewController`, yet WebKit still publishes it for inspection under
+`com.apple.SafariViewService`. The bottom row is the one to record loudest:
+while an auth session is presented the inspector reports *zero* connected
+applications, so an agent that assumes "system-presented means
+SafariViewService" wastes a call. Hit-testing reaches all three.
+
+**`process` is what to pass as `bundle_id`.** An out-of-process view is hosted
+by `com.apple.SafariViewService`, not by the app. Without it `get_web_content`
+sees two connected applications and asks which one you meant.
+
+**`isInspectable` is per view, not per app.** Since iOS 16.4 an app's own
+`WKWebView` is inspectable only if the app sets it on *that instance*, so one
+view opting in says nothing about another in the same app. Put it behind
+`#if DEBUG`, which is where it belongs.
+
+**`anchor` is a hint, never a fact.** DOM geometry is viewport-relative, and
+nothing in the protocol says where the view sits on screen. The offset depends
+on device size, iOS version and text size, so a recorded one is offered as the
+first candidate and confirmed by a single probe — if it no longer holds it is
+discarded and the ordinary search runs. Recording it is still worth it: an
+out-of-process page took a **17-probe sweep and ~3.5s** to locate cold, against
+**1 probe and ~0.2s** once written down. Out-of-process views need this most,
+because they carry their own chrome at both ends and none of it is in the native
+tree, so geometry cannot even guess.
+
+**Where to get the values.** `get_web_content` returns them under `anchors`,
+ready to paste:
+
+```json
+{"page_id": 3, "url": "https://social.arctian.org/settings",
+ "origin": [0, 106], "viewport": [402, 685], "strategy": "sweep"}
+```
+
+A `strategy` of `hint` means the recorded value was used and confirmed;
+`geometry` or `sweep` means it was rediscovered, which is the signal to write
+the new value down.
 
 **Note when the URL is third-party.** It can change without an app release —
-the example above moved from `/communities` to `/servers` between knowledge-base
-revisions. Prefer structural selectors (`h1`, `button[aria-label]`) over text
-the site can reword.
+the Mastodon instance picker moved from `/communities` to `/servers` between
+knowledge-base revisions. Prefer structural selectors (`h1`,
+`button[aria-label]`) over text the site can reword.
 
 None of this applies on Android, where the accessibility tree does descend into
 a `WebView` and web content appears as ordinary elements.

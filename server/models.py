@@ -933,6 +933,51 @@ class UIElement(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class WebContentAnchor(BaseModel):
+    """Where a page sat on screen when it was last measured.
+
+    A hypothesis, never a fact. The origin depends on the device size, the iOS
+    version and the accessibility text size, so a recorded one is offered as the
+    first candidate and confirmed by a single probe like any other. Right, it
+    turns a 17-probe sweep into one probe; wrong, it costs that one probe and
+    the usual search proceeds.
+    """
+
+    origin: list[float]           # [x, y] of the page's top-left, in points
+    viewport: list[float] | None = None      # [width, height] it was measured at
+    measured_on: str | None = None           # e.g. "iPhone 16 Pro - iOS 18.6"
+
+
+class WebContentHint(BaseModel):
+    """What is already known about one web view on a screen.
+
+    Recorded so an agent does not have to rediscover it. The costly things to
+    find out are which process hosts the view and whether the Web Inspector can
+    see it at all -- both stable properties of the app's code, unlike the
+    geometry.
+    """
+
+    screen: str | None = None
+    host: str | None = None
+    """The class presenting it: WKWebView, SFSafariViewController,
+    ASWebAuthenticationSession."""
+
+    process: str | None = None
+    """Bundle id to pass as `bundle_id`. An out-of-process view is hosted by
+    com.apple.SafariViewService, not by the app."""
+
+    reachable_by: list[str] = Field(default_factory=list)
+    """Which routes actually work: "inspector", "hit_test". An
+    ASWebAuthenticationSession is hit_test only -- the inspector reports no
+    connected application at all while one is presented."""
+
+    url: str | None = None
+    """Used to match this hint to a live page, so no screen identification is
+    needed before the page can be located."""
+
+    anchor: WebContentAnchor | None = None
+
+
 class Landmark(BaseModel):
     """A single element selector for screen identification.
 

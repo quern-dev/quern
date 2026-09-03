@@ -9,8 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
-from server.models import Landmark, ScreenLandmarks, UIElement
+from server.models import (
+    Landmark,
+    ScreenLandmarks,
+    UIElement,
+    WebContentHint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +57,12 @@ class ParseResult:
 
     screen: ScreenLandmarks | None = None
     skip: SkippedFile | None = None
+    web_content: list[WebContentHint] = field(default_factory=list)
+    """Carried on both paths deliberately. The screens that most need a web
+    content hint -- an OAuth view, a settings page behind
+    SFSafariViewController -- are exactly the ones with no native landmarks, so
+    a hint attached only to successful parses would never reach the cases it
+    exists for."""
 
 
 @dataclass
@@ -59,6 +71,7 @@ class KnowledgeBaseScan:
 
     screens: list[ScreenLandmarks] = field(default_factory=list)
     skipped: list[SkippedFile] = field(default_factory=list)
+    web_content: list[WebContentHint] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +329,7 @@ def parse_screen_landmarks(
         ))
 
     screen_name = data.get("screen", "") or file_path.stem
+    hints = _parse_web_content(data.get("web_content"), screen_name)
 
     raw_landmarks = data.get("landmarks")
     if not raw_landmarks or not isinstance(raw_landmarks, list):
@@ -329,10 +343,10 @@ def parse_screen_landmarks(
             return ParseResult(skip=SkippedFile(
                 file=label, screen=screen_name, reason="legacy_format",
                 identify_by=list(identify_by),
-            ))
+            ), web_content=hints)
         return ParseResult(skip=SkippedFile(
             file=label, screen=screen_name, reason="no_landmarks",
-        ))
+        ), web_content=hints)
 
     landmarks: list[Landmark] = []
     for entry in raw_landmarks:
@@ -343,11 +357,36 @@ def parse_screen_landmarks(
     if not landmarks:
         return ParseResult(skip=SkippedFile(
             file=label, screen=screen_name, reason="invalid_entries",
-        ))
+        ), web_content=hints)
 
     return ParseResult(
         screen=ScreenLandmarks(screen=screen_name, landmarks=landmarks),
+        web_content=hints,
     )
+
+
+def _parse_web_content(raw: object, screen: str) -> list[WebContentHint]:
+    """Read a screen's web_content: block, skipping anything malformed.
+
+    A bad hint must never stop a knowledge base loading: it is an optimisation,
+    and every value in it is verified before use.
+    """
+    if not isinstance(raw, list):
+        return []
+    hints: list[WebContentHint] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        # The screen name comes from the file, not the entry. Passing both
+        # raises TypeError for a duplicate keyword before Pydantic ever runs,
+        # and that is not a ValidationError -- one entry carrying a stray
+        # `screen:` would abort the whole scan rather than be skipped.
+        fields = {k: v for k, v in entry.items() if k != "screen"}
+        try:
+            hints.append(WebContentHint(screen=screen, **fields))
+        except (ValidationError, TypeError):
+            logger.warning("Ignoring malformed web_content entry in %s", screen)
+    return hints
 
 
 def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
@@ -370,6 +409,7 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
         if md_file.name.startswith("_"):
             continue
         result = parse_screen_landmarks(md_file, base_path=path)
+        scan.web_content.extend(result.web_content)
         if result.screen is not None:
             scan.screens.append(result.screen)
         elif result.skip is not None:
@@ -387,6 +427,7 @@ class LandmarkRegistry:
 
     def __init__(self) -> None:
         self._sets: dict[str, list[ScreenLandmarks]] = {}
+        self._web_content: dict[str, list[WebContentHint]] = {}
 
     def load(self, app: str, screens: list[ScreenLandmarks]) -> int:
         """Load landmarks for an app. Replaces any existing set for that app.
@@ -407,7 +448,14 @@ class LandmarkRegistry:
         """
         scan = scan_knowledge_base(Path(path))
         count = self.load(app, scan.screens)
+        self._web_content[app] = scan.web_content
         return count, scan.skipped
+
+    def web_content(self, app: str | None = None) -> list[WebContentHint]:
+        """Recorded web view facts, for one app or all of them."""
+        if app is not None:
+            return list(self._web_content.get(app, []))
+        return [hint for hints in self._web_content.values() for hint in hints]
 
     def unload(self, app: str | None = None) -> str:
         """Unload landmarks. If app is None, unload all.
@@ -416,8 +464,10 @@ class LandmarkRegistry:
         """
         if app is None:
             self._sets.clear()
+            self._web_content.clear()
             return "all"
         self._sets.pop(app, None)
+        self._web_content.pop(app, None)
         return app
 
     def list_sets(self) -> dict[str, int]:

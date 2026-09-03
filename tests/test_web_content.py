@@ -27,6 +27,7 @@ from server.device.web_content import (
     project,
     to_screen,
 )
+from server.models import WebContentAnchor, WebContentHint
 
 SCREEN = {"x": 0, "y": 0, "width": 402, "height": 874}
 
@@ -498,3 +499,100 @@ async def test_every_page_gets_a_cheap_pass_before_any_page_sweeps():
         [native_el("Application", "App", 0, 0, 402, 874)])
     assert result["anchored"] is True
     assert [e["AXLabel"] for e in result["elements"]] == ["Servers"]
+
+
+# ------------------------------------------------- recorded origins
+
+def hint(url, origin, **kw):
+    return WebContentHint(url=url, anchor=WebContentAnchor(origin=origin), **kw)
+
+
+async def test_a_recorded_origin_is_confirmed_in_one_probe():
+    """Measured: an SFSafariViewController page cost a 17-probe sweep to locate
+    and one probe once its origin had been written down."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 3, "title": "T", "url": "https://example.test/settings"}],
+        {3: page([dom("GoToSocial Settings", 35, 147, 233, 34)])})
+    screen = FakeScreen([native_el("Heading", "GoToSocial Settings", 35, 253, 233, 34)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        hints=[hint("https://example.test/settings", [0, 106])])
+    assert result["anchored"] is True
+    assert result["probes"] == 1
+    assert result["anchors"][0]["strategy"] == "hint"
+    assert result["anchors"][0]["origin"] == [0.0, 106.0]
+
+
+async def test_a_recorded_origin_that_no_longer_holds_is_discarded():
+    """Devices, iOS versions and text sizes move it. A stale hint must cost a
+    probe, not a wrong tap."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 3, "title": "T", "url": "https://example.test/settings"}],
+        {3: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        hints=[hint("https://example.test/settings", [0, 600])])
+    assert result["anchored"] is True, "a bad hint must not prevent locating the page"
+    assert result["anchors"][0]["strategy"] != "hint"
+    assert result["anchors"][0]["origin"] == [0.0, 126.0]
+
+
+async def test_a_hint_for_another_page_is_not_applied():
+    inspector = FakeInspector(
+        [APP], [{"page_id": 3, "title": "T", "url": "https://example.test/settings"}],
+        {3: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)],
+        hints=[hint("https://elsewhere.test/other", [0, 106])])
+    assert result["anchors"][0]["strategy"] == "geometry"
+
+
+async def test_what_is_emitted_is_what_should_be_written_down():
+    """The response has to carry everything the knowledge base block needs, or
+    a discovery cannot be recorded without measuring it again by hand."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 3, "title": "T", "url": "https://example.test/s"}],
+        # 874 - 748 = 126, the offset the heading actually sits at, so the
+        # bottom-anchored candidate is the one that confirms.
+        {3: page([dom("Servers", 24, 170, 144, 53)], vw=402, vh=748)})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)])
+    recorded = result["anchors"][0]
+    assert recorded["url"] == "https://example.test/s"
+    assert recorded["origin"] == [0.0, 126.0]
+    assert recorded["viewport"] == [402, 748]
+    assert recorded["strategy"] in ("geometry", "sweep", "hint")
+
+
+async def test_a_second_page_is_still_swept_after_the_first_is_located():
+    """Two web views can be on screen together -- a page and an embedded player.
+    One being found cheaply is no reason to leave the other unreachable."""
+    inspector = FakeInspector(
+        [APP],
+        [{"page_id": 1, "title": "Cheap", "url": "https://a.test/"},
+         {"page_id": 2, "title": "Needs sweeping", "url": "https://b.test/"}],
+        # Page 1 sits where geometry predicts; page 2 does not, so only a sweep
+        # can place it.
+        {1: page([dom("Alpha", 0, 100, 402, 40)], vw=402, vh=748),
+         # Placed so two sweep rows (y=350, y=525) land inside them; both sit
+         # at the same +280 offset, which is what the two-distinct-hits rule
+         # needs before it will believe a swept origin.
+         2: page([dom("Beta", 0, 60, 402, 40), dom("Gamma", 0, 220, 402, 40)])})
+    screen = FakeScreen([
+        native_el("StaticText", "Alpha", 0, 226, 402, 40),
+        native_el("StaticText", "Beta", 0, 340, 402, 40),
+        native_el("StaticText", "Gamma", 0, 500, 402, 40),
+    ])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)])
+    located = {a["page_id"] for a in result["anchors"]}
+    assert located == {1, 2}, f"only located {located}"
+    assert {a["strategy"] for a in result["anchors"]} == {"geometry", "sweep"}

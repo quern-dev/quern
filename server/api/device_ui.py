@@ -401,7 +401,13 @@ async def get_web_content(request: Request, body: WebContentRequest) -> dict:
 
     controller = _get_controller(request)
     try:
-        result = await controller.get_web_content(udid=body.udid, bundle_id=body.bundle_id)
+        # Matching is by page URL, so every loaded app's hints are equally
+        # usable and the knowledge-base app name does not need to be known here.
+        registry = getattr(request.app.state, "landmark_registry", None)
+        hints = registry.web_content() if registry is not None else None
+        result = await controller.get_web_content(
+            udid=body.udid, bundle_id=body.bundle_id, hints=hints,
+        )
         elapsed = (time.perf_counter() - start) * 1000
         logger.info(
             f"[PERF] API /ui/web-content SUCCESS: {elapsed:.1f}ms, "
