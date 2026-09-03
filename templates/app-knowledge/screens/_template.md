@@ -61,12 +61,38 @@ identify_by:
 #
 # On Android none of this applies: the accessibility tree does descend into a
 # WebView, so web content appears as ordinary elements.
+# What is already known about each web view on this screen, so an agent does
+# not have to rediscover it. Emitted ready to paste by get_web_content, under
+# "anchors".
 web_content:
-  # - host: "WKWebView"
-  #   in_process: true
-  #   inspectable: "debug"
+  # - host: "SFSafariViewController"   # the class presenting it
+  #   process: "com.apple.SafariViewService"
+  #   # Which bundle_id to pass to get_web_content. An out-of-process view
+  #   # (SFSafariViewController, ASWebAuthenticationSession) is hosted by
+  #   # SafariViewService, NOT by the app -- and needs no isInspectable, since
+  #   # that property only governs the app's own WKWebViews. An in-process
+  #   # WKWebView uses the app's own bundle id and does need it, per instance.
+  #   reachable_by: [inspector, hit_test]
+  #   # Measured, and the most valuable field here. The three cases differ:
+  #   #   in-process WKWebView        -> inspector (with isInspectable), hit_test
+  #   #   SFSafariViewController      -> inspector, hit_test
+  #   #   ASWebAuthenticationSession  -> hit_test ONLY; while one is presented
+  #   #                                 the inspector reports no connected app
+  #   #                                 at all, so do not spend a call on it.
   #   url: "https://example.com/page"
-  #   page_offset: [0, 100]
+  #   # How a live page is matched to this entry. No screen identification is
+  #   # needed first, which matters because a screen with a web view often has
+  #   # no native identity at all.
+  #   anchor:
+  #     origin: [0, 106]               # page top-left, in points
+  #     viewport: [402, 685]
+  #     measured_on: "iPhone 16 Pro - iOS 18.6"
+  #   # A HINT, never a fact. It depends on device size, iOS version and text
+  #   # size, so it is offered as the first candidate and confirmed by one
+  #   # probe; if it no longer holds it is discarded and the usual search runs.
+  #   # Worth recording because the alternative is expensive: locating an
+  #   # out-of-process page cost a 17-probe sweep and ~3.5s, against 1 probe
+  #   # and ~0.2s once written down.
 
 # Where this screen can be reached from.
 reachable_from:

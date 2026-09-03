@@ -409,6 +409,33 @@ def _contains(frame: dict | None, x: float, y: float) -> bool:
     return hit_contains(frame, x, y)
 
 
+def _anchor_hint_for(hints: list | None, page: dict) -> Anchor | None:
+    """A recorded origin for this page, matched by URL.
+
+    Matching on the URL rather than the screen name is what keeps this
+    non-circular: the pages a hint could help locate are largely the ones with
+    no native identity, so requiring the screen to be identified first would
+    rule out every case worth optimising.
+    """
+    if not hints:
+        return None
+    url = str(page.get("url") or "")
+    if not url:
+        return None
+    for hint in hints:
+        recorded = getattr(hint, "url", None)
+        anchor = getattr(hint, "anchor", None)
+        if not recorded or anchor is None or not getattr(anchor, "origin", None):
+            continue
+        if recorded not in url and url not in recorded:
+            continue
+        origin = anchor.origin
+        if len(origin) < 2:
+            continue
+        return Anchor(dx=float(origin[0]), dy=float(origin[1]))
+    return None
+
+
 async def collect_web_content(
     udid: str,
     bundle_id: str | None,
@@ -419,6 +446,7 @@ async def collect_web_content(
     max_probes: int = MAX_ANCHOR_PROBES,
     attribute_udid: AttributeUdidFn | None = None,
     require_device_match: bool = False,
+    hints: list | None = None,
 ) -> dict:
     """Read every inspectable page on screen and place it in screen coordinates.
 
@@ -429,6 +457,7 @@ async def collect_web_content(
 
     result: dict = {
         "elements": [], "pages": [], "probes": 0, "anchored": False, "reason": None,
+        "anchors": [],
     }
 
     applications = await inspector.connected_applications()
@@ -523,31 +552,57 @@ async def collect_web_content(
     # different origins, and an offset confirmed for one says nothing about
     # the other.
     #
-    # Two phases, because the passes cost very differently. Every page gets the
-    # cheap geometry pass first; only if none of them anchored does any page pay
-    # for a sweep. Interleaving them would let a page that is not on screen
-    # spend the whole budget sweeping before a page that is has been looked at
-    # at all -- the same starvation the per-page cap exists to prevent.
+    # Three passes, cheapest first, because they cost very differently. A
+    # recorded origin is one probe. Geometry is up to four. Sweeping is a dozen
+    # or more, so no page pays for it until every page has failed the cheaper
+    # passes -- otherwise a page that is not on screen sweeps away the budget
+    # before a page that is has been looked at at all.
     screen = app_frame(native) or {"x": 0, "y": 0, "width": 0, "height": 0}
     budget = max_probes
-    for page, page_contents in contents:
-        if budget <= 0:
-            break
+
+    async def attempt(page, page_contents, candidates, limit, strategy) -> bool:
+        nonlocal budget
+        if budget <= 0 or not candidates:
+            return False
         anchor, probes = await confirm_anchor(
-            udid, describe_point, page_contents,
-            candidate_anchors(native, page_contents, screen),
-            native_screen=screen, max_probes=min(budget, MAX_PROBES_PER_PAGE),
+            udid, describe_point, page_contents, candidates,
+            native_screen=screen, max_probes=min(budget, limit),
         )
         result["probes"] += probes
         budget -= probes
         if anchor is None:
-            continue
+            return False
         result["anchored"] = True
         result["elements"].extend(project(page_contents, anchor, page_id=page["page_id"]))
+        viewport = page_contents.get("viewport") or {}
+        # What an agent writes back into the knowledge base, so the next run
+        # starts from a one-probe confirmation instead of a search.
+        result["anchors"].append({
+            "page_id": page["page_id"],
+            "url": page.get("url"),
+            "origin": [round(anchor.dx, 1), round(anchor.dy, 1)],
+            "viewport": [viewport.get("width"), viewport.get("height")],
+            "strategy": strategy,
+        })
+        return True
+
+    located: set = set()
+    for page, page_contents in contents:
+        hint = _anchor_hint_for(hints, page)
+        if hint is not None and await attempt(page, page_contents, [hint], 3, "hint"):
+            located.add(page["page_id"])
+
+    for page, page_contents in contents:
+        if page["page_id"] in located:
+            continue
+        if await attempt(page, page_contents,
+                         candidate_anchors(native, page_contents, screen),
+                         MAX_PROBES_PER_PAGE, "geometry"):
+            located.add(page["page_id"])
 
     if not result["anchored"]:
-        # Geometry suggested nothing that held. Sweep for an origin instead --
-        # the only route for a web view whose chrome the native tree cannot see,
+        # Nothing geometry suggested held. Sweep for an origin instead -- the
+        # only route for a web view whose chrome the native tree cannot see,
         # which is every out-of-process one.
         for page, page_contents in contents:
             if budget <= 0:
@@ -563,6 +618,14 @@ async def collect_web_content(
             result["anchored"] = True
             result["elements"].extend(
                 project(page_contents, anchor, page_id=page["page_id"]))
+            viewport = page_contents.get("viewport") or {}
+            result["anchors"].append({
+                "page_id": page["page_id"],
+                "url": page.get("url"),
+                "origin": [round(anchor.dx, 1), round(anchor.dy, 1)],
+                "viewport": [viewport.get("width"), viewport.get("height")],
+                "strategy": "sweep",
+            })
 
     if not result["anchored"]:
         result["reason"] = (

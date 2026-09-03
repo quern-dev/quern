@@ -1702,6 +1702,7 @@ class DeviceControllerUI:
         self,
         udid: str | None = None,
         bundle_id: str | None = None,
+        hints: list | None = None,
     ) -> dict:
         """Read web content the accessibility tree cannot see.
 
@@ -1755,6 +1756,7 @@ class DeviceControllerUI:
                 inspector, native,
                 attribute_udid=simulator_udid_for_application,
                 require_device_match=require_match,
+                hints=hints,
             )
 
         # One transaction at a time: the connection is shared, and a retry

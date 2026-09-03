@@ -858,3 +858,81 @@ class TestLandmarkRegistry:
         assert len(skipped) == 1
         assert skipped[0].reason == "legacy_format"
         assert skipped[0].screen == "Legacy"
+
+
+# ------------------------------------------------- recorded web view facts
+
+def _write(tmp_path, name, frontmatter):
+    screens = tmp_path / "screens"
+    screens.mkdir(exist_ok=True)
+    (screens / name).write_text(f"---\n{frontmatter}\n---\n\nbody\n")
+    return tmp_path
+
+
+def test_web_content_is_read_from_a_screen_with_no_landmarks(tmp_path):
+    """The screens that most need a recorded web view -- an OAuth view, a
+    settings page behind SFSafariViewController -- are exactly the ones with no
+    native identity. A hint reachable only through a successful landmark parse
+    would never reach the cases it exists for."""
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "settings.md", '''screen: "settings"
+landmarks: []
+web_content:
+  - host: "SFSafariViewController"
+    process: "com.apple.SafariViewService"
+    reachable_by: [inspector, hit_test]
+    url: "https://example.test/settings"
+    anchor:
+      origin: [0, 106]
+      viewport: [402, 685]''')
+    scan = scan_knowledge_base(tmp_path)
+    assert scan.screens == []                      # no landmarks, as expected
+    assert len(scan.web_content) == 1
+    hint = scan.web_content[0]
+    assert hint.screen == "settings"
+    assert hint.process == "com.apple.SafariViewService"
+    assert hint.anchor.origin == [0, 106]
+    assert "hit_test" in hint.reachable_by
+
+
+def test_web_content_is_also_read_from_a_screen_that_has_landmarks(tmp_path):
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "picker.md", '''screen: "picker"
+landmarks:
+  - { element: "Button", label: "Done" }
+web_content:
+  - host: "WKWebView"
+    url: "https://example.test/servers"''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [s.screen for s in scan.screens] == ["picker"]
+    assert [h.host for h in scan.web_content] == ["WKWebView"]
+
+
+def test_a_malformed_web_content_entry_does_not_stop_the_load(tmp_path):
+    """A hint is an optimisation and every value in it is verified before use;
+    a bad one must never cost the whole knowledge base."""
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "broken.md", '''screen: "broken"
+landmarks:
+  - { element: "Button", label: "Done" }
+web_content:
+  - anchor: "not a mapping"
+  - "a bare string"
+  - host: "WKWebView"
+    url: "https://ok.test/"''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [s.screen for s in scan.screens] == ["broken"]
+    assert [h.url for h in scan.web_content] == ["https://ok.test/"]
+
+
+def test_unloading_an_app_forgets_its_web_content(tmp_path):
+    from server.device.landmarks import LandmarkRegistry
+    _write(tmp_path, "s.md", '''screen: "s"
+landmarks: []
+web_content:
+  - url: "https://example.test/"''')
+    registry = LandmarkRegistry()
+    registry.load_from_path("App", str(tmp_path))
+    assert len(registry.web_content("App")) == 1
+    registry.unload("App")
+    assert registry.web_content("App") == []
