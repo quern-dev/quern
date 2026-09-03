@@ -576,6 +576,22 @@ def _install_skills(project_root: Path) -> CheckResult:
     skills_dest = claude_dir / "skills"
     skills_dest.mkdir(parents=True, exist_ok=True)
 
+    # Retiring a skill leaves a symlink behind on every machine that ever ran
+    # setup, pointing at a directory that no longer exists. Only links we own
+    # are removed: a symlink into our own skills directory whose target is gone.
+    removed = []
+    for link_path in sorted(skills_dest.iterdir()):
+        if not link_path.is_symlink() or link_path.exists():
+            continue
+        try:
+            target = Path(os.readlink(link_path))
+        except OSError:
+            continue
+        if target.parent.resolve() != skills_src.resolve():
+            continue
+        link_path.unlink()
+        removed.append(link_path.name)
+
     installed = []
     for skill_dir in sorted(skills_src.iterdir()):
         if not skill_dir.is_dir() or skill_dir.name.startswith("."):
@@ -592,18 +608,21 @@ def _install_skills(project_root: Path) -> CheckResult:
         link_path.symlink_to(skill_dir)
         installed.append(skill_dir.name)
 
-    if not installed:
+    if not installed and not removed:
         return CheckResult(
             name="Claude Code skills",
             status=CheckStatus.OK,
             message="No skills to install",
         )
 
+    summary = f"Linked {len(installed)} skill(s) to ~/.claude/skills/"
+    if removed:
+        summary += f", removed {len(removed)} stale link(s)"
     return CheckResult(
         name="Claude Code skills",
         status=CheckStatus.OK,
-        message=f"Linked {len(installed)} skill(s) to ~/.claude/skills/",
-        detail=", ".join(installed),
+        message=summary,
+        detail=", ".join(installed + [f"{name} (stale link removed)" for name in removed]),
     )
 
 

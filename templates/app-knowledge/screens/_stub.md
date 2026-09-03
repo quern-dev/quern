@@ -3,7 +3,7 @@ screen: ""
 status: stub
 
 # Discovered from this screen/edge. Fill in as known.
-identify_by: []
+landmarks: []
 reachable_from:
   - screen: "[[screens/...]]"
     action: 'tap_element label="..." element_type="..."'
