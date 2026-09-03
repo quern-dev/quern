@@ -22,6 +22,7 @@ sits at a different origin.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from server.device.probing import DescribePointFn, frame_key
 
@@ -265,6 +266,26 @@ async def confirm_anchor(
     return None, probes
 
 
+class InspectorLike(Protocol):
+    """What collection needs from a Web Inspector connection.
+
+    A Protocol rather than the concrete class, because every test here drives
+    this with a fake -- the real one needs a booted simulator and a live socket.
+    """
+
+    async def connected_applications(self) -> list[dict]: ...
+
+    async def pages(self, application_id: str) -> list[dict]: ...
+
+    async def page_contents(self, application_id: str, page_id: int) -> dict | None: ...
+
+
+class AttributeUdidFn(Protocol):
+    """Maps an inspector application id to the simulator hosting it."""
+
+    async def __call__(self, application_id: str) -> str | None: ...
+
+
 # The Web Inspector reports WebKit's own helper processes alongside real apps.
 # They are never what a caller means by "the app".
 _HELPER_PREFIXES = ("process-", "com.apple.WebKit")
@@ -392,11 +413,11 @@ async def collect_web_content(
     udid: str,
     bundle_id: str | None,
     describe_point: DescribePointFn,
-    inspector,
+    inspector: InspectorLike,
     native: list[dict],
     *,
     max_probes: int = MAX_ANCHOR_PROBES,
-    attribute_udid=None,
+    attribute_udid: AttributeUdidFn | None = None,
     require_device_match: bool = False,
 ) -> dict:
     """Read every inspectable page on screen and place it in screen coordinates.
