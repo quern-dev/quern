@@ -63,8 +63,12 @@ _COLLECT_JS = """
   for (var i = 0; i < nodes.length && out.length < 400; i++) {
     var n = nodes[i];
     var r = n.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) continue;
+    // Degenerate boxes are layout artefacts rather than content: skip-links and
+    // framework route announcers park themselves at (-1, -1, 1x1), and probing
+    // one lands outside the app frame entirely.
+    if (r.width < 2 || r.height < 2) continue;
     if (r.bottom < 0 || r.top > window.innerHeight) continue;
+    if (r.right < 0 || r.left > window.innerWidth) continue;
     var own = '';
     for (var c = n.firstChild; c; c = c.nextSibling) {
       if (c.nodeType === 3) own += c.nodeValue;
@@ -77,6 +81,33 @@ _COLLECT_JS = """
     // Structural wrappers with no text of their own are noise; keep them only
     // when they are something a user can act on.
     if (!own && !interactive) continue;
+    // A block element's border box spans the whole column, but accessibility
+    // reports only the rendered glyphs, so the box centre lands in whitespace
+    // beside the text and a hit-test there answers with the nearest element
+    // instead. A Range over the text nodes reproduces the accessibility frame:
+    // measured against joinmastodon.org, an <h1> with a 354x50 border box has a
+    // text rect and an AX frame that both read 144x53.
+    //
+    // This applies to controls too, not just prose. A nav link whose <a> spans
+    // a 394pt row reports an accessibility frame only as wide as the word
+    // "Apps", so probing the row centre answers with a neighbouring element.
+    // The text box is inside the control either way, so it is the safer target.
+    var box = r;
+    if (own) {
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(n);
+        var textRect = range.getBoundingClientRect();
+        if (textRect.width >= 2 && textRect.height >= 2) box = textRect;
+      } catch (e) {}
+    }
+    // An element under an overlay is still in the DOM with a valid box, but a
+    // tap at its centre hits whatever is on top. Measured with the site's nav
+    // menu open: the page heading and body paragraph were still reported, and
+    // probing them answered with the menu items covering them.
+    var atPoint = document.elementFromPoint(
+      box.left + box.width / 2, box.top + box.height / 2);
+    if (atPoint && atPoint !== n && !n.contains(atPoint) && !atPoint.contains(n)) continue;
     out.push({
       tag: tag,
       id: n.id || null,
@@ -85,7 +116,7 @@ _COLLECT_JS = """
       type: n.getAttribute('type'),
       href: tag === 'a' ? n.getAttribute('href') : null,
       text: (own || n.getAttribute('aria-label') || n.value || '').slice(0, 200),
-      x: r.left, y: r.top, width: r.width, height: r.height,
+      x: box.left, y: box.top, width: box.width, height: box.height,
       interactive: !!interactive
     });
   }
