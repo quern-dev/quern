@@ -90,3 +90,39 @@ def test_relinking_an_unchanged_install_is_a_no_op(tmp_path, home):
     result = _install_skills(root)
     assert os.readlink(home / ".claude" / "skills" / "quern-api") == before
     assert "already linked" in (result.detail or "")
+
+
+def test_a_relative_stale_link_is_recognised_as_ours(tmp_path, home):
+    """os.readlink returns whatever was stored. A relative target is relative to
+    the link's own directory, not to wherever the process is running."""
+    root = _project(tmp_path, "quern-api")
+    skills_dest = home / ".claude" / "skills"
+    relative = os.path.relpath(root / "skills" / "retired", skills_dest)
+    stale = skills_dest / "retired"
+    stale.symlink_to(relative)
+    assert stale.is_symlink() and not stale.exists()
+
+    result = _install_skills(root)
+
+    assert not stale.is_symlink(), "a relative dangling link was not recognised"
+    assert "stale" in result.message
+
+
+def test_a_link_that_cannot_be_removed_does_not_abort_the_rest(tmp_path, home, monkeypatch):
+    """One undeletable link is not a reason to leave every other skill unlinked."""
+    root = _project(tmp_path, "quern-api")
+    stale = home / ".claude" / "skills" / "retired"
+    stale.symlink_to(root / "skills" / "retired")
+
+    real_unlink = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "retired":
+            raise PermissionError("nope")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    result = _install_skills(root)
+
+    assert (home / ".claude" / "skills" / "quern-api").exists(), "install stopped early"
+    assert "Linked 1" in result.message

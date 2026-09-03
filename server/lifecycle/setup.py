@@ -587,9 +587,17 @@ def _install_skills(project_root: Path) -> CheckResult:
             target = Path(os.readlink(link_path))
         except OSError:
             continue
+        # A relative target is relative to the link's own directory, not to
+        # wherever this process happens to be running.
+        if not target.is_absolute():
+            target = link_path.parent / target
         if target.parent.resolve() != skills_src.resolve():
             continue
-        link_path.unlink()
+        try:
+            link_path.unlink()
+        except OSError:
+            # One link we cannot remove is not a reason to leave the rest.
+            continue
         removed.append(link_path.name)
 
     installed = []

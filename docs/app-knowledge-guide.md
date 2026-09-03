@@ -123,7 +123,7 @@ A stub is a minimal screen file that records "this screen exists and I know how 
 **When to create a stub:**
 
 1. You're documenting Screen A and find it leads to Screen B.
-2. Before creating a stub for Screen B, check if a file already exists for it — search existing screen docs by name and `landmarks`.
+2. Before creating a stub for Screen B, check if a file already exists for it — search every screen document by name first, then read its `landmarks:` (or, on a file written before April 2026, its `identify_by:`). Searching only for `landmarks:` misses a pre-landmarks file entirely, and the duplicate stub splits that screen's `reachable_from` edges across two documents.
 3. If no match exists, create a stub: `screens/screen-b.md` with `status: stub`, the `reachable_from` edge you just discovered, and whatever you can infer about the screen name.
 4. If a match exists (stub or documented), just add the new `reachable_from` edge to the existing file.
 

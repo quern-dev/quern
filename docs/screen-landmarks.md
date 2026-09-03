@@ -83,8 +83,9 @@ landmarks:
 ```
 
 The two coexisted in the template for a transition period after April 2026 and
-no longer do. `landmarks` is the only field the loader reads; `identify_by` was
-never evaluated. Prose that does not fit the structured schema belongs in the
+no longer do. `landmarks` is the only field used to load or match a screen. `identify_by`
+is read solely to report it back as a diagnostic, and has never been evaluated
+against a live UI. Prose that does not fit the structured schema belongs in the
 body of the document, where a reader will actually find it.
 
 **A knowledge base written before April 2026** has only `identify_by:`. The
