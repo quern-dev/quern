@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from server.device import probing
+from server.device import ax_recovery, probing
 from server.models import SimBridgeSaturatedError
 
 logger = logging.getLogger("quern-debug-server.sim-bridge")
@@ -408,7 +408,7 @@ class SimBridgeBackend:
 
     async def describe_all(
         self, udid: str, *, snapshot_depth: int | None = None,
-        source_timeout: float | None = None,
+        source_timeout: float | None = None, _recovered: bool = False,
     ) -> list[dict]:
         """Return flat list of UI elements.
 
@@ -443,6 +443,23 @@ class SimBridgeBackend:
                 "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms elements=%d",
                 (time.perf_counter() - start) * 1000, len(flat),
             )
+
+            # An XCUITest or WDA run leaves this simulator's accessibility
+            # bridge with a stale port cache, after which every app reports a
+            # single bare Application element (#66). Recovery is a kill away and
+            # the respawn is automatic, so heal it rather than handing back an
+            # empty tree that reads as mass landmark drift.
+            #
+            # Once only. If the tree still looks poisoned after a reset, the
+            # cause is something else and retrying would just be a slower way to
+            # return the same answer.
+            if not _recovered and ax_recovery.looks_poisoned(flat):
+                if await ax_recovery.reset_bridge(udid):
+                    return await self.describe_all(
+                        udid, snapshot_depth=snapshot_depth,
+                        source_timeout=source_timeout, _recovered=True,
+                    )
+
             return flat
 
     async def describe_all_nested(
