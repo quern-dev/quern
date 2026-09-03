@@ -87,7 +87,7 @@ def flatten_nested(items: list[dict]) -> list[dict]:
     return result
 
 
-def _frame_key(frame: dict | None) -> tuple[int, int, int, int] | None:
+def frame_key(frame: dict | None) -> tuple[int, int, int, int] | None:
     if not frame:
         return None
     return (
@@ -95,6 +95,11 @@ def _frame_key(frame: dict | None) -> tuple[int, int, int, int] | None:
         int(frame.get("width", 0)), int(frame.get("height", 0)),
     )
 
+
+# Kept so every existing caller and test in this module reads unchanged; the
+# public name exists because web_probing needs the same key to tell a web hit
+# from a native element it has already seen.
+_frame_key = frame_key
 
 DescribePointFn = Callable[[str, float, float], Awaitable[dict | None]]
 

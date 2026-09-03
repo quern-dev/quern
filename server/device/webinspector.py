@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import json
 import logging
 import os
 import socket
@@ -42,6 +43,60 @@ _SEL_REPORT_IDENTIFIER = "_rpc_reportIdentifier:"
 _SEL_FORWARD_GET_LISTING = "_rpc_forwardGetListing:"
 _SEL_FORWARD_SOCKET_SETUP = "_rpc_forwardSocketSetup:"
 _SEL_FORWARD_SOCKET_DATA = "_rpc_forwardSocketData:"
+
+# Replies to a forwarded WebKit message come back under this selector, carrying
+# the raw protocol JSON. Unlike the sim-bridge wire protocol, WebKit messages
+# carry their own ids, so a reply can be matched to its request rather than to
+# whatever arrived next.
+_SEL_APPLICATION_SENT_DATA = "_rpc_applicationSentData:"
+
+# Collects every element a page can show, with the geometry needed to touch it.
+# Written as one expression so a page yields its whole structure in a single
+# round trip: a DOM.getDocument walk would need one message per node, and the
+# channel is slow enough that the difference is seconds.
+_COLLECT_JS = """
+(function () {
+  var out = [];
+  var nodes = document.querySelectorAll(
+    'a, button, input, select, textarea, [role], [onclick], h1, h2, h3, h4, ' +
+    'h5, h6, p, li, label, span, div');
+  for (var i = 0; i < nodes.length && out.length < 400; i++) {
+    var n = nodes[i];
+    var r = n.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    if (r.bottom < 0 || r.top > window.innerHeight) continue;
+    var own = '';
+    for (var c = n.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) own += c.nodeValue;
+    }
+    own = own.trim();
+    var tag = n.tagName.toLowerCase();
+    var interactive = (tag === 'a' || tag === 'button' || tag === 'input' ||
+                       tag === 'select' || tag === 'textarea' ||
+                       n.hasAttribute('onclick') || n.getAttribute('role'));
+    // Structural wrappers with no text of their own are noise; keep them only
+    // when they are something a user can act on.
+    if (!own && !interactive) continue;
+    out.push({
+      tag: tag,
+      id: n.id || null,
+      name: n.getAttribute('name'),
+      role: n.getAttribute('role'),
+      type: n.getAttribute('type'),
+      href: tag === 'a' ? n.getAttribute('href') : null,
+      text: (own || n.getAttribute('aria-label') || n.value || '').slice(0, 200),
+      x: r.left, y: r.top, width: r.width, height: r.height,
+      interactive: !!interactive
+    });
+  }
+  return JSON.stringify({
+    url: location.href, title: document.title,
+    viewport: {width: window.innerWidth, height: window.innerHeight},
+    scroll: {x: window.scrollX, y: window.scrollY},
+    elements: out
+  });
+})()
+"""
 
 
 class WebInspectorError(RuntimeError):
@@ -88,6 +143,10 @@ class SimulatorWebInspector:
         self._service: Any = None
         self._sock: socket.socket | None = None
         self._connection_id = str(uuid.uuid4()).upper()
+        self._sender_id = str(uuid.uuid4()).upper()
+        self._sessions: set[tuple[str, int]] = set()
+        self._targets: dict[tuple[str, int], str] = {}
+        self._message_id = 0
         self._applications: dict[str, dict] = {}
 
     async def __aenter__(self) -> SimulatorWebInspector:
@@ -206,6 +265,166 @@ class SimulatorWebInspector:
             }
             for app_id, info in self._applications.items()
         ]
+
+    async def _open_session(self, application_id: str, page_id: int) -> None:
+        session = (application_id, page_id)
+        if session in self._sessions:
+            return
+        await self._send(_SEL_FORWARD_SOCKET_SETUP, {
+            "WIRApplicationIdentifierKey": application_id,
+            "WIRConnectionIdentifierKey": self._connection_id,
+            "WIRPageIdentifierKey": page_id,
+            "WIRSenderKey": self._sender_id,
+        })
+        self._sessions.add(session)
+
+    async def _send_to_page(
+        self, application_id: str, page_id: int, message: dict,
+    ) -> None:
+        await self._send(_SEL_FORWARD_SOCKET_DATA, {
+            "WIRApplicationIdentifierKey": application_id,
+            "WIRConnectionIdentifierKey": self._connection_id,
+            "WIRPageIdentifierKey": page_id,
+            "WIRSenderKey": self._sender_id,
+            "WIRSocketDataKey": json.dumps(message).encode(),
+        })
+
+    async def _forward(
+        self, application_id: str, page_id: int, method: str, params: dict | None = None,
+    ) -> dict | None:
+        """Send one WebKit protocol message to a page and wait for its reply.
+
+        Messages are wrapped in `Target.sendMessageToTarget` and replies arrive
+        inside `Target.dispatchMessageFromTarget`. Sending a bare
+        `Runtime.evaluate` is answered with
+
+            {"error": {"code": -32601, "message": "'Runtime' domain was not
+             found"}}
+
+        which reads as "this WebKit has no JavaScript" rather than "you skipped
+        a layer". The target id comes from the `Target.targetCreated` event the
+        page emits when the session opens, so the session has to be established
+        and drained before anything can be sent.
+
+        Replies are matched on the inner message id. WebKit messages carry
+        their own ids, unlike the sim-bridge wire protocol, so pairing by
+        arrival order is unnecessary here — and would be wrong, since the
+        daemon interleaves unrelated events.
+        """
+        session = (application_id, page_id)
+        await self._open_session(application_id, page_id)
+
+        if session not in self._targets:
+            target_id = await self._await_target(application_id, page_id)
+            if target_id is None:
+                # Drop the session too. Setup is skipped when the session is
+                # cached, and Target.targetCreated is only announced when it is
+                # established — so keeping a session whose target never arrived
+                # means every later call waits for an event that cannot come.
+                self._sessions.discard(session)
+                logger.debug("webinspector: no target for page %s", page_id)
+                return None
+            self._targets[session] = target_id
+
+        self._message_id += 1
+        inner_id = self._message_id
+        inner = {"id": inner_id, "method": method, "params": params or {}}
+
+        self._message_id += 1
+        await self._send_to_page(application_id, page_id, {
+            "id": self._message_id,
+            "method": "Target.sendMessageToTarget",
+            "params": {"targetId": self._targets[session], "message": json.dumps(inner)},
+        })
+
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while asyncio.get_running_loop().time() < deadline:
+            decoded = await self._next_page_message(page_id, deadline)
+            if decoded is None:
+                return None
+            if decoded.get("method") == "Target.dispatchMessageFromTarget":
+                raw_inner = (decoded.get("params") or {}).get("message")
+                try:
+                    unwrapped = json.loads(raw_inner) if raw_inner else None
+                except ValueError:
+                    continue
+                if unwrapped and unwrapped.get("id") == inner_id:
+                    return unwrapped
+        return None
+
+    async def _next_page_message(self, page_id: int, deadline: float) -> dict | None:
+        """The next decoded protocol message from one page, ignoring the rest.
+
+        The page id filter is not decoration. An app can have several
+        inspectable pages — Metatext has two, a YouTube embed and the instance
+        picker — and every one of them announces its own Target.targetCreated
+        on the shared connection. Without this, opening a session on one page
+        can cache another page's target id and then send every message to the
+        wrong document.
+        """
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                message = await asyncio.wait_for(
+                    self._service.recv_plist(), timeout=remaining)
+            except TimeoutError:
+                return None
+            if message is None:
+                return None
+            if message.get("__selector") != _SEL_APPLICATION_SENT_DATA:
+                self._absorb(message)
+                continue
+            argument = message.get("__argument") or {}
+            if argument.get("WIRPageIdentifierKey") not in (None, page_id):
+                continue  # another page's traffic on the shared connection
+            raw = argument.get("WIRMessageDataKey")
+            if not raw:
+                continue
+            try:
+                return json.loads(bytes(raw).decode())
+            except (ValueError, UnicodeDecodeError):
+                continue
+        return None
+
+    async def _await_target(self, application_id: str, page_id: int) -> str | None:
+        """Read the target id the page announces after its session opens."""
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while asyncio.get_running_loop().time() < deadline:
+            decoded = await self._next_page_message(page_id, deadline)
+            if decoded is None:
+                return None
+            if decoded.get("method") == "Target.targetCreated":
+                info = (decoded.get("params") or {}).get("targetInfo") or {}
+                target = info.get("targetId")
+                if target:
+                    return str(target)
+        return None
+
+    async def evaluate(self, application_id: str, page_id: int, expression: str) -> object:
+        """Run JavaScript in a page and return the decoded result."""
+        reply = await self._forward(application_id, page_id, "Runtime.evaluate", {
+            "expression": expression,
+            "returnByValue": True,
+        })
+        if not reply:
+            return None
+        result = ((reply.get("result") or {}).get("result") or {})
+        return result.get("value")
+
+    async def page_contents(self, application_id: str, page_id: int) -> dict | None:
+        """Every addressable element in a page, with page-space geometry.
+
+        Coordinates are relative to the page viewport, not the screen. A caller
+        wanting to touch them has to anchor the two, which one accessibility
+        hit-test is enough to do.
+        """
+        raw = await self.evaluate(application_id, page_id, _COLLECT_JS)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            return None
 
     async def pages(self, application_id: str) -> list[dict]:
         """Inspectable pages within one application.

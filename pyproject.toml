@@ -22,6 +22,11 @@ dependencies = [
     "mitmproxy>=10.0",
     "httpx>=0.27",
     "Pillow>=10.0",
+    # Vision framework via pyobjc, for locating on-screen text to aim
+    # accessibility hit-tests at (see server/device/vision_ocr.py). In-process,
+    # so nothing to compile, sign or ship. macOS only, like the simulator path
+    # it serves; the module degrades to pixel analysis if the import fails.
+    "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
     "fb-idb>=1.1.0",
     "uiautomator2>=3.2",
     "pyyaml>=6.0",
