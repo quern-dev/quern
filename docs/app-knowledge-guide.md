@@ -279,11 +279,13 @@ not follow the rule you would guess:
 | `SFSafariViewController` | **yes, with no opt-in from the app** | yes |
 | `ASWebAuthenticationSession` | **no — reports no connected application at all** | yes |
 
-`get_web_content` tries both, Inspector first, and reports which answered in
-`route`. Recording `reachable_by` still pays: a screen known to be
-`hit_test`-only skips a failing Inspector attempt, and the probe route costs a
-screenshot, text recognition and a dozen or so hit-tests — around 2s, against
-~0.2s for an Inspector page with a recorded origin.
+`get_web_content` always asks the Inspector first and falls back to probing only
+when it returns nothing, reporting which answered in `route`. `reachable_by`
+does not change that order — it tells a reader what to expect, and what a result
+costs: the probe route needs a screenshot, text recognition and a dozen or so
+hit-tests, around 2s, against ~0.2s for an Inspector page with a recorded
+origin. A screen recorded as `hit_test` only will always pay the failed
+Inspector attempt first.
 
 The middle row is the surprising one. The app has no handle on a
 `SFSafariViewController`, yet WebKit still publishes it for inspection under

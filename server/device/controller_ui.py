@@ -18,6 +18,7 @@ from server.device.ui_elements import (
     get_tap_point,
     parse_elements,
 )
+from server.device.web_probing import WebSweepResult
 from server.models import DeviceError, UIElement, WaitCondition
 
 
@@ -1692,7 +1693,9 @@ class DeviceControllerUI:
             except Exception:
                 logger.debug("web inspector close failed", exc_info=True)
 
-    async def _sweep_web_content(self, udid: str, native: list[dict]):
+    async def _sweep_web_content(
+        self, udid: str, native: list[dict],
+    ) -> WebSweepResult:
         """Find on-screen content by hit-testing, aimed with a screenshot.
 
         The route of last resort, and the only one for a web view that no
