@@ -84,16 +84,24 @@ async def test_a_process_outside_any_simulator_is_not_attributed(monkeypatch):
 
 
 async def test_a_parent_walk_cannot_loop_forever(monkeypatch):
-    """A cycle in reported parents must terminate rather than hang the request."""
+    """A cycle in reported parents must terminate rather than hang the request.
+
+    The mock raises once the walk runs long, so a regressed guard fails here
+    instead of looping forever -- an assertion after the call could never run.
+    """
     calls = []
 
     async def fake_field(pid, field):
         calls.append(pid)
-        return {"command": "no udid here", "ppid": "777"}[field]
+        if len(calls) > 40:
+            raise AssertionError("parent walk did not terminate on a cycle")
+        # A two-node cycle: 777 -> 888 -> 777. A self-parent would be caught by
+        # the parent == pid check without ever exercising the bounded walk.
+        return {"command": "no udid here",
+                "ppid": "888" if pid == "777" else "777"}[field]
 
     monkeypatch.setattr(webinspector, "_process_field", fake_field)
     assert await webinspector.simulator_udid_for_application("PID:777") is None
-    assert len(calls) < 40
 
 
 async def test_non_pid_application_ids_are_not_attributed():
