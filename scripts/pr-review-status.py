@@ -174,7 +174,7 @@ def status(number: int, ask: bool = False) -> tuple[str, str]:
     """
     try:
         return _status(number, ask)
-    except (GhError, json.JSONDecodeError, KeyError, ValueError) as exc:
+    except (GhError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         return "unknown", f"#{number} — could not determine review state: {exc}"
 
 
@@ -193,8 +193,11 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
     if not head or not branch:
         raise ValueError("the PR did not report a head ref")
 
-    local = subprocess.run(["git", "rev-parse", f"origin/{branch}"],
-                           capture_output=True, text=True)
+    try:
+        local = subprocess.run(["git", "rev-parse", f"origin/{branch}"],
+                               capture_output=True, text=True)
+    except OSError as exc:  # git missing, not executable, cwd gone
+        raise ValueError(f"could not run git: {exc}") from exc
     local_sha = local.stdout.strip()
     if local.returncode != 0 or not local_sha:
         # Unresolvable rather than verified. Skipping the comparison here would
