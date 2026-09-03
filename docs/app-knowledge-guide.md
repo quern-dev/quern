@@ -243,6 +243,52 @@ This is a separate issue from identifier reliability. The label is *correct*, bu
 - **In the Key Elements table**, write the stable portion followed by `...` and explain the dynamic part in Notes. Example: `Attributes, ...` with note "Comma-separated list of cache attributes, varies per cache."
 - **Prefer identifier over label** for dynamic-label elements — this is the one case where identifiers are more reliable than labels, if one exists.
 
+### Documenting Web Views
+
+A screen built on web content looks almost empty to `get_ui_tree`: on iOS the
+accessibility tree does not descend into a `WKWebView`, and the out-of-process
+hosts are not in the app's hierarchy at all. The failure mode is a
+misdiagnosis, not an error — a near-empty tree reads as "the screen failed to
+load" or "every landmark drifted", and the agent goes looking for a problem
+that isn't there.
+
+Record it in the screen's `web_content:` block. The facts that matter are ones
+only the source can answer, which is exactly what a knowledge base is for.
+
+```yaml
+web_content:
+  - host: "WKWebView"
+    in_process: true
+    inspectable: "debug"
+    url: "https://joinmastodon.org/servers"
+    page_offset: [0, 100]
+```
+
+**`in_process` decides everything else.** When the app constructs the view, it
+can opt it into remote inspection and the page's own DOM becomes available.
+When the system constructs it — `SFSafariViewController`,
+`ASWebAuthenticationSession` — the app has no handle on it, so that route is
+closed no matter what the app does.
+
+**`inspectable` is about the view, not the content.** Since iOS 16.4 a
+`WKWebView` is only inspectable if the app sets `isInspectable` on it. That is
+the app's decision about a view it owns, so it can be true even when the HTML
+comes from a third party the team has no control over. Use `"debug"` when it is
+behind `#if DEBUG`, which is where it belongs.
+
+**Why record `page_offset`.** DOM geometry is viewport-relative, so it cannot be
+tapped directly. One accessibility hit-test on any element recovers the offset
+between page and screen space; writing it down saves doing that every session.
+Re-derive it if the screen's layout changes.
+
+**Note when the URL is third-party.** It can change without an app release —
+the example above moved from `/communities` to `/servers` between knowledge-base
+revisions. Prefer structural selectors (`h1`, `button[aria-label]`) over text
+the site can reword.
+
+None of this applies on Android, where the accessibility tree does descend into
+a `WebView` and web content appears as ordinary elements.
+
 ### Overlay Panels
 
 Some UI doesn't fit neatly into "screen" or "alert" categories: map pin summary cards, bottom sheets, floating panels, and similar overlays that are persistent (not transient like alerts), interactive (they have navigation edges), but not full screens (no navigation bar, they overlay the parent screen).

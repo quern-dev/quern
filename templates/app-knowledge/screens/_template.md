@@ -32,6 +32,42 @@ landmarks:
 identify_by:
   - { element: "", label: "" }
 
+# Web-backed content on this screen. Omit the key entirely when there is none.
+#
+# The accessibility tree does not descend into a WKWebView on iOS, so a screen
+# built on web content looks almost empty to get_ui_tree — which reads as "the
+# screen failed to load" rather than "the content is behind another door".
+# Recording it here stops that misdiagnosis and names the route that works.
+#
+# Which route applies is decided by facts only the source knows, so this is
+# exactly the kind of thing worth writing down once:
+#
+#   host          WKWebView | SFSafariViewController | ASWebAuthenticationSession
+#                 | WebView (Android)
+#   in_process    true when the app constructs the view itself. The system-hosted
+#                 ones (SFSafariViewController, ASWebAuthenticationSession) run in
+#                 another process and are not in the app's hierarchy at all.
+#   inspectable   true | false | "debug". Since iOS 16.4 a WKWebView is only
+#                 inspectable if the app sets isInspectable on it. That is a
+#                 property of the view the app creates, NOT of the content it
+#                 loads — so this can be true even for a third-party page, and is
+#                 always false for the out-of-process hosts.
+#   url           what it loads. Note when it is third-party: it can change
+#                 without an app release, so prefer structural selectors over
+#                 text the site can reword.
+#   page_offset   [x, y] of page (0,0) in screen points, when known. DOM
+#                 geometry is viewport-relative; this is what makes it tappable.
+#                 One accessibility hit-test on any element recovers it.
+#
+# On Android none of this applies: the accessibility tree does descend into a
+# WebView, so web content appears as ordinary elements.
+web_content:
+  # - host: "WKWebView"
+  #   in_process: true
+  #   inspectable: "debug"
+  #   url: "https://example.com/page"
+  #   page_offset: [0, 100]
+
 # Where this screen can be reached from.
 reachable_from:
   - screen: "[[screens/...]]"
