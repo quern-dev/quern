@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import subprocess
 import sys
 import time
@@ -52,6 +53,11 @@ EXIT_FINDINGS = 3
 EXIT_UNKNOWN = 4
 _EXIT = {"ok": EXIT_OK, "pending": EXIT_PENDING,
          "findings": EXIT_FINDINGS, "unknown": EXIT_UNKNOWN}
+
+# The head each PR was verified against, so a caller can bind its merge to the
+# same commit this check looked at. Re-reading the head afterwards would let a
+# push land in between and protect the new, unreviewed one instead.
+_VERIFIED_HEAD: dict[int, str] = {}
 
 
 class GhError(RuntimeError):
@@ -184,15 +190,27 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
     # ref makes the staleness visible instead of invisible.
     head = pr.get("headRefOid") or ""
     branch = pr.get("headRefName") or ""
-    if branch and head:
-        local = subprocess.run(["git", "rev-parse", f"origin/{branch}"],
-                               capture_output=True, text=True)
-        local_sha = local.stdout.strip()
-        if local.returncode == 0 and local_sha and local_sha != head:
-            raise ValueError(
-                f"the API still reports head {head[:8]} while origin/{branch} is "
-                f"{local_sha[:8]} — it has not caught up with the push"
-            )
+    if not head or not branch:
+        raise ValueError("the PR did not report a head ref")
+
+    local = subprocess.run(["git", "rev-parse", f"origin/{branch}"],
+                           capture_output=True, text=True)
+    local_sha = local.stdout.strip()
+    if local.returncode != 0 or not local_sha:
+        # Unresolvable rather than verified. Skipping the comparison here would
+        # approve on the strength of a check that never ran — which is how the
+        # rest of this file kept failing open. A fork PR lands here, correctly:
+        # origin/<branch> does not exist locally, so freshness is unprovable.
+        raise ValueError(
+            f"could not resolve origin/{branch}; head freshness is unverifiable "
+            f"(a fork PR needs its head repository fetched first)"
+        )
+    if local_sha != head:
+        raise ValueError(
+            f"the API still reports head {head[:8]} while origin/{branch} is "
+            f"{local_sha[:8]} — it has not caught up with the push"
+        )
+    _VERIFIED_HEAD[number] = head
 
     commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits"))
     dates = [c["committedDate"] for c in commits["commits"]]
@@ -256,6 +274,9 @@ def main() -> int:
     ap.add_argument("prs", nargs="*", type=int)
     ap.add_argument("--wait", action="store_true",
                     help="poll until every PR is reviewed and clean")
+    ap.add_argument("--emit-head", metavar="FILE",
+                    help="write the verified head SHA here, for a caller that "
+                         "needs to bind a merge to the commit this check saw")
     ap.add_argument("--ask", action="store_true",
                     help="ask CodeRabbit whether the head is reviewed. Posts a "
                          "comment, so it is off by default: a status check "
@@ -273,6 +294,8 @@ def main() -> int:
         print(f"— review status @ {datetime.now().strftime('%H:%M:%S')}")
         code = report(numbers, args.ask)
         if code == EXIT_OK:
+            if args.emit_head and len(numbers) == 1:
+                pathlib.Path(args.emit_head).write_text(_VERIFIED_HEAD.get(numbers[0], ""))
             return EXIT_OK
         # Only pending resolves by waiting. Findings need a human, and unknown
         # means the check itself could not see the data.

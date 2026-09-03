@@ -38,7 +38,9 @@ else
   # review object, and the summary comment refreshes on every push whether or
   # not a review ran. Asking costs a comment, which is why the plain status
   # check stays read-only and only the merge path pays it.
-  python3 scripts/pr-review-status.py "$PR" --ask $WAIT || STATE=$?
+  HEAD_FILE=$(mktemp)
+  trap 'rm -f "$HEAD_FILE"' EXIT
+  python3 scripts/pr-review-status.py "$PR" --ask --emit-head "$HEAD_FILE" $WAIT || STATE=$?
 
   case "${STATE:-0}" in
     0) ;;
@@ -48,10 +50,19 @@ else
   esac
 fi
 
-# Bind the merge to the commit that was reviewed. Between the check above and
-# the merge below, a push can land -- and merging then ships a commit nothing
-# reviewed, which is the exact hole this script exists to close. GitHub refuses
-# the merge if the head has moved.
-HEAD_SHA=$(gh pr view "$PR" --repo jerimiah797/quern --json headRefOid -q .headRefOid)
+# Bind the merge to the commit the check actually verified, not to whatever the
+# head is now. Re-reading it here would let a push land in between and pin the
+# merge to the new, unreviewed commit -- protecting the wrong thing while
+# looking careful. --force has no verified SHA, so it falls back to the current
+# head, which is the point of --force.
+HEAD_SHA=""
+[ -n "${HEAD_FILE:-}" ] && [ -s "$HEAD_FILE" ] && HEAD_SHA=$(cat "$HEAD_FILE")
+if [ -z "$HEAD_SHA" ]; then
+  if [ -z "$FORCE" ]; then
+    echo "Not merging #$PR: the review check did not report a verified head."
+    exit 1
+  fi
+  HEAD_SHA=$(gh pr view "$PR" --repo jerimiah797/quern --json headRefOid -q .headRefOid)
+fi
 gh pr merge "$PR" --repo jerimiah797/quern --merge --delete-branch \
   --match-head-commit "$HEAD_SHA"
