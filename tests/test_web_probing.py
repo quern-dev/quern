@@ -13,6 +13,7 @@ wrong from first principles:
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 import pytest
@@ -284,3 +285,59 @@ async def test_vision_targets_are_probed_at_their_centres(monkeypatch):
     )
     assert screen.calls == [(90.0, 305.0)], f"probed {screen.calls}"
     assert [e["AXLabel"] for e in result.elements] == ["Servers"]
+
+
+# --------------------------------------------------------------------------
+# Web Inspector session handling
+# --------------------------------------------------------------------------
+
+async def test_a_failed_target_lookup_does_not_poison_the_session():
+    """Otherwise one timeout disables the page permanently.
+
+    Setup is skipped when a session is cached, and Target.targetCreated is only
+    announced when a session is established. Keeping a session whose target
+    never arrived means every later call waits for an event that cannot come.
+    """
+    from unittest.mock import AsyncMock
+
+    from server.device.webinspector import SimulatorWebInspector
+
+    insp = SimulatorWebInspector()
+    insp._send = AsyncMock()
+    insp._await_target = AsyncMock(return_value=None)
+
+    assert await insp._forward("PID:1", 1, "Runtime.evaluate", {}) is None
+    assert ("PID:1", 1) not in insp._sessions, "the dead session was kept"
+
+
+async def test_another_pages_traffic_is_ignored():
+    """An app can have several inspectable pages on one connection.
+
+    Metatext has two — a YouTube embed and the instance picker — and each
+    announces its own Target.targetCreated. Without filtering, opening a session
+    on one page can cache the other page's target and send every subsequent
+    message to the wrong document.
+    """
+    import json as _json
+
+    from server.device.webinspector import SimulatorWebInspector
+
+    insp = SimulatorWebInspector()
+    wanted = _json.dumps({"id": 7, "result": {"mine": True}}).encode()
+    other = _json.dumps({"id": 7, "result": {"mine": False}}).encode()
+
+    messages = [
+        {"__selector": "_rpc_applicationSentData:",
+         "__argument": {"WIRPageIdentifierKey": 2, "WIRMessageDataKey": other}},
+        {"__selector": "_rpc_applicationSentData:",
+         "__argument": {"WIRPageIdentifierKey": 1, "WIRMessageDataKey": wanted}},
+    ]
+
+    class Service:
+        async def recv_plist(self):
+            return messages.pop(0) if messages else None
+
+    insp._service = Service()
+    deadline = asyncio.get_running_loop().time() + 5
+    got = await insp._next_page_message(1, deadline)
+    assert got == {"id": 7, "result": {"mine": True}}, f"took another page's reply: {got}"

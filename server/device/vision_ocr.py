@@ -25,9 +25,6 @@ import logging
 
 logger = logging.getLogger("quern-debug-server.device")
 
-# Vision's accurate path. Slower than .fast and worth it: .fast misses small
-# type, which is most of a web page.
-_RECOGNITION_ACCURATE = 1
 
 _unavailable_logged = False
 
@@ -80,7 +77,10 @@ def text_regions(png: bytes, screen: dict) -> list[dict]:
             return []
 
         request = Vision.VNRecognizeTextRequest.alloc().init()
-        request.setRecognitionLevel_(_RECOGNITION_ACCURATE)
+        # Vision's accurate path. Slower than .fast and worth it: .fast misses
+        # small type, which is most of a web page. Named rather than hard-coded
+        # as 1, so a framework change cannot silently reinterpret it.
+        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
         # Language correction rewrites UI strings into dictionary words, and the
         # text is used to match against accessibility labels, so it has to stay
         # verbatim.

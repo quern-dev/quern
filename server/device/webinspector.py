@@ -317,6 +317,11 @@ class SimulatorWebInspector:
         if session not in self._targets:
             target_id = await self._await_target(application_id, page_id)
             if target_id is None:
+                # Drop the session too. Setup is skipped when the session is
+                # cached, and Target.targetCreated is only announced when it is
+                # established — so keeping a session whose target never arrived
+                # means every later call waits for an event that cannot come.
+                self._sessions.discard(session)
                 logger.debug("webinspector: no target for page %s", page_id)
                 return None
             self._targets[session] = target_id
@@ -334,7 +339,7 @@ class SimulatorWebInspector:
 
         deadline = asyncio.get_running_loop().time() + self._timeout
         while asyncio.get_running_loop().time() < deadline:
-            decoded = await self._next_page_message(deadline)
+            decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
                 return None
             if decoded.get("method") == "Target.dispatchMessageFromTarget":
@@ -347,8 +352,16 @@ class SimulatorWebInspector:
                     return unwrapped
         return None
 
-    async def _next_page_message(self, deadline: float) -> dict | None:
-        """The next decoded protocol message, absorbing daemon chatter."""
+    async def _next_page_message(self, page_id: int, deadline: float) -> dict | None:
+        """The next decoded protocol message from one page, ignoring the rest.
+
+        The page id filter is not decoration. An app can have several
+        inspectable pages — Metatext has two, a YouTube embed and the instance
+        picker — and every one of them announces its own Target.targetCreated
+        on the shared connection. Without this, opening a session on one page
+        can cache another page's target id and then send every message to the
+        wrong document.
+        """
         while asyncio.get_running_loop().time() < deadline:
             remaining = deadline - asyncio.get_running_loop().time()
             try:
@@ -361,7 +374,10 @@ class SimulatorWebInspector:
             if message.get("__selector") != _SEL_APPLICATION_SENT_DATA:
                 self._absorb(message)
                 continue
-            raw = (message.get("__argument") or {}).get("WIRMessageDataKey")
+            argument = message.get("__argument") or {}
+            if argument.get("WIRPageIdentifierKey") not in (None, page_id):
+                continue  # another page's traffic on the shared connection
+            raw = argument.get("WIRMessageDataKey")
             if not raw:
                 continue
             try:
@@ -374,7 +390,7 @@ class SimulatorWebInspector:
         """Read the target id the page announces after its session opens."""
         deadline = asyncio.get_running_loop().time() + self._timeout
         while asyncio.get_running_loop().time() < deadline:
-            decoded = await self._next_page_message(deadline)
+            decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
                 return None
             if decoded.get("method") == "Target.targetCreated":
