@@ -508,6 +508,51 @@ Label matching modes (mutually exclusive — use only one):
     }
   });
 
+  server.registerTool("get_web_content", {
+    description: `Read web content inside a WKWebView on an iOS simulator, which get_ui_tree cannot see. The accessibility tree walk stops at the web view — it is absent from the tree entirely, not empty — so a screen built around one looks like nothing but its native chrome. This reads the live DOM through the simulator's Web Inspector and returns elements with real screen frames, including DOM ids and icon-only controls that carry only an aria-label. Tap the results by label with tap_element as usual. Requires the app to set webView.isInspectable = true; that is a per-WKWebView-instance property, so one web view opting in says nothing about another in the same app. Simulator only: Android's accessibility tree already descends into WebView, and physical iOS devices use a different transport — on both, use get_ui_tree. Costs roughly a second on top of a UI tree read, so call it when a screen looks emptier than it should, then again after navigating or scrolling the page. If it reports anchored=false, the page was found but its position on screen could not be confirmed; the elements are withheld rather than returned at a guessed offset.`,
+    inputSchema: strictParams({
+      bundle_id: z
+        .string()
+        .optional()
+        .describe(
+          "Which connected app to read. Optional when only one app is connected to the Web Inspector, which is the usual case."
+        ),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ bundle_id, udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (bundle_id) body.bundle_id = bundle_id;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/web-content",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("scroll_to_element", {
     description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Supported on Android and iOS (simulator + physical). Drives a bounded swipe loop that re-checks the target by selector after each swipe — no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause. Android covers View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView. iOS handles both scroller shapes: a directional swipe toward a located-but-off-screen target in laid-out ScrollViews, and a blind down-then-up sweep for lazy/recycled lists where rows drop out of the tree; rows scrolled under the nav/status bar are rejected rather than counted as already visible. Returns the element's on-screen position once visible; 404 if it never appears within the swipe budget.`,
     inputSchema: strictParams({
