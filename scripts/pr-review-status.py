@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import subprocess
 import sys
 import time
@@ -52,6 +53,11 @@ EXIT_FINDINGS = 3
 EXIT_UNKNOWN = 4
 _EXIT = {"ok": EXIT_OK, "pending": EXIT_PENDING,
          "findings": EXIT_FINDINGS, "unknown": EXIT_UNKNOWN}
+
+# The head each PR was verified against, so a caller can bind its merge to the
+# same commit this check looked at. Re-reading the head afterwards would let a
+# push land in between and protect the new, unreviewed one instead.
+_VERIFIED_HEAD: dict[int, str] = {}
 
 
 class GhError(RuntimeError):
@@ -168,13 +174,46 @@ def status(number: int, ask: bool = False) -> tuple[str, str]:
     """
     try:
         return _status(number, ask)
-    except (GhError, json.JSONDecodeError, KeyError, ValueError) as exc:
+    except (GhError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         return "unknown", f"#{number} — could not determine review state: {exc}"
 
 
 def _status(number: int, ask: bool = False) -> tuple[str, str]:
-    raw = gh("pr", "view", str(number), "--repo", REPO, "--json", "title")
+    raw = gh("pr", "view", str(number), "--repo", REPO,
+             "--json", "title,headRefName,headRefOid")
     pr = json.loads(raw)
+
+    # GitHub does not register a push instantly, and this check tends to run
+    # right after one. Reading commits inside that window returns the *previous*
+    # head, whose review looks current — which merged an unreviewed commit six
+    # seconds after it was pushed. Comparing the API's head against the local
+    # ref makes the staleness visible instead of invisible.
+    head = pr.get("headRefOid") or ""
+    branch = pr.get("headRefName") or ""
+    if not head or not branch:
+        raise ValueError("the PR did not report a head ref")
+
+    try:
+        local = subprocess.run(["git", "rev-parse", f"origin/{branch}"],
+                               capture_output=True, text=True)
+    except OSError as exc:  # git missing, not executable, cwd gone
+        raise ValueError(f"could not run git: {exc}") from exc
+    local_sha = local.stdout.strip()
+    if local.returncode != 0 or not local_sha:
+        # Unresolvable rather than verified. Skipping the comparison here would
+        # approve on the strength of a check that never ran — which is how the
+        # rest of this file kept failing open. A fork PR lands here, correctly:
+        # origin/<branch> does not exist locally, so freshness is unprovable.
+        raise ValueError(
+            f"could not resolve origin/{branch}; head freshness is unverifiable "
+            f"(a fork PR needs its head repository fetched first)"
+        )
+    if local_sha != head:
+        raise ValueError(
+            f"the API still reports head {head[:8]} while origin/{branch} is "
+            f"{local_sha[:8]} — it has not caught up with the push"
+        )
+    _VERIFIED_HEAD[number] = head
 
     commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits"))
     dates = [c["committedDate"] for c in commits["commits"]]
@@ -238,6 +277,9 @@ def main() -> int:
     ap.add_argument("prs", nargs="*", type=int)
     ap.add_argument("--wait", action="store_true",
                     help="poll until every PR is reviewed and clean")
+    ap.add_argument("--emit-head", metavar="FILE",
+                    help="write the verified head SHA here, for a caller that "
+                         "needs to bind a merge to the commit this check saw")
     ap.add_argument("--ask", action="store_true",
                     help="ask CodeRabbit whether the head is reviewed. Posts a "
                          "comment, so it is off by default: a status check "
@@ -255,6 +297,8 @@ def main() -> int:
         print(f"— review status @ {datetime.now().strftime('%H:%M:%S')}")
         code = report(numbers, args.ask)
         if code == EXIT_OK:
+            if args.emit_head and len(numbers) == 1:
+                pathlib.Path(args.emit_head).write_text(_VERIFIED_HEAD.get(numbers[0], ""))
             return EXIT_OK
         # Only pending resolves by waiting. Findings need a human, and unknown
         # means the check itself could not see the data.
