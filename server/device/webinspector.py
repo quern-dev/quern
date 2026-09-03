@@ -29,6 +29,7 @@ import glob
 import json
 import logging
 import os
+import re
 import socket
 import uuid
 from typing import Any
@@ -63,8 +64,12 @@ _COLLECT_JS = """
   for (var i = 0; i < nodes.length && out.length < 400; i++) {
     var n = nodes[i];
     var r = n.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) continue;
+    // Degenerate boxes are layout artefacts rather than content: skip-links and
+    // framework route announcers park themselves at (-1, -1, 1x1), and probing
+    // one lands outside the app frame entirely.
+    if (r.width < 2 || r.height < 2) continue;
     if (r.bottom < 0 || r.top > window.innerHeight) continue;
+    if (r.right < 0 || r.left > window.innerWidth) continue;
     var own = '';
     for (var c = n.firstChild; c; c = c.nextSibling) {
       if (c.nodeType === 3) own += c.nodeValue;
@@ -77,6 +82,50 @@ _COLLECT_JS = """
     // Structural wrappers with no text of their own are noise; keep them only
     // when they are something a user can act on.
     if (!own && !interactive) continue;
+    // A block element's border box spans the whole column, but accessibility
+    // reports only the rendered glyphs, so the box centre lands in whitespace
+    // beside the text and a hit-test there answers with the nearest element
+    // instead. A Range over the text nodes reproduces the accessibility frame:
+    // measured against joinmastodon.org, an <h1> with a 354x50 border box has a
+    // text rect and an AX frame that both read 144x53.
+    //
+    // This applies to controls too, not just prose. A nav link whose <a> spans
+    // a 394pt row reports an accessibility frame only as wide as the word
+    // "Apps", so probing the row centre answers with a neighbouring element.
+    // The text box is inside the control either way, so it is the safer target.
+    // Measure the same direct child text nodes `own` was built from, one Range
+    // each. selectNodeContents on the element would include its element
+    // children: for <li>Label <div>...tall card...</div></li> the union is
+    // close to the original border box, so the centre lands on the card rather
+    // than the glyphs -- reintroducing the very defect this block prevents.
+    var box = r;
+    if (own) {
+      try {
+        var union = null;
+        for (var c2 = n.firstChild; c2; c2 = c2.nextSibling) {
+          if (c2.nodeType !== 3 || !c2.nodeValue.trim()) continue;
+          var rg = document.createRange();
+          rg.selectNodeContents(c2);
+          var b = rg.getBoundingClientRect();
+          if (b.width < 1 || b.height < 1) continue;
+          union = union ? {
+            left: Math.min(union.left, b.left), top: Math.min(union.top, b.top),
+            right: Math.max(union.right, b.right), bottom: Math.max(union.bottom, b.bottom),
+          } : {left: b.left, top: b.top, right: b.right, bottom: b.bottom};
+        }
+        if (union && union.right - union.left >= 2 && union.bottom - union.top >= 2) {
+          box = {left: union.left, top: union.top,
+                 width: union.right - union.left, height: union.bottom - union.top};
+        }
+      } catch (e) {}
+    }
+    // An element under an overlay is still in the DOM with a valid box, but a
+    // tap at its centre hits whatever is on top. Measured with the site's nav
+    // menu open: the page heading and body paragraph were still reported, and
+    // probing them answered with the menu items covering them.
+    var atPoint = document.elementFromPoint(
+      box.left + box.width / 2, box.top + box.height / 2);
+    if (atPoint && atPoint !== n && !n.contains(atPoint) && !atPoint.contains(n)) continue;
     out.push({
       tag: tag,
       id: n.id || null,
@@ -85,7 +134,7 @@ _COLLECT_JS = """
       type: n.getAttribute('type'),
       href: tag === 'a' ? n.getAttribute('href') : null,
       text: (own || n.getAttribute('aria-label') || n.value || '').slice(0, 200),
-      x: r.left, y: r.top, width: r.width, height: r.height,
+      x: box.left, y: box.top, width: box.width, height: box.height,
       interactive: !!interactive
     });
   }
@@ -462,3 +511,41 @@ class SimulatorWebInspector:
                 ]
             self._absorb(message)
         return []
+
+
+# The webinspectord socket carries no UDID, but an application id is the host
+# app's pid, and every simulator process descends from a `launchd_sim` whose
+# command line names the device directory. That is enough to tell which
+# simulator a connection is actually reporting on.
+_LAUNCHD_SIM_UDID = re.compile(
+    r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/", re.IGNORECASE)
+
+_MAX_PARENT_WALK = 8
+
+
+async def _process_field(pid: str, field: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "ps", "-o", f"{field}=", "-p", pid,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return out.decode(errors="replace").strip()
+
+
+async def simulator_udid_for_application(application_id: str) -> str | None:
+    """Which simulator an inspector application belongs to, or None if unknown."""
+    if not application_id or not application_id.startswith("PID:"):
+        return None
+    pid = application_id[4:].strip()
+    if not pid.isdigit():
+        return None
+    for _ in range(_MAX_PARENT_WALK):
+        command = await _process_field(pid, "command")
+        match = _LAUNCHD_SIM_UDID.search(command)
+        if match:
+            return match.group(1).upper()
+        parent = await _process_field(pid, "ppid")
+        if not parent.isdigit() or parent in ("0", "1") or parent == pid:
+            return None
+        pid = parent
+    return None

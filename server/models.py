@@ -1024,6 +1024,15 @@ class SwipeRequest(BaseModel):
     udid: str | None = None
 
 
+class WebContentRequest(BaseModel):
+    """Request body for POST /device/ui/web-content."""
+
+    udid: str | None = None
+    bundle_id: str | None = None
+    """Which connected app to read. Optional when only one app is connected to
+    the Web Inspector, which is the usual case."""
+
+
 class ScrollToElementRequest(BaseModel):
     """Request body for POST /device/ui/scroll-to-element."""
 

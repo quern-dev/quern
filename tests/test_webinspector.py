@@ -54,3 +54,56 @@ async def test_connect_reports_how_many_candidates_were_dead(tmp_path, monkeypat
         assert "stale" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected WebInspectorError")
+
+
+# ------------------------------------------------- attributing a connection
+
+async def test_an_application_is_traced_to_its_simulator(monkeypatch):
+    """The application id is the app's host pid, and simulator processes descend
+    from a launchd_sim whose command line names the device directory."""
+    udid = "F5AF3736-C05F-493F-AA52-CA883B13B18C"
+    tree = {
+        "91962": {"command": "/…/Metatext.app/Metatext", "ppid": "28860"},
+        "28860": {"command": f"launchd_sim /…/CoreSimulator/Devices/{udid}/data/var/run/x.plist",
+                  "ppid": "1"},
+    }
+
+    async def fake_field(pid, field):
+        return tree.get(pid, {}).get(field, "")
+
+    monkeypatch.setattr(webinspector, "_process_field", fake_field)
+    assert await webinspector.simulator_udid_for_application("PID:91962") == udid
+
+
+async def test_a_process_outside_any_simulator_is_not_attributed(monkeypatch):
+    async def fake_field(pid, field):
+        return {"command": "/usr/bin/something", "ppid": "1"}[field]
+
+    monkeypatch.setattr(webinspector, "_process_field", fake_field)
+    assert await webinspector.simulator_udid_for_application("PID:5") is None
+
+
+async def test_a_parent_walk_cannot_loop_forever(monkeypatch):
+    """A cycle in reported parents must terminate rather than hang the request.
+
+    The mock raises once the walk runs long, so a regressed guard fails here
+    instead of looping forever -- an assertion after the call could never run.
+    """
+    calls = []
+
+    async def fake_field(pid, field):
+        calls.append(pid)
+        if len(calls) > 40:
+            raise AssertionError("parent walk did not terminate on a cycle")
+        # A two-node cycle: 777 -> 888 -> 777. A self-parent would be caught by
+        # the parent == pid check without ever exercising the bounded walk.
+        return {"command": "no udid here",
+                "ppid": "888" if pid == "777" else "777"}[field]
+
+    monkeypatch.setattr(webinspector, "_process_field", fake_field)
+    assert await webinspector.simulator_udid_for_application("PID:777") is None
+
+
+async def test_non_pid_application_ids_are_not_attributed():
+    assert await webinspector.simulator_udid_for_application("com.example.app") is None
+    assert await webinspector.simulator_udid_for_application("") is None
