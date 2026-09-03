@@ -1703,7 +1703,11 @@ class DeviceControllerUI:
                 tool="web-content",
             )
 
-        elements, resolved = await self.get_ui_elements(resolved)
+        # Deliberately the unmerged read. get_ui_elements would fold in the
+        # previous overlay, and those elements feed page-title ranking,
+        # app_frame and the candidate origins -- so a stale read would help
+        # decide where the next one thinks the page is.
+        elements, resolved = await self._native_ui_elements(resolved)
         native = [
             {"type": e.type, "AXLabel": e.label, "frame": e.frame}
             for e in elements if e.frame

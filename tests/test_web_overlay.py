@@ -194,3 +194,43 @@ async def test_the_probe_targets_the_centre_of_the_recorded_frame():
                         frame={"x": 100, "y": 200, "width": 40, "height": 20})
     await ctrl._web_element_still_there("SIM", element)
     assert backend.probes == [(120.0, 210.0)]
+
+
+async def test_a_previous_read_cannot_influence_the_next_one():
+    """get_web_content must anchor against the native tree alone.
+
+    The overlay feeds page-title ranking, app_frame and the candidate origins.
+    Reading through the merged view would let a stale result help decide where
+    the next one thinks the page is -- a feedback loop with no way out.
+    """
+    ctrl = DeviceController()
+    ctrl._store_web_overlay("SIM", [web("Servers", 24, 296)])
+    seen: dict = {}
+
+    async def fake_native(udid=None, *args, **kwargs):
+        return [native("Application", "App", 0, 0, 402, 874)], "SIM"
+
+    async def fake_collect(udid, bundle_id, describe_point, inspector, native_arg, **kw):
+        seen["labels"] = [e["AXLabel"] for e in native_arg]
+        return {"elements": [], "pages": [], "probes": 0, "anchored": False}
+
+    ctrl._native_ui_elements = fake_native
+    ctrl.resolve_udid = lambda udid=None: _immediate("SIM")
+    ctrl._is_android = lambda _u: False
+    ctrl._is_physical = lambda _u: False
+    ctrl._booted_simulator_count = lambda: _immediate(1)
+    ctrl._connected_web_inspector = lambda: _immediate(object())
+
+    import server.device.web_content as wc
+    original = wc.collect_web_content
+    wc.collect_web_content = fake_collect
+    try:
+        await ctrl.get_web_content(udid="SIM")
+    finally:
+        wc.collect_web_content = original
+
+    assert seen["labels"] == ["App"], "the stale overlay leaked into anchoring"
+
+
+async def _immediate(value):
+    return value
