@@ -1725,19 +1725,35 @@ class DeviceControllerUI:
         native landmarks must not stop being identifiable because the Inspector
         is unreachable.
         """
+        from server.device.web_content import _is_app
+        from server.device.webinspector import simulator_udid_for_application
+
         if self._is_android(udid) or self._is_physical(udid):
             return []
+        require_match = await self._booted_simulator_count() > 1
         try:
-            inspector = await self._connected_web_inspector()
-            urls: list[str] = []
-            for application in await inspector.connected_applications():
-                app_id = application.get("application_id")
-                if not app_id:
-                    continue
-                for page in await inspector.pages(app_id):
-                    url = page.get("url")
-                    if url:
-                        urls.append(str(url))
+            # The same lock the content path takes. The connection is shared and
+            # the protocol interleaves replies, so a listing running alongside a
+            # read would consume its messages.
+            async with self._web_inspector_op_lock:
+                inspector = await self._connected_web_inspector()
+                urls: list[str] = []
+                for application in await inspector.connected_applications():
+                    app_id = application.get("application_id")
+                    # WebKit's own helper processes are not the app under test.
+                    if not app_id or not _is_app(application):
+                        continue
+                    # The socket carries no UDID, so with several simulators
+                    # booted a page could belong to another one. Attributing it
+                    # is the same rule get_web_content applies before returning
+                    # anyone's content as this device's.
+                    owner = await simulator_udid_for_application(app_id)
+                    if owner != udid and (owner is not None or require_match):
+                        continue
+                    for page in await inspector.pages(app_id):
+                        url = page.get("url")
+                        if url:
+                            urls.append(str(url))
             return urls
         except Exception:
             logger.debug("could not list web pages for identification", exc_info=True)

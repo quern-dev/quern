@@ -28,8 +28,13 @@ landmarks:
   # For a screen whose identity is entirely web -- an SFSafariViewController
   # reports one element to the accessibility tree, the Application -- match the
   # page instead. Read from the Web Inspector's page listing, so it costs one
-  # round trip and no probes. Not available for an ASWebAuthenticationSession,
-  # which no process publishes; those screens have no identity to match.
+  # round trip and no probes.
+  #
+  # It asserts that a page with this URL is LOADED, not that it is on screen: an
+  # app can hold an inspectable page in the background. Choose a URL no
+  # background page could share, and add an element landmark too whenever the
+  # screen has anything native to name. Not available for an
+  # ASWebAuthenticationSession, which no process publishes.
   # - { web_url_contains: "/settings" }
 
 # Web-backed content on this screen. Omit the key entirely when there is none.

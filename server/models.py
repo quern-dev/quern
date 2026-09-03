@@ -995,8 +995,12 @@ class Landmark(BaseModel):
     For screens whose identity is entirely web: an SFSafariViewController on a
     settings page reports one element to the accessibility tree, the
     Application, so there is nothing native to name. The URL is read from the
-    Web Inspector's page listing, which costs no probes -- but it is not
-    available for an ASWebAuthenticationSession, which no process publishes."""
+    Web Inspector's page listing, which costs no probes.
+
+    It asserts the page is *loaded*, not that it is on screen -- an app can hold
+    an inspectable page in the background, and telling those apart would need
+    the probes this avoids. Not available for an ASWebAuthenticationSession,
+    which no process publishes."""
     identifier: str | None = None  # primary: exact match, case-sensitive
     label: str | None = None  # fallback: exact match, case-insensitive
     label_contains: str | None = None  # fallback: substring match, case-insensitive
@@ -1011,8 +1015,21 @@ class Landmark(BaseModel):
 
 
     @model_validator(mode="after")
-    def check_selector(self):
-        if not self.element and not self.web_url_contains:
+    def check_selector(self) -> Landmark:
+        if self.web_url_contains is not None:
+            if not self.web_url_contains.strip():
+                # An empty substring is in every URL, so this would match any
+                # page at all -- and silently, since it looks like a selector.
+                raise ValueError("web_url_contains cannot be blank")
+            if self.element or self.identifier or self.label or self.label_contains:
+                # The URL branch is taken whole; an element field alongside it
+                # would be quietly ignored rather than narrowing anything. Two
+                # landmarks express the conjunction, and are evaluated as one.
+                raise ValueError(
+                    "web_url_contains cannot be combined with element selectors; "
+                    "use a separate landmark entry for each"
+                )
+        elif not self.element:
             raise ValueError("a landmark needs either element or web_url_contains")
         return self
 

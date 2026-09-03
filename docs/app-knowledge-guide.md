@@ -279,14 +279,26 @@ landmarks:
   - { web_url_contains: "/settings" }
 ```
 
-The URL comes from the Web Inspector's page listing, which costs one round trip
-and no probes, and it is only requested when some loaded landmark asks for it —
-a knowledge base that uses none pays nothing. It combines with element landmarks
-under the usual AND, so a page open *behind* a different screen does not
-identify that screen as this one. It does not work for an
-`ASWebAuthenticationSession`, which publishes no pages at all; those screens
-have no identity to match, and a landmark that cannot be evaluated fails rather
-than passes.
+The URL comes from the Web Inspector's page listing — one round trip, no probes
+— and is only requested when some loaded landmark asks for one, so a knowledge
+base that uses none pays nothing.
+
+**Know what it actually asserts.** The listing is scoped to the device and to
+real applications (WebKit's helper processes are excluded), but it is *not*
+scoped to what is on screen. It says **a page with this URL is loaded**, not
+that you are looking at it. An app can hold an inspectable page in the
+background — Metatext keeps a YouTube embed alive in the timeline — and a URL
+landmark cannot tell that apart from the same page in the foreground.
+Establishing that would need probes, which is the cost this avoids.
+
+So pick a URL specific enough that its mere presence identifies the screen, and
+add an element landmark whenever the screen has anything native to name: the two
+are ANDed, and the element is what pins it to the foreground. A screen with *no*
+native elements — the case this exists for — is relying on the URL alone, so
+choose one no background page could share.
+
+It does not work for an `ASWebAuthenticationSession`, which publishes no pages
+at all. A landmark that cannot be evaluated fails rather than passes.
 
 **`reachable_by` is the field worth having.** There are three cases and they do
 not follow the rule you would guess:

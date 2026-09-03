@@ -1049,3 +1049,43 @@ landmarks:
   - { element: "Button", label: "Done" }''')
     scan = scan_knowledge_base(tmp_path)
     assert [lm.element for lm in scan.screens[0].landmarks] == ["Button"]
+
+
+def test_a_blank_url_selector_is_refused():
+    """An empty substring is in every URL, so this would match any page at all
+    -- and silently, because it looks like a selector."""
+    from pydantic import ValidationError as PydanticError
+
+    from server.models import Landmark
+    for blank in ("", "   "):
+        try:
+            Landmark(web_url_contains=blank)
+        except PydanticError:
+            continue
+        raise AssertionError(f"accepted a blank selector {blank!r}")
+
+
+def test_a_url_selector_cannot_be_mixed_with_element_selectors():
+    """The URL branch is taken whole, so an element field beside it would be
+    ignored rather than narrowing anything -- the landmark would match more than
+    it appears to."""
+    from pydantic import ValidationError as PydanticError
+
+    from server.models import Landmark
+    for extra in ({"element": "Button"}, {"label": "Done"},
+                  {"identifier": "x"}, {"label_contains": "Do"}):
+        try:
+            Landmark(web_url_contains="/settings", **extra)
+        except PydanticError:
+            continue
+        raise AssertionError(f"accepted a mixed selector with {extra}")
+
+
+def test_a_mixed_selector_in_a_file_is_skipped_not_silently_widened(tmp_path):
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "mixed.md", '''screen: "mixed"
+landmarks:
+  - { element: "Button", web_url_contains: "/settings" }
+  - { element: "Button", label: "Done" }''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [lm.label for lm in scan.screens[0].landmarks] == ["Done"]
