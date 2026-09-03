@@ -730,6 +730,30 @@ class DeviceControllerUI:
         else:
             self._web_overlay.pop(udid, None)
 
+    @staticmethod
+    def _encloses(outer: dict | None, inner: dict | None) -> bool:
+        """Whether `outer` strictly contains `inner`.
+
+        Strictly: two frames of the same size say nothing about nesting, and
+        accepting them would let an element swapped in at the same coordinates
+        pass as the one that used to be there -- which is the staleness this
+        check exists to catch.
+        """
+        if not outer or not inner:
+            return False
+        outer_area = outer.get("width", 0) * outer.get("height", 0)
+        inner_area = inner.get("width", 0) * inner.get("height", 0)
+        if outer_area <= inner_area:
+            return False
+        return (
+            outer.get("x", 0) <= inner.get("x", 0)
+            and outer.get("y", 0) <= inner.get("y", 0)
+            and outer.get("x", 0) + outer.get("width", 0)
+            >= inner.get("x", 0) + inner.get("width", 0)
+            and outer.get("y", 0) + outer.get("height", 0)
+            >= inner.get("y", 0) + inner.get("height", 0)
+        )
+
     async def _web_element_still_there(self, udid: str, element: UIElement) -> bool:
         """One probe, before tapping something the tree cannot see.
 
@@ -757,7 +781,14 @@ class DeviceControllerUI:
         # text; landing inside the expected frame is all the evidence there is.
         if not element.label:
             return True
-        return _texts_correspond(label, normalise(element.label))
+        if _texts_correspond(label, normalise(element.label)):
+            return True
+        # Accessibility flattens nesting the DOM keeps: an emoji <span> inside a
+        # link is reported as the link, and a form control is named by its
+        # <label>. When the element answering encloses the one asked for, a tap
+        # here still activates what the caller meant, so the differing name is
+        # not evidence of staleness.
+        return self._encloses(hit.get("frame"), frame)
 
     async def get_ui_elements(
         self,

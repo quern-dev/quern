@@ -410,3 +410,48 @@ async def test_a_matching_attribution_proceeds():
     )
     assert result["device_verified"] is True
     assert [e["AXLabel"] for e in result["elements"]] == ["Servers"]
+
+
+# ------------------------------------------------- sweeping for an origin
+
+async def test_a_swept_origin_needs_two_probes_to_agree():
+    """One match is not evidence. A page and a native screen can share a string
+    by coincidence, and the offset derived from that pairing is arbitrary --
+    which is how the deleted search-based design put a page 215pt out."""
+    contents = page([dom("Shared", 0, 100, 402, 40), dom("Unique", 0, 300, 402, 40)])
+    # Full-width so the sweep actually lands inside it; only this one element
+    # can ever match, because nothing else on screen shares any DOM text.
+    screen = FakeScreen([native_el("StaticText", "Shared", 0, 206, 402, 40)])
+    from server.device.web_content import anchor_by_probe
+    # 14 probes so a sweep row (y=233) genuinely lands inside the element --
+    # with a coarser budget none of them do, and the test would pass because
+    # nothing matched rather than because one match was refused.
+    anchor, probes = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
+    assert anchor is None, "a lone match must not decide the offset"
+    assert probes == 14
+
+
+async def test_two_agreeing_probes_fix_the_origin():
+    contents = page([dom("Alpha", 0, 100, 402, 40), dom("Beta", 0, 300, 402, 40)])
+    screen = FakeScreen([
+        native_el("StaticText", "Alpha", 0, 206, 402, 40),
+        native_el("StaticText", "Beta", 0, 406, 402, 40),
+    ])
+    from server.device.web_content import anchor_by_probe
+    anchor, _ = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
+    assert anchor is not None
+    assert anchor.dy == 106.0 and anchor.matched >= 2
+
+
+async def test_sweeping_matches_exactly_never_by_containment():
+    """The measured failure that killed the earlier design: a short label that
+    is a prefix of a longer one is not the same element."""
+    contents = page([dom("Mastodon is not a single website", 0, 100, 402, 40),
+                     dom("Other text entirely", 0, 300, 402, 40)])
+    screen = FakeScreen([native_el("Link", "Mastodon", 0, 206, 402, 40)])
+    from server.device.web_content import anchor_by_probe
+    anchor, _ = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=8)
+    assert anchor is None

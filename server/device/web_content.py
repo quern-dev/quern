@@ -96,6 +96,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             "tag": element.get("tag"),
             "href": element.get("href"),
             "interactive": bool(element.get("interactive")),
+            "value": element.get("value"),
             "page_id": page_id,
         })
     return projected
@@ -116,6 +117,22 @@ MAX_PROBES_PER_PAGE = 4
 # A truncated accessibility label has to be this long before it is allowed to
 # identify a DOM node by prefix alone. Short prefixes match far too much.
 MIN_PREFIX_MATCH = 12
+
+# Probes spent looking for an origin that geometry could not suggest. Only paid
+# when the cheap path has already failed.
+MAX_FALLBACK_PROBES = 14
+
+# Independent probes that must agree before a probed offset is believed.
+MIN_PROBE_AGREEMENT = 2
+
+# Accessibility frames are rounded, so agreement is approximate.
+ANCHOR_TOLERANCE_PT = 2.0
+
+# Fractions of the screen width to sweep. Centre first because body text lives
+# there, then the gutters: a short left-aligned heading has an accessibility
+# frame only as wide as its glyphs, so a centre probe falls outside it and is
+# correctly rejected.
+ANCHOR_COLUMNS = (0.5, 0.25, 0.75)
 
 # Two agreeing probes is the point of diminishing returns: the first establishes
 # the offset and the second rules out a coincidental text match.
@@ -256,6 +273,107 @@ def _is_app(application: dict) -> bool:
     return bool(bundle) and not bundle.startswith(_HELPER_PREFIXES)
 
 
+def _unique_texts(dom: list[dict]) -> dict[str, dict]:
+    """DOM elements indexed by text, dropping any text that appears twice.
+
+    An ambiguous label identifies nothing: two elements sharing text sit at
+    different page rects, so an offset derived from one may be wrong by the
+    distance between them.
+    """
+    seen: dict[str, dict | None] = {}
+    for element in dom:
+        key = normalise(element.get("text"))
+        if not key:
+            continue
+        seen[key] = None if key in seen else element
+    return {text: el for text, el in seen.items() if el is not None}
+
+
+async def anchor_by_probe(
+    udid: str,
+    describe_point,
+    contents: dict,
+    screen: dict,
+    *,
+    max_probes: int = MAX_FALLBACK_PROBES,
+    min_agreement: int = MIN_PROBE_AGREEMENT,
+) -> tuple[Anchor | None, int]:
+    """Find an origin by sweeping, when geometry cannot suggest one.
+
+    An out-of-process web view carries its own chrome -- an address bar above, a
+    toolbar below -- and none of it appears in the native tree, so neither
+    "below the top chrome" nor "as tall as its viewport, anchored to the foot of
+    the screen" describes where the page starts. Measured on GoToSocial's
+    settings page inside SFSafariViewController: a 402x685 viewport on a 402x874
+    screen sits at y=106, while bottom-anchoring predicts 189.
+
+    Matching here is **exact only**. An earlier design accepted containment and
+    paired a logo labelled "Mastodon" with a paragraph beginning "Mastodon is
+    not a single website...", anchoring the page 215pt from where it sat. Two
+    independent probes must also agree, so a single freak match cannot decide
+    the offset on its own.
+    """
+    index = _unique_texts(contents.get("elements") or [])
+    if not index:
+        return None, 0
+
+    left, top = screen.get("x", 0), screen.get("y", 0)
+    width, height = screen.get("width", 0), screen.get("height", 0)
+    if width <= 0 or height <= 0 or max_probes < 1:
+        return None, 0
+
+    step = height / (max_probes + 1)
+    candidates: list[tuple[float, float]] = []
+    probes = 0
+    for i in range(max_probes):
+        x = left + width * ANCHOR_COLUMNS[i % len(ANCHOR_COLUMNS)]
+        y = top + step * (i + 1)
+        hit = await describe_point(udid, x, y)
+        probes += 1
+        if not hit or not _contains(hit.get("frame"), x, y):
+            continue
+        element = index.get(normalise(hit.get("AXLabel")))
+        if element is None:
+            continue
+        frame = hit["frame"]
+        candidates.append((
+            float(frame.get("x", 0)) - float(element.get("x", 0)),
+            float(frame.get("y", 0)) - float(element.get("y", 0)),
+        ))
+        best = _largest_cluster(candidates)
+        if len(best) >= min_agreement:
+            return Anchor(
+                dx=sum(c[0] for c in best) / len(best),
+                dy=sum(c[1] for c in best) / len(best),
+                matched=len(best),
+            ), probes
+    return None, probes
+
+
+def _largest_cluster(
+    candidates: list[tuple[float, float]], tolerance: float = ANCHOR_TOLERANCE_PT,
+) -> list[tuple[float, float]]:
+    """The biggest group of mutually-agreeing offsets.
+
+    Averaging every candidate would land the page between the truth and any
+    outlier -- wrong for every element rather than wrong for one.
+    """
+    best: list[tuple[float, float]] = []
+    for pivot in candidates:
+        group = [
+            c for c in candidates
+            if abs(c[0] - pivot[0]) <= tolerance and abs(c[1] - pivot[1]) <= tolerance
+        ]
+        if len(group) > len(best):
+            best = group
+    return best
+
+
+def _contains(frame: dict | None, x: float, y: float) -> bool:
+    from server.device.web_probing import hit_contains
+    return hit_contains(frame, x, y)
+
+
 async def collect_web_content(
     udid: str,
     bundle_id: str | None,
@@ -382,6 +500,15 @@ async def collect_web_content(
         )
         result["probes"] += probes
         budget -= probes
+        if anchor is None:
+            # Geometry suggested nothing that held. Sweep for an origin instead
+            # -- the only route for a web view whose chrome the native tree
+            # cannot see.
+            anchor, extra = await anchor_by_probe(
+                udid, describe_point, page_contents, screen,
+                max_probes=min(MAX_FALLBACK_PROBES, max(0, max_probes - result["probes"] + budget)),
+            )
+            result["probes"] += extra
         if anchor is None:
             continue
         result["anchored"] = True

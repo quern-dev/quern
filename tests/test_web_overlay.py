@@ -234,3 +234,29 @@ async def test_a_previous_read_cannot_influence_the_next_one():
 
 async def _immediate(value):
     return value
+
+
+async def test_an_enclosing_element_confirms_a_nested_one():
+    """Accessibility flattens nesting the DOM keeps: an emoji <span> inside a
+    link is reported as the link. A tap there still activates what was asked
+    for, so the differing name is not evidence of staleness."""
+    ctrl = DeviceController()
+    with_backend(ctrl, {"AXLabel": "Source - GoToSocial 0.22.1",
+                        "frame": {"x": 59, "y": 599, "width": 304, "height": 23}})
+    span = UIElement(type="StaticText", label="\U0001f9a5",
+                     frame={"x": 17, "y": 599, "width": 42, "height": 23})
+    # The span sits inside the link's line box even though its own frame starts
+    # further left; what matters is that the answering element is larger.
+    span.frame = {"x": 100, "y": 601, "width": 30, "height": 19}
+    assert await ctrl._web_element_still_there("SIM", span) is True
+
+
+async def test_a_same_sized_element_with_another_name_is_still_refused():
+    """Equal frames say nothing about nesting. Accepting them would let an
+    element swapped in at the same coordinates pass for the original."""
+    ctrl = DeviceController()
+    with_backend(ctrl, {"AXLabel": "Donate",
+                        "frame": {"x": 351, "y": 160, "width": 27, "height": 19}})
+    element = UIElement(type="Button", label="Toggle menu",
+                        frame={"x": 351, "y": 160, "width": 27, "height": 19})
+    assert await ctrl._web_element_still_there("SIM", element) is False
