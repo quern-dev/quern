@@ -936,3 +936,22 @@ web_content:
     assert len(registry.web_content("App")) == 1
     registry.unload("App")
     assert registry.web_content("App") == []
+
+
+def test_a_web_content_entry_carrying_its_own_screen_key_is_skipped(tmp_path):
+    """A duplicate keyword raises TypeError before Pydantic validates, which is
+    not a ValidationError -- so one stray key would abort the whole scan."""
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "dup.md", '''screen: "dup"
+landmarks:
+  - { element: "Button", label: "Done" }
+web_content:
+  - screen: "somewhere-else"
+    url: "https://example.test/"
+  - url: "https://ok.test/"''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [s.screen for s in scan.screens] == ["dup"]
+    # The entry is kept, with the file's screen name winning over the stray key.
+    assert [(h.screen, h.url) for h in scan.web_content] == [
+        ("dup", "https://example.test/"), ("dup", "https://ok.test/"),
+    ]

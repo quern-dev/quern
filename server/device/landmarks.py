@@ -377,9 +377,14 @@ def _parse_web_content(raw: object, screen: str) -> list[WebContentHint]:
     for entry in raw:
         if not isinstance(entry, dict):
             continue
+        # The screen name comes from the file, not the entry. Passing both
+        # raises TypeError for a duplicate keyword before Pydantic ever runs,
+        # and that is not a ValidationError -- one entry carrying a stray
+        # `screen:` would abort the whole scan rather than be skipped.
+        fields = {k: v for k, v in entry.items() if k != "screen"}
         try:
-            hints.append(WebContentHint(screen=screen, **entry))
-        except ValidationError:
+            hints.append(WebContentHint(screen=screen, **fields))
+        except (ValidationError, TypeError):
             logger.warning("Ignoring malformed web_content entry in %s", screen)
     return hints
 

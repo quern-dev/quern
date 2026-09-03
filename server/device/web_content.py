@@ -600,32 +600,36 @@ async def collect_web_content(
                          MAX_PROBES_PER_PAGE, "geometry"):
             located.add(page["page_id"])
 
-    if not result["anchored"]:
-        # Nothing geometry suggested held. Sweep for an origin instead -- the
-        # only route for a web view whose chrome the native tree cannot see,
-        # which is every out-of-process one.
-        for page, page_contents in contents:
-            if budget <= 0:
-                break
-            anchor, extra = await anchor_by_probe(
-                udid, describe_point, page_contents, screen,
-                max_probes=min(budget, MAX_FALLBACK_PROBES),
-            )
-            result["probes"] += extra
-            budget -= extra
-            if anchor is None:
-                continue
-            result["anchored"] = True
-            result["elements"].extend(
-                project(page_contents, anchor, page_id=page["page_id"]))
-            viewport = page_contents.get("viewport") or {}
-            result["anchors"].append({
-                "page_id": page["page_id"],
-                "url": page.get("url"),
-                "origin": [round(anchor.dx, 1), round(anchor.dy, 1)],
-                "viewport": [viewport.get("width"), viewport.get("height")],
-                "strategy": "sweep",
-            })
+    # Sweep whatever is still unlocated. Gated on the page rather than on
+    # whether anything anchored at all: two web views can be on screen together,
+    # and one of them being found cheaply is no reason to leave the other
+    # unreachable. This is the only route for a view whose chrome the native
+    # tree cannot see, which is every out-of-process one.
+    for page, page_contents in contents:
+        if page["page_id"] in located:
+            continue
+        if budget <= 0:
+            break
+        anchor, extra = await anchor_by_probe(
+            udid, describe_point, page_contents, screen,
+            max_probes=min(budget, MAX_FALLBACK_PROBES),
+        )
+        result["probes"] += extra
+        budget -= extra
+        if anchor is None:
+            continue
+        result["anchored"] = True
+        result["elements"].extend(
+            project(page_contents, anchor, page_id=page["page_id"]))
+        viewport = page_contents.get("viewport") or {}
+        result["anchors"].append({
+            "page_id": page["page_id"],
+            "url": page.get("url"),
+            "origin": [round(anchor.dx, 1), round(anchor.dy, 1)],
+            "viewport": [viewport.get("width"), viewport.get("height")],
+            "strategy": "sweep",
+        })
+
 
     if not result["anchored"]:
         result["reason"] = (

@@ -569,3 +569,30 @@ async def test_what_is_emitted_is_what_should_be_written_down():
     assert recorded["origin"] == [0.0, 126.0]
     assert recorded["viewport"] == [402, 748]
     assert recorded["strategy"] in ("geometry", "sweep", "hint")
+
+
+async def test_a_second_page_is_still_swept_after_the_first_is_located():
+    """Two web views can be on screen together -- a page and an embedded player.
+    One being found cheaply is no reason to leave the other unreachable."""
+    inspector = FakeInspector(
+        [APP],
+        [{"page_id": 1, "title": "Cheap", "url": "https://a.test/"},
+         {"page_id": 2, "title": "Needs sweeping", "url": "https://b.test/"}],
+        # Page 1 sits where geometry predicts; page 2 does not, so only a sweep
+        # can place it.
+        {1: page([dom("Alpha", 0, 100, 402, 40)], vw=402, vh=748),
+         # Placed so two sweep rows (y=350, y=525) land inside them; both sit
+         # at the same +280 offset, which is what the two-distinct-hits rule
+         # needs before it will believe a swept origin.
+         2: page([dom("Beta", 0, 60, 402, 40), dom("Gamma", 0, 220, 402, 40)])})
+    screen = FakeScreen([
+        native_el("StaticText", "Alpha", 0, 226, 402, 40),
+        native_el("StaticText", "Beta", 0, 340, 402, 40),
+        native_el("StaticText", "Gamma", 0, 500, 402, 40),
+    ])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)])
+    located = {a["page_id"] for a in result["anchors"]}
+    assert located == {1, 2}, f"only located {located}"
+    assert {a["strategy"] for a in result["anchors"]} == {"geometry", "sweep"}
