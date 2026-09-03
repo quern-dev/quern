@@ -29,9 +29,12 @@ class SkippedFile:
 
     Reasons:
         legacy_format    — file has identify_by: but no usable landmarks:.
-                           identify_by is included verbatim (entries may be
-                           dicts ready for mechanical migration, or strings /
-                           freeform prose that need agent reinterpretation).
+                           identify_by was the field before landmarks (April
+                           2026) and the loader has never evaluated it. Kept as
+                           a diagnostic, not a migration path: without it such a
+                           file reports no_landmarks, which tells the reader
+                           nothing. The entries are echoed verbatim so the
+                           rename can be done from the response alone.
         no_landmarks     — file has neither field. Likely a stub.
         no_frontmatter   — file has no '---' YAML block.
         yaml_error       — frontmatter failed to parse. error is set.
@@ -333,8 +336,8 @@ def parse_screen_landmarks(
 
     raw_landmarks = data.get("landmarks")
     if not raw_landmarks or not isinstance(raw_landmarks, list):
-        # No usable landmarks. Distinguish legacy format (file has
-        # identify_by:) from genuine no-landmarks (stub or unannotated).
+        # No usable landmarks. Say which of the two it is: a file still using
+        # the pre-landmarks identify_by: field, or one that never had any.
         identify_by = data.get("identify_by")
         if isinstance(identify_by, list) and identify_by:
             # Pass entries through verbatim — dict entries can be migrated

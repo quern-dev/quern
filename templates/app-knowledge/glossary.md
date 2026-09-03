@@ -26,5 +26,5 @@ These terms have specific meaning within this knowledge base:
 | environment | A server backend the app connects to (production, staging). Defined in `environments.md`. |
 | quirk | A non-obvious behavior that an agent wouldn't predict from the UI alone. |
 | stub | A minimal screen file for a screen discovered as a navigation edge but not yet visited. Has `status: stub`. |
-| identify_by | Elements an agent checks to confirm which screen it's on. Listed in reliability order. |
+| landmarks | Selectors that must all hold for a screen to be recognized — present by default, or absent when an entry sets `absent: true`. `load_landmarks` registers them; `identify_screen` evaluates them against the current UI. |
 | precondition | App state that must be true before a screen or flow is reachable. References entries in `states.md`. |

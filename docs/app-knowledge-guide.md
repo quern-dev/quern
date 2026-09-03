@@ -123,7 +123,7 @@ A stub is a minimal screen file that records "this screen exists and I know how 
 **When to create a stub:**
 
 1. You're documenting Screen A and find it leads to Screen B.
-2. Before creating a stub for Screen B, check if a file already exists for it — search existing screen docs by name and `landmarks` (or `identify_by` on legacy files).
+2. Before creating a stub for Screen B, check if a file already exists for it — search every screen document by name first, then read its `landmarks:` (or, on a file written before April 2026, its `identify_by:`). Searching only for `landmarks:` misses a pre-landmarks file entirely, and the duplicate stub splits that screen's `reachable_from` edges across two documents.
 3. If no match exists, create a stub: `screens/screen-b.md` with `status: stub`, the `reachable_from` edge you just discovered, and whatever you can infer about the screen name.
 4. If a match exists (stub or documented), just add the new `reachable_from` edge to the existing file.
 
@@ -147,7 +147,7 @@ The `init_app_knowledge` tool reports stub vs. documented counts so you can gaug
 Copy `screens/_template.md` and fill it in. Key principles:
 
 - **`landmarks` is the most important field.** Quern evaluates it server-side against the live UI tree to answer "what screen am I on?" — it's the foundation of `identify_screen`, `get_screen_summary?identify=true`, and any future automation that needs to recognize where the agent is. Use the most unique, stable elements (nav bar titles, screen-specific identifiers).
-- **`identify_by` is a human-readable hint and is optional.** Older screens have it; new screens don't need it unless you want a freeform prose note that doesn't fit the structured schema. The loader ignores it for matching. If you have both, they should agree.
+- **`landmarks` is the only field consulted for matching.** Screens written before April 2026 may also carry `identify_by:`; nothing reads it. Put prose notes in the body of the document instead, where they will be read.
 - **Include actual quern tool calls.** Don't write "tap the login button" — write `tap_element label="Sign In" element_type="button"`. The agent will copy-paste these.
 - **Be precise about element types.** Use the exact types from `get_ui_tree` — don't guess. See "Common iOS Element Types" above.
 - **Document failure modes.** What alerts, errors, or unexpected states can occur? How should the agent recover?
@@ -164,23 +164,26 @@ A landmark is an element selector that must be present (or absent) for a screen 
 
 After authoring, run `validate_landmarks` (or the `quern validate` HTTP endpoint) on the knowledge base to catch overlapping landmarks. Two screens whose landmark sets are subsets of each other will collide — at least one needs a distinguishing element.
 
-### Migrating a Legacy Knowledge Base
+### When a Knowledge Base Has No Landmarks
 
-If `load_landmarks` returns `screens: 0` with a populated `skipped[]` array, the knowledge base predates the landmarks schema (PR #22, April 2026) and uses the older `identify_by:` field. The loader categorizes each skipped file with a `reason` so you (or an agent) can act on it:
+If `load_landmarks` returns `screens: 0` with a populated `skipped[]`, each entry
+says why:
 
-- `legacy_format` — file has structured `identify_by:` entries that can be migrated. The original entries are echoed back in `skipped[].identify_by`.
-- `no_landmarks` — file is a stub or unannotated. Add landmarks during the next visit.
-- `yaml_error` / `no_frontmatter` / `invalid_entries` — file is malformed. Inspect manually.
+- `legacy_format` — the file uses `identify_by:`, the field that preceded
+  `landmarks:` (April 2026). The loader has never evaluated it. The original
+  entries are echoed back in `skipped[].identify_by`, so the rename can be done
+  from the response alone: keep `element`, `identifier`, `label`,
+  `label_contains` and `absent` as they are, turn `value: "1"` into
+  `selected: true`, and drop anything else — those were freeform hints nothing
+  read. Entries that are prose rather than mappings describe a state the schema
+  cannot express; re-visit the screen and author landmarks from what it actually
+  exposes.
+- `no_landmarks` — a stub, or never annotated. Add landmarks on the next visit.
+- `yaml_error` / `no_frontmatter` / `invalid_entries` — malformed. Inspect it.
 
-For `legacy_format` files with structured dict entries, the migration is mostly mechanical:
-
-- Rename the `identify_by:` key to `landmarks:`.
-- Translate any `value: "1"` (legacy "selected") to `selected: true`. Drop `value: "0"` entries unless you specifically want a `selected: false` landmark.
-- Drop fields that are not part of the new schema (`role_description`, etc.) — these were freeform hints that the loader ignored.
-
-For `legacy_format` entries that are strings rather than dicts (freeform prose like `"SFSafariViewController showing server settings page"`), the original author was describing a state the schema couldn't express. Re-visit the screen with `get_screen_summary` and pick concrete landmarks that fit the structured schema; the prose is a starting point, not a 1:1 mapping.
-
-Always review proposed migrations with the human user before rewriting files — landmarks may need adjustment for app changes since the legacy KB was authored. (See the agent migration skill for the per-file workflow.)
+Do not translate a stale knowledge base mechanically. Landmarks may need
+adjustment for app changes made since it was written, and YAML that parses is no
+evidence the app still exposes those elements — see the next section.
 
 ### Keeping Landmarks in Sync
 
@@ -194,15 +197,13 @@ The knowledge base is a living artifact, not a one-time setup. App teams ship UI
 
 **How to fix drift:**
 
-The procedure is identical to the migration skill's verification phase:
-
 1. Navigate to the affected screen (use `reachable_from` from the screen file as the recipe).
 2. `wait_for_element` on a likely-stable element to handle mid-transition states.
 3. Call `get_ui_tree` (with `include_raw=true` if you need to debug the platform normalizer) to see what the screen actually exposes now.
 4. Re-author the `landmarks:` block — drop selectors that no longer exist, swap in current identifiers, prefer structural elements (nav title, unique button identifier) over copy-dependent labels.
 5. Re-run `load_landmarks` and `identify_screen` to confirm `confidence: "exact"`.
 
-Drop the legacy `identify_by:` block at the same time, or update it alongside `landmarks:` — leaving it pointing at stale identifiers misleads anyone reading the file.
+If the file still carries an `identify_by:` block, delete it while you are there. Nothing reads it, and one left pointing at renamed identifiers misleads the next person who opens the file.
 
 **Cadence and triggers:**
 

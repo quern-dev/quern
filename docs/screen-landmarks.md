@@ -2,7 +2,7 @@
 
 ## Problem
 
-Quern's app knowledge base documents screens with an `identify_by` field, but it's a freeform hint for agents — not something Quern can evaluate programmatically. Every consumer that needs to answer "what screen am I on?" reimplements the matching: agents parse `identify_by` hints and compare against `get_screen_summary` output, recipes will need it, screen diffs need it, and the knowledge base itself can't validate whether two screens have ambiguous identities.
+Quern's app knowledge base originally documented screens with an `identify_by` field, but it was a freeform hint for agents — not something Quern could evaluate programmatically. Every consumer that needs to answer "what screen am I on?" reimplements the matching: agents parse `identify_by` hints and compare against `get_screen_summary` output, recipes will need it, screen diffs need it, and the knowledge base itself can't validate whether two screens have ambiguous identities.
 
 There's no shared, machine-evaluable definition of screen identity.
 
@@ -69,7 +69,7 @@ Matching rules:
 
 ### Template change
 
-The screen template's `identify_by` field evolves into `landmarks`:
+`identify_by` was replaced by `landmarks`:
 
 ```yaml
 ---
@@ -80,16 +80,20 @@ status: documented
 # All landmarks must match for this screen to be recognized.
 landmarks:
   - { element: "navigationBar", label: "Settings" }
-
-# Legacy field — kept for human-readable hints during transition.
-# Agents should prefer landmarks for programmatic matching.
-identify_by:
-  - { element: "navigationBar", label: "Settings" }
 ```
 
-Both fields coexist by design. `landmarks` is the machine-evaluable schema that the loader actually reads; `identify_by` is a human-readable hint that the loader ignores at runtime but agents may consult while authoring. For most screens they'll be similar. New screens don't need `identify_by` unless you want a freeform prose note that doesn't fit the structured schema.
+The two coexisted in the template for a transition period after April 2026 and
+no longer do. `landmarks` is the only field used to load or match a screen. `identify_by`
+is read solely to report it back as a diagnostic, and has never been evaluated
+against a live UI. Prose that does not fit the structured schema belongs in the
+body of the document, where a reader will actually find it.
 
-**Migrating a legacy knowledge base.** If the screen documents in your KB were authored before April 2026, they only have `identify_by:`. The loader surfaces these in the `skipped[]` array of the `load_landmarks` response with `reason: "legacy_format"` and the original entries echoed back so an agent can propose a per-file migration. The `quern-landmark-migration` agent skill (under `skills/`) automates this with user review at each step.
+**A knowledge base written before April 2026** has only `identify_by:`. The
+loader reports those files in `skipped[]` with `reason: "legacy_format"` and
+echoes the original entries back, which is enough to do the rename from the
+response alone — see "When a Knowledge Base Has No Landmarks" in the app
+knowledge guide. Do not translate one mechanically without checking it against
+the running app; YAML that parses is no evidence the elements still exist.
 
 ### Authoring during the guided tour
 
@@ -260,7 +264,7 @@ The response includes:
 - `source`: the path that was scanned (or `"inline"` for inline-loaded landmarks)
 - `screens`: the count of successfully loaded screens
 - `skipped`: an array of screen files that couldn't be turned into landmarks, each with a `reason` and (where applicable) the original frontmatter data so the caller can act on it. Reason codes:
-  - `legacy_format` — file has `identify_by:` but no usable `landmarks:`. The original entries are echoed back in `skipped[].identify_by` (verbatim — dict entries can be migrated mechanically; freeform-prose strings need the screen re-visited). The `quern-landmark-migration` skill walks an agent through fixing each one.
+  - `legacy_format` — file has `identify_by:` but no usable `landmarks:`. The original entries are echoed back in `skipped[].identify_by` (verbatim — mappings can be renamed mechanically; freeform-prose strings need the screen re-visited).
   - `no_landmarks` — file has neither field, likely a stub.
   - `no_frontmatter` / `yaml_error` / `invalid_entries` — file is malformed; `error` is populated where applicable.
   - `read_error` — couldn't read the file.

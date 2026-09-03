@@ -26,12 +26,6 @@ status: documented
 landmarks:
   - { element: "", identifier: "" }
 
-# Human-readable identification hints for agents reading the doc.
-# Optional. Leave it out if landmarks above already capture the screen
-# identity clearly.
-identify_by:
-  - { element: "", label: "" }
-
 # Web-backed content on this screen. Omit the key entirely when there is none.
 #
 # The accessibility tree does not descend into a WKWebView on iOS, so a screen
@@ -139,7 +133,7 @@ tags: []
 ## Overlay Panels
 
 <!-- Persistent overlays on this screen (map pin cards, bottom sheets, floating panels).
-     Not alerts (those are transient). For each panel: trigger, identify_by, key elements,
+     Not alerts (those are transient). For each panel: trigger, how to recognize it, key elements,
      navigation edges, and how to dismiss.
      Delete this section if the screen has no overlays. -->
 
