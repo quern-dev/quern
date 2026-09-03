@@ -1717,6 +1717,32 @@ class DeviceControllerUI:
             udid, self._ui_backend(udid).describe_point, capture, native,
         )
 
+    async def web_page_urls(self, udid: str) -> list[str]:
+        """URLs of every inspectable page on this device.
+
+        Costs one Web Inspector round trip and no probes, which is what makes a
+        URL usable as a landmark. Silent on failure: a screen identified by
+        native landmarks must not stop being identifiable because the Inspector
+        is unreachable.
+        """
+        if self._is_android(udid) or self._is_physical(udid):
+            return []
+        try:
+            inspector = await self._connected_web_inspector()
+            urls: list[str] = []
+            for application in await inspector.connected_applications():
+                app_id = application.get("application_id")
+                if not app_id:
+                    continue
+                for page in await inspector.pages(app_id):
+                    url = page.get("url")
+                    if url:
+                        urls.append(str(url))
+            return urls
+        except Exception:
+            logger.debug("could not list web pages for identification", exc_info=True)
+            return []
+
     async def _booted_simulator_count(self) -> int:
         try:
             devices = await self.simctl.list_devices()

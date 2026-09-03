@@ -14,6 +14,7 @@ from server.api.device import (
     _get_controller,
     _handle_device_error,
 )
+from server.device.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -305,7 +306,13 @@ async def get_screen_summary(
 
         if identify:
             registry = request.app.state.landmark_registry
-            result = registry.identify(elements)
+            # Only reach for the page listing when a loaded landmark needs it,
+            # so a knowledge base with no URL landmarks costs nothing extra.
+            page_urls = (
+                await controller.web_page_urls(resolved_udid)
+                if needs_page_urls(registry.all_screens()) else ()
+            )
+            result = registry.identify(elements, page_urls=page_urls)
             summary["identified_as"] = result["matched"]
             summary["confidence"] = result["confidence"]
 

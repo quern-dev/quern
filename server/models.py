@@ -985,7 +985,18 @@ class Landmark(BaseModel):
     Label is a fallback for elements without stable identifiers.
     """
 
-    element: str  # element type (required, e.g. "navigationBar", "Button")
+    element: str | None = None
+    """Element type, e.g. "navigationBar" or "Button". Required unless the
+    landmark identifies the screen by its web page instead."""
+
+    web_url_contains: str | None = None
+    """Match a substring of the URL of a web page on screen.
+
+    For screens whose identity is entirely web: an SFSafariViewController on a
+    settings page reports one element to the accessibility tree, the
+    Application, so there is nothing native to name. The URL is read from the
+    Web Inspector's page listing, which costs no probes -- but it is not
+    available for an ASWebAuthenticationSession, which no process publishes."""
     identifier: str | None = None  # primary: exact match, case-sensitive
     label: str | None = None  # fallback: exact match, case-insensitive
     label_contains: str | None = None  # fallback: substring match, case-insensitive
@@ -997,6 +1008,13 @@ class Landmark(BaseModel):
     Timelines tab is just present." Both iOS and Android backends normalize
     selection state into UIElement.value as "1" (selected) / "0" (not).
     Omit to ignore selection state."""
+
+
+    @model_validator(mode="after")
+    def check_selector(self):
+        if not self.element and not self.web_url_contains:
+            raise ValueError("a landmark needs either element or web_url_contains")
+        return self
 
 
 class ScreenLandmarks(BaseModel):

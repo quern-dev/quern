@@ -270,6 +270,24 @@ web_content:
       measured_on: "iPhone 16 Pro - iOS 18.6"
 ```
 
+**Identifying a screen that has no native identity.** A screen built entirely on
+a web view cannot be named by its elements, because there are none to name — the
+accessibility tree reports the Application and nothing else. Match the page:
+
+```yaml
+landmarks:
+  - { web_url_contains: "/settings" }
+```
+
+The URL comes from the Web Inspector's page listing, which costs one round trip
+and no probes, and it is only requested when some loaded landmark asks for it —
+a knowledge base that uses none pays nothing. It combines with element landmarks
+under the usual AND, so a page open *behind* a different screen does not
+identify that screen as this one. It does not work for an
+`ASWebAuthenticationSession`, which publishes no pages at all; those screens
+have no identity to match, and a landmark that cannot be evaluated fails rather
+than passes.
+
 **`reachable_by` is the field worth having.** There are three cases and they do
 not follow the rule you would guess:
 

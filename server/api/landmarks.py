@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query, Request
 from server.device.landmarks import (
     LandmarkRegistry,
     SkippedFile,
+    needs_page_urls,
     scan_knowledge_base,
 )
 from server.models import (
@@ -87,7 +88,7 @@ async def identify_screen(request: Request, body: IdentifyRequest):
     controller = _get_controller(request)
 
     try:
-        elements, _ = await controller.get_ui_elements(
+        elements, resolved = await controller.get_ui_elements(
             body.udid,
             snapshot_depth=body.snapshot_depth,
             source_timeout=body.source_timeout,
@@ -97,7 +98,11 @@ async def identify_screen(request: Request, body: IdentifyRequest):
         from server.api.device import _handle_device_error
         raise _handle_device_error(e)
 
-    return registry.identify(elements, app=body.app)
+    page_urls = (
+        await controller.web_page_urls(resolved)
+        if needs_page_urls(registry.all_screens(body.app)) else ()
+    )
+    return registry.identify(elements, app=body.app, page_urls=page_urls)
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,12 @@ status: documented
 #                      tab exists" when several tabs share the same id pattern.
 landmarks:
   - { element: "", identifier: "" }
+  # For a screen whose identity is entirely web -- an SFSafariViewController
+  # reports one element to the accessibility tree, the Application -- match the
+  # page instead. Read from the Web Inspector's page listing, so it costs one
+  # round trip and no probes. Not available for an ASWebAuthenticationSession,
+  # which no process publishes; those screens have no identity to match.
+  # - { web_url_contains: "/settings" }
 
 # Web-backed content on this screen. Omit the key entirely when there is none.
 #

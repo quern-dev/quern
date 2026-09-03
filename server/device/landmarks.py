@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,18 +83,30 @@ class KnowledgeBaseScan:
 # ---------------------------------------------------------------------------
 
 
-def match_landmark(elements: list[UIElement], landmark: Landmark) -> bool:
+def match_landmark(
+    elements: list[UIElement],
+    landmark: Landmark,
+    page_urls: Sequence[str] = (),
+) -> bool:
     """Check if a single landmark matches against a UI element list.
 
     Uses AND logic: all specified fields (element type, identifier, label,
     selection state) must match on the same element.  When ``absent=True``,
     the result is inverted — the landmark matches only if the element is
     NOT found.
+
+    A landmark naming ``web_url_contains`` is matched against ``page_urls``
+    instead, for screens whose identity is entirely web.
     """
+    if landmark.web_url_contains is not None:
+        needle = landmark.web_url_contains.lower()
+        found = any(needle in (url or "").lower() for url in page_urls)
+        return (not found) if landmark.absent else found
+
     candidates = elements
 
     # Filter by element type (always required)
-    lower_type = landmark.element.lower()
+    lower_type = (landmark.element or "").lower()
     candidates = [e for e in candidates if e.type.lower() == lower_type]
 
     # Filter by identifier (primary, locale-independent)
@@ -129,6 +142,7 @@ def match_landmark(elements: list[UIElement], landmark: Landmark) -> bool:
 def match_landmarks(
     elements: list[UIElement],
     landmarks: list[Landmark],
+    page_urls: Sequence[str] = (),
 ) -> tuple[bool, list[dict]]:
     """Check all landmarks against the UI element list (AND logic).
 
@@ -139,7 +153,7 @@ def match_landmarks(
     results: list[dict] = []
     all_matched = True
     for lm in landmarks:
-        matched = match_landmark(elements, lm)
+        matched = match_landmark(elements, lm, page_urls)
         results.append({
             "landmark": lm.model_dump(exclude_none=True),
             "matched": matched,
@@ -157,6 +171,7 @@ def match_landmarks(
 def identify_screen(
     elements: list[UIElement],
     screens: list[ScreenLandmarks],
+    page_urls: Sequence[str] = (),
 ) -> dict:
     """Identify which screen matches the current UI state.
 
@@ -175,7 +190,7 @@ def identify_screen(
     for screen in screens:
         if not screen.landmarks:
             continue
-        all_matched, results = match_landmarks(elements, screen.landmarks)
+        all_matched, results = match_landmarks(elements, screen.landmarks, page_urls)
         matched_count = sum(1 for r in results if r["matched"])
         if all_matched:
             full_matches.append((screen.screen, results))
@@ -222,6 +237,18 @@ def identify_screen(
 # ---------------------------------------------------------------------------
 # Collision detection
 # ---------------------------------------------------------------------------
+
+
+def needs_page_urls(screens: list[ScreenLandmarks]) -> bool:
+    """Whether identifying against these screens requires the page listing.
+
+    Asked before the Web Inspector is contacted at all, so a knowledge base that
+    uses no URL landmarks -- which is nearly all of them -- pays nothing.
+    """
+    return any(
+        lm.web_url_contains is not None
+        for screen in screens for lm in screen.landmarks
+    )
 
 
 def detect_collisions(screens: list[ScreenLandmarks]) -> dict:
@@ -353,9 +380,15 @@ def parse_screen_landmarks(
 
     landmarks: list[Landmark] = []
     for entry in raw_landmarks:
-        if not isinstance(entry, dict) or "element" not in entry:
+        if not isinstance(entry, dict):
             continue
-        landmarks.append(Landmark(**entry))
+        try:
+            landmarks.append(Landmark(**entry))
+        except (ValidationError, TypeError):
+            # Enforced by the model: a landmark naming neither an element nor a
+            # URL can match nothing, and treating it as satisfied would make its
+            # screen match everything.
+            continue
 
     if not landmarks:
         return ParseResult(skip=SkippedFile(
@@ -490,6 +523,7 @@ class LandmarkRegistry:
         self,
         elements: list[UIElement],
         app: str | None = None,
+        page_urls: Sequence[str] = (),
     ) -> dict:
         """Identify the current screen against loaded landmarks.
 
@@ -506,7 +540,7 @@ class LandmarkRegistry:
                 "matched_landmarks": [],
                 "partial_matches": [],
             }
-        return identify_screen(elements, screens)
+        return identify_screen(elements, screens, page_urls)
 
     def validate(self, app: str | None = None) -> dict:
         """Check for collisions across loaded landmarks."""
