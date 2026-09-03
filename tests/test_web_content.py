@@ -596,3 +596,37 @@ async def test_a_second_page_is_still_swept_after_the_first_is_located():
     located = {a["page_id"] for a in result["anchors"]}
     assert located == {1, 2}, f"only located {located}"
     assert {a["strategy"] for a in result["anchors"]} == {"geometry", "sweep"}
+
+
+# ------------------------------------------------- probed elements
+
+def test_probed_hits_arrive_looking_like_projected_ones():
+    """A caller should not have to know which route found an element."""
+    from server.device.web_content import from_probe
+    elements = from_probe([
+        {"type": "Button", "AXLabel": "Sign in",
+         "frame": {"x": 16, "y": 503, "width": 370, "height": 39}},
+        {"type": "StaticText", "AXLabel": "Email",
+         "frame": {"x": 19, "y": 319, "width": 42, "height": 24}},
+    ])
+    assert [e["type"] for e in elements] == ["Button", "StaticText"]
+    assert [e["interactive"] for e in elements] == [True, False]
+    assert {e["source"] for e in elements} == {"web-probe"}
+    # No DOM behind a probe, so nothing may be invented for these.
+    assert all(e["dom_id"] is None and e["tag"] is None for e in elements)
+
+
+def test_a_probed_element_with_no_area_is_dropped():
+    from server.device.web_content import from_probe
+    assert from_probe([{"type": "Button", "AXLabel": "x",
+                        "frame": {"x": 0, "y": 0, "width": 0, "height": 10}}]) == []
+
+
+def test_a_probed_field_keeps_its_value():
+    """Filling a form means checking what actually landed in the field."""
+    from server.device.web_content import from_probe
+    element = from_probe([{"type": "TextField", "AXLabel": "Email",
+                           "AXValue": "someone@example.test",
+                           "frame": {"x": 0, "y": 0, "width": 10, "height": 10}}])[0]
+    assert element["value"] == "someone@example.test"
+    assert element["interactive"] is True

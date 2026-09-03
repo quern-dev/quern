@@ -485,10 +485,18 @@ async def type_text(request: Request, body: TypeTextRequest):
 
 @router.post("/ui/clear")
 async def clear_text(request: Request, body: ClearTextRequest):
-    """Clear text in the currently focused text field (select-all + delete)."""
+    """Clear a text field: triple-tap to select, then Backspace.
+
+    Pass `label` or `identifier` to say which field. Without one this clears the
+    first field that has a value, which is not the field the caller just tapped:
+    on a sign-in form it finds the email field rather than the password one.
+    Focus cannot be detected — the accessibility tree does not report it.
+    """
     controller = _get_controller(request)
     try:
-        resolved = await controller.clear_text(udid=body.udid)
+        resolved = await controller.clear_text(
+            udid=body.udid, label=body.label, identifier=body.identifier,
+        )
         return {"status": "ok", "udid": resolved}
     except DeviceError as e:
         raise _handle_device_error(e)
