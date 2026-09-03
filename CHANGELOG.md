@@ -5,6 +5,16 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A simulator no longer stays unusable after an XCUITest or WDA run** (#66) — any XCTest-based run leaves that simulator's `CoreSimulatorBridge` holding a stale mach-port cache, after which every foregrounded app reports a single bare `Application` element with a `0x0` frame. Not just the app under test: Safari breaks too, and only SpringBoard keeps reading normally. The empty tree is indistinguishable from every landmark on every screen drifting at once, so the usual response was to go and edit knowledge bases that were never wrong. Quern now recognises the signature and restarts that simulator's bridge, which is launchd-on-demand, so the retried query comes back against a fresh cache. Around a second, app state preserved, and scoped to the one simulator — there is one bridge per booted simulator, so the others are undisturbed. Recovery is attempted once per read; if the tree still looks wedged afterwards the cause is something else, and retrying would only be a slower way to return the same answer.
+
+### Notes
+- The detection is deliberately narrow. An app mid-launch legitimately reports a single `Application` element, so the zero frame and absent label are what separate "nothing has rendered yet" from "the bridge cannot see anything", and a false positive costs a needless restart.
+- There is no reload path short of killing the process: the port cache belongs to the AX runtime loaded into the bridge, which holds no handle to invalidate it, and `SIGHUP` is not handled. Kill-and-respawn is the only lever available, and at ~1s it does not need to be a better one.
+
+
 ## [0.14.1] - 2026-09-02
 
 Twenty-one commits since 0.14.1-beta.2. The theme is correctness under
