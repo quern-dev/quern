@@ -455,3 +455,46 @@ async def test_sweeping_matches_exactly_never_by_containment():
     anchor, _ = await anchor_by_probe(
         "SIM", screen.describe_point, contents, SCREEN, max_probes=8)
     assert anchor is None
+
+
+async def test_two_samples_of_one_element_are_not_two_agreeing_probes():
+    """A tall element can swallow two sweep rows and hand back the same offset
+    twice. Counting that as corroboration is counting one piece of evidence
+    twice, which is precisely what the agreement rule is for."""
+    contents = page([dom("Tall block", 0, 100, 402, 300)])
+    screen = FakeScreen([native_el("StaticText", "Tall block", 0, 206, 402, 300)])
+    from server.device.web_content import anchor_by_probe
+    anchor, _ = await anchor_by_probe(
+        "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
+    assert anchor is None, "one element sampled repeatedly is still one element"
+
+
+async def test_the_sweep_cannot_exceed_the_remaining_budget():
+    """A page that is not on screen must not sweep away the budget."""
+    inspector = FakeInspector(
+        [APP], [{"page_id": 1, "title": "A", "url": "u"}, {"page_id": 2, "title": "B", "url": "u"}],
+        {1: page([dom(f"x{i}", 0, i * 40, 402, 30) for i in range(4)]),
+         2: page([dom(f"y{i}", 0, i * 40, 402, 30) for i in range(4)])})
+    screen = FakeScreen([native_el("Other", "matches nothing", 0, 0, 402, 874)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)], max_probes=9)
+    assert result["anchored"] is False
+    assert result["probes"] <= 9, f"spent {result['probes']} of a 9 probe budget"
+
+
+async def test_every_page_gets_a_cheap_pass_before_any_page_sweeps():
+    """Otherwise the first page listed sweeps away the budget and a later page
+    that geometry would have located instantly is never tried."""
+    inspector = FakeInspector(
+        [APP],
+        [{"page_id": 1, "title": "Offscreen", "url": "u"},
+         {"page_id": 2, "title": "Visible", "url": "u"}],
+        {1: page([dom(f"hidden{i}", 0, i * 40, 402, 30) for i in range(4)]),
+         2: page([dom("Servers", 24, 170, 144, 53)])})
+    screen = FakeScreen([native_el("Heading", "Servers", 24, 296, 144, 53)])
+    result = await collect_web_content(
+        "SIM", "com.example.app", screen.describe_point, inspector,
+        [native_el("Application", "App", 0, 0, 402, 874)])
+    assert result["anchored"] is True
+    assert [e["AXLabel"] for e in result["elements"]] == ["Servers"]

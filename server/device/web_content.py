@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from server.device.probing import DescribePointFn, frame_key
+
 
 @dataclass(frozen=True)
 class Anchor:
@@ -108,7 +110,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
 
 # Enough probes to cross a screen at roughly one per text block, and few enough
 # that a screen with no reachable web content costs well under a second.
-MAX_ANCHOR_PROBES = 10
+MAX_ANCHOR_PROBES = 26
 
 # A per-page ceiling, so one page that is not on screen cannot spend the whole
 # budget before a page that is has been tried at all.
@@ -214,7 +216,7 @@ def anchor_verification_targets(contents: dict, limit: int = 3) -> list[dict]:
 
 async def confirm_anchor(
     udid: str,
-    describe_point,
+    describe_point: DescribePointFn,
     contents: dict,
     candidates: list[Anchor],
     *,
@@ -291,7 +293,7 @@ def _unique_texts(dom: list[dict]) -> dict[str, dict]:
 
 async def anchor_by_probe(
     udid: str,
-    describe_point,
+    describe_point: DescribePointFn,
     contents: dict,
     screen: dict,
     *,
@@ -323,7 +325,11 @@ async def anchor_by_probe(
         return None, 0
 
     step = height / (max_probes + 1)
-    candidates: list[tuple[float, float]] = []
+    # Offset plus the frame it came from. Two sweep rows can land inside one
+    # tall element and yield identical offsets; counting those as two agreeing
+    # probes would be counting the same evidence twice, which is exactly what
+    # the agreement rule exists to prevent.
+    candidates: list[tuple[tuple[float, float], tuple[int, int, int, int]]] = []
     probes = 0
     for i in range(max_probes):
         x = left + width * ANCHOR_COLUMNS[i % len(ANCHOR_COLUMNS)]
@@ -336,35 +342,43 @@ async def anchor_by_probe(
         if element is None:
             continue
         frame = hit["frame"]
-        candidates.append((
+        key = frame_key(frame)
+        if key is None:
+            continue
+        candidates.append(((
             float(frame.get("x", 0)) - float(element.get("x", 0)),
             float(frame.get("y", 0)) - float(element.get("y", 0)),
-        ))
+        ), key))
         best = _largest_cluster(candidates)
-        if len(best) >= min_agreement:
+        if len({key for _, key in best}) >= min_agreement:
+            offsets = [offset for offset, _ in best]
             return Anchor(
-                dx=sum(c[0] for c in best) / len(best),
-                dy=sum(c[1] for c in best) / len(best),
-                matched=len(best),
+                dx=sum(o[0] for o in offsets) / len(offsets),
+                dy=sum(o[1] for o in offsets) / len(offsets),
+                matched=len({key for _, key in best}),
             ), probes
     return None, probes
 
 
 def _largest_cluster(
-    candidates: list[tuple[float, float]], tolerance: float = ANCHOR_TOLERANCE_PT,
-) -> list[tuple[float, float]]:
-    """The biggest group of mutually-agreeing offsets.
+    candidates: list[tuple[tuple[float, float], tuple[int, int, int, int]]],
+    tolerance: float = ANCHOR_TOLERANCE_PT,
+) -> list[tuple[tuple[float, float], tuple[int, int, int, int]]]:
+    """The biggest group of mutually-agreeing offsets, ranked by distinct hits.
 
     Averaging every candidate would land the page between the truth and any
-    outlier -- wrong for every element rather than wrong for one.
+    outlier -- wrong for every element rather than wrong for one. Ranking by
+    distinct source frames rather than sample count keeps a single tall element
+    sampled twice from outvoting two genuinely different ones.
     """
-    best: list[tuple[float, float]] = []
-    for pivot in candidates:
+    best: list[tuple[tuple[float, float], tuple[int, int, int, int]]] = []
+    for (pivot, _) in candidates:
         group = [
-            c for c in candidates
-            if abs(c[0] - pivot[0]) <= tolerance and abs(c[1] - pivot[1]) <= tolerance
+            (offset, key) for offset, key in candidates
+            if abs(offset[0] - pivot[0]) <= tolerance
+            and abs(offset[1] - pivot[1]) <= tolerance
         ]
-        if len(group) > len(best):
+        if len({k for _, k in group}) > len({k for _, k in best}):
             best = group
     return best
 
@@ -377,7 +391,7 @@ def _contains(frame: dict | None, x: float, y: float) -> bool:
 async def collect_web_content(
     udid: str,
     bundle_id: str | None,
-    describe_point,
+    describe_point: DescribePointFn,
     inspector,
     native: list[dict],
     *,
@@ -486,8 +500,13 @@ async def collect_web_content(
 
     # Each page is anchored on its own: two web views on one screen have
     # different origins, and an offset confirmed for one says nothing about
-    # the other. A page whose content is scrolled out of view simply fails to
-    # confirm and is reported rather than guessed at.
+    # the other.
+    #
+    # Two phases, because the passes cost very differently. Every page gets the
+    # cheap geometry pass first; only if none of them anchored does any page pay
+    # for a sweep. Interleaving them would let a page that is not on screen
+    # spend the whole budget sweeping before a page that is has been looked at
+    # at all -- the same starvation the per-page cap exists to prevent.
     screen = app_frame(native) or {"x": 0, "y": 0, "width": 0, "height": 0}
     budget = max_probes
     for page, page_contents in contents:
@@ -501,18 +520,28 @@ async def collect_web_content(
         result["probes"] += probes
         budget -= probes
         if anchor is None:
-            # Geometry suggested nothing that held. Sweep for an origin instead
-            # -- the only route for a web view whose chrome the native tree
-            # cannot see.
-            anchor, extra = await anchor_by_probe(
-                udid, describe_point, page_contents, screen,
-                max_probes=min(MAX_FALLBACK_PROBES, max(0, max_probes - result["probes"] + budget)),
-            )
-            result["probes"] += extra
-        if anchor is None:
             continue
         result["anchored"] = True
         result["elements"].extend(project(page_contents, anchor, page_id=page["page_id"]))
+
+    if not result["anchored"]:
+        # Geometry suggested nothing that held. Sweep for an origin instead --
+        # the only route for a web view whose chrome the native tree cannot see,
+        # which is every out-of-process one.
+        for page, page_contents in contents:
+            if budget <= 0:
+                break
+            anchor, extra = await anchor_by_probe(
+                udid, describe_point, page_contents, screen,
+                max_probes=min(budget, MAX_FALLBACK_PROBES),
+            )
+            result["probes"] += extra
+            budget -= extra
+            if anchor is None:
+                continue
+            result["anchored"] = True
+            result["elements"].extend(
+                project(page_contents, anchor, page_id=page["page_id"]))
 
     if not result["anchored"]:
         result["reason"] = (
