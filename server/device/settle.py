@@ -23,11 +23,16 @@ slow load means waiting on the content -- and then waiting for it to settle.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PIL.Image import Image
 
 logger = logging.getLogger("quern-debug-server.settle")
 
@@ -68,7 +73,7 @@ class SettleResult:
     reason: str | None = None
 
 
-def _prepare(png: bytes):
+def _prepare(png: bytes) -> Image | None:
     """Decode to a small grayscale image, or None if it cannot be read."""
     try:
         from PIL import Image
@@ -85,7 +90,9 @@ def _prepare(png: bytes):
     return image
 
 
-def changed_fraction(before, after, threshold: int = PIXEL_THRESHOLD) -> float:
+def changed_fraction(
+    before: Image, after: Image, threshold: int = PIXEL_THRESHOLD,
+) -> float:
     """Fraction of pixels differing by more than `threshold`.
 
     Two frames of different sizes have wholly changed -- a rotation or a device
@@ -125,21 +132,57 @@ async def wait_settled(
     frames = 0
     last_change: float | None = None
 
-    while True:
-        png = await capture()
-        if png is None:
-            return SettleResult(
-                settled=False, elapsed_ms=(time.perf_counter() - started) * 1000,
-                frames=frames, last_change=last_change,
-                reason="could not capture the screen",
+    def timed_out() -> SettleResult:
+        """Explain the timeout from what was actually observed.
+
+        Not from whether a capture happened to be in flight when the deadline
+        passed: captures run back to back, so that is true most of the time and
+        would describe an animating screen as a slow one.
+        """
+        if frames == 0:
+            reason = (
+                "no screen capture completed within the timeout — the device is "
+                "not answering rather than still drawing"
             )
+        elif last_change is not None and last_change >= epsilon:
+            reason = (
+                f"the screen was still changing when the timeout expired (the "
+                f"last comparison differed by {last_change:.2%}). Something is "
+                "animating — a spinner, a video, a carousel — and will not settle."
+            )
+        else:
+            reason = (
+                "the screen did not hold still for long enough before the "
+                "timeout expired"
+            )
+        return SettleResult(
+            settled=False, elapsed_ms=(time.perf_counter() - started) * 1000,
+            frames=frames, last_change=last_change, reason=reason,
+        )
+
+    def failed(reason: str) -> SettleResult:
+        return SettleResult(
+            settled=False, elapsed_ms=(time.perf_counter() - started) * 1000,
+            frames=frames, last_change=last_change, reason=reason,
+        )
+
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return timed_out()
+        try:
+            # Bounded by what is left of the budget. The deadline is otherwise
+            # only consulted between frames, so a capture that blocks would run
+            # past the timeout entirely -- a wedged simulator does exactly that.
+            png = await asyncio.wait_for(capture(), timeout=remaining)
+        except TimeoutError:
+            return timed_out()
+
+        if png is None:
+            return failed("could not capture the screen")
         current = _prepare(png)
         if current is None:
-            return SettleResult(
-                settled=False, elapsed_ms=(time.perf_counter() - started) * 1000,
-                frames=frames, last_change=last_change,
-                reason="could not decode the capture",
-            )
+            return failed("could not decode the capture")
         frames += 1
 
         if previous is not None:
@@ -152,18 +195,3 @@ async def wait_settled(
                     frames=frames, last_change=last_change,
                 )
         previous = current
-
-        # Checked after a comparison, not before a capture: a screen that
-        # settles exactly at the deadline should be reported settled.
-        if time.perf_counter() >= deadline:
-            return SettleResult(
-                settled=False, elapsed_ms=(time.perf_counter() - started) * 1000,
-                frames=frames, last_change=last_change,
-                reason=(
-                    "the screen was still changing when the timeout expired"
-                    + (f" (last comparison differed by {last_change:.2%})"
-                       if last_change is not None else "")
-                    + ". Something is animating -- a spinner, a video, a "
-                    "carousel -- and will not settle."
-                ),
-            )

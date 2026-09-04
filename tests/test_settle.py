@@ -217,3 +217,28 @@ async def test_the_required_run_of_stable_frames_is_configurable(stable_frames):
                                         stable_frames=stable_frames))
     assert result.settled is True
     assert result.frames == stable_frames + 1
+
+
+async def test_a_capture_that_blocks_does_not_outlast_the_timeout():
+    """The deadline is only consulted between frames, so a capture that hangs
+    would run past it entirely. A wedged simulator does exactly that."""
+    async def slow():
+        await asyncio.sleep(30)
+        return frame()
+
+    started = asyncio.get_running_loop().time()
+    result = await bounded(wait_settled(slow, timeout=0.4), limit=5)
+    assert result.settled is False
+    assert asyncio.get_running_loop().time() - started < 3, "ran past its timeout"
+    assert result.frames == 0
+    assert "not answering" in result.reason
+
+
+async def test_an_animating_screen_is_described_as_animating():
+    """Captures run back to back, so the deadline nearly always expires while
+    one is in flight. That must not be reported as a slow device."""
+    flicker = [frame(), frame(blot=(0, 0, 400, 800))]
+    result = await bounded(wait_settled(capped(paced(flicker)), timeout=0.3))
+    assert result.settled is False
+    assert "animating" in result.reason
+    assert result.frames > 1

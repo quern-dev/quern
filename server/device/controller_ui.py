@@ -502,9 +502,22 @@ class DeviceControllerUI:
                 # both rejects that and returns accurate resting coordinates.
                 #
                 # Waited for rather than slept through: a bounce lasts as long
-                # as it lasts, and the constant this replaced was too short for
-                # a long list and too long for a short one.
-                await self.wait_for_settle(udid=resolved, timeout=3.0)
+                # as it lasts, and the constant this replaced was too short --
+                # a real scroll takes ~1100ms to settle against the 300ms that
+                # was slept.
+                #
+                # A screen that never settles is still worth acting on: a
+                # timeline with a playing video never holds still, and refusing
+                # to scroll there would make it unreachable. The coordinates are
+                # then no better than the sleep gave, which is why it is said
+                # out loud rather than passed off as a settled read.
+                stability = await self.wait_for_settle(udid=resolved, timeout=3.0)
+                if not stability["settled"]:
+                    logger.info(
+                        "ios scroll-to-element: screen never settled (%s) — "
+                        "using coordinates that may still be moving",
+                        stability.get("reason"),
+                    )
                 el = await _fetch()
                 if el is not None and _visible(el):
                     return el
@@ -1594,8 +1607,17 @@ class DeviceControllerUI:
                         )
 
                         # The element is known to be moving, so wait for it to
-                        # stop rather than guessing how long that takes.
-                        await self.wait_for_settle(udid=resolved, timeout=3.0)
+                        # stop rather than guessing how long that takes. If it
+                        # never stops the tap still goes ahead -- the position
+                        # is re-read below either way, and refusing would make
+                        # any screen with an animation untappable.
+                        stability = await self.wait_for_settle(udid=resolved, timeout=3.0)
+                        if not stability["settled"]:
+                            logger.info(
+                                "tap_element: screen never settled (%s) — tapping "
+                                "the last known position",
+                                stability.get("reason"),
+                            )
 
                         # Re-fetch one more time to get final position (bypass cache again)
                         # Use filtering for performance
