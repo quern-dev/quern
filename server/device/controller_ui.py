@@ -500,7 +500,11 @@ class DeviceControllerUI:
                 # rubber-banding, so the immediate frame may be an over-scroll
                 # bounce that snaps back out of view. Re-fetching once settled
                 # both rejects that and returns accurate resting coordinates.
-                await asyncio.sleep(0.3)
+                #
+                # Waited for rather than slept through: a bounce lasts as long
+                # as it lasts, and the constant this replaced was too short for
+                # a long list and too long for a short one.
+                await self.wait_for_settle(udid=resolved, timeout=3.0)
                 el = await _fetch()
                 if el is not None and _visible(el):
                     return el
@@ -1390,6 +1394,11 @@ class DeviceControllerUI:
                     # Let the scroll settle before clicking — a tap landing
                     # while the list is still coming to rest gets absorbed as a
                     # scroll-stop instead of a click (observed intermittently).
+                    #
+                    # Still a sleep, unlike the iOS paths above: wait_for_settle
+                    # costs three captures, and adb's capture time has not been
+                    # measured here, so swapping this blind could make the
+                    # Android path slower rather than more reliable. See #100.
                     await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label,
@@ -1584,8 +1593,9 @@ class DeviceControllerUI:
                             initial_frame, current_frame
                         )
 
-                        # Wait longer for animation to complete
-                        await asyncio.sleep(0.3)
+                        # The element is known to be moving, so wait for it to
+                        # stop rather than guessing how long that takes.
+                        await self.wait_for_settle(udid=resolved, timeout=3.0)
 
                         # Re-fetch one more time to get final position (bypass cache again)
                         # Use filtering for performance
@@ -1692,6 +1702,42 @@ class DeviceControllerUI:
                 await inspector.close()
             except Exception:
                 logger.debug("web inspector close failed", exc_info=True)
+
+    async def wait_for_settle(
+        self,
+        udid: str | None = None,
+        timeout: float = 10.0,
+    ) -> dict:
+        """Wait until the screen stops changing.
+
+        The answer no sleep can give: the same screen settles in a fraction of a
+        second when cached and takes arbitrarily longer on a cold load, so a
+        constant is always both too long and too short.
+        """
+        from server.device.settle import wait_settled
+
+        resolved = await self.resolve_udid(udid)
+
+        async def capture() -> bytes | None:
+            try:
+                # Raw, not the processed screenshot: this decodes and downscales
+                # each frame itself, so paying to resize and re-encode first is
+                # ~62ms of waste on a ~114ms capture, three times per wait.
+                return await self.raw_screenshot(resolved)
+            except Exception:
+                logger.debug("settle: screenshot failed", exc_info=True)
+                return None
+
+        result = await wait_settled(capture, timeout=timeout)
+        return {
+            "settled": result.settled,
+            "elapsed_ms": round(result.elapsed_ms, 1),
+            "frames": result.frames,
+            "last_change": (round(result.last_change, 5)
+                            if result.last_change is not None else None),
+            "reason": result.reason,
+            "udid": resolved,
+        }
 
     async def _sweep_web_content(
         self, udid: str, native: list[dict],

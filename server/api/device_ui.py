@@ -25,6 +25,7 @@ from server.models import (
     TapRequest,
     TypeTextRequest,
     WaitForElementRequest,
+    WaitSettledRequest,
     WebContentRequest,
 )
 
@@ -426,6 +427,30 @@ async def get_web_content(request: Request, body: WebContentRequest) -> dict:
         logger.error(
             f"[PERF] API /ui/web-content ERROR: {(time.perf_counter()-start)*1000:.1f}ms, error={e}"
         )
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/wait-settled")
+async def wait_settled(request: Request, body: WaitSettledRequest) -> dict:
+    """Wait until the screen stops changing.
+
+    Answers "has drawing stopped", not "has content arrived": a blank page still
+    loading is perfectly still and settles in under two seconds. Waiting out a
+    slow load means waiting on the content first, then settling.
+
+    Returns `settled: false` with a reason when the timeout expires, which means
+    something is animating rather than loading — a spinner, a video, a carousel.
+    """
+    start = time.perf_counter()
+    controller = _get_controller(request)
+    try:
+        result = await controller.wait_for_settle(udid=body.udid, timeout=body.timeout)
+        logger.info(
+            f"[PERF] API /ui/wait-settled: {(time.perf_counter()-start)*1000:.1f}ms, "
+            f"settled={result['settled']}, frames={result['frames']}"
+        )
+        return {"status": "ok", **result}
+    except DeviceError as e:
         raise _handle_device_error(e)
 
 

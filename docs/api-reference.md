@@ -112,6 +112,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `swipe` | POST | `/api/v1/device/ui/swipe` | Swipe gesture |
 | `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it |
 | `get_web_content` | POST | `/api/v1/device/ui/web-content` | Read WKWebView content the accessibility tree cannot see (iOS simulator only) |
+| `wait_for_settle` | POST | `/api/v1/device/ui/wait-settled` | Wait until the screen stops changing, by comparing successive screenshots |
 | `type_text` | POST | `/api/v1/device/ui/type` | Type text |
 | `clear_text` | POST | `/api/v1/device/ui/clear` | Clear text field |
 | `press_button` | POST | `/api/v1/device/ui/press` | Press hardware button |

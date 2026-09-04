@@ -508,6 +508,48 @@ Label matching modes (mutually exclusive — use only one):
     }
   });
 
+  server.registerTool("wait_for_settle", {
+    description: `Wait until the screen stops changing — the answer no sleep can give. Compares successive screenshots and returns once consecutive frames are effectively identical, so it adapts to whatever the screen is actually doing instead of guessing a duration. Use it after any action that starts a transition or an animation, and before interacting with a web view: web content is invisible to the accessibility tree, so nothing else can tell you it has finished drawing. It answers "has drawing stopped", NOT "has content arrived" -- a blank page still loading is perfectly still, and this will call it settled in under two seconds (measured against a stalled request: settled=true after 1.6s with a white screen). Raising the timeout does not help, because nothing is moving. For a slow load, wait for the content itself -- poll get_web_content until it returns elements, or wait_for_element for a native one -- and use this afterwards to let the result stop moving. Measured on a web form where typing is silently lost if it arrives early — a 0.2s sleep landed the keystroke 1 time in 5, a 1.0s sleep landed 5 of 5, and this landed 5 of 5 in about 0.67s. Returns settled=false with a reason when the timeout expires, which means something is animating rather than loading (a spinner, a video, a carousel) and will never settle — treat that as a signal about the screen, not a failure of the wait. Also reports last_change, the fraction of pixels that differed on the final comparison, which distinguishes "nearly settled" from "moving steadily".`,
+    inputSchema: strictParams({
+      timeout: z
+        .coerce.number()
+        .default(10)
+        .describe("Seconds to wait before giving up (default 10)"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ timeout, udid }) => {
+    try {
+      const body: Record<string, unknown> = { timeout };
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/wait-settled",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("get_web_content", {
     description: `Read web content inside a WKWebView on an iOS simulator, which get_ui_tree cannot see. The accessibility tree walk stops at the web view — it is absent from the tree entirely, not empty — so a screen built around one looks like nothing but its native chrome. This reads the live DOM through the simulator's Web Inspector and returns elements with real screen frames, including DOM ids and icon-only controls that carry only an aria-label. The results are merged into subsequent UI reads for about a minute, so tap_element, get_ui_tree and get_screen_summary all see them and you can tap by label as usual. That overlay is dropped as soon as anything changes the screen -- a tap, swipe, scroll or launch -- so call this again after each interaction with the page. A tap on a web element is verified against the live screen first, and returns not_found with reason "stale_web_content" rather than tapping the wrong thing if the page moved underneath it. Two routes, tried in that order. The Web Inspector gives real DOM ids and icon-only controls, and reaches an in-process WKWebView when the app sets webView.isInspectable = true (per instance, so one view opting in says nothing about another) and an SFSafariViewController with no opt-in at all, under bundle_id com.apple.SafariViewService. When the Inspector sees nothing, this falls back to hit-testing the screen, aimed by text recognition -- slower, and label-only with no DOM, but it is the only route into an ASWebAuthenticationSession, which is presented with no connected application at all. The response says which route answered, under "route". Simulator only: Android's accessibility tree already descends into WebView, and physical iOS devices use a different transport — on both, use get_ui_tree. Costs roughly a second on top of a UI tree read, so call it when a screen looks emptier than it should, then again after navigating or scrolling the page. If it reports anchored=false, the page was found but its position on screen could not be confirmed; the elements are withheld rather than returned at a guessed offset.`,
     inputSchema: strictParams({
