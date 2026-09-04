@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import UTC, datetime
@@ -2104,12 +2105,115 @@ class DeviceControllerUI:
             },
         }
 
-    async def type_text(self, text: str, udid: str | None = None) -> str:
-        """Type text into focused field. Returns the resolved udid."""
+    async def type_text(
+        self,
+        text: str,
+        udid: str | None = None,
+        label: str | None = None,
+        identifier: str | None = None,
+    ) -> dict:
+        """Type text, into a named field if one is given.
+
+        Without a target this types wherever the keyboard is pointed and cannot
+        report whether that was anywhere: keystrokes are fire-and-forget, and
+        nothing in the accessibility tree says which element has focus. On a
+        screen with no text field at all it still succeeds, having typed into
+        nothing.
+
+        Naming the field buys certainty -- it is located, tapped, typed into,
+        and read back, so a mismatch is an error rather than a silence. That
+        costs a fresh tree read, around 1.8s natively and 2s for web content,
+        which is why it is asked for rather than assumed.
+        """
         resolved = await self.resolve_udid(udid)
+        if not (label or identifier):
+            await self._ui_backend(resolved).type_text(resolved, text)
+            self._invalidate_ui_cache(resolved)
+            return {"udid": resolved, "verified": False}
+
+        target = await self._find_text_field(resolved, label=label, identifier=identifier)
+        before = target.value or ""
+        cx, cy = get_tap_point(target)
+        await self._ui_backend(resolved).tap(resolved, cx, cy)
+        # A tap on a freshly presented field does not always take focus, and
+        # anything typed before it does is lost silently. Give it a moment, then
+        # confirm from the value rather than assuming.
+        await asyncio.sleep(0.3)
         await self._ui_backend(resolved).type_text(resolved, text)
-        self._invalidate_ui_cache(resolved)  # UI changed (text field value updated)
-        return resolved
+        self._invalidate_ui_cache(resolved)
+        await asyncio.sleep(0.3)
+
+        after = await self._read_field_value(resolved, target, label, identifier)
+        if not self._text_landed(before, after, text, target.type):
+            raise DeviceError(
+                f"typed {len(text)} characters into "
+                f"'{label or identifier}' but its value did not change "
+                f"({len(before)} characters before, "
+                f"{'unreadable' if after is None else str(len(after)) + ' after'}). "
+                "The tap may not have taken focus, or the field may be "
+                "read-only.",
+                tool="idb",
+            )
+        return {"udid": resolved, "verified": True}
+
+    @staticmethod
+    def _text_landed(before: str, after: str | None, text: str, kind: str) -> bool:
+        """Whether the value moved the way typing `text` would move it."""
+        if after is None:
+            return False
+        if kind == "SecureTextField":
+            # A secure field reports dots, so the text itself is never visible;
+            # the length is the only evidence available.
+            return len(after) >= len(before) + len(text)
+        return text in after and after != before
+
+    def _matching_fields(self, elements, label: str | None, identifier: str | None):
+        """Text fields matching every selector given."""
+        fields = [e for e in elements if e.type in self._TEXT_FIELD_TYPES and e.frame]
+        return find_element(fields, label=label, identifier=identifier)
+
+    async def _find_text_field(
+        self, udid: str, *, label: str | None, identifier: str | None,
+    ):
+        # Read fresh. A cached tree can describe a screen that has since
+        # changed, and typing at stale coordinates would put the text in
+        # whatever now occupies them -- which the read-back afterwards, looking
+        # up the same selector, would not necessarily notice.
+        if self._web_overlay.get(udid):
+            with contextlib.suppress(DeviceError):
+                await self.get_web_content(udid=udid)
+        elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+        matches = self._matching_fields(elements, label, identifier)
+        if not matches:
+            raise DeviceError(
+                # Phrased for the 404 mapping: anything else surfaces as a 500,
+                # which reads as a broken server rather than a missing field.
+                f"No element found: no text field matching "
+                f"{label or identifier!r} to type into",
+                tool="wda" if self._is_physical(udid) else "idb",
+            )
+        return matches[0]
+
+    async def _read_field_value(
+        self, udid: str, target, label: str | None, identifier: str | None,
+    ) -> str | None:
+        """The field's value now, read fresh.
+
+        Web content needs re-reading through its own route: the overlay still
+        holds the value from before the keystrokes, so consulting it would
+        confirm whatever was already believed.
+        """
+        if (target.extra_attrs or {}).get("source") in ("web-inspector", "web-probe"):
+            try:
+                await self.get_web_content(udid=udid)
+            except DeviceError:
+                return None
+        try:
+            elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+        except DeviceError:
+            return None
+        matches = self._matching_fields(elements, label, identifier)
+        return (matches[0].value or "") if matches else None
 
     _TEXT_FIELD_TYPES = ("TextField", "SecureTextField", "TextArea", "SearchField")
 

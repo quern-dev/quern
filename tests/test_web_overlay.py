@@ -794,3 +794,112 @@ async def test_a_web_clear_on_another_simulator_does_not_count():
         assert cleared == [], "cleared an input on another simulator"
     finally:
         wi.simulator_udid_for_application = original
+
+
+# ------------------------------------------------- typing into a named field
+
+class _TypeBackend:
+    def __init__(self, landed: bool = True):
+        self.typed, self.taps, self.landed = [], [], landed
+
+    async def tap(self, udid, x, y):
+        self.taps.append((x, y))
+
+    async def type_text(self, udid, text):
+        self.typed.append(text)
+
+
+def _type_controller(field, after_value, backend=None):
+    ctrl = DeviceController()
+    ctrl.resolve_udid = lambda udid=None: _immediate("SIM")
+    ctrl._is_physical = lambda _u: False
+    ctrl._is_android = lambda _u: False
+    ctrl._invalidate_ui_cache = lambda *_a, **_k: None
+    backend = backend or _TypeBackend()
+    ctrl._ui_backend = lambda _u: backend
+    reads = {"n": 0}
+
+    async def elements(udid=None, **kw):
+        reads["n"] += 1
+        if reads["n"] > 1 and after_value is not None:
+            updated = _native_field(after_value)
+            updated.identifier = field.identifier
+            updated.label = field.label
+            updated.extra_attrs = field.extra_attrs
+            return [updated], "SIM"
+        return [field], "SIM"
+
+    ctrl.get_ui_elements = elements
+    return ctrl, backend
+
+
+async def test_typing_into_a_named_field_is_verified():
+    ctrl, backend = _type_controller(_native_field(""), "hello")
+    result = await ctrl.type_text("hello", identifier="composition.text")
+    assert result["verified"] is True
+    assert backend.taps, "did not focus the field before typing"
+    assert backend.typed == ["hello"]
+
+
+async def test_text_that_never_arrives_is_an_error_not_a_success():
+    """The failure this exists for: a tap that does not take focus, and the
+    keystrokes go nowhere while the call reports ok."""
+    ctrl, _ = _type_controller(_native_field(""), "")
+    with pytest.raises(DeviceError) as exc:
+        await ctrl.type_text("hello", identifier="composition.text")
+    assert "did not change" in str(exc.value)
+
+
+async def test_untargeted_typing_says_it_is_unverified():
+    """Nothing reports which element has focus, so the honest answer is to say
+    the result was not checked rather than to imply it was."""
+    ctrl, backend = _type_controller(_native_field(""), None)
+    result = await ctrl.type_text("hello")
+    assert result["verified"] is False
+    assert backend.taps == [], "tapped without being told which field"
+
+
+async def test_a_named_field_that_is_not_there_is_an_error():
+    ctrl, _ = _type_controller(_native_field(""), "hello")
+    with pytest.raises(DeviceError):
+        await ctrl.type_text("hello", identifier="nonexistent")
+
+
+def test_a_secure_field_is_verified_by_length_not_content():
+    """A password field reports dots, so the typed text is never visible in the
+    value and a containment check would fail every time."""
+    landed = DeviceController._text_landed
+    assert landed("", "•" * 5, "hello", "SecureTextField") is True
+    assert landed("", "", "hello", "SecureTextField") is False
+    # And an ordinary field still checks the content, so text landing in some
+    # other field cannot pass.
+    assert landed("", "goodbye", "hello", "TextField") is False
+
+
+async def test_typing_reads_the_screen_fresh_before_tapping():
+    """A cached tree can describe a screen that has since changed, and typing at
+    stale coordinates puts the text wherever they now point."""
+    ctrl, backend = _type_controller(_native_field(""), "hello")
+    seen: list = []
+    original = ctrl.get_ui_elements
+
+    async def recording(udid=None, **kw):
+        seen.append(kw.get("use_cache", True))
+        return await original(udid=udid, **kw)
+
+    ctrl.get_ui_elements = recording
+    await ctrl.type_text("hello", identifier="composition.text")
+    assert seen and seen[0] is False, "looked up the field in the cache"
+
+
+def test_both_selectors_must_match_the_same_field():
+    """find_element takes label *or* identifier, so a selector beside a label is
+    ignored -- and the lookup before typing and the read-back after are separate
+    lookups, which could then resolve to different fields."""
+    ctrl = DeviceController()
+    a = _native_field("")
+    a.label, a.identifier = "Email", "field.a"
+    b = _native_field("")
+    b.label, b.identifier = "Email", "field.b"
+    got = ctrl._matching_fields([a, b], "Email", "field.b")
+    assert [e.identifier for e in got] == ["field.b"]

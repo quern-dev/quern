@@ -649,8 +649,18 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("type_text", {
-    description: `Type text into the currently focused input field. On iOS simulators this attaches the simulated hardware keyboard before typing (required for shifted characters to retain their modifier), which hides the software keyboard — use set_hardware_keyboard with enabled=false afterward if a later step expects the software keyboard to be visible.`,
+    description: `Type text into an input field. PASS label OR identifier whenever you can: the field is then located, tapped, typed into and read back, so the call fails loudly if the text did not arrive. Without one the text goes wherever the keyboard happens to be pointed and nothing can check it -- on a screen with no text field at all this still returns ok, having typed into nothing, and a tap that failed to take focus looks identical to one that worked. The response reports verified: true|false so you can tell which you got. Verification costs a fresh UI read (~2s), which is why it is opt-in. On iOS simulators this attaches the simulated hardware keyboard before typing (required for shifted characters to retain their modifier), which hides the software keyboard — use set_hardware_keyboard with enabled=false afterward if a later step expects the software keyboard to be visible.`,
     inputSchema: strictParams({
+      label: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Field to type into, by visible text. Enables verification."),
+      identifier: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Field to type into, by accessibility identifier. Enables verification."),
       text: z.string().describe("Text to type"),
       udid: z
         .string()
@@ -671,9 +681,11 @@ Label matching modes (mutually exclusive — use only one):
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ text, udid, include_screen_context, capture_screenshots, settle_delay }) => {
+  }, async ({ text, label, identifier, udid, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { text };
+      if (label) body.label = label;
+      if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;

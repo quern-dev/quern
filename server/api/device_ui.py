@@ -502,8 +502,12 @@ async def type_text(request: Request, body: TypeTextRequest):
         if body.capture_screenshots:
             resolved = await controller.resolve_udid(body.udid)
             before = await _capture_action_screenshot(controller, resolved, "type_before")
-        udid = await controller.type_text(text=body.text, udid=body.udid)
-        result: dict = {"status": "ok", "udid": udid}
+        typed = await controller.type_text(
+            text=body.text, udid=body.udid,
+            label=body.label, identifier=body.identifier,
+        )
+        udid = typed["udid"]
+        result: dict = {"status": "ok", "udid": udid, "verified": typed["verified"]}
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "type_after")
