@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import UTC, datetime
@@ -2166,15 +2167,41 @@ class DeviceControllerUI:
             return len(after) >= len(before) + len(text)
         return text in after and after != before
 
+    def _matching_fields(self, elements, label: str | None, identifier: str | None):
+        """Text fields matching every selector given.
+
+        find_element takes label *or* identifier -- its chain is an elif, so a
+        label wins and an identifier beside it is ignored. That is fine when one
+        selector is used to find a thing, and not fine here: the field typed
+        into and the field read back afterwards are looked up separately, so a
+        selector that silently does nothing could have them resolve to different
+        fields and verify the wrong one.
+        """
+        fields = [e for e in elements if e.type in self._TEXT_FIELD_TYPES and e.frame]
+        if label is not None:
+            fields = [e for e in fields if (e.label or "").lower() == label.lower()]
+        if identifier is not None:
+            fields = [e for e in fields if e.identifier == identifier]
+        return fields
+
     async def _find_text_field(
         self, udid: str, *, label: str | None, identifier: str | None,
     ):
-        elements, _ = await self.get_ui_elements(udid=udid)
-        fields = [e for e in elements if e.type in self._TEXT_FIELD_TYPES and e.frame]
-        matches = find_element(fields, label=label, identifier=identifier)
+        # Read fresh. A cached tree can describe a screen that has since
+        # changed, and typing at stale coordinates would put the text in
+        # whatever now occupies them -- which the read-back afterwards, looking
+        # up the same selector, would not necessarily notice.
+        if self._web_overlay.get(udid):
+            with contextlib.suppress(DeviceError):
+                await self.get_web_content(udid=udid)
+        elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+        matches = self._matching_fields(elements, label, identifier)
         if not matches:
             raise DeviceError(
-                f"No text field matching {label or identifier!r} to type into",
+                # Phrased for the 404 mapping: anything else surfaces as a 500,
+                # which reads as a broken server rather than a missing field.
+                f"No element found: no text field matching "
+                f"{label or identifier!r} to type into",
                 tool="wda" if self._is_physical(udid) else "idb",
             )
         return matches[0]
@@ -2197,7 +2224,7 @@ class DeviceControllerUI:
             elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
         except DeviceError:
             return None
-        matches = find_element(elements, label=label, identifier=identifier)
+        matches = self._matching_fields(elements, label, identifier)
         return (matches[0].value or "") if matches else None
 
     _TEXT_FIELD_TYPES = ("TextField", "SecureTextField", "TextArea", "SearchField")

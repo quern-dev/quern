@@ -170,9 +170,11 @@ def find_element(
 ) -> list[UIElement]:
     """Find elements matching label/identifier/type filters.
 
-    Combines filters with AND logic. At least one of label, label_contains,
-    label_prefix, identifier, or element_type is required. Only one label
-    matching mode may be used at a time.
+    One selector chooses the candidates, in this order: label, label_contains,
+    label_prefix, identifier, element_type. Only the first one supplied is used
+    -- passing both a label and an identifier does not narrow to elements with
+    both, the identifier is simply ignored. `element_type` is the exception and
+    narrows whatever the chosen selector returned.
 
     Args:
         elements: List of UI elements to search

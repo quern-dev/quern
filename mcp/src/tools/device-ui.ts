@@ -653,10 +653,12 @@ Label matching modes (mutually exclusive — use only one):
     inputSchema: strictParams({
       label: z
         .string()
+        .min(1)
         .optional()
         .describe("Field to type into, by visible text. Enables verification."),
       identifier: z
         .string()
+        .min(1)
         .optional()
         .describe("Field to type into, by accessibility identifier. Enables verification."),
       text: z.string().describe("Text to type"),

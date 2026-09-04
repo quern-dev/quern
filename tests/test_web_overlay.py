@@ -874,3 +874,32 @@ def test_a_secure_field_is_verified_by_length_not_content():
     # And an ordinary field still checks the content, so text landing in some
     # other field cannot pass.
     assert landed("", "goodbye", "hello", "TextField") is False
+
+
+async def test_typing_reads_the_screen_fresh_before_tapping():
+    """A cached tree can describe a screen that has since changed, and typing at
+    stale coordinates puts the text wherever they now point."""
+    ctrl, backend = _type_controller(_native_field(""), "hello")
+    seen: list = []
+    original = ctrl.get_ui_elements
+
+    async def recording(udid=None, **kw):
+        seen.append(kw.get("use_cache", True))
+        return await original(udid=udid, **kw)
+
+    ctrl.get_ui_elements = recording
+    await ctrl.type_text("hello", identifier="composition.text")
+    assert seen and seen[0] is False, "looked up the field in the cache"
+
+
+def test_both_selectors_must_match_the_same_field():
+    """find_element takes label *or* identifier, so a selector beside a label is
+    ignored -- and the lookup before typing and the read-back after are separate
+    lookups, which could then resolve to different fields."""
+    ctrl = DeviceController()
+    a = _native_field("")
+    a.label, a.identifier = "Email", "field.a"
+    b = _native_field("")
+    b.label, b.identifier = "Email", "field.b"
+    got = ctrl._matching_fields([a, b], "Email", "field.b")
+    assert [e.identifier for e in got] == ["field.b"]

@@ -1157,6 +1157,16 @@ class TypeTextRequest(BaseModel):
     settle_delay: float = Field(default=1.0, ge=0, le=10)
 
 
+    @model_validator(mode="after")
+    def check_selectors(self) -> TypeTextRequest:
+        # An empty string is falsy, so it would slip past the targeting check
+        # and type untargeted -- the caller having asked for the opposite.
+        for name in ("label", "identifier"):
+            value = getattr(self, name)
+            if value is not None and not value.strip():
+                raise ValueError(f"{name} cannot be blank")
+        return self
+
 class WaitSettledRequest(BaseModel):
     """Request body for POST /device/ui/wait-settled."""
 
