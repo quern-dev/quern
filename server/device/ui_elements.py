@@ -170,11 +170,13 @@ def find_element(
 ) -> list[UIElement]:
     """Find elements matching label/identifier/type filters.
 
-    One selector chooses the candidates, in this order: label, label_contains,
-    label_prefix, identifier, element_type. Only the first one supplied is used
-    -- passing both a label and an identifier does not narrow to elements with
-    both, the identifier is simply ignored. `element_type` is the exception and
-    narrows whatever the chosen selector returned.
+    One label selector chooses the candidates -- label, label_contains or
+    label_prefix, whichever is supplied -- and `identifier` and `element_type`
+    then narrow the result. Every selector given must match the same element.
+
+    `identifier` used to be ignored whenever a label was also given, which was
+    silent: a caller naming both to disambiguate two same-labelled fields got
+    the first of them regardless.
 
     Args:
         elements: List of UI elements to search
@@ -203,7 +205,10 @@ def find_element(
         # No search criteria provided
         return []
 
-    # Optional type filter to narrow results
+    # Narrowing filters. Applied after the primary selector rather than instead
+    # of it, so naming both a label and an identifier means both must hold.
+    if identifier and matches:
+        matches = [e for e in matches if e.identifier == identifier]
     if element_type and matches:
         matches = find_by_type(matches, element_type)
 

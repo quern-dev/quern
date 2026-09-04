@@ -417,3 +417,48 @@ class TestGenerateScreenSummary:
         assert result["element_types"] == {}
         assert result["interactive_elements"] == []
         assert "Screen" in result["summary"]
+
+
+class TestCombinedSelectors:
+    """Naming a label and an identifier must mean both, not just the label.
+
+    It used to mean just the label, silently: a caller naming both to
+    disambiguate two same-labelled fields got the first of them regardless, and
+    tap_element passes both.
+    """
+
+    def _field(self, label, identifier, type_="TextField"):
+        return UIElement(type=type_, label=label, identifier=identifier,
+                         frame={"x": 0, "y": 0, "width": 10, "height": 10})
+
+    def test_identifier_narrows_a_label_match(self):
+        fields = [self._field("Email", "field.a"), self._field("Email", "field.b")]
+        got = find_element(fields, label="Email", identifier="field.b")
+        assert [e.identifier for e in got] == ["field.b"]
+
+    def test_selectors_that_disagree_match_nothing(self):
+        fields = [self._field("Email", "field.a")]
+        assert find_element(fields, label="Email", identifier="field.z") == []
+
+    def test_identifier_still_works_alone(self):
+        fields = [self._field("Email", "field.a"), self._field("Name", "field.b")]
+        got = find_element(fields, identifier="field.b")
+        assert [e.label for e in got] == ["Name"]
+
+    def test_label_still_works_alone(self):
+        fields = [self._field("Email", "field.a"), self._field("Name", "field.b")]
+        got = find_element(fields, label="Email")
+        assert [e.identifier for e in got] == ["field.a"]
+
+    def test_identifier_narrows_a_substring_match_too(self):
+        fields = [self._field("Email address", "field.a"),
+                  self._field("Email address", "field.b")]
+        got = find_element(fields, label_contains="Email", identifier="field.b")
+        assert [e.identifier for e in got] == ["field.b"]
+
+    def test_all_three_selectors_must_agree(self):
+        fields = [self._field("Email", "field.a", "TextField"),
+                  self._field("Email", "field.a", "Button")]
+        got = find_element(fields, label="Email", identifier="field.a",
+                           element_type="Button")
+        assert [e.type for e in got] == ["Button"]

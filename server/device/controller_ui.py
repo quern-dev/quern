@@ -2168,21 +2168,9 @@ class DeviceControllerUI:
         return text in after and after != before
 
     def _matching_fields(self, elements, label: str | None, identifier: str | None):
-        """Text fields matching every selector given.
-
-        find_element takes label *or* identifier -- its chain is an elif, so a
-        label wins and an identifier beside it is ignored. That is fine when one
-        selector is used to find a thing, and not fine here: the field typed
-        into and the field read back afterwards are looked up separately, so a
-        selector that silently does nothing could have them resolve to different
-        fields and verify the wrong one.
-        """
+        """Text fields matching every selector given."""
         fields = [e for e in elements if e.type in self._TEXT_FIELD_TYPES and e.frame]
-        if label is not None:
-            fields = [e for e in fields if (e.label or "").lower() == label.lower()]
-        if identifier is not None:
-            fields = [e for e in fields if e.identifier == identifier]
-        return fields
+        return find_element(fields, label=label, identifier=identifier)
 
     async def _find_text_field(
         self, udid: str, *, label: str | None, identifier: str | None,
