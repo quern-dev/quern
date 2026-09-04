@@ -1740,6 +1740,10 @@ class DeviceControllerUI:
         if self._is_android(udid) or self._is_physical(udid):
             return False
         from server.device.web_content import _is_app
+        from server.device.webinspector import simulator_udid_for_application
+
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
 
         async def attempt() -> bool:
             async with self._web_inspector_op_lock:
@@ -1747,6 +1751,13 @@ class DeviceControllerUI:
                 for application in await inspector.connected_applications():
                     app_id = application.get("application_id")
                     if not app_id or not _is_app(application):
+                        continue
+                    # The socket carries no UDID. Without this, a focused input
+                    # on another booted simulator would be cleared instead --
+                    # and reported as success, so the field actually asked about
+                    # would be left alone.
+                    owner = await simulator_udid_for_application(app_id)
+                    if owner != udid and (owner is not None or require_match):
                         continue
                     for page in await inspector.pages(app_id):
                         # Every page is asked; only the one with an input
@@ -2183,10 +2194,25 @@ class DeviceControllerUI:
             self._invalidate_ui_cache(resolved)
             return resolved
 
-        remaining = len(target.value or "")
-        if remaining and await self._clear_web_input(resolved):
+        # Attempted regardless of the cached length: `value` is an overlay
+        # snapshot and can be stale, and this route verifies itself -- it
+        # reports success only when the element's value is actually empty.
+        if await self._clear_web_input(resolved):
             self._invalidate_ui_cache(resolved)
             return resolved
+
+        remaining = len(target.value or "")
+        if remaining > self._MAX_DELETE:
+            # Better to say so than to send 500 backspaces at a longer field and
+            # report ok over a value that is still partly there.
+            raise DeviceError(
+                f"'{target.label or target.identifier}' holds {remaining} "
+                f"characters, more than the {self._MAX_DELETE} this can clear by "
+                "keystroke, and the Web Inspector could not reach the page to "
+                "clear it directly. Reload the page, or make the web view "
+                "inspectable.",
+                tool="idb",
+            )
 
         if remaining and hasattr(backend, "delete_backwards"):
             # Tap near the trailing edge first: backspace only deletes behind
@@ -2196,9 +2222,7 @@ class DeviceControllerUI:
             edge_x = target.frame["x"] + target.frame["width"] - self._CARET_EDGE_INSET
             await backend.tap(resolved, min(edge_x, cx + target.frame["width"] / 2), cy)
             await asyncio.sleep(0.2)
-            await backend.delete_backwards(
-                resolved, min(remaining + self._DELETE_OVERSHOOT, self._MAX_DELETE),
-            )
+            await backend.delete_backwards(resolved, remaining + self._DELETE_OVERSHOOT)
 
         self._invalidate_ui_cache(resolved)
         return resolved

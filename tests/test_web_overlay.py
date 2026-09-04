@@ -735,3 +735,59 @@ async def test_an_empty_web_field_costs_nothing_extra():
     ctrl, backend = _clear_controller(_web_field(""), web_clear=False)
     await ctrl.clear_text(label="Instance")
     assert backend.deleted == []
+
+
+async def test_a_field_too_long_to_clear_is_refused_not_half_cleared():
+    """Sending the cap and reporting ok would leave a value partly there while
+    saying it was cleared -- the failure this whole change is about."""
+    ctrl, backend = _clear_controller(_web_field("q" * 900), web_clear=False)
+    with pytest.raises(DeviceError) as exc:
+        await ctrl.clear_text(label="Instance")
+    assert "900" in str(exc.value)
+    assert backend.deleted == [], "typed backspaces it knew could not finish"
+
+
+async def test_the_inspector_is_tried_even_when_the_cached_value_looks_empty():
+    """`value` is an overlay snapshot. If it is stale and empty, gating on it
+    would skip both routes and report a clear that never happened."""
+    ctrl, backend = _clear_controller(_web_field(""), web_clear=True)
+    cleared: list = []
+    ctrl._clear_web_input = lambda _u: (cleared.append(True), _immediate(True))[1]
+    await ctrl.clear_text(label="Instance")
+    assert cleared, "never asked the inspector because the snapshot looked empty"
+
+
+async def test_a_web_clear_on_another_simulator_does_not_count():
+    """Clearing a focused input on a different booted simulator and reporting
+    success would leave the field actually asked about untouched."""
+    ctrl = DeviceController()
+    ctrl._is_android = lambda _u: False
+    ctrl._is_physical = lambda _u: False
+    ctrl._booted_simulator_count = lambda: _immediate(2)
+    cleared: list = []
+
+    class Inspector:
+        async def connected_applications(self):
+            return [{"application_id": "PID:9", "bundle_id": "com.example.app"}]
+
+        async def pages(self, app_id):
+            return [{"page_id": 1}]
+
+        async def clear_focused_input(self, app_id, page_id):
+            cleared.append((app_id, page_id))
+            return True
+
+    ctrl._connected_web_inspector = lambda: _immediate(Inspector())
+    ctrl._close_web_inspector = lambda: _immediate(None)
+    import server.device.webinspector as wi
+    original = wi.simulator_udid_for_application
+
+    async def elsewhere(_app_id):
+        return "SOME-OTHER-SIM"
+
+    wi.simulator_udid_for_application = elsewhere
+    try:
+        assert await ctrl._clear_web_input("SIM") is False
+        assert cleared == [], "cleared an input on another simulator"
+    finally:
+        wi.simulator_udid_for_application = original
