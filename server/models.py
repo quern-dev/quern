@@ -1150,6 +1150,13 @@ class TypeTextRequest(BaseModel):
     settle_delay: float = Field(default=1.0, ge=0, le=10)
 
 
+class WaitSettledRequest(BaseModel):
+    """Request body for POST /device/ui/wait-settled."""
+
+    udid: str | None = None
+    timeout: float = Field(default=10.0, gt=0, le=120)
+
+
 class ClearTextRequest(BaseModel):
     """Request body for POST /device/ui/clear."""
 

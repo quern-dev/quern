@@ -487,16 +487,25 @@ class DeviceController(DeviceControllerUI):
             resolved = udid
         else:
             resolved = await self.resolve_udid(None)
+        raw_png = await self.raw_screenshot(resolved)
+        return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
+
+    async def raw_screenshot(self, resolved: str) -> bytes:
+        """The device's own capture, before any re-encoding.
+
+        Separate because a caller that is going to decode the image itself
+        should not pay for it being resized and re-encoded first: measured, the
+        processing adds ~62ms to a ~114ms capture, and settle detection decodes
+        every frame anyway.
+        """
         if self._is_android(resolved):
             # Only wake physical devices — emulator screencap works with screen off
             if not resolved.startswith("emulator-"):
                 await self._ensure_android_screen_on(resolved)
-            raw_png = await self.adb.screenshot(resolved)
-        elif self._is_physical(resolved):
-            raw_png = await self.pmd3.screenshot(resolved)
-        else:
-            raw_png = await self.simctl.screenshot(resolved)
-        return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
+            return await self.adb.screenshot(resolved)
+        if self._is_physical(resolved):
+            return await self.pmd3.screenshot(resolved)
+        return await self.simctl.screenshot(resolved)
 
     async def set_location(
         self, latitude: float, longitude: float, udid: str | None = None,
