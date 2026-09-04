@@ -551,7 +551,14 @@ class SimBridgeBackend:
         self, udid: str, x: float, y: float,
         element_type: str | None = None,
     ) -> None:
-        """Select all text and delete it. Triple-tap to select, then backspace."""
+        """Select all text and delete it. Triple-tap to select, then backspace.
+
+        Reliable in a native text view. A web input frequently does not honour
+        the triple-tap as a select-all, and the single backspace then removes
+        exactly one character -- measured on a form inside an
+        SFSafariViewController, at every tap spacing tried. Callers that need
+        the field actually empty should follow with `delete_backwards`.
+        """
         # Triple-tap to select all
         for _ in range(3):
             await self._send({"cmd": "tap", "udid": udid, "x": x, "y": y})
@@ -559,6 +566,17 @@ class SimBridgeBackend:
         await asyncio.sleep(0.1)
         # Send backspace (HID usage 0x2A on page 7)
         await self._send({"cmd": "type", "udid": udid, "text": "\x08"})
+
+    async def delete_backwards(self, udid: str, count: int) -> None:
+        """Delete `count` characters behind the caret.
+
+        Depends on nothing but the backspace key, so it works where a
+        selection-based clear does not. Measured at ~63ms per character, which
+        is the bridge's own keystroke cadence; sending more than the field holds
+        is harmless, since backspace on an empty field does nothing.
+        """
+        if count > 0:
+            await self._send({"cmd": "type", "udid": udid, "text": "\x08" * count})
 
     async def screenshot(
         self, udid: str, quality: float = 0.8, scale: int = 1,

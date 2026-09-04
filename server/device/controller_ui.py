@@ -734,6 +734,9 @@ class DeviceControllerUI:
             parsed.append(UIElement(
                 type=element.get("type") or "Other",
                 label=element.get("AXLabel") or "",
+                # Carried, not dropped: clear_text sizes its work from the
+                # value, and a web field reporting None reads as already empty.
+                value=element.get("value"),
                 # A DOM id is not an accessibility identifier and must not
                 # masquerade as one: it never appears in the native tree, so
                 # letting it match `identifier=` would make a web-only lookup
@@ -1725,6 +1728,61 @@ class DeviceControllerUI:
             except Exception:
                 logger.debug("web inspector close failed", exc_info=True)
 
+    async def _clear_web_input(self, udid: str) -> bool:
+        """Empty the focused web input through the Web Inspector, if it can.
+
+        Measured against a 55-character field: 6ms, where the same clear by
+        keystroke costs ~3.5s. Not a replacement for the keystroke path, which
+        is the only one that works where the Inspector sees nothing -- an
+        ASWebAuthenticationSession reports no connected application at all, and
+        that is the OAuth form every app has.
+        """
+        if self._is_android(udid) or self._is_physical(udid):
+            return False
+        from server.device.web_content import _is_app
+        from server.device.webinspector import simulator_udid_for_application
+
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
+
+        async def attempt() -> bool:
+            async with self._web_inspector_op_lock:
+                inspector = await self._connected_web_inspector()
+                for application in await inspector.connected_applications():
+                    app_id = application.get("application_id")
+                    if not app_id or not _is_app(application):
+                        continue
+                    # The socket carries no UDID. Without this, a focused input
+                    # on another booted simulator would be cleared instead --
+                    # and reported as success, so the field actually asked about
+                    # would be left alone.
+                    owner = await simulator_udid_for_application(app_id)
+                    if owner != udid and (owner is not None or require_match):
+                        continue
+                    for page in await inspector.pages(app_id):
+                        # Every page is asked; only the one with an input
+                        # focused acts, so this cannot empty a field on a page
+                        # the caller was not typing into.
+                        if await inspector.clear_focused_input(app_id, page["page_id"]):
+                            return True
+            return False
+
+        for retry in (False, True):
+            try:
+                if await attempt():
+                    return True
+            except Exception:
+                logger.debug("web input clear via the inspector failed",
+                             exc_info=True)
+            if retry:
+                break
+            # The connection is long-lived and can be dead by the time it is
+            # used -- the symptom is an incomplete read, not an error on
+            # connect. Reconnect once before falling back to keystrokes, which
+            # cost ~63ms per character against this path's 6ms.
+            await self._close_web_inspector()
+        return False
+
     async def wait_for_settle(
         self,
         udid: str | None = None,
@@ -2055,6 +2113,19 @@ class DeviceControllerUI:
 
     _TEXT_FIELD_TYPES = ("TextField", "SecureTextField", "TextArea", "SearchField")
 
+    # Points in from the field's trailing edge for the caret-placing tap. Inside
+    # the field, past the end of any text that fits.
+    _CARET_EDGE_INSET = 8.0
+
+    # Extra backspaces beyond the value's known length. The length can be a
+    # moment stale, and an extra keystroke on an empty field does nothing.
+    _DELETE_OVERSHOOT = 8
+
+    # A ceiling on the work. At the bridge's ~63ms per keystroke, this is about
+    # thirty seconds; a field longer than this wants a different approach, not a
+    # longer wait.
+    _MAX_DELETE = 500
+
     async def clear_text(
         self,
         udid: str | None = None,
@@ -2103,10 +2174,54 @@ class DeviceControllerUI:
 
         cx = target.frame["x"] + target.frame["width"] / 2
         cy = target.frame["y"] + target.frame["height"] / 2
+        backend = self._ui_backend(resolved)
 
-        await self._ui_backend(resolved).select_all_and_delete(
-            resolved, x=cx, y=cy, element_type=target.type,
-        )
+        # The triple-tap selects the whole value in a native text view --
+        # measured at 60 characters to 0 in one call -- and is all that is
+        # needed there.
+        if (target.extra_attrs or {}).get("source") not in ("web-inspector", "web-probe"):
+            await backend.select_all_and_delete(
+                resolved, x=cx, y=cy, element_type=target.type,
+            )
+            self._invalidate_ui_cache(resolved)
+            return resolved
+
+        # A web input does not honour it: measured inside an
+        # SFSafariViewController, one call took 26 characters to 25. Running it
+        # here would achieve nothing except quietly editing a field this may be
+        # about to refuse to clear. One tap, to put the caret in it.
+        await backend.tap(resolved, cx, cy)
+        await asyncio.sleep(0.2)
+
+        # Attempted regardless of the cached length: `value` is an overlay
+        # snapshot and can be stale, and this route verifies itself -- it
+        # reports success only when the element's value is actually empty.
+        if await self._clear_web_input(resolved):
+            self._invalidate_ui_cache(resolved)
+            return resolved
+
+        remaining = len(target.value or "")
+        if remaining > self._MAX_DELETE:
+            # Refused before touching it. Sending the cap and reporting ok over
+            # a value still partly there is the failure being fixed here.
+            raise DeviceError(
+                f"'{target.label or target.identifier}' holds {remaining} "
+                f"characters, more than the {self._MAX_DELETE} this can clear by "
+                "keystroke, and the Web Inspector could not reach the page to "
+                "clear it directly. Reload the page, or make the web view "
+                "inspectable.",
+                tool="idb",
+            )
+
+        if remaining and hasattr(backend, "delete_backwards"):
+            # Backspace only deletes behind the caret, so put it past the last
+            # character first, then overshoot -- an extra keystroke on an empty
+            # field does nothing, and the length may be a moment stale.
+            edge_x = target.frame["x"] + target.frame["width"] - self._CARET_EDGE_INSET
+            await backend.tap(resolved, min(edge_x, cx + target.frame["width"] / 2), cy)
+            await asyncio.sleep(0.2)
+            await backend.delete_backwards(resolved, remaining + self._DELETE_OVERSHOOT)
+
         self._invalidate_ui_cache(resolved)
         return resolved
 

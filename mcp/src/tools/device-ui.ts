@@ -705,7 +705,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("clear_text", {
-    description: `Clear a text field (select-all + delete), before type_text when the field already holds content. Pass label or identifier to say WHICH field: without one this picks the first field that has a value, which is not the field you just tapped -- on a sign-in form, clearing before typing the password finds the email field and empties that instead. Focus cannot be detected; the accessibility tree does not report it. Select-all takes a line at a time, so a long or wrapped value may need clearing more than once; check the value and repeat. Secure text fields (passwords) may not support select-all at all.`,
+    description: `Clear a text field (select-all + delete), before type_text when the field already holds content. Pass label or identifier to say WHICH field: without one this picks the first field that has a value, which is not the field you just tapped -- on a sign-in form, clearing before typing the password finds the email field and empties that instead. Focus cannot be detected; the accessibility tree does not report it. A web field is cleared through the Web Inspector when the page is visible to it (a few milliseconds), and by keystroke otherwise -- about 63ms per character, so a long value takes seconds. Either way the field ends empty. Secure text fields (passwords) may not support select-all at all.`,
     inputSchema: strictParams({
       label: z
         .string()
