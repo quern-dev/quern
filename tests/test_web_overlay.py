@@ -745,6 +745,9 @@ async def test_a_field_too_long_to_clear_is_refused_not_half_cleared():
         await ctrl.clear_text(label="Instance")
     assert "900" in str(exc.value)
     assert backend.deleted == [], "typed backspaces it knew could not finish"
+    # And it did not edit the field on the way to refusing: the triple-tap
+    # removes a character from a web input, so running it first would leave 899.
+    assert backend.select_calls == [], "modified a field it then refused to clear"
 
 
 async def test_the_inspector_is_tried_even_when_the_cached_value_looks_empty():

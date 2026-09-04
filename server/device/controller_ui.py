@@ -2174,25 +2174,24 @@ class DeviceControllerUI:
 
         cx = target.frame["x"] + target.frame["width"] / 2
         cy = target.frame["y"] + target.frame["height"] / 2
-
         backend = self._ui_backend(resolved)
-        await backend.select_all_and_delete(
-            resolved, x=cx, y=cy, element_type=target.type,
-        )
 
-        # Native fields are done: the triple-tap selects the whole value and the
-        # backspace clears it, measured at 60 characters to 0 in one call.
-        #
-        # A web input usually does not honour the triple-tap, and the backspace
-        # then removes a single character -- measured on a form inside an
-        # SFSafariViewController, one call took 26 characters to 25, so the
-        # field looks cleared without being cleared. Only those need more work,
-        # and the source says which is which. Deciding by re-reading the field
-        # instead would cost a full tree walk on every clear, native ones
-        # included, to learn something already known.
+        # The triple-tap selects the whole value in a native text view --
+        # measured at 60 characters to 0 in one call -- and is all that is
+        # needed there.
         if (target.extra_attrs or {}).get("source") not in ("web-inspector", "web-probe"):
+            await backend.select_all_and_delete(
+                resolved, x=cx, y=cy, element_type=target.type,
+            )
             self._invalidate_ui_cache(resolved)
             return resolved
+
+        # A web input does not honour it: measured inside an
+        # SFSafariViewController, one call took 26 characters to 25. Running it
+        # here would achieve nothing except quietly editing a field this may be
+        # about to refuse to clear. One tap, to put the caret in it.
+        await backend.tap(resolved, cx, cy)
+        await asyncio.sleep(0.2)
 
         # Attempted regardless of the cached length: `value` is an overlay
         # snapshot and can be stale, and this route verifies itself -- it
@@ -2203,8 +2202,8 @@ class DeviceControllerUI:
 
         remaining = len(target.value or "")
         if remaining > self._MAX_DELETE:
-            # Better to say so than to send 500 backspaces at a longer field and
-            # report ok over a value that is still partly there.
+            # Refused before touching it. Sending the cap and reporting ok over
+            # a value still partly there is the failure being fixed here.
             raise DeviceError(
                 f"'{target.label or target.identifier}' holds {remaining} "
                 f"characters, more than the {self._MAX_DELETE} this can clear by "
@@ -2215,10 +2214,9 @@ class DeviceControllerUI:
             )
 
         if remaining and hasattr(backend, "delete_backwards"):
-            # Tap near the trailing edge first: backspace only deletes behind
-            # the caret, and a tap in the middle of the text would leave
-            # everything after it. Then overshoot -- backspace on an empty field
-            # does nothing, and the length may be a moment stale.
+            # Backspace only deletes behind the caret, so put it past the last
+            # character first, then overshoot -- an extra keystroke on an empty
+            # field does nothing, and the length may be a moment stale.
             edge_x = target.frame["x"] + target.frame["width"] - self._CARET_EDGE_INSET
             await backend.tap(resolved, min(edge_x, cx + target.frame["width"] / 2), cy)
             await asyncio.sleep(0.2)
