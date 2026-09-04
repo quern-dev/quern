@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,7 +86,7 @@ class KnowledgeBaseScan:
 def match_landmark(
     elements: list[UIElement],
     landmark: Landmark,
-    page_urls: Sequence[str] = (),
+    page_urls: Sequence[Mapping[str, str | None]] = (),
 ) -> bool:
     """Check if a single landmark matches against a UI element list.
 
@@ -100,7 +100,12 @@ def match_landmark(
     """
     if landmark.web_url_contains is not None:
         needle = landmark.web_url_contains.lower()
-        found = any(needle in (url or "").lower() for url in page_urls)
+        found = any(
+            needle in (page.get("url") or "").lower()
+            and (landmark.web_process is None
+                 or page.get("process") == landmark.web_process)
+            for page in page_urls
+        )
         return (not found) if landmark.absent else found
 
     candidates = elements
@@ -142,7 +147,7 @@ def match_landmark(
 def match_landmarks(
     elements: list[UIElement],
     landmarks: list[Landmark],
-    page_urls: Sequence[str] = (),
+    page_urls: Sequence[Mapping[str, str | None]] = (),
 ) -> tuple[bool, list[dict]]:
     """Check all landmarks against the UI element list (AND logic).
 
@@ -171,7 +176,7 @@ def match_landmarks(
 def identify_screen(
     elements: list[UIElement],
     screens: list[ScreenLandmarks],
-    page_urls: Sequence[str] = (),
+    page_urls: Sequence[Mapping[str, str | None]] = (),
 ) -> dict:
     """Identify which screen matches the current UI state.
 
@@ -523,7 +528,7 @@ class LandmarkRegistry:
         self,
         elements: list[UIElement],
         app: str | None = None,
-        page_urls: Sequence[str] = (),
+        page_urls: Sequence[Mapping[str, str | None]] = (),
     ) -> dict:
         """Identify the current screen against loaded landmarks.
 

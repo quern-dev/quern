@@ -1001,6 +1001,14 @@ class Landmark(BaseModel):
     an inspectable page in the background, and telling those apart would need
     the probes this avoids. Not available for an ASWebAuthenticationSession,
     which no process publishes."""
+
+    web_process: str | None = None
+    """Restrict the URL match to pages hosted by this bundle id.
+
+    Several applications can be connected at once -- the app under test and
+    com.apple.SafariViewService, which hosts its out-of-process web views -- and
+    without this a page in one satisfies a landmark meant for the other. The
+    value is the same one `web_content.process` records for the screen."""
     identifier: str | None = None  # primary: exact match, case-sensitive
     label: str | None = None  # fallback: exact match, case-insensitive
     label_contains: str | None = None  # fallback: substring match, case-insensitive
@@ -1029,6 +1037,8 @@ class Landmark(BaseModel):
                     "web_url_contains cannot be combined with element selectors; "
                     "use a separate landmark entry for each"
                 )
+        elif self.web_process is not None:
+            raise ValueError("web_process only applies alongside web_url_contains")
         elif not self.element:
             raise ValueError("a landmark needs either element or web_url_contains")
         return self

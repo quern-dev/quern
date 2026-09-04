@@ -1717,8 +1717,13 @@ class DeviceControllerUI:
             udid, self._ui_backend(udid).describe_point, capture, native,
         )
 
-    async def web_page_urls(self, udid: str) -> list[str]:
-        """URLs of every inspectable page on this device.
+    async def web_page_urls(self, udid: str) -> list[dict]:
+        """Every inspectable page on this device, with the process hosting it.
+
+        The process is carried, not discarded: several applications are
+        connected at once -- the app under test and com.apple.SafariViewService,
+        which hosts its out-of-process web views -- so a URL alone cannot say
+        which of them is showing the page.
 
         Costs one Web Inspector round trip and no probes, which is what makes a
         URL usable as a landmark. Silent on failure: a screen identified by
@@ -1737,7 +1742,7 @@ class DeviceControllerUI:
             # read would consume its messages.
             async with self._web_inspector_op_lock:
                 inspector = await self._connected_web_inspector()
-                urls: list[str] = []
+                urls: list[dict] = []
                 for application in await inspector.connected_applications():
                     app_id = application.get("application_id")
                     # WebKit's own helper processes are not the app under test.
@@ -1750,10 +1755,11 @@ class DeviceControllerUI:
                     owner = await simulator_udid_for_application(app_id)
                     if owner != udid and (owner is not None or require_match):
                         continue
+                    process = application.get("bundle_id")
                     for page in await inspector.pages(app_id):
                         url = page.get("url")
                         if url:
-                            urls.append(str(url))
+                            urls.append({"url": str(url), "process": process})
             return urls
         except Exception:
             logger.debug("could not list web pages for identification", exc_info=True)

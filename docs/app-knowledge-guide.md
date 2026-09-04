@@ -276,8 +276,14 @@ accessibility tree reports the Application and nothing else. Match the page:
 
 ```yaml
 landmarks:
-  - { web_url_contains: "/settings" }
+  - { web_url_contains: "/settings", web_process: "com.apple.SafariViewService" }
 ```
+
+`web_process` is the bundle id hosting the page — the same value
+`web_content.process` records. Several applications are connected at once, the
+app under test and `com.apple.SafariViewService`, so a URL alone cannot say
+which of them is showing it. Scoping is optional but worth doing whenever the
+same URL could plausibly load in either.
 
 The URL comes from the Web Inspector's page listing — one round trip, no probes
 — and is only requested when some loaded landmark asks for one, so a knowledge

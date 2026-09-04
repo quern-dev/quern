@@ -972,8 +972,9 @@ def test_a_url_landmark_identifies_a_screen_with_no_native_identity():
     from server.models import Landmark, ScreenLandmarks
     screens = [ScreenLandmarks(screen="account-settings",
                                landmarks=[Landmark(web_url_contains="/settings")])]
-    result = identify_screen([_ui("Application", "Metatext")], screens,
-                             page_urls=["https://social.example/settings"])
+    pages = [{"url": "https://social.example/settings",
+              "process": "com.example.app"}]
+    result = identify_screen([_ui("Application", "Metatext")], screens, pages)
     assert result["matched"] == "account-settings"
     assert result["confidence"] == "exact"
 
@@ -983,8 +984,9 @@ def test_a_url_landmark_does_not_match_another_page():
     from server.models import Landmark, ScreenLandmarks
     screens = [ScreenLandmarks(screen="account-settings",
                                landmarks=[Landmark(web_url_contains="/settings")])]
-    result = identify_screen([_ui("Application")], screens,
-                             page_urls=["https://social.example/about"])
+    pages = [{"url": "https://social.example/about",
+              "process": "com.example.app"}]
+    result = identify_screen([_ui("Application")], screens, pages)
     assert result["matched"] is None
 
 
@@ -1002,8 +1004,8 @@ def test_an_absent_url_landmark_inverts():
     from server.device.landmarks import match_landmark
     from server.models import Landmark
     lm = Landmark(web_url_contains="/settings", absent=True)
-    assert match_landmark([], lm, ["https://social.example/about"])
-    assert not match_landmark([], lm, ["https://social.example/settings"])
+    assert match_landmark([], lm, [{"url": "https://social.example/about"}])
+    assert not match_landmark([], lm, [{"url": "https://social.example/settings"}])
 
 
 def test_url_and_element_landmarks_combine():
@@ -1014,7 +1016,8 @@ def test_url_and_element_landmarks_combine():
         Landmark(web_url_contains="/settings"),
         Landmark(element="Button", label="Done"),
     ])]
-    urls = ["https://social.example/settings"]
+    urls = [{"url": "https://social.example/settings",
+             "process": "com.example.app"}]
     assert identify_screen([_ui("Button", "Done")], screens, urls)["matched"] == "settings-web"
     assert identify_screen([_ui("Button", "Cancel")], screens, urls)["matched"] is None
 
@@ -1089,3 +1092,38 @@ landmarks:
   - { element: "Button", label: "Done" }''')
     scan = scan_knowledge_base(tmp_path)
     assert [lm.label for lm in scan.screens[0].landmarks] == ["Done"]
+
+
+def test_a_url_landmark_can_be_scoped_to_the_process_hosting_the_page():
+    """Several applications are connected at once -- the app under test and
+    com.apple.SafariViewService, which hosts its out-of-process web views -- so
+    a URL alone cannot say which is showing the page."""
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    lm = Landmark(web_url_contains="/settings",
+                  web_process="com.apple.SafariViewService")
+    pages = [{"url": "https://x.test/settings", "process": "com.example.app"}]
+    assert not match_landmark([], lm, pages), "matched a page in another process"
+    pages.append({"url": "https://x.test/settings",
+                  "process": "com.apple.SafariViewService"})
+    assert match_landmark([], lm, pages)
+
+
+def test_an_unscoped_url_landmark_still_matches_any_process():
+    """Scoping is opt-in; a knowledge base that does not care keeps working."""
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    assert match_landmark([], Landmark(web_url_contains="/settings"),
+                          [{"url": "https://x.test/settings", "process": "anything"}])
+
+
+def test_web_process_without_a_url_is_refused():
+    """On its own it selects nothing, so it would silently do nothing."""
+    from pydantic import ValidationError as PydanticError
+
+    from server.models import Landmark
+    try:
+        Landmark(element="Button", web_process="com.apple.SafariViewService")
+    except PydanticError:
+        return
+    raise AssertionError("accepted web_process with no web_url_contains")

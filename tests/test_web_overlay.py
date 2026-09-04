@@ -530,7 +530,8 @@ async def test_helper_processes_contribute_no_urls():
          "PID:2": [{"url": "https://helper.test/"}]},
         owners={"PID:1": "SIM", "PID:2": "SIM"})
     try:
-        assert await ctrl.web_page_urls("SIM") == ["https://x.test/settings"]
+        assert await ctrl.web_page_urls("SIM") == [
+            {"url": "https://x.test/settings", "process": "com.example.app"}]
     finally:
         _restore_attr(ctrl)
 
@@ -564,7 +565,8 @@ async def test_unattributable_pages_are_allowed_when_only_one_is_booted():
         [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]},
         owners={}, booted=1)
     try:
-        assert await ctrl.web_page_urls("SIM") == ["https://x.test/settings"]
+        assert await ctrl.web_page_urls("SIM") == [
+            {"url": "https://x.test/settings", "process": "com.example.app"}]
     finally:
         _restore_attr(ctrl)
 
@@ -583,7 +585,8 @@ async def test_listing_pages_holds_the_shared_connection_lock():
         ctrl._web_inspector_op_lock.release()
         # Bounded: if the listing stays blocked after the lock is free, this
         # should fail rather than hang the suite.
-        assert await asyncio.wait_for(task, timeout=5) == ["https://x.test/settings"]
+        assert await asyncio.wait_for(task, timeout=5) == [
+            {"url": "https://x.test/settings", "process": "com.example.app"}]
     finally:
         _restore_attr(ctrl)
 

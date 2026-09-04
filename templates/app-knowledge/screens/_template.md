@@ -33,9 +33,11 @@ landmarks:
   # It asserts that a page with this URL is LOADED, not that it is on screen: an
   # app can hold an inspectable page in the background. Choose a URL no
   # background page could share, and add an element landmark too whenever the
-  # screen has anything native to name. Not available for an
-  # ASWebAuthenticationSession, which no process publishes.
-  # - { web_url_contains: "/settings" }
+  # screen has anything native to name. web_process is the bundle id hosting
+  # the page -- the same value web_content.process records -- and narrows the
+  # match to it. Not available for an ASWebAuthenticationSession, which no
+  # process publishes.
+  # - { web_url_contains: "/settings", web_process: "com.apple.SafariViewService" }
 
 # Web-backed content on this screen. Omit the key entirely when there is none.
 #
