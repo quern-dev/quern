@@ -86,7 +86,7 @@ class KnowledgeBaseScan:
 def match_landmark(
     elements: list[UIElement],
     landmark: Landmark,
-    page_urls: Sequence[Mapping[str, str | None]] = (),
+    page_urls: Sequence[Mapping[str, str | None]] | None = None,
 ) -> bool:
     """Check if a single landmark matches against a UI element list.
 
@@ -96,9 +96,17 @@ def match_landmark(
     NOT found.
 
     A landmark naming ``web_url_contains`` is matched against ``page_urls``
-    instead, for screens whose identity is entirely web.
+    instead, for screens whose identity is entirely web. ``page_urls`` of
+    ``None`` means the listing could not be obtained, which is different from an
+    empty list: an empty list is evidence that no page is open, and no listing
+    at all is no evidence of anything.
     """
     if landmark.web_url_contains is not None:
+        if page_urls is None:
+            # Before the absent inversion, deliberately. Inverting "could not
+            # look" would let an absent-URL landmark identify a screen on the
+            # strength of a failed query.
+            return False
         needle = landmark.web_url_contains.lower()
         found = any(
             needle in (page.get("url") or "").lower()
@@ -147,7 +155,7 @@ def match_landmark(
 def match_landmarks(
     elements: list[UIElement],
     landmarks: list[Landmark],
-    page_urls: Sequence[Mapping[str, str | None]] = (),
+    page_urls: Sequence[Mapping[str, str | None]] | None = None,
 ) -> tuple[bool, list[dict]]:
     """Check all landmarks against the UI element list (AND logic).
 
@@ -176,7 +184,7 @@ def match_landmarks(
 def identify_screen(
     elements: list[UIElement],
     screens: list[ScreenLandmarks],
-    page_urls: Sequence[Mapping[str, str | None]] = (),
+    page_urls: Sequence[Mapping[str, str | None]] | None = None,
 ) -> dict:
     """Identify which screen matches the current UI state.
 
@@ -528,7 +536,7 @@ class LandmarkRegistry:
         self,
         elements: list[UIElement],
         app: str | None = None,
-        page_urls: Sequence[Mapping[str, str | None]] = (),
+        page_urls: Sequence[Mapping[str, str | None]] | None = None,
     ) -> dict:
         """Identify the current screen against loaded landmarks.
 

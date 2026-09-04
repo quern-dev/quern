@@ -1127,3 +1127,25 @@ def test_web_process_without_a_url_is_refused():
     except PydanticError:
         return
     raise AssertionError("accepted web_process with no web_url_contains")
+
+
+def test_an_absent_url_landmark_does_not_match_when_the_listing_failed():
+    """The inversion must come after the availability check. Inverting "could
+    not look" would identify a screen on the strength of a failed query."""
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    lm = Landmark(web_url_contains="/settings", absent=True)
+    assert match_landmark([], lm, []) is True          # looked, found nothing
+    assert match_landmark([], lm, None) is False       # could not look
+
+
+def test_an_empty_listing_is_evidence_but_no_listing_is_not():
+    from server.device.landmarks import identify_screen
+    from server.models import Landmark, ScreenLandmarks
+    screens = [ScreenLandmarks(screen="not-settings", landmarks=[
+        Landmark(web_url_contains="/settings", absent=True),
+        Landmark(element="Button", label="Done"),
+    ])]
+    elements = [_ui("Button", "Done")]
+    assert identify_screen(elements, screens, [])["matched"] == "not-settings"
+    assert identify_screen(elements, screens, None)["matched"] is None

@@ -591,7 +591,45 @@ async def test_listing_pages_holds_the_shared_connection_lock():
         _restore_attr(ctrl)
 
 
-async def test_a_device_that_cannot_have_web_pages_is_not_queried():
+async def test_a_device_that_cannot_have_web_pages_reports_no_listing():
+    """None, not []: an empty list would be evidence that no page is open, and
+    on Android there is simply no listing to consult."""
     ctrl = DeviceController()
     ctrl._is_android = lambda _u: True
-    assert await ctrl.web_page_urls("emulator-5554") == []
+    assert await ctrl.web_page_urls("emulator-5554") is None
+
+
+async def test_an_uncountable_simulator_is_not_treated_as_a_single_one():
+    """The count decides whether an unattributable Inspector connection is safe
+    to trust. A failed count read as "one" turns that into a yes."""
+    ctrl = DeviceController()
+
+    class Broken:
+        async def list_devices(self):
+            raise OSError("simctl unavailable")
+
+    ctrl.simctl = Broken()
+    assert await ctrl._booted_simulator_count() is None
+
+
+async def test_pages_are_refused_when_the_simulator_count_is_unknown():
+    ctrl = _url_controller(
+        [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]}, owners={})
+    ctrl._booted_simulator_count = lambda: _immediate(None)
+    try:
+        assert await ctrl.web_page_urls("SIM") == []
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_a_failed_listing_reports_no_listing_rather_than_no_pages():
+    ctrl = DeviceController()
+    ctrl._is_android = lambda _u: False
+    ctrl._is_physical = lambda _u: False
+    ctrl._booted_simulator_count = lambda: _immediate(1)
+
+    async def boom():
+        raise RuntimeError("inspector unreachable")
+
+    ctrl._connected_web_inspector = boom
+    assert await ctrl.web_page_urls("SIM") is None

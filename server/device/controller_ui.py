@@ -1717,7 +1717,7 @@ class DeviceControllerUI:
             udid, self._ui_backend(udid).describe_point, capture, native,
         )
 
-    async def web_page_urls(self, udid: str) -> list[dict]:
+    async def web_page_urls(self, udid: str) -> list[dict] | None:
         """Every inspectable page on this device, with the process hosting it.
 
         The process is carried, not discarded: several applications are
@@ -1734,8 +1734,12 @@ class DeviceControllerUI:
         from server.device.webinspector import simulator_udid_for_application
 
         if self._is_android(udid) or self._is_physical(udid):
-            return []
-        require_match = await self._booted_simulator_count() > 1
+            # Not "no pages" -- no listing at all. Android's tree already holds
+            # web content, and a physical device is reached over another
+            # transport, so nothing here can speak to what is on screen.
+            return None
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
         try:
             # The same lock the content path takes. The connection is shared and
             # the protocol interleaves replies, so a listing running alongside a
@@ -1763,13 +1767,22 @@ class DeviceControllerUI:
             return urls
         except Exception:
             logger.debug("could not list web pages for identification", exc_info=True)
-            return []
+            # None, not []: an empty list means the device genuinely has no
+            # inspectable page, which is evidence. A failure is not.
+            return None
 
-    async def _booted_simulator_count(self) -> int:
+    async def _booted_simulator_count(self) -> int | None:
+        """How many simulators are booted, or None if that cannot be determined.
+
+        None rather than 0: callers use this to decide whether an unattributable
+        Web Inspector connection is safe to trust, and a failed count read as
+        "one simulator" turns that into a yes.
+        """
         try:
             devices = await self.simctl.list_devices()
         except Exception:
-            return 0
+            logger.debug("could not count booted simulators", exc_info=True)
+            return None
         return sum(1 for d in devices if str(getattr(d, "state", "")).lower().endswith("booted"))
 
     async def get_web_content(
@@ -1820,8 +1833,10 @@ class DeviceControllerUI:
         ]
 
         # More than one booted simulator means the connection cannot be steered
-        # by UDID, so attribution stops being advisory and becomes required.
-        require_match = await self._booted_simulator_count() > 1
+        # by UDID, so attribution stops being advisory and becomes required. An
+        # unknown count is treated the same way: it cannot rule the risk out.
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
 
         async def attempt() -> dict:
             inspector = await self._connected_web_inspector()

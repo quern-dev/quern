@@ -100,7 +100,7 @@ async def identify_screen(request: Request, body: IdentifyRequest):
 
     page_urls = (
         await controller.web_page_urls(resolved)
-        if needs_page_urls(registry.all_screens(body.app)) else ()
+        if needs_page_urls(registry.all_screens(body.app)) else None
     )
     return registry.identify(elements, app=body.app, page_urls=page_urls)
 

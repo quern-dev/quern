@@ -310,7 +310,7 @@ async def get_screen_summary(
             # so a knowledge base with no URL landmarks costs nothing extra.
             page_urls = (
                 await controller.web_page_urls(resolved_udid)
-                if needs_page_urls(registry.all_screens()) else ()
+                if needs_page_urls(registry.all_screens()) else None
             )
             result = registry.identify(elements, page_urls=page_urls)
             summary["identified_as"] = result["matched"]
