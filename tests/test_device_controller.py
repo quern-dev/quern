@@ -529,8 +529,12 @@ class TestTypeText:
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.type_text = AsyncMock()
 
-        udid = await ctrl.type_text("hello world")
-        assert udid == "AAAA-1111"
+        result = await ctrl.type_text("hello world")
+        assert result["udid"] == "AAAA-1111"
+        # Untargeted typing cannot be checked: nothing reports which element has
+        # focus, so the caller is told the result is unverified rather than left
+        # to assume it landed.
+        assert result["verified"] is False
         ctrl.idb.type_text.assert_called_once_with("AAAA-1111", "hello world")
 
 

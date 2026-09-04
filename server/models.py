@@ -1145,6 +1145,13 @@ class TypeTextRequest(BaseModel):
 
     text: str
     udid: str | None = None
+    label: str | None = None
+    identifier: str | None = None
+    """Which field to type into. Naming one makes the call verify itself: the
+    field is located, tapped and read back afterwards. Without one the text goes
+    wherever the keyboard is pointed, and whether that was anywhere cannot be
+    known."""
+
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

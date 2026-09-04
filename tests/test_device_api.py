@@ -116,7 +116,8 @@ def mock_controller(app):
         }
     )
     ctrl.swipe = AsyncMock(return_value="AAAA-1111")
-    ctrl.type_text = AsyncMock(return_value="AAAA-1111")
+    ctrl.type_text = AsyncMock(
+        return_value={"udid": "AAAA-1111", "verified": False})
     ctrl.clear_text = AsyncMock(return_value="AAAA-1111")
     ctrl.press_button = AsyncMock(return_value="AAAA-1111")
     ctrl.set_location = AsyncMock(return_value="AAAA-1111")
@@ -772,7 +773,11 @@ class TestTypeText:
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
-        mock_controller.type_text.assert_called_once_with(text="hello world", udid=None)
+        # Untargeted, so the response says so rather than implying it landed.
+        assert resp.json()["verified"] is False
+        mock_controller.type_text.assert_called_once_with(
+            text="hello world", udid=None, label=None, identifier=None,
+        )
 
     async def test_type_text_no_auth(self, app):
         transport = ASGITransport(app=app)
