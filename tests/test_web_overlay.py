@@ -633,3 +633,105 @@ async def test_a_failed_listing_reports_no_listing_rather_than_no_pages():
 
     ctrl._connected_web_inspector = boom
     assert await ctrl.web_page_urls("SIM") is None
+
+
+def test_a_web_fields_value_survives_into_the_overlay():
+    """clear_text sizes its work from the value. A field that reports None
+    reads as already empty, and the clear silently does nothing."""
+    ctrl = controller_with_overlay([
+        {"type": "TextField", "AXLabel": "Instance", "source": "web-inspector",
+         "value": "https://social.example",
+         "frame": {"x": 35, "y": 325, "width": 332, "height": 39}}])
+    stored, _ = ctrl._web_overlay["SIM"]
+    assert stored[0].value == "https://social.example"
+
+
+# ------------------------------------------------- clearing a web field
+
+class _ClearBackend:
+    def __init__(self):
+        self.select_calls, self.taps, self.deleted = [], [], []
+
+    async def select_all_and_delete(self, udid, x, y, element_type):
+        self.select_calls.append((x, y, element_type))
+
+    async def tap(self, udid, x, y):
+        self.taps.append((x, y))
+
+    async def delete_backwards(self, udid, count):
+        self.deleted.append(count)
+
+
+def _clear_controller(field, *, web_clear=False):
+    ctrl = DeviceController()
+    ctrl.resolve_udid = lambda udid=None: _immediate("SIM")
+    ctrl._is_physical = lambda _u: False
+    ctrl._is_android = lambda _u: False
+    ctrl._invalidate_ui_cache = lambda *_a, **_k: None
+    backend = _ClearBackend()
+    ctrl._ui_backend = lambda _u: backend
+
+    async def elements(udid=None, **kw):
+        return [field], "SIM"
+
+    ctrl.get_ui_elements = elements
+    ctrl._clear_web_input = lambda _u: _immediate(web_clear)
+    return ctrl, backend
+
+
+def _web_field(value: str):
+    el = UIElement(type="TextField", label="Instance",
+                   frame={"x": 35, "y": 325, "width": 332, "height": 39})
+    el.value = value
+    el.extra_attrs = {"source": "web-inspector"}
+    return el
+
+
+def _native_field(value: str):
+    el = UIElement(type="TextArea", label="",
+                   identifier="composition.text",
+                   frame={"x": 0, "y": 100, "width": 300, "height": 80})
+    el.value = value
+    return el
+
+
+async def test_a_native_field_is_done_after_the_triple_tap():
+    """It selects the whole value there -- measured at 60 characters to 0 in one
+    call -- so deleting again would spend seconds re-clearing an empty field."""
+    ctrl, backend = _clear_controller(_native_field("x" * 61))
+    await ctrl.clear_text(identifier="composition.text")
+    assert backend.select_calls, "the fast path did not run"
+    assert backend.deleted == [], "spent keystrokes on an already-cleared field"
+
+
+async def test_a_web_field_is_finished_off_by_keystrokes():
+    """The triple-tap removes one character there, so the field looks cleared
+    without being cleared."""
+    ctrl, backend = _clear_controller(_web_field("y" * 60), web_clear=False)
+    await ctrl.clear_text(label="Instance")
+    assert backend.deleted, "left the web field partly filled"
+    assert backend.deleted[0] >= 60, "deleted fewer characters than the field held"
+
+
+async def test_the_caret_is_moved_to_the_end_before_deleting():
+    """Backspace only removes what is behind the caret, so a tap in the middle
+    of the text would leave everything after it."""
+    ctrl, backend = _clear_controller(_web_field("z" * 20), web_clear=False)
+    await ctrl.clear_text(label="Instance")
+    assert backend.taps, "no caret-placing tap"
+    x, _ = backend.taps[-1]
+    centre = 35 + 332 / 2
+    assert x > centre, "tapped at or before the centre, leaving a suffix behind"
+
+
+async def test_the_inspector_clear_short_circuits_the_keystrokes():
+    """6ms against ~63ms per character; the keystroke path is the fallback."""
+    ctrl, backend = _clear_controller(_web_field("w" * 100), web_clear=True)
+    await ctrl.clear_text(label="Instance")
+    assert backend.deleted == [], "typed backspaces despite the page being cleared"
+
+
+async def test_an_empty_web_field_costs_nothing_extra():
+    ctrl, backend = _clear_controller(_web_field(""), web_clear=False)
+    await ctrl.clear_text(label="Instance")
+    assert backend.deleted == []

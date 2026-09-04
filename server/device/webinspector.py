@@ -160,6 +160,39 @@ _COLLECT_JS = """
 """
 
 
+# How long to listen for application-connected notices before answering. Long
+# enough for a report already in flight, short enough not to be felt: the daemon
+# has usually sent it well before anyone asks.
+_REFRESH_SETTLE = 0.3
+
+
+# Clearing the focused input, for pages the Inspector can see. Measured against
+# a 55-character field: 6ms, where the same clear by keystroke costs ~3.5s.
+#
+# Two things this deliberately does not do. It does not fall back to the first
+# input on the page -- a page that is not the one being typed into would then
+# have an unrelated field wiped, and every inspectable page gets asked. And it
+# does not assign through `el.value`: React and other frameworks override that
+# setter on the element instance, so the DOM would empty while their own state
+# kept the old value, leaving a field that looks cleared and is not. Going
+# through the prototype's setter and firing the events a framework listens for
+# is what makes the clear real.
+_CLEAR_FOCUSED_JS = """
+(function () {
+  var el = document.activeElement;
+  if (!el) return 'not focused';
+  var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+            : el instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
+  if (!proto) return 'not an input';
+  var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+  setter.call(el, '');
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  return el.value === '' ? 'cleared' : 'not cleared';
+})()
+"""
+
+
 class WebInspectorError(RuntimeError):
     """Raised when the inspector channel is unavailable or misbehaves."""
 
@@ -331,8 +364,28 @@ class SimulatorWebInspector:
         else:
             logger.debug("webinspector: unhandled selector %s", selector)
 
-    async def connected_applications(self) -> list[dict]:
-        """Applications the inspector can see, newest state first."""
+    async def connected_applications(self, refresh: bool = True) -> list[dict]:
+        """Applications the inspector can see, newest state first.
+
+        The list is built from what the daemon has told us, and it tells us
+        proactively -- an app that launches after this connection was made
+        arrives as an `_rpc_applicationConnected:` that nobody has read yet. On
+        a long-lived connection that means the cache silently describes the
+        world as it was at connect time: measured, an SFSafariViewController
+        opened later was absent entirely, so a caller concluded there was no
+        inspectable page and fell back to a route costing a thousand times more.
+
+        So the channel is drained first, briefly. Cheap next to being wrong.
+        """
+        if refresh and self._service is not None:
+            try:
+                await self._drain_handshake(settle=_REFRESH_SETTLE)
+            except Exception:
+                # Best effort. This method never touched the socket before, so
+                # a dead connection surfaced later, where callers already
+                # reconnect; letting it raise here turned that into a 500.
+                logger.debug("webinspector: could not refresh the application "
+                             "list; answering from cache", exc_info=True)
         return [
             {
                 "application_id": app_id,
@@ -502,6 +555,15 @@ class SimulatorWebInspector:
             return json.loads(raw) if isinstance(raw, str) else raw
         except ValueError:
             return None
+
+    async def clear_focused_input(self, application_id: str, page_id: int) -> bool:
+        """Empty the focused input on a page. True only if it actually emptied.
+
+        Scoped to whatever has focus, so asking every page is safe: only the one
+        being typed into has an input focused, and the rest decline.
+        """
+        result = await self.evaluate(application_id, page_id, _CLEAR_FOCUSED_JS)
+        return result == "cleared"
 
     async def pages(self, application_id: str) -> list[dict]:
         """Inspectable pages within one application.
