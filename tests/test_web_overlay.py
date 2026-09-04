@@ -581,7 +581,9 @@ async def test_listing_pages_holds_the_shared_connection_lock():
         await asyncio.sleep(0.1)
         assert not task.done(), "listed pages while another operation held the lock"
         ctrl._web_inspector_op_lock.release()
-        assert await task == ["https://x.test/settings"]
+        # Bounded: if the listing stays blocked after the lock is free, this
+        # should fail rather than hang the suite.
+        assert await asyncio.wait_for(task, timeout=5) == ["https://x.test/settings"]
     finally:
         _restore_attr(ctrl)
 
