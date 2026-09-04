@@ -955,3 +955,197 @@ web_content:
     assert [(h.screen, h.url) for h in scan.web_content] == [
         ("dup", "https://example.test/"), ("dup", "https://ok.test/"),
     ]
+
+
+# ------------------------------------------------- identity from a web page
+
+def _ui(type_, label="", identifier=None, value=None):
+    from server.models import UIElement
+    return UIElement(type=type_, label=label, identifier=identifier, value=value,
+                     frame={"x": 0, "y": 0, "width": 10, "height": 10})
+
+
+def test_a_url_landmark_identifies_a_screen_with_no_native_identity():
+    """The case it exists for: an SFSafariViewController reports one element to
+    the accessibility tree, the Application, so there is nothing to name."""
+    from server.device.landmarks import identify_screen
+    from server.models import Landmark, ScreenLandmarks
+    screens = [ScreenLandmarks(screen="account-settings",
+                               landmarks=[Landmark(web_url_contains="/settings")])]
+    pages = [{"url": "https://social.example/settings",
+              "process": "com.example.app"}]
+    result = identify_screen([_ui("Application", "Metatext")], screens, pages)
+    assert result["matched"] == "account-settings"
+    assert result["confidence"] == "exact"
+
+
+def test_a_url_landmark_does_not_match_another_page():
+    from server.device.landmarks import identify_screen
+    from server.models import Landmark, ScreenLandmarks
+    screens = [ScreenLandmarks(screen="account-settings",
+                               landmarks=[Landmark(web_url_contains="/settings")])]
+    pages = [{"url": "https://social.example/about",
+              "process": "com.example.app"}]
+    result = identify_screen([_ui("Application")], screens, pages)
+    assert result["matched"] is None
+
+
+def test_a_url_landmark_fails_closed_when_no_pages_were_listed():
+    """An ASWebAuthenticationSession publishes no pages at all, and the listing
+    can fail. Neither may be read as a match."""
+    from server.device.landmarks import identify_screen
+    from server.models import Landmark, ScreenLandmarks
+    screens = [ScreenLandmarks(screen="account-settings",
+                               landmarks=[Landmark(web_url_contains="/settings")])]
+    assert identify_screen([_ui("Application")], screens)["matched"] is None
+
+
+def test_an_absent_url_landmark_inverts():
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    lm = Landmark(web_url_contains="/settings", absent=True)
+    assert match_landmark([], lm, [{"url": "https://social.example/about"}])
+    assert not match_landmark([], lm, [{"url": "https://social.example/settings"}])
+
+
+def test_url_and_element_landmarks_combine():
+    """Both must hold: a page can be open behind a screen that is not it."""
+    from server.device.landmarks import identify_screen
+    from server.models import Landmark, ScreenLandmarks
+    screens = [ScreenLandmarks(screen="settings-web", landmarks=[
+        Landmark(web_url_contains="/settings"),
+        Landmark(element="Button", label="Done"),
+    ])]
+    urls = [{"url": "https://social.example/settings",
+             "process": "com.example.app"}]
+    assert identify_screen([_ui("Button", "Done")], screens, urls)["matched"] == "settings-web"
+    assert identify_screen([_ui("Button", "Cancel")], screens, urls)["matched"] is None
+
+
+def test_the_page_listing_is_only_needed_when_a_landmark_asks_for_it():
+    """Contacting the Web Inspector on every identification would tax every
+    knowledge base for a feature almost none of them use."""
+    from server.device.landmarks import needs_page_urls
+    from server.models import Landmark, ScreenLandmarks
+    native_only = [ScreenLandmarks(screen="a", landmarks=[Landmark(element="Button")])]
+    assert needs_page_urls(native_only) is False
+    assert needs_page_urls(native_only + [ScreenLandmarks(
+        screen="b", landmarks=[Landmark(web_url_contains="/x")])]) is True
+
+
+def test_a_url_landmark_is_read_from_a_screen_file(tmp_path):
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "settings.md", '''screen: "settings"
+landmarks:
+  - { web_url_contains: "/settings" }''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [lm.web_url_contains for lm in scan.screens[0].landmarks] == ["/settings"]
+
+
+def test_a_landmark_naming_neither_an_element_nor_a_url_is_skipped(tmp_path):
+    """It can match nothing, so silently treating it as satisfied would make the
+    screen match everything."""
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "broken.md", '''screen: "broken"
+landmarks:
+  - { label: "no element, no url" }
+  - { element: "Button", label: "Done" }''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [lm.element for lm in scan.screens[0].landmarks] == ["Button"]
+
+
+def test_a_blank_url_selector_is_refused():
+    """An empty substring is in every URL, so this would match any page at all
+    -- and silently, because it looks like a selector."""
+    from pydantic import ValidationError as PydanticError
+
+    from server.models import Landmark
+    for blank in ("", "   "):
+        try:
+            Landmark(web_url_contains=blank)
+        except PydanticError:
+            continue
+        raise AssertionError(f"accepted a blank selector {blank!r}")
+
+
+def test_a_url_selector_cannot_be_mixed_with_element_selectors():
+    """The URL branch is taken whole, so an element field beside it would be
+    ignored rather than narrowing anything -- the landmark would match more than
+    it appears to."""
+    from pydantic import ValidationError as PydanticError
+
+    from server.models import Landmark
+    for extra in ({"element": "Button"}, {"label": "Done"},
+                  {"identifier": "x"}, {"label_contains": "Do"}):
+        try:
+            Landmark(web_url_contains="/settings", **extra)
+        except PydanticError:
+            continue
+        raise AssertionError(f"accepted a mixed selector with {extra}")
+
+
+def test_a_mixed_selector_in_a_file_is_skipped_not_silently_widened(tmp_path):
+    from server.device.landmarks import scan_knowledge_base
+    _write(tmp_path, "mixed.md", '''screen: "mixed"
+landmarks:
+  - { element: "Button", web_url_contains: "/settings" }
+  - { element: "Button", label: "Done" }''')
+    scan = scan_knowledge_base(tmp_path)
+    assert [lm.label for lm in scan.screens[0].landmarks] == ["Done"]
+
+
+def test_a_url_landmark_can_be_scoped_to_the_process_hosting_the_page():
+    """Several applications are connected at once -- the app under test and
+    com.apple.SafariViewService, which hosts its out-of-process web views -- so
+    a URL alone cannot say which is showing the page."""
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    lm = Landmark(web_url_contains="/settings",
+                  web_process="com.apple.SafariViewService")
+    pages = [{"url": "https://x.test/settings", "process": "com.example.app"}]
+    assert not match_landmark([], lm, pages), "matched a page in another process"
+    pages.append({"url": "https://x.test/settings",
+                  "process": "com.apple.SafariViewService"})
+    assert match_landmark([], lm, pages)
+
+
+def test_an_unscoped_url_landmark_still_matches_any_process():
+    """Scoping is opt-in; a knowledge base that does not care keeps working."""
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    assert match_landmark([], Landmark(web_url_contains="/settings"),
+                          [{"url": "https://x.test/settings", "process": "anything"}])
+
+
+def test_web_process_without_a_url_is_refused():
+    """On its own it selects nothing, so it would silently do nothing."""
+    from pydantic import ValidationError as PydanticError
+
+    from server.models import Landmark
+    try:
+        Landmark(element="Button", web_process="com.apple.SafariViewService")
+    except PydanticError:
+        return
+    raise AssertionError("accepted web_process with no web_url_contains")
+
+
+def test_an_absent_url_landmark_does_not_match_when_the_listing_failed():
+    """The inversion must come after the availability check. Inverting "could
+    not look" would identify a screen on the strength of a failed query."""
+    from server.device.landmarks import match_landmark
+    from server.models import Landmark
+    lm = Landmark(web_url_contains="/settings", absent=True)
+    assert match_landmark([], lm, []) is True          # looked, found nothing
+    assert match_landmark([], lm, None) is False       # could not look
+
+
+def test_an_empty_listing_is_evidence_but_no_listing_is_not():
+    from server.device.landmarks import identify_screen
+    from server.models import Landmark, ScreenLandmarks
+    screens = [ScreenLandmarks(screen="not-settings", landmarks=[
+        Landmark(web_url_contains="/settings", absent=True),
+        Landmark(element="Button", label="Done"),
+    ])]
+    elements = [_ui("Button", "Done")]
+    assert identify_screen(elements, screens, [])["matched"] == "not-settings"
+    assert identify_screen(elements, screens, None)["matched"] is None

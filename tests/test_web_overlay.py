@@ -13,6 +13,7 @@ probe and an honest error instead of a tap on whatever now occupies that pixel.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -481,3 +482,154 @@ async def test_tap_element_verifies_a_probed_element_before_tapping():
     assert tapped == [], "tapped an element that is no longer there"
     assert result["status"] == "not_found"
     assert result["reason"] == "stale_web_content"
+
+
+# ------------------------------------------------- listing pages for identity
+
+class _FakeInspector:
+    def __init__(self, apps, pages):
+        self.apps, self.pages_by_app = apps, pages
+
+    async def connected_applications(self):
+        return self.apps
+
+    async def pages(self, application_id):
+        return self.pages_by_app.get(application_id, [])
+
+
+def _url_controller(apps, pages, *, owners, booted=1):
+    ctrl = DeviceController()
+    ctrl._is_android = lambda _u: False
+    ctrl._is_physical = lambda _u: False
+    ctrl._booted_simulator_count = lambda: _immediate(booted)
+    ctrl._connected_web_inspector = lambda: _immediate(_FakeInspector(apps, pages))
+    import server.device.webinspector as wi
+    ctrl._original_attr = wi.simulator_udid_for_application
+
+    async def attribute(app_id):
+        return owners.get(app_id)
+
+    wi.simulator_udid_for_application = attribute
+    return ctrl
+
+
+def _restore_attr(ctrl):
+    import server.device.webinspector as wi
+    wi.simulator_udid_for_application = ctrl._original_attr
+
+
+APP_A = {"application_id": "PID:1", "bundle_id": "com.example.app"}
+HELPER = {"application_id": "PID:2", "bundle_id": "com.apple.WebKit.WebContent"}
+
+
+async def test_helper_processes_contribute_no_urls():
+    """WebKit's own processes are not the app under test."""
+    ctrl = _url_controller(
+        [APP_A, HELPER],
+        {"PID:1": [{"url": "https://x.test/settings"}],
+         "PID:2": [{"url": "https://helper.test/"}]},
+        owners={"PID:1": "SIM", "PID:2": "SIM"})
+    try:
+        assert await ctrl.web_page_urls("SIM") == [
+            {"url": "https://x.test/settings", "process": "com.example.app"}]
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_another_simulators_pages_are_not_this_devices():
+    """The socket carries no UDID, so a page can belong to another booted
+    simulator -- and would otherwise satisfy a landmark for this one."""
+    ctrl = _url_controller(
+        [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]},
+        owners={"PID:1": "OTHER-SIM"}, booted=2)
+    try:
+        assert await ctrl.web_page_urls("SIM") == []
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_unattributable_pages_are_refused_when_several_are_booted():
+    ctrl = _url_controller(
+        [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]},
+        owners={}, booted=2)
+    try:
+        assert await ctrl.web_page_urls("SIM") == []
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_unattributable_pages_are_allowed_when_only_one_is_booted():
+    """With a single simulator there is nothing to confuse it with, and
+    refusing would make the feature unusable on the ordinary setup."""
+    ctrl = _url_controller(
+        [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]},
+        owners={}, booted=1)
+    try:
+        assert await ctrl.web_page_urls("SIM") == [
+            {"url": "https://x.test/settings", "process": "com.example.app"}]
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_listing_pages_holds_the_shared_connection_lock():
+    """The connection is shared and the protocol interleaves replies, so a
+    listing running alongside a content read would consume its messages."""
+    ctrl = _url_controller(
+        [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]},
+        owners={"PID:1": "SIM"})
+    try:
+        await ctrl._web_inspector_op_lock.acquire()
+        task = asyncio.create_task(ctrl.web_page_urls("SIM"))
+        await asyncio.sleep(0.1)
+        assert not task.done(), "listed pages while another operation held the lock"
+        ctrl._web_inspector_op_lock.release()
+        # Bounded: if the listing stays blocked after the lock is free, this
+        # should fail rather than hang the suite.
+        assert await asyncio.wait_for(task, timeout=5) == [
+            {"url": "https://x.test/settings", "process": "com.example.app"}]
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_a_device_that_cannot_have_web_pages_reports_no_listing():
+    """None, not []: an empty list would be evidence that no page is open, and
+    on Android there is simply no listing to consult."""
+    ctrl = DeviceController()
+    ctrl._is_android = lambda _u: True
+    assert await ctrl.web_page_urls("emulator-5554") is None
+
+
+async def test_an_uncountable_simulator_is_not_treated_as_a_single_one():
+    """The count decides whether an unattributable Inspector connection is safe
+    to trust. A failed count read as "one" turns that into a yes."""
+    ctrl = DeviceController()
+
+    class Broken:
+        async def list_devices(self):
+            raise OSError("simctl unavailable")
+
+    ctrl.simctl = Broken()
+    assert await ctrl._booted_simulator_count() is None
+
+
+async def test_pages_are_refused_when_the_simulator_count_is_unknown():
+    ctrl = _url_controller(
+        [APP_A], {"PID:1": [{"url": "https://x.test/settings"}]}, owners={})
+    ctrl._booted_simulator_count = lambda: _immediate(None)
+    try:
+        assert await ctrl.web_page_urls("SIM") == []
+    finally:
+        _restore_attr(ctrl)
+
+
+async def test_a_failed_listing_reports_no_listing_rather_than_no_pages():
+    ctrl = DeviceController()
+    ctrl._is_android = lambda _u: False
+    ctrl._is_physical = lambda _u: False
+    ctrl._booted_simulator_count = lambda: _immediate(1)
+
+    async def boom():
+        raise RuntimeError("inspector unreachable")
+
+    ctrl._connected_web_inspector = boom
+    assert await ctrl.web_page_urls("SIM") is None

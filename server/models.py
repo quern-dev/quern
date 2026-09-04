@@ -985,7 +985,30 @@ class Landmark(BaseModel):
     Label is a fallback for elements without stable identifiers.
     """
 
-    element: str  # element type (required, e.g. "navigationBar", "Button")
+    element: str | None = None
+    """Element type, e.g. "navigationBar" or "Button". Required unless the
+    landmark identifies the screen by its web page instead."""
+
+    web_url_contains: str | None = None
+    """Match a substring of the URL of a web page on screen.
+
+    For screens whose identity is entirely web: an SFSafariViewController on a
+    settings page reports one element to the accessibility tree, the
+    Application, so there is nothing native to name. The URL is read from the
+    Web Inspector's page listing, which costs no probes.
+
+    It asserts the page is *loaded*, not that it is on screen -- an app can hold
+    an inspectable page in the background, and telling those apart would need
+    the probes this avoids. Not available for an ASWebAuthenticationSession,
+    which no process publishes."""
+
+    web_process: str | None = None
+    """Restrict the URL match to pages hosted by this bundle id.
+
+    Several applications can be connected at once -- the app under test and
+    com.apple.SafariViewService, which hosts its out-of-process web views -- and
+    without this a page in one satisfies a landmark meant for the other. The
+    value is the same one `web_content.process` records for the screen."""
     identifier: str | None = None  # primary: exact match, case-sensitive
     label: str | None = None  # fallback: exact match, case-insensitive
     label_contains: str | None = None  # fallback: substring match, case-insensitive
@@ -997,6 +1020,28 @@ class Landmark(BaseModel):
     Timelines tab is just present." Both iOS and Android backends normalize
     selection state into UIElement.value as "1" (selected) / "0" (not).
     Omit to ignore selection state."""
+
+
+    @model_validator(mode="after")
+    def check_selector(self) -> Landmark:
+        if self.web_url_contains is not None:
+            if not self.web_url_contains.strip():
+                # An empty substring is in every URL, so this would match any
+                # page at all -- and silently, since it looks like a selector.
+                raise ValueError("web_url_contains cannot be blank")
+            if self.element or self.identifier or self.label or self.label_contains:
+                # The URL branch is taken whole; an element field alongside it
+                # would be quietly ignored rather than narrowing anything. Two
+                # landmarks express the conjunction, and are evaluated as one.
+                raise ValueError(
+                    "web_url_contains cannot be combined with element selectors; "
+                    "use a separate landmark entry for each"
+                )
+        elif self.web_process is not None:
+            raise ValueError("web_process only applies alongside web_url_contains")
+        elif not self.element:
+            raise ValueError("a landmark needs either element or web_url_contains")
+        return self
 
 
 class ScreenLandmarks(BaseModel):

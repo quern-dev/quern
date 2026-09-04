@@ -1717,11 +1717,72 @@ class DeviceControllerUI:
             udid, self._ui_backend(udid).describe_point, capture, native,
         )
 
-    async def _booted_simulator_count(self) -> int:
+    async def web_page_urls(self, udid: str) -> list[dict] | None:
+        """Every inspectable page on this device, with the process hosting it.
+
+        The process is carried, not discarded: several applications are
+        connected at once -- the app under test and com.apple.SafariViewService,
+        which hosts its out-of-process web views -- so a URL alone cannot say
+        which of them is showing the page.
+
+        Costs one Web Inspector round trip and no probes, which is what makes a
+        URL usable as a landmark. Silent on failure: a screen identified by
+        native landmarks must not stop being identifiable because the Inspector
+        is unreachable.
+        """
+        from server.device.web_content import _is_app
+        from server.device.webinspector import simulator_udid_for_application
+
+        if self._is_android(udid) or self._is_physical(udid):
+            # Not "no pages" -- no listing at all. Android's tree already holds
+            # web content, and a physical device is reached over another
+            # transport, so nothing here can speak to what is on screen.
+            return None
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
+        try:
+            # The same lock the content path takes. The connection is shared and
+            # the protocol interleaves replies, so a listing running alongside a
+            # read would consume its messages.
+            async with self._web_inspector_op_lock:
+                inspector = await self._connected_web_inspector()
+                urls: list[dict] = []
+                for application in await inspector.connected_applications():
+                    app_id = application.get("application_id")
+                    # WebKit's own helper processes are not the app under test.
+                    if not app_id or not _is_app(application):
+                        continue
+                    # The socket carries no UDID, so with several simulators
+                    # booted a page could belong to another one. Attributing it
+                    # is the same rule get_web_content applies before returning
+                    # anyone's content as this device's.
+                    owner = await simulator_udid_for_application(app_id)
+                    if owner != udid and (owner is not None or require_match):
+                        continue
+                    process = application.get("bundle_id")
+                    for page in await inspector.pages(app_id):
+                        url = page.get("url")
+                        if url:
+                            urls.append({"url": str(url), "process": process})
+            return urls
+        except Exception:
+            logger.debug("could not list web pages for identification", exc_info=True)
+            # None, not []: an empty list means the device genuinely has no
+            # inspectable page, which is evidence. A failure is not.
+            return None
+
+    async def _booted_simulator_count(self) -> int | None:
+        """How many simulators are booted, or None if that cannot be determined.
+
+        None rather than 0: callers use this to decide whether an unattributable
+        Web Inspector connection is safe to trust, and a failed count read as
+        "one simulator" turns that into a yes.
+        """
         try:
             devices = await self.simctl.list_devices()
         except Exception:
-            return 0
+            logger.debug("could not count booted simulators", exc_info=True)
+            return None
         return sum(1 for d in devices if str(getattr(d, "state", "")).lower().endswith("booted"))
 
     async def get_web_content(
@@ -1772,8 +1833,10 @@ class DeviceControllerUI:
         ]
 
         # More than one booted simulator means the connection cannot be steered
-        # by UDID, so attribution stops being advisory and becomes required.
-        require_match = await self._booted_simulator_count() > 1
+        # by UDID, so attribution stops being advisory and becomes required. An
+        # unknown count is treated the same way: it cannot rule the risk out.
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
 
         async def attempt() -> dict:
             inspector = await self._connected_web_inspector()
