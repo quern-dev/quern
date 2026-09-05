@@ -115,11 +115,20 @@ def classify_source(path: str | None) -> str:
     # files always live under a Cellar.
     if "/Cellar/" in path or path.startswith(("/opt/homebrew/", "/home/linuxbrew/")):
         return "brew"
-    if "/.venv/" in path or path.startswith(str(Path(sys.executable).parent)):
+    if "/.venv/" in path:
+        return "venv"
+    # Only meaningful inside a virtualenv. Run under a system interpreter,
+    # sys.executable's directory is /usr/bin, and every binary there would be
+    # reported as living in quern's environment.
+    if _in_virtualenv() and path.startswith(str(Path(sys.executable).parent)):
         return "venv"
     if path.startswith(("/usr/bin/", "/usr/local/bin/", "/bin/")):
         return "system"
     return "unknown"
+
+
+def _in_virtualenv() -> bool:
+    return sys.prefix != sys.base_prefix
 
 
 def package_version(distribution: str) -> str | None:
@@ -277,6 +286,7 @@ async def collect_sites() -> list[ToolSite]:
         available=adb_path is not None,
         version=await binary_version(adb_path, ["version"]) if adb_path else None,
         path=adb_path, source=classify_source(adb_path),
+        volatile_path=is_volatile(adb_path),
     ))
 
     # --- libimobiledevice -------------------------------------------------
@@ -286,6 +296,7 @@ async def collect_sites() -> list[ToolSite]:
         available=imd_path is not None,
         version=await binary_version(imd_path, ["--version"]) if imd_path else None,
         path=imd_path, source=classify_source(imd_path),
+        volatile_path=is_volatile(imd_path),
     )
     if site.source == "brew":
         site.requested, site.required_by = await brew_provenance("libimobiledevice")

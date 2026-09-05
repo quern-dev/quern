@@ -278,3 +278,60 @@ def test_a_snapshot_that_is_not_text_reports_nothing(snapshot):
     snapshot.write_bytes(b"\xff\xfe\x00not valid utf-8 \xc3\x28")
     assert setup_mod._load_recorded_sites() == {}
     assert setup_mod._report_drift([_site()]) == []
+
+
+class TestVenvDetectionUnderASystemPython:
+    """`sys.executable`'s directory is only quern's environment when quern is
+    in a virtualenv. Under a system interpreter it is /usr/bin, and matching on
+    it would report every binary there as living in quern's environment."""
+
+    def test_a_system_binary_is_not_called_venv(self, monkeypatch):
+        from server.device import tool_versions as tv
+        monkeypatch.setattr(tv.sys, "executable", "/usr/bin/python3")
+        monkeypatch.setattr(tv.sys, "prefix", "/usr")
+        monkeypatch.setattr(tv.sys, "base_prefix", "/usr")   # not a virtualenv
+        assert tv.classify_source("/usr/bin/some-tool") == "system"
+
+    def test_inside_a_virtualenv_the_interpreter_directory_counts(
+        self, monkeypatch, tmp_path,
+    ):
+        from server.device import tool_versions as tv
+        venv_bin = tmp_path / "env" / "bin"
+        venv_bin.mkdir(parents=True)
+        monkeypatch.setattr(tv.sys, "executable", str(venv_bin / "python"))
+        monkeypatch.setattr(tv.sys, "prefix", str(tmp_path / "env"))
+        monkeypatch.setattr(tv.sys, "base_prefix", "/usr")   # is a virtualenv
+        assert tv.classify_source(str(venv_bin / "idb")) == "venv"
+
+
+async def test_every_cli_site_is_asked_whether_its_path_survives_a_shell(monkeypatch):
+    """One site forgetting means the snapshot records a path that changes on
+    its own, and the next doctor reports a move that never happened.
+
+    Every tool is pointed at a volatile path here, so the check does not depend
+    on where this machine happens to keep them -- adb sits in a stable SDK
+    directory locally, and the omission it is guarding against was invisible
+    for exactly that reason.
+    """
+    from server.device import tool_versions as tv
+
+    volatile = "/x/.local/state/fnm_multishells/1_2/bin/tool"
+    monkeypatch.setattr(tv.shutil, "which", lambda _n: volatile)
+    monkeypatch.setattr(tv, "which", lambda _n: volatile)
+    monkeypatch.setattr(tv, "brew_provenance", _no_provenance)
+    monkeypatch.setattr(tv, "binary_version", _no_version)
+
+    for site in await tv.collect_sites():
+        if site.role != "cli" or not site.path:
+            continue
+        assert site.volatile_path, (
+            f"{site.name} does not report whether its path is volatile"
+        )
+
+
+async def _no_provenance(_formula):
+    return None, []
+
+
+async def _no_version(*_a, **_kw):
+    return None
