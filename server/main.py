@@ -628,10 +628,15 @@ fetch('/api/v1/device/list', {
         """
         tools_status: dict = {}
         cache_stats: dict = {}
+        sites: list = []
         if hasattr(app.state, "device_controller") and app.state.device_controller:
-            tools_status = await app.state.device_controller.check_tools()
-            cache_stats = app.state.device_controller.get_cache_stats()
-        return {"tools": tools_status, "ui_cache": cache_stats}
+            controller = app.state.device_controller
+            tools_status = await controller.check_tools()
+            cache_stats = controller.get_cache_stats()
+            # Versions and provenance alongside the flags, not instead of them:
+            # existing callers read `tools` by truthiness.
+            sites = await controller.tool_sites()
+        return {"tools": tools_status, "sites": sites, "ui_cache": cache_stats}
 
     return app
 
