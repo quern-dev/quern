@@ -91,9 +91,10 @@ reviews:
 
     - path: "docs/api-reference.md"
       instructions: |
-        Generated from the source — every tool with the endpoint behind it,
-        derived from each tool's own apiRequest call. Hand-edits get overwritten.
-        Changes belong in the generator or the tool definitions.
+        Every tool with the endpoint behind it. Hand-maintained, and guarded by
+        tests/test_readme_sync.py, which fails when a registered route or tool
+        is missing here or listed here without existing. There is no generator —
+        edit this file directly and let the guard check it.
 
     - path: "docs/release-channels.md"
       instructions: |

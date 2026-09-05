@@ -31,6 +31,7 @@ from server.models import (
     StopDeviceLogRequest,
     StopSimLogRequest,
     TerminateAppRequest,
+    ToolSitesResponse,
     UninstallAppRequest,
     WdaElementNotFoundError,
     WdaElementNotInteractableError,
@@ -120,6 +121,24 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 # ---------------------------------------------------------------------------
 # Device management
 # ---------------------------------------------------------------------------
+
+
+@router.get("/tools/sites", response_model=ToolSitesResponse)
+async def tool_sites(request: Request) -> ToolSitesResponse:
+    """Every install site quern uses, with versions and provenance.
+
+    Authenticated, unlike the public /tools: `path` carries account names and
+    filesystem layout. /tools keeps returning availability flags only.
+
+    Two entries share a name where two installs do. `pymobiledevice3` is a
+    library imported for web content and a binary run by tunneld, and they drift
+    apart -- measured at 11.3.1 and 9.15.1 on one machine.
+    """
+    controller = _get_controller(request)
+    try:
+        return ToolSitesResponse(sites=await controller.tool_sites())
+    except DeviceError as e:
+        raise _handle_device_error(e)
 
 
 @router.get("/list")

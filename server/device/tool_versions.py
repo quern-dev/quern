@@ -21,9 +21,9 @@ timestamp, so it is recorded as provenance rather than as a location to revisit.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +34,7 @@ from pathlib import Path
 #   adb              ->  Android Debug Bridge version 1.0.41
 #   node             ->  v22.22.2
 #   mitmdump         ->  Mitmproxy: 12.2.3
-_VERSION_RE = re.compile(r"\bv?(\d+(?:\.\d+){1,3}(?:[-.][A-Za-z0-9]+)?)\b")
+_VERSION_RE = re.compile(r"\bv?(\d+(?:\.\d+){1,3}(?:-[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)?)")
 
 # Paths whose spelling changes between shells. fnm hands out a per-shell
 # directory named for the pid that asked, so the path is evidence of where a
@@ -92,9 +92,16 @@ def is_volatile(path: str | None) -> bool:
 
 
 def classify_source(path: str | None) -> str:
-    """Where a binary came from, judged by where it sits."""
+    """Where a binary came from, judged by where it sits.
+
+    Symlinks are followed first. Brew links its binaries into `bin` directories
+    that look like system paths, so classifying the link would report `system`
+    for a formula and skip its provenance entirely.
+    """
     if not path:
         return "unknown"
+    with contextlib.suppress(OSError):
+        path = str(Path(path).resolve())
     if "fnm_multishells" in path or "/fnm/" in path:
         return "fnm"
     if "/pipx/" in path:
@@ -103,7 +110,10 @@ def classify_source(path: str | None) -> str:
         return "android-sdk"
     if "/Xcode.app/" in path or path.startswith("/Applications/Xcode"):
         return "xcode"
-    if path.startswith(("/opt/homebrew/", "/usr/local/Cellar/", "/home/linuxbrew/")):
+    # By segment, not prefix: brew's root moves between /opt/homebrew,
+    # /usr/local, linuxbrew and whatever HOMEBREW_PREFIX says, but a formula's
+    # files always live under a Cellar.
+    if "/Cellar/" in path or path.startswith(("/opt/homebrew/", "/home/linuxbrew/")):
         return "brew"
     if "/.venv/" in path or path.startswith(str(Path(sys.executable).parent)):
         return "venv"
@@ -126,6 +136,23 @@ def package_version(distribution: str) -> str | None:
         return None
 
 
+async def _run(args: list[str], timeout: float) -> tuple[int, str]:
+    """Run a command off the event loop, returning (exit code, stdout)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return 1, ""
+    except OSError:
+        return 1, ""
+    return proc.returncode or 0, out.decode(errors="replace")
+
+
 async def binary_version(path: str, args: list[str], timeout: float = 5.0) -> str | None:
     """Run a binary's version command and pull the version out of it."""
     try:
@@ -134,13 +161,24 @@ async def binary_version(path: str, args: list[str], timeout: float = 5.0) -> st
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except (OSError, TimeoutError):
+    except TimeoutError:
+        # Kill it: communicate() leaves the child running, and a version
+        # command that hangs would otherwise stay alive across requests.
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return None
+    except OSError:
         return None
     return parse_version(out.decode(errors="replace"))
 
 
-def brew_provenance(formula: str) -> tuple[bool | None, list[str]]:
+async def brew_provenance(formula: str) -> tuple[bool | None, list[str]]:
     """Whether a formula was asked for, and what else depends on it.
+
+    Run off the event loop -- `brew info` and `brew uses` are slow enough that
+    doing them synchronously would stall every other request for as long as
+    they take.
 
     Both are best effort. `installed_on_request` is absent on installs old
     enough to predate it -- measured, `libusbmuxd` and `openssl@3` carry
@@ -151,12 +189,9 @@ def brew_provenance(formula: str) -> tuple[bool | None, list[str]]:
     try:
         import json
 
-        raw = subprocess.run(
-            ["brew", "info", "--json=v2", formula],
-            capture_output=True, text=True, timeout=15,
-        )
-        if raw.returncode == 0:
-            for entry in (json.loads(raw.stdout).get("formulae") or []):
+        code, stdout = await _run(["brew", "info", "--json=v2", formula], timeout=15)
+        if code == 0:
+            for entry in (json.loads(stdout).get("formulae") or []):
                 for installed in entry.get("installed") or []:
                     if installed.get("installed_on_request"):
                         requested = True
@@ -167,12 +202,9 @@ def brew_provenance(formula: str) -> tuple[bool | None, list[str]]:
 
     required_by: list[str] = []
     try:
-        uses = subprocess.run(
-            ["brew", "uses", "--installed", formula],
-            capture_output=True, text=True, timeout=20,
-        )
-        if uses.returncode == 0:
-            required_by = uses.stdout.split()
+        code, stdout = await _run(["brew", "uses", "--installed", formula], timeout=20)
+        if code == 0:
+            required_by = stdout.split()
     except Exception:
         pass
     return requested, required_by
@@ -256,7 +288,7 @@ async def collect_sites() -> list[ToolSite]:
         path=imd_path, source=classify_source(imd_path),
     )
     if site.source == "brew":
-        site.requested, site.required_by = brew_provenance("libimobiledevice")
+        site.requested, site.required_by = await brew_provenance("libimobiledevice")
     sites.append(site)
 
     # --- node -------------------------------------------------------------

@@ -42,8 +42,10 @@ class TestParseVersion:
     def test_name_colon_version(self):
         assert parse_version("Mitmproxy: 12.2.3") == "12.2.3"
 
-    def test_a_prerelease_suffix_survives(self):
-        assert parse_version("quern 0.14.1-beta.2") == "0.14.1-beta"
+    def test_a_prerelease_keeps_its_build_number(self):
+        """Truncating to `0.14.1-beta` makes beta.1 and beta.2 compare equal,
+        so drift between two prereleases would go unreported."""
+        assert parse_version("quern 0.14.1-beta.2") == "0.14.1-beta.2"
 
     def test_output_with_no_version_reports_none(self):
         assert parse_version("usage: idb [-h] [--log {DEBUG,INFO}]") is None
@@ -66,7 +68,23 @@ class TestClassifySource:
         assert classify_source("/Users/x/Library/Android/sdk/platform-tools/adb") == "android-sdk"
 
     def test_system(self):
-        assert classify_source("/usr/local/bin/pymobiledevice3") == "system"
+        # A path that does not exist, so resolve() leaves it alone: on a real
+        # machine /usr/local/bin is full of symlinks into Cellar and pipx.
+        assert classify_source("/usr/bin/nonexistent-tool-xyz") == "system"
+
+    def test_a_symlink_is_followed_before_classifying(self, tmp_path):
+        """Brew links its binaries into bin directories that look like system
+        paths. Classifying the link reports `system` for a formula, and its
+        provenance is then never looked up."""
+        cellar = tmp_path / "usr" / "local" / "Cellar" / "x" / "1.0" / "bin"
+        cellar.mkdir(parents=True)
+        real = cellar / "idevice_id"
+        real.write_text("")
+        link = tmp_path / "bin" / "idevice_id"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(real)
+        # The link is classified by what it points at, not by where it sits.
+        assert classify_source(str(link)) == "brew"
 
     def test_nothing_to_go_on(self):
         assert classify_source(None) == "unknown"
@@ -226,3 +244,29 @@ def test_the_two_pymobiledevice3_installs_are_tracked_apart(snapshot):
     ])
     assert drift and "9.15.1 → 7.7.1" in drift[0].detail
     assert "library" not in drift[0].detail
+
+
+class TestSnapshotIsShapeChecked:
+    """It is a file on disk that a person can edit. A doctor run that raises on
+    a malformed snapshot fails at the point it was meant to be reporting."""
+
+    def test_a_list_instead_of_an_object(self, snapshot):
+        snapshot.write_text("[]")
+        assert setup_mod._load_recorded_sites() == {}
+
+    def test_sites_that_is_not_a_list(self, snapshot):
+        snapshot.write_text(json.dumps({"sites": "nope"}))
+        assert setup_mod._load_recorded_sites() == {}
+
+    def test_a_null_entry_is_dropped_not_crashed_on(self, snapshot):
+        snapshot.write_text(json.dumps({"sites": [None, _site()]}))
+        loaded = setup_mod._load_recorded_sites()
+        assert [s["name"] for s in loaded["sites"]] == ["pymobiledevice3"]
+
+    def test_an_entry_missing_its_key_fields_is_dropped(self, snapshot):
+        snapshot.write_text(json.dumps({"sites": [{"version": "1.0"}, _site()]}))
+        assert len(setup_mod._load_recorded_sites()["sites"]) == 1
+
+    def test_a_malformed_snapshot_reports_no_drift_rather_than_raising(self, snapshot):
+        snapshot.write_text("{ not json")
+        assert setup_mod._report_drift([_site()]) == []

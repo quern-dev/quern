@@ -2153,12 +2153,29 @@ def record_tool_sites() -> None:
 
 
 def _load_recorded_sites() -> dict:
+    """The recorded snapshot, or nothing if it is not one.
+
+    Shape-checked rather than trusted. It is a file on disk that a person can
+    edit, and a doctor run that raises on a malformed snapshot fails at the
+    point it was meant to be reporting.
+    """
     import json
 
     try:
-        return json.loads(TOOL_SNAPSHOT.read_text())
+        data = json.loads(TOOL_SNAPSHOT.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    sites = data.get("sites")
+    if not isinstance(sites, list):
+        return {}
+    usable = [
+        s for s in sites
+        if isinstance(s, dict) and isinstance(s.get("name"), str)
+        and isinstance(s.get("role"), str)
+    ]
+    return {"recorded_at": data.get("recorded_at"), "sites": usable}
 
 
 def report_tool_sites(record: bool = False) -> list[CheckResult]:
