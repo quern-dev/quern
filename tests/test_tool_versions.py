@@ -270,3 +270,11 @@ class TestSnapshotIsShapeChecked:
     def test_a_malformed_snapshot_reports_no_drift_rather_than_raising(self, snapshot):
         snapshot.write_text("{ not json")
         assert setup_mod._report_drift([_site()]) == []
+
+
+def test_a_snapshot_that_is_not_text_reports_nothing(snapshot):
+    """UnicodeDecodeError is a ValueError, not an OSError, and read_text raises
+    it before json ever sees the bytes."""
+    snapshot.write_bytes(b"\xff\xfe\x00not valid utf-8 \xc3\x28")
+    assert setup_mod._load_recorded_sites() == {}
+    assert setup_mod._report_drift([_site()]) == []

@@ -2163,7 +2163,9 @@ def _load_recorded_sites() -> dict:
 
     try:
         data = json.loads(TOOL_SNAPSHOT.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (OSError, ValueError):
+        # ValueError covers both JSONDecodeError and UnicodeDecodeError: bytes
+        # that are not valid text fail in read_text, before json sees them.
         return {}
     if not isinstance(data, dict):
         return {}
