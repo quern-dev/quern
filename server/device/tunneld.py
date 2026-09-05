@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -140,6 +141,143 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
             Path(tmp_path).unlink(missing_ok=True)
 
     return _tunnel_udid_cache.get(coredevice_uuid)
+
+
+
+@dataclass
+class TunneldHealth:
+    """What state the tunneld daemon is in, and what would resolve it."""
+
+    status: str
+    """healthy | wedged | stopped | not_installed | no_binary | stale_plist |
+    binary_drift."""
+
+    detail: str
+    serving: bool = False
+    launchd_state: str | None = None
+    pid: int | None = None
+    program: str | None = None
+    remedy: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "healthy"
+
+
+def launchd_job() -> dict[str, str]:
+    """What launchd knows about the tunneld job, without needing sudo.
+
+    `launchctl print` on a system-domain job is readable unprivileged -- verified
+    on macOS 26 -- which is what lets this run inside read-only diagnostics
+    without a password prompt. Only the handful of scalar fields are parsed;
+    the output is a large nested dump and anything deeper would be brittle.
+    """
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"system/{TUNNELD_LABEL}"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+
+    wanted = ("state", "pid", "program", "last exit code")
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key, value = key.strip(), value.strip()
+        # Only top-level scalars: nested blocks repeat `state = active` for
+        # every endpoint, which would otherwise overwrite the job's own state.
+        if key in wanted and key not in fields:
+            fields[key] = value
+    return fields
+
+
+async def tunneld_health() -> TunneldHealth:
+    """Whether tunneld is actually serving, and if not, why.
+
+    The distinction that matters is **wedged versus stopped**, because they look
+    identical from the HTTP side and need opposite responses. A failed device
+    pairing can leave the daemon alive and not serving: it holds no listener and
+    never exits, so `KeepAlive` never fires and launchd reports it healthy
+    indefinitely (#73). "HTTP down while launchd says running" is the signature
+    that separates that from a daemon which is simply not started.
+
+    This reports and does not remediate. Recovery is `bootout` + `bootstrap`,
+    never `kickstart -k` -- that sends SIGKILL and hung launchctl on macOS 15,
+    as `install_daemon` already notes.
+    """
+    binary = find_pymobiledevice3_binary()
+    if binary is None:
+        return TunneldHealth(
+            status="no_binary",
+            detail="pymobiledevice3 binary not found, so tunneld cannot run",
+            remedy="pipx install pymobiledevice3",
+        )
+
+    if not PLIST_PATH.exists():
+        return TunneldHealth(
+            status="not_installed",
+            detail="LaunchDaemon is not installed",
+            remedy="./quern tunneld install",
+        )
+
+    serving = await is_tunneld_running()
+    job = launchd_job()
+    state = job.get("state")
+    pid = int(job["pid"]) if job.get("pid", "").isdigit() else None
+    program = job.get("program")
+
+    if not serving:
+        if state == "running":
+            return TunneldHealth(
+                status="wedged", serving=False, launchd_state=state, pid=pid,
+                program=program,
+                detail=(
+                    f"alive (pid {pid}) but not serving on {TUNNELD_URL} — "
+                    "launchd sees a healthy job and will never restart it"
+                ),
+                remedy=(
+                    "sudo launchctl bootout system/" + TUNNELD_LABEL
+                    + " && sudo launchctl bootstrap system " + str(PLIST_PATH)
+                    + "  (not kickstart -k: it hangs launchctl)"
+                ),
+            )
+        return TunneldHealth(
+            status="stopped", serving=False, launchd_state=state, pid=pid,
+            program=program,
+            detail=f"installed but not running (launchd state: {state or 'unknown'})",
+            remedy="./quern tunneld install",
+        )
+
+    if not installed_plist_is_current():
+        return TunneldHealth(
+            status="stale_plist", serving=True, launchd_state=state, pid=pid,
+            program=program,
+            detail=f"serving, but the installed plist is outdated ({installed_plist_log_path()})",
+            remedy="./quern tunneld install",
+        )
+
+    # The daemon runs whatever the plist froze in, which is not necessarily the
+    # binary quern would resolve today -- a second pipx install, or a per-user
+    # one shadowing the shared path, drifts silently and is invisible from the
+    # HTTP side because the old one keeps serving perfectly well.
+    if program and Path(program) != binary:
+        return TunneldHealth(
+            status="binary_drift", serving=True, launchd_state=state, pid=pid,
+            program=program,
+            detail=f"serving from {program}, but quern resolves {binary}",
+            remedy="./quern tunneld install  (re-freezes the plist onto the resolved binary)",
+        )
+
+    return TunneldHealth(
+        status="healthy", serving=True, launchd_state=state, pid=pid, program=program,
+        detail=f"serving on {TUNNELD_URL} (pid {pid})",
+    )
 
 
 def generate_plist(binary_path: Path) -> str:
