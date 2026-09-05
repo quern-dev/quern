@@ -89,7 +89,9 @@ def python_deps_state(project_root: Path | None = None) -> dict:
     return {"applicable": True, "in_sync": True, "reason": "up to date"}
 
 
-def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
+def _ensure_python_deps(
+    quiet: bool = False, force: bool = False, eager: bool = False,
+) -> bool:
     """Install declared Python dependencies when the venv has fallen behind.
 
     Covers the cases `quern update` cannot reach — a manual `git pull`, a branch
@@ -100,6 +102,9 @@ def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
     Args:
         quiet: only print on an actual install or failure.
         force: install regardless of the stamp (used by `quern doctor --fix`).
+        eager: also pull transitive dependencies up to their newest compatible
+            release, rather than leaving any already-satisfying version alone.
+            Only `quern update` passes this -- see the note below.
 
     Returns:
         True if the venv is in sync, False if an install was needed and failed.
@@ -117,14 +122,53 @@ def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
     if not quiet:
         print(f"Installing Python dependencies ({state['reason']})...")
 
+    # pip's default (--upgrade-strategy only-if-needed) leaves any version that
+    # already satisfies the constraint alone, so a venv drifts arbitrarily far
+    # behind while every declared floor stays satisfied. Our floors are all `>=`
+    # and none is near what ships (see pyproject.toml), so "satisfies" is a very
+    # weak statement about how current the venv is.
+    #
+    # Eager is therefore right for `quern update` -- an explicit "bring me
+    # forward" -- and wrong for the start path, which runs on every launch and
+    # must stay a cheap constraint check rather than a network-bound upgrade.
+    # Doctor --fix stays non-eager too: it repairs a broken venv, and pulling
+    # every transitive dep forward mid-repair changes more than the fault.
+    cmd = [str(venv_pip), "install", "-e", "."]
+    if eager:
+        cmd += ["--upgrade", "--upgrade-strategy", "eager"]
+
+    # Every failure path below has to go through this. Not writing the stamp is
+    # enough only when it is absent or older than pyproject.toml; a *forced*
+    # install runs regardless of the stamp, so it can fail against one that is
+    # already current from an earlier success, and leaving it alone records the
+    # failure as done. The next start then reads "up to date" and skips, which
+    # also makes the "starting Quern again will retry automatically" message
+    # printed below false.
+    #
+    # It matters most for the eager path, which moves the whole transitive tree:
+    # a failure part-way through can leave a partially upgraded venv marked
+    # complete. A timeout is the likeliest way to get there, which is exactly
+    # the branch the first version of this fix missed -- hence one helper rather
+    # than the same unlink repeated per path.
+    def failed() -> bool:
+        (project_root / ".venv" / DEPS_STAMP_NAME).unlink(missing_ok=True)
+        return False
+
     try:
         result = subprocess.run(
-            [str(venv_pip), "install", "-e", "."],
+            cmd,
             cwd=str(project_root), capture_output=True, text=True, timeout=300,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
+        # The two base classes, not a list of the ones seen so far. Naming
+        # concrete exceptions cost three rounds here: FileNotFoundError alone
+        # missed TimeoutExpired, and adding that missed PermissionError -- which
+        # a non-executable .venv/bin/pip raises, and which propagated uncaught
+        # into the start path rather than merely leaving a stale stamp.
+        # OSError covers the whole errno family; SubprocessError covers
+        # TimeoutExpired and CalledProcessError.
         print(f"Error: dependency install failed: {exc}")
-        return False
+        return failed()
 
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
@@ -134,7 +178,7 @@ def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
             print(f"  {err.splitlines()[-1][:200]}")
         print("  This is usually a network problem. Once it is reachable, "
               "starting Quern again will retry automatically.")
-        return False
+        return failed()
 
     # Only on success — a failed install must not look done to the next start.
     (project_root / ".venv" / DEPS_STAMP_NAME).touch()

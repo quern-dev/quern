@@ -175,6 +175,19 @@ quern set-channel          # print the current channel
 quern set-channel stable   # switch back
 ```
 
+`quern update` brings its own venv forward eagerly: pip's default strategy leaves
+any version that already satisfies a constraint alone, so a venv drifts arbitrarily
+far behind while every declared floor stays satisfied. Every dependency floor quern
+declares is a `>=` and none is near what currently ships — `pymobiledevice3` sits
+three majors above its own — so "satisfies the constraint" says very little about how
+current the venv is.
+
+Starting the server stays non-eager: it compares two mtimes, and invokes pip only when
+the venv is actually stale or a previous install failed — never the eager transitive
+upgrade `quern update` performs. `quern doctor --fix` is also non-eager, because it
+repairs a broken venv and pulling every transitive dependency forward mid-repair
+changes more than the fault being fixed.
+
 Setting the channel only writes `~/.quern/config.json` — nothing changes until the next `quern update`. Git-clone installs follow the `release/stable` / `release/beta` pointer branches; tarball installs follow GitHub Releases, filtered on the prerelease flag. Full details, including the maintainer release procedure, are in [`docs/release-channels.md`](docs/release-channels.md).
 
 ## What Quern Does

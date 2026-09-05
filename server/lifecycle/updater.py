@@ -377,7 +377,7 @@ def _rebuild_and_restart(project_root: Path) -> bool:
     # only a warning, so an update could report success onto a stale venv.
     from server.__main__ import _ensure_python_deps
 
-    deps_ok = _ensure_python_deps(quiet=False, force=True)
+    deps_ok = _ensure_python_deps(quiet=False, force=True, eager=True)
 
     # Rebuild MCP server
     from server.__main__ import _ensure_mcp_built
