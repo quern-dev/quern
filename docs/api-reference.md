@@ -207,6 +207,7 @@ public probes, and a few operations the CLI uses directly.
 | GET | `/api/v1/system/channel` | Current update channel preference |
 | GET | `/health` | Fast liveness ping (public). Does no device-tool probing — kept sub-millisecond so CLI health checks can't time out |
 | GET | `/tools` | Device-tool availability and UI cache stats (public). Backs `quern doctor` and `quern status` |
+| GET | `/api/v1/device/tools/sites` | Per-install-site tool versions and provenance. Authenticated: it returns absolute paths, which `/tools` deliberately does not |
 | GET | `/video-test` | Internal preview test page (public) |
 | POST | `/api/v1/builds/parse` | Submit xcodebuild output |
 | POST | `/api/v1/device/active` | Set the active device by UDID |

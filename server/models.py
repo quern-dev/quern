@@ -1167,6 +1167,32 @@ class TypeTextRequest(BaseModel):
                 raise ValueError(f"{name} cannot be blank")
         return self
 
+class ToolSiteInfo(BaseModel):
+    """One place a tool is installed, and what quern uses it for."""
+
+    name: str
+    role: str
+    available: bool
+    version: str | None = None
+    path: str | None = None
+    source: str = "unknown"
+    detail: str | None = None
+    volatile_path: bool = False
+    requested: bool | None = None
+    required_by: list[str] = Field(default_factory=list)
+    upgrade_note: str | None = None
+
+
+class ToolSitesResponse(BaseModel):
+    """Every install site quern uses.
+
+    Authenticated: `path` exposes account names and filesystem layout, which is
+    why this is not on the public /tools endpoint beside the availability flags.
+    """
+
+    sites: list[ToolSiteInfo]
+
+
 class WaitSettledRequest(BaseModel):
     """Request body for POST /device/ui/wait-settled."""
 

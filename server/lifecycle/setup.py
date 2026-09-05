@@ -2081,10 +2081,166 @@ def run_setup() -> int:
     if node_result.status == CheckStatus.OK and project_root:
         report.add(_build_mcp(project_root))
 
+    # ── Tool inventory ──
+    #
+    # Last, and never fatal: it answers "what is this machine actually
+    # running", which is the question a "works on mine" turns into. Recording
+    # it here means a later doctor can say what moved.
+
+    for result in report_tool_sites(record=True):
+        report.add(result)
+
     # ── Summary ──
 
     report.print_summary()
     return 1 if report.has_errors else 0
+
+
+# ── Tool inventory ───────────────────────────────────────────────────────
+
+
+TOOL_SNAPSHOT = Path.home() / ".quern" / "tool-sites.json"
+
+
+def _collect_sites_sync() -> list[dict]:
+    """Every install site quern uses. Sync, because setup is."""
+    import asyncio
+
+    from server.device.tool_versions import collect_sites, upgrade_note
+
+    try:
+        sites = asyncio.run(collect_sites())
+    except Exception:
+        return []
+    return [
+        {
+            "name": s.name, "role": s.role, "version": s.version,
+            "path": s.path, "source": s.source, "available": s.available,
+            "volatile_path": s.volatile_path, "upgrade_note": upgrade_note(s),
+        }
+        for s in sites
+    ]
+
+
+def record_tool_sites() -> None:
+    """Write down what was in use, so a later run can see what moved.
+
+    A snapshot of observed reality with a timestamp, not a claim about what
+    was tested -- it cannot go stale in the way a hand-maintained manifest can,
+    because nothing has to remember to update it.
+
+    Volatile paths are stored with the path dropped. fnm hands node out from a
+    directory named for the pid that asked, so recording the path would
+    guarantee a spurious "moved" on the next shell; the source is the durable
+    part.
+    """
+    import json
+
+    sites = _collect_sites_sync()
+    if not sites:
+        return
+    for site in sites:
+        if site.get("volatile_path"):
+            site["path"] = None
+    try:
+        TOOL_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        TOOL_SNAPSHOT.write_text(json.dumps(
+            {"recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "sites": sites},
+            indent=2,
+        ))
+    except OSError:
+        pass
+
+
+def _load_recorded_sites() -> dict:
+    """The recorded snapshot, or nothing if it is not one.
+
+    Shape-checked rather than trusted. It is a file on disk that a person can
+    edit, and a doctor run that raises on a malformed snapshot fails at the
+    point it was meant to be reporting.
+    """
+    import json
+
+    try:
+        data = json.loads(TOOL_SNAPSHOT.read_text())
+    except (OSError, ValueError):
+        # ValueError covers both JSONDecodeError and UnicodeDecodeError: bytes
+        # that are not valid text fail in read_text, before json sees them.
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    sites = data.get("sites")
+    if not isinstance(sites, list):
+        return {}
+    usable = [
+        s for s in sites
+        if isinstance(s, dict) and isinstance(s.get("name"), str)
+        and isinstance(s.get("role"), str)
+    ]
+    return {"recorded_at": data.get("recorded_at"), "sites": usable}
+
+
+def report_tool_sites(record: bool = False) -> list[CheckResult]:
+    """What quern is using, and anything that has moved since it was recorded."""
+    sites = _collect_sites_sync()
+    if not sites:
+        return []
+
+    results: list[CheckResult] = []
+    for site in sites:
+        label = f"{site['name']} ({site['role']})"
+        if not site["available"]:
+            results.append(CheckResult(
+                name=label, status=CheckStatus.SKIPPED, message="not found",
+            ))
+            continue
+        where = site["source"]
+        if site["volatile_path"]:
+            where += " (per-shell path)"
+        results.append(CheckResult(
+            name=label,
+            status=CheckStatus.OK,
+            message=f"{site['version'] or 'version unknown'} — {where}",
+            detail=site.get("upgrade_note") or "",
+        ))
+
+    results.extend(_report_drift(sites))
+    if record:
+        record_tool_sites()
+    return results
+
+
+def _report_drift(sites: list[dict]) -> list[CheckResult]:
+    """Anything that changed version or moved since it was last recorded."""
+    recorded = _load_recorded_sites()
+    previous = {(s["name"], s["role"]): s for s in recorded.get("sites", [])}
+    if not previous:
+        return []
+
+    drifted: list[str] = []
+    for site in sites:
+        was = previous.get((site["name"], site["role"]))
+        if was is None:
+            continue
+        if was.get("version") and site["version"] and was["version"] != site["version"]:
+            drifted.append(
+                f"{site['name']} ({site['role']}) {was['version']} → {site['version']}"
+            )
+        # A volatile path was recorded as None, so it cannot report a move it
+        # would make on every shell.
+        elif was.get("path") and site["path"] and was["path"] != site["path"]:
+            drifted.append(
+                f"{site['name']} ({site['role']}) moved: {was['path']} → {site['path']}"
+            )
+    if not drifted:
+        return []
+    return [CheckResult(
+        name="tool drift",
+        status=CheckStatus.WARNING,
+        message=f"{len(drifted)} change(s) since {recorded.get('recorded_at', 'the last record')}",
+        detail="\n".join("  " + d for d in drifted)
+               + "\n  Re-record with: ./quern setup",
+    )]
 
 
 # ── Uninstall ────────────────────────────────────────────────────────────

@@ -98,6 +98,39 @@ class DeviceController(DeviceControllerUI):
             "sim_bridge": await self.sim_bridge_manager.is_available(),
         }
 
+    async def tool_sites(self) -> list:
+        """Every install site quern uses, with versions and provenance.
+
+        Separate from `check_tools()` rather than folded into it. That returns
+        one boolean per tool name and is consumed by truthiness -- `main.py`
+        decides whether to use the sim-bridge backend from it -- so widening
+        the values to dictionaries would make every tool read as available,
+        including the missing ones.
+
+        The names also do not line up: `pymobiledevice3` is two installs at
+        different versions serving different code paths, which is the confusion
+        this reports its way out of.
+        """
+        from server.device.tool_versions import collect_sites, upgrade_note
+        from server.models import ToolSiteInfo
+
+        return [
+            ToolSiteInfo(
+                name=site.name,
+                role=site.role,
+                available=site.available,
+                version=site.version,
+                path=site.path,
+                source=site.source,
+                detail=site.detail,
+                volatile_path=site.volatile_path,
+                requested=site.requested,
+                required_by=site.required_by,
+                upgrade_note=upgrade_note(site),
+            )
+            for site in await collect_sites()
+        ]
+
     def _device_type(self, udid: str) -> DeviceType:
         """Look up device type from cache. Defaults to simulator if unknown."""
         return self._device_type_cache.get(udid, DeviceType.SIMULATOR)

@@ -631,6 +631,9 @@ fetch('/api/v1/device/list', {
         if hasattr(app.state, "device_controller") and app.state.device_controller:
             tools_status = await app.state.device_controller.check_tools()
             cache_stats = app.state.device_controller.get_cache_stats()
+        # Availability flags only. The per-site inventory carries absolute
+        # paths -- account names and filesystem layout -- and lives behind auth
+        # at /api/v1/device/tools/sites instead.
         return {"tools": tools_status, "ui_cache": cache_stats}
 
     return app
