@@ -56,6 +56,19 @@ class ToolSite:
     source: str = "unknown"
     """Where it came from: brew, pipx, venv, fnm, android-sdk, xcode, system."""
 
+    package: str | None = None
+    """What the package manager calls this, which is not always what quern does.
+
+    `idb` ships from the `fb-idb` distribution and `adb` from the
+    `android-platform-tools` cask, so using the tool's own name to look up a
+    version or build an upgrade command reaches the wrong project. None means no
+    identity is recorded, which planners must treat as unknown rather than
+    guessing from `name`.
+    """
+
+    brew_cask: bool = False
+    """Installed by `brew install --cask`, so upgrading needs `--cask`."""
+
     detail: str | None = None
     """Anything a reader needs that the fields above cannot carry."""
 
@@ -238,7 +251,7 @@ async def collect_sites() -> list[ToolSite]:
     # --- pymobiledevice3, as a library ------------------------------------
     library = package_version("pymobiledevice3")
     sites.append(ToolSite(
-        name="pymobiledevice3", role="library",
+        name="pymobiledevice3", role="library", package="pymobiledevice3",
         available=library is not None, version=library,
         path=str(Path(sys.executable).parent.parent), source="venv",
         detail="imported by webinspector.py for web content on simulators",
@@ -250,7 +263,7 @@ async def collect_sites() -> list[ToolSite]:
     binary = find_pymobiledevice3_binary()
     binary_path = str(binary) if binary else None
     sites.append(ToolSite(
-        name="pymobiledevice3", role="cli",
+        name="pymobiledevice3", role="cli", package="pymobiledevice3",
         available=binary_path is not None,
         version=await binary_version(binary_path, ["version"]) if binary_path else None,
         path=binary_path, source=classify_source(binary_path),
@@ -261,7 +274,7 @@ async def collect_sites() -> list[ToolSite]:
     # --- idb --------------------------------------------------------------
     idb_path = which("idb")
     sites.append(ToolSite(
-        name="idb", role="cli",
+        name="idb", role="cli", package="fb-idb",
         available=idb_path is not None,
         # From metadata: `idb --version` prints usage rather than a version.
         version=package_version("fb-idb"),
@@ -272,7 +285,7 @@ async def collect_sites() -> list[ToolSite]:
     # --- mitmproxy --------------------------------------------------------
     mitm_path = which("mitmdump")
     sites.append(ToolSite(
-        name="mitmproxy", role="cli",
+        name="mitmproxy", role="cli", package="mitmproxy",
         available=mitm_path is not None,
         version=package_version("mitmproxy"),
         path=mitm_path, source=classify_source(mitm_path),
@@ -282,7 +295,9 @@ async def collect_sites() -> list[ToolSite]:
     # --- adb --------------------------------------------------------------
     adb_path = shutil.which("adb") or _android_sdk_adb()
     sites.append(ToolSite(
-        name="adb", role="cli",
+        # There is no `adb` formula: brew ships the binary in the
+        # android-platform-tools *cask*.
+        name="adb", role="cli", package="android-platform-tools", brew_cask=True,
         available=adb_path is not None,
         version=await binary_version(adb_path, ["version"]) if adb_path else None,
         path=adb_path, source=classify_source(adb_path),
@@ -291,21 +306,18 @@ async def collect_sites() -> list[ToolSite]:
 
     # --- libimobiledevice -------------------------------------------------
     imd_path = shutil.which("idevice_id")
-    site = ToolSite(
-        name="libimobiledevice", role="cli",
+    sites.append(ToolSite(
+        name="libimobiledevice", role="cli", package="libimobiledevice",
         available=imd_path is not None,
         version=await binary_version(imd_path, ["--version"]) if imd_path else None,
         path=imd_path, source=classify_source(imd_path),
         volatile_path=is_volatile(imd_path),
-    )
-    if site.source == "brew":
-        site.requested, site.required_by = await brew_provenance("libimobiledevice")
-    sites.append(site)
+    ))
 
     # --- node -------------------------------------------------------------
     node_path = shutil.which("node")
     sites.append(ToolSite(
-        name="node", role="cli",
+        name="node", role="cli", package="node",
         available=node_path is not None,
         version=await binary_version(node_path, ["--version"]) if node_path else None,
         path=node_path, source=classify_source(node_path),
@@ -313,7 +325,37 @@ async def collect_sites() -> list[ToolSite]:
         detail="runs the MCP server",
     ))
 
+    await _attach_brew_provenance(sites)
     return sites
+
+
+async def _attach_brew_provenance(sites: list[ToolSite]) -> None:
+    """Fill in `requested` and `required_by` for every site that came from brew.
+
+    This used to be done for `libimobiledevice` alone, because that was the only
+    brew install on the machine it was written on. That is a property of one
+    machine, not of the tool: mitmproxy, adb and pymobiledevice3 are all
+    brew-installable, and on a machine that installed them that way the
+    provenance -- which is the thing that decides whether an upgrade is safe to
+    offer -- was simply missing.
+
+    Concurrent because each formula costs a `brew info` plus a `brew uses`, and
+    serially that is the slowest thing in the inventory.
+    """
+    brewed = [s for s in sites if s.source == "brew" and s.available]
+    if not brewed:
+        return
+    results = await asyncio.gather(
+        *(brew_provenance(site.package or site.name) for site in brewed),
+        return_exceptions=True,
+    )
+    for site, result in zip(brewed, results, strict=True):
+        if isinstance(result, BaseException):
+            # Best effort, as brew_provenance already documents: an unreadable
+            # formula leaves both fields at their "not recorded" defaults rather
+            # than failing the whole inventory.
+            continue
+        site.requested, site.required_by = result
 
 
 def _android_sdk_adb() -> str | None:

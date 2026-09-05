@@ -441,7 +441,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 ## Troubleshooting
 
-**Tools missing or misbehaving?** `quern doctor` reports device-tool availability
+**Tools missing or misbehaving?** `quern doctor` reports device-tool availability and venv sync, plus the version, provenance and upgrade command for the tools quern tracks as install sites (`pymobiledevice3`, `idb`, `mitmproxy`, `adb`, `libimobiledevice`, `node`). `simctl` and `devicectl` ship inside Xcode and are reported as available or not, without version detail
 (adb, simctl, idb, devicectl, pymobiledevice3) as read-only diagnostics, and
 `GET /tools` returns the same data over HTTP. Both are deliberately kept off the
 `/health` path so the liveness probe stays sub-millisecond — do not expect

@@ -1048,7 +1048,14 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # Still report dependencies — an installation without a device
         # controller is exactly one where a missing dependency is plausible,
         # so this is the worst possible place to skip the check.
+        #
+        # The same argument covers the external tools: a missing device
+        # controller often *is* a missing or stale external tool, so this branch
+        # is where their versions matter most. Skipping it here also made the
+        # README's description of `quern doctor` false on exactly the machines
+        # someone runs it on.
         _report_python_deps(getattr(args, "fix", False))
+        _report_external_tools(getattr(args, "fix", False))
         sys.exit(0)
 
     print("Device tools:")
@@ -1056,7 +1063,59 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         print(f"  {'✓' if ok else '✗'} {name}")
 
     _report_python_deps(getattr(args, "fix", False))
+    _report_external_tools(getattr(args, "fix", False))
     sys.exit(0)
+
+
+def _report_external_tools(fix: bool = False) -> None:
+    """Every install site quern uses, what manages it, and what it is behind.
+
+    Read-only, like the rest of doctor: this reports the upgrade commands and
+    never runs them -- including under `--fix`.
+
+    That is a deliberate boundary rather than an omission. `--fix` is scoped to
+    "exactly what server startup runs" (see `_report_python_deps`), which is the
+    venv and nothing else; a pipx or brew upgrade changes state for every other
+    consumer on the machine, which is further out of scope than `quern setup` --
+    already ruled out for `--fix` on the same grounds. Having two commands that
+    both upgrade external tools would also be two things to keep in agreement.
+
+    What `--fix` must not do is stay silent about it. Printing "--fix: nothing to
+    do" for the venv directly above a tool marked as behind reads as "and nothing
+    to do about that either", so when `--fix` is asked for and cannot help, it
+    says so and names the command that can.
+
+    The full list rather than only the stale ones, because the question doctor
+    gets asked is "why does this machine behave differently from that one", and
+    two machines comparing only their problems will agree they have none while
+    running three-major-apart copies of the same tool.
+    """
+    import asyncio
+
+    from server.device.tool_updates import format_report, plan_updates
+    from server.device.tool_versions import collect_sites
+
+    print()
+    try:
+        async def gather():
+            return await plan_updates(await collect_sites())
+
+        updates = asyncio.run(gather())
+    except Exception as exc:
+        # Diagnostics must not be the thing that breaks. A machine where this
+        # raises is exactly one someone is running doctor on.
+        print(f"External tools: could not be checked ({exc})")
+        return
+
+    print(format_report(updates))
+
+    from server.device.tool_updates import actionable
+
+    if fix and actionable(updates):
+        print()
+        print("  --fix does not upgrade external tools: these commands change")
+        print("  state for every consumer on this machine, not just quern.")
+        print("  Run them yourself, or: quern update --tools")
 
 
 def _report_python_deps(fix: bool) -> None:
