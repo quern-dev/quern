@@ -408,7 +408,7 @@ def _rebuild_and_restart(project_root: Path) -> bool:
     return deps_ok
 
 
-def _report_tool_updates(apply: bool = False) -> None:
+def _report_tool_updates(apply: bool = False) -> bool:
     """Show external tools that have moved on, and optionally move them.
 
     Runs on every `quern update`, including the "already up to date" path.
@@ -420,6 +420,11 @@ def _report_tool_updates(apply: bool = False) -> None:
     project -- a pipx or brew upgrade affects every other consumer on the
     machine, and doing that unasked as a side effect of updating quern is not
     the caller's decision to have made for them.
+
+    Returns False only when `apply` was asked for and an upgrade command failed.
+    Reporting alone always returns True: a stale tool is information, not a
+    failed update. But `--tools` is an instruction, and printing "failed" while
+    the process still exits 0 tells a script the opposite of what happened.
     """
     import asyncio
 
@@ -434,27 +439,34 @@ def _report_tool_updates(apply: bool = False) -> None:
     except Exception as exc:
         # Never fail an update over a version check.
         print(f"Note: could not check external tool versions ({exc}).")
-        return
+        return True
 
     offer = format_offer(updates)
     if not offer:
-        return
+        return True
     print(offer)
 
     todo = actionable(updates)
     if not apply:
         print("\n  Run `quern update --tools` to apply these.")
-        return
+        return True
 
+    failures: list[str] = []
     for update in todo:
         print(f"\nUpgrading {update.name}...")
         try:
             result = subprocess.run(update.command, timeout=600)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             print(f"  failed: {exc}")
+            failures.append(update.name)
             continue
         if result.returncode != 0:
             print(f"  failed: {' '.join(update.command)} exited {result.returncode}")
+            failures.append(update.name)
+
+    if failures:
+        print(f"\n{len(failures)} tool upgrade(s) failed: {', '.join(failures)}")
+    return not failures
 
 
 def run_update(apply_tools: bool = False) -> int:
@@ -480,8 +492,7 @@ def run_update(apply_tools: bool = False) -> int:
         return 1  # Error
     if rc == 2:
         # Nothing to rebuild, but external tools age independently of quern.
-        _report_tool_updates(apply_tools)
-        return 0
+        return 0 if _report_tool_updates(apply_tools) else 1
 
     if not _rebuild_and_restart(project_root):
         # The source is updated but the venv is not. Saying "success" here is
@@ -489,5 +500,4 @@ def run_update(apply_tools: bool = False) -> int:
         print("Update incomplete: dependencies could not be installed.")
         return 1
 
-    _report_tool_updates(apply_tools)
-    return 0
+    return 0 if _report_tool_updates(apply_tools) else 1

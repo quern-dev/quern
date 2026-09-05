@@ -1048,7 +1048,14 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # Still report dependencies — an installation without a device
         # controller is exactly one where a missing dependency is plausible,
         # so this is the worst possible place to skip the check.
+        #
+        # The same argument covers the external tools: a missing device
+        # controller often *is* a missing or stale external tool, so this branch
+        # is where their versions matter most. Skipping it here also made the
+        # README's description of `quern doctor` false on exactly the machines
+        # someone runs it on.
         _report_python_deps(getattr(args, "fix", False))
+        _report_external_tools(getattr(args, "fix", False))
         sys.exit(0)
 
     print("Device tools:")

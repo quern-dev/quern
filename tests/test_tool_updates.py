@@ -20,6 +20,8 @@ same way `probe_container` takes `describe_point`.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from server.device.tool_updates import (
@@ -33,8 +35,12 @@ from server.device.tool_versions import ToolSite
 
 
 def _site(name="pymobiledevice3", role="cli", source="pipx", version="9.15.1", **kw):
+    # `package` defaults to the tool's own name, which is true for most sites.
+    # The ones where it is not -- idb/fb-idb, adb/android-platform-tools -- are
+    # set explicitly by the tests that care.
     return ToolSite(
         name=name, role=role, source=source, version=version,
+        package=kw.pop("package", name), brew_cask=kw.pop("brew_cask", False),
         available=kw.pop("available", True), path=kw.pop("path", f"/opt/{source}/bin/{name}"),
         **kw,
     )
@@ -417,7 +423,12 @@ def test_already_up_to_date_still_checks_tools(monkeypatch):
     monkeypatch.setattr(updater, "_update_via_git", lambda _root: 2)  # already current
 
     called: list[bool] = []
-    monkeypatch.setattr(updater, "_report_tool_updates", lambda apply=False: called.append(apply))
+
+    def record(apply=False):
+        called.append(apply)
+        return True
+
+    monkeypatch.setattr(updater, "_report_tool_updates", record)
 
     assert updater.run_update() == 0
     assert called == [False], "the up-to-date path skipped the tool check"
@@ -784,3 +795,189 @@ def test_doctor_passes_the_fix_flag_through():
 
     source = inspect.getsource(main._cmd_doctor)
     assert '_report_external_tools(getattr(args, "fix", False))' in source
+
+
+# --------------------------------------------------------------------------
+# Package identity: what the manager calls a tool is not what quern calls it
+# --------------------------------------------------------------------------
+#
+# `collect_sites` records `idb` from the `fb-idb` distribution and `adb` from
+# the `android-platform-tools` cask. Planning off `site.name` therefore queried
+# the wrong PyPI project and emitted an upgrade command for a package that does
+# not exist -- while looking entirely plausible in the output.
+
+
+async def test_the_pypi_lookup_uses_the_distribution_not_the_tool_name():
+    asked: list[str] = []
+
+    async def pypi(name):
+        asked.append(name)
+        return "1.9.0"
+
+    site = _site(name="idb", package="fb-idb", source="pipx", version="1.5.2")
+    update = _by_name(await _plan([site], pypi=pypi), "idb")
+
+    assert asked == ["fb-idb"], "queried PyPI for the wrong project"
+    assert update.command == ["pipx", "upgrade", "fb-idb"]
+
+
+async def test_a_cask_is_upgraded_with_the_cask_flag():
+    """There is no `adb` formula; brew ships the binary in a cask, so
+    `brew upgrade adb` fails outright."""
+    async def brew():
+        return {"android-platform-tools": "36.0.0"}
+
+    site = _site(name="adb", package="android-platform-tools", brew_cask=True,
+                 source="brew", version="1.0.41")
+    update = _by_name(await _plan([site], brew=brew), "adb")
+
+    assert update.action == "upgrade_available"
+    assert update.command == ["brew", "upgrade", "--cask", "android-platform-tools"]
+
+
+async def test_a_formula_is_upgraded_without_the_cask_flag():
+    async def brew():
+        return {"libimobiledevice": "1.5.0"}
+
+    site = _site(name="libimobiledevice", source="brew", version="1.4.0")
+    update = _by_name(await _plan([site], brew=brew), "libimobiledevice")
+    assert update.command == ["brew", "upgrade", "libimobiledevice"]
+
+
+async def test_a_site_without_an_identity_is_unknown_not_current():
+    """Planning it as `current` would report a tool as up to date on the
+    strength of a lookup that never happened."""
+    site = _site(package=None)
+    update = _by_name(await _plan([site]), "pymobiledevice3")
+    assert update.action == "unknown"
+    assert not update.actionable
+    assert "no package identity" in update.reason
+    assert update.command == []
+
+
+async def test_brew_outdated_reads_casks_as_well_as_formulae(fake_brew_run):
+    """Reading only `formulae` reported an outdated cask as up to date."""
+    from server.device.tool_updates import brew_outdated
+
+    payload = json.dumps({
+        "formulae": [{"name": "libimobiledevice", "current_version": "1.5.0"}],
+        # Casks report `name` as a list of tokens, not a string.
+        "casks": [{"name": ["android-platform-tools"], "current_version": "36.0.0"}],
+    })
+    fake_brew_run(0, payload)
+    assert await brew_outdated() == {
+        "libimobiledevice": "1.5.0",
+        "android-platform-tools": "36.0.0",
+    }
+
+
+async def test_provenance_asks_brew_about_the_formula_name():
+    """`brew info adb` is not a thing. Asking under the tool's nickname returned
+    no provenance, which reads downstream as 'not recorded'."""
+    import server.device.tool_versions as tv
+    from server.device import tool_versions
+
+    asked: list[str] = []
+
+    async def fake_provenance(formula):
+        asked.append(formula)
+        return True, []
+
+    original = tv.brew_provenance
+    tv.brew_provenance = fake_provenance
+    try:
+        await tool_versions._attach_brew_provenance(
+            [_site(name="adb", package="android-platform-tools", source="brew")])
+    finally:
+        tv.brew_provenance = original
+
+    assert asked == ["android-platform-tools"]
+
+
+# --------------------------------------------------------------------------
+# `--tools` is an instruction, so its failures have to be visible
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_upgrade_makes_update_exit_nonzero(monkeypatch, capsys):
+    """Printing "failed" while the process exits 0 tells a script the opposite
+    of what happened."""
+    from server.device import tool_updates
+    from server.lifecycle import updater
+
+    async def fake_sites():
+        return [_site()]
+
+    async def fake_plan(_sites, **_kw):
+        return [tool_updates.ToolUpdate(
+            name="pymobiledevice3", role="cli", action="upgrade_available",
+            current="9.15.1", latest="11.3.1", source="pipx",
+            command=["pipx", "upgrade", "pymobiledevice3"], reason="newer",
+        )]
+
+    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr(
+        updater.subprocess, "run",
+        lambda *a, **k: __import__("types").SimpleNamespace(returncode=1))
+
+    assert updater._report_tool_updates(apply=True) is False
+    assert "1 tool upgrade(s) failed" in capsys.readouterr().out
+
+
+def test_a_raised_upgrade_failure_also_counts(monkeypatch, capsys):
+    from server.device import tool_updates
+    from server.lifecycle import updater
+
+    async def fake_sites():
+        return [_site()]
+
+    async def fake_plan(_sites, **_kw):
+        return [tool_updates.ToolUpdate(
+            name="pymobiledevice3", role="cli", action="upgrade_available",
+            current="9.15.1", latest="11.3.1", source="pipx",
+            command=["pipx", "upgrade", "pymobiledevice3"], reason="newer",
+        )]
+
+    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+
+    def boom(*_a, **_k):
+        raise PermissionError("pipx not executable")
+
+    monkeypatch.setattr(updater.subprocess, "run", boom)
+    assert updater._report_tool_updates(apply=True) is False
+
+
+def test_reporting_alone_is_never_a_failure(monkeypatch):
+    """A stale tool is information. Only `--tools` turns it into an instruction
+    that can fail."""
+    from server.device import tool_updates
+    from server.lifecycle import updater
+
+    async def fake_sites():
+        return [_site()]
+
+    async def fake_plan(_sites, **_kw):
+        return [tool_updates.ToolUpdate(
+            name="pymobiledevice3", role="cli", action="upgrade_available",
+            current="9.15.1", latest="11.3.1", source="pipx",
+            command=["pipx", "upgrade", "pymobiledevice3"], reason="newer",
+        )]
+
+    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    assert updater._report_tool_updates(apply=False) is True
+
+
+def test_doctor_reports_external_tools_when_no_device_tools_are_found(monkeypatch):
+    """The branch where it matters most: a missing device controller often *is*
+    a missing or stale external tool. Skipping the report there also made the
+    README's description of `quern doctor` false."""
+    import inspect
+
+    from server import main
+
+    source = inspect.getsource(main._cmd_doctor)
+    empty_branch = source.split("if not tools:")[1].split("sys.exit(0)")[0]
+    assert "_report_external_tools" in empty_branch

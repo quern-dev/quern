@@ -144,7 +144,7 @@ async def pypi_latest(package: str) -> str | None:
         return None
 
 
-async def brew_outdated() -> dict[str, str] | None:
+async def brew_outdated() -> dict[str, str] | None:  # noqa: D401
     """Formula name -> newest version for outdated formulae, or None if unasked.
 
     One call for every formula rather than one per tool: `brew outdated` is slow
@@ -165,11 +165,19 @@ async def brew_outdated() -> dict[str, str] | None:
         payload = json.loads(stdout)
     except (ValueError, TypeError):
         return None
+    # Casks as well as formulae: `adb` arrives from the android-platform-tools
+    # cask, and reading only `formulae` meant an outdated cask was reported as
+    # up to date. Their version key differs -- casks carry `current_version`
+    # under the same name but are listed separately -- so both arrays are read.
     latest: dict[str, str] = {}
-    for entry in payload.get("formulae") or []:
-        name, current = entry.get("name"), entry.get("current_version")
-        if name and current:
-            latest[name] = current
+    for key in ("formulae", "casks"):
+        for entry in payload.get(key) or []:
+            name = entry.get("name")
+            current = entry.get("current_version")
+            if isinstance(name, list):          # casks report a list of tokens
+                name = name[0] if name else None
+            if name and current:
+                latest[name] = current
     return latest
 
 
@@ -232,19 +240,35 @@ async def _plan_one(
     # Without it a failed lookup is indistinguishable from a successful one that
     # found nothing newer, and the tool reports a clean bill of health for a
     # question it never got to ask.
+    # The package manager's name for this tool, which is not always quern's:
+    # `idb` ships from `fb-idb`, `adb` from the `android-platform-tools` cask.
+    # Using `site.name` here queried the wrong PyPI project and emitted an
+    # upgrade command for a package that does not exist.
+    package = site.package
+    if package is None:
+        base.action = "unknown"
+        base.reason = (
+            "no package identity recorded, so the newest version cannot be "
+            "looked up safely"
+        )
+        return base
+
     checked = True
     if site.source == "pipx":
-        base.latest = await pypi(site.name)
+        base.latest = await pypi(package)
         checked = base.latest is not None
-        base.command = ["pipx", "upgrade", site.name]
+        base.command = ["pipx", "upgrade", package]
     elif site.source == "brew":
         if brew_latest is None:
             checked = False
         else:
             # brew outdated is exhaustive: absent from it means up to date, so
             # the current version is the newest one.
-            base.latest = brew_latest.get(site.name, site.version)
-        base.command = ["brew", "upgrade", site.name]
+            base.latest = brew_latest.get(package, site.version)
+        base.command = ["brew", "upgrade"]
+        if site.brew_cask:
+            base.command.append("--cask")
+        base.command.append(package)
     else:
         base.action = "unknown"
         base.reason = f"no upgrade route known for source {site.source!r}"
