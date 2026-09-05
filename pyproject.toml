@@ -5,31 +5,58 @@ description = "Debug log capture and AI context server"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
+# Dependency floors: read this before adding or raising one.
+#
+# Every floor here is `>=`, never a cap. A cap would be an untested claim about
+# a release that does not exist yet, and it is the mechanism that strands a
+# project on old versions -- so we do not use one. Major bumps arrive as
+# Dependabot PRs (.github/dependabot.yml) and are gated by CI, which builds a
+# fresh venv and therefore always resolves to the latest satisfying release.
+#
+# That has a consequence worth stating plainly: CI proves latest works. Nothing
+# here proves the *floor* works. A floor is only trustworthy if someone actually
+# installed that version and ran the suite, so each one below is marked:
+#
+#   verified  -- tested at the boundary; the comment says what breaks underneath
+#   inherited -- the version current when the dep was added. Not a tested claim.
+#                Safe to raise to whatever CI is green on; do not cite it as a
+#                compatibility guarantee.
+#
+# Floors do not hold anything back: pymobiledevice3 sits three majors above its
+# own floor. Raise a floor only to encode a real incompatibility, not as
+# housekeeping.
 dependencies = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
-    # Web Inspector transport for simulator webview inspection. Floored at 8.0
-    # deliberately: send_plist/recv_plist are synchronous in 7.x and coroutines
-    # from 8.0 onward. webinspector.py awaits them, so on 7.x the await lands on
-    # a plain return value and raises TypeError ("object NoneType can't be used
-    # in 'await' expression"). Loud, but only at call time, and the message does
-    # not mention the version -- hence the floor. Verified at 7.7.1, 8.0.0,
-    # 9.15.1 and 11.3.0. Note this is a library import; server/device/pmd3.py
+    "fastapi>=0.115.0",                 # inherited
+    "uvicorn[standard]>=0.34.0",        # inherited
+    # verified. Web Inspector transport for simulator webview inspection.
+    # Floored at 8.0 deliberately: send_plist/recv_plist are synchronous in 7.x
+    # and coroutines from 8.0 onward. webinspector.py awaits them, so on 7.x the
+    # await lands on a plain return value and raises TypeError ("object NoneType
+    # can't be used in 'await' expression"). Loud, but only at call time, and the
+    # message does not mention the version -- hence the floor. Verified at 7.7.1,
+    # 8.0.0, 9.15.1 and 11.3.0. Note this is a library import; server/device/pmd3.py
     # separately shells out to a pipx-installed CLI, a different install.
     "pymobiledevice3>=8.0",
-    "pydantic>=2.0",
-    "sse-starlette>=2.0",
-    "mitmproxy>=10.0",
-    "httpx>=0.27",
-    "Pillow>=10.0",
-    # Vision framework via pyobjc, for locating on-screen text to aim
-    # accessibility hit-tests at (see server/device/vision_ocr.py). In-process,
-    # so nothing to compile, sign or ship. macOS only, like the simulator path
-    # it serves; the module degrades to pixel analysis if the import fails.
+    "pydantic>=2.0",                    # inherited; v1 genuinely breaks, but 2.0 exactly is untested
+    "sse-starlette>=2.0",               # inherited
+    "mitmproxy>=10.0",                  # inherited
+    "httpx>=0.27",                      # inherited. Starlette 1.x deprecates httpx
+                                        # under TestClient in favour of httpx2; when
+                                        # that becomes an error this floor moves.
+    "Pillow>=10.0",                     # inherited
+    # inherited -- 10.0 was picked when the dep was added and never tested at that
+    # boundary. Vision framework via pyobjc, for locating on-screen text to aim
+    # accessibility hit-tests at (see server/device/vision_ocr.py). In-process, so
+    # nothing to compile, sign or ship. macOS only, like the simulator path it
+    # serves; the module degrades to pixel analysis if the import fails. The real
+    # constraint is objc.registerMetaDataForSelector for computeDistance's
+    # out-param, which lives in pyobjc-core, not here.
     "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
+    # inherited. CLI only -- `idb` is imported in zero Python files; server/device
+    # shells out to the binary. The floor constrains the console script, not an API.
     "fb-idb>=1.1.0",
-    "uiautomator2>=3.2",
-    "pyyaml>=6.0",
+    "uiautomator2>=3.2",                # inherited
+    "pyyaml>=6.0",                      # inherited
 ]
 
 [project.optional-dependencies]

@@ -89,7 +89,9 @@ def python_deps_state(project_root: Path | None = None) -> dict:
     return {"applicable": True, "in_sync": True, "reason": "up to date"}
 
 
-def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
+def _ensure_python_deps(
+    quiet: bool = False, force: bool = False, eager: bool = False,
+) -> bool:
     """Install declared Python dependencies when the venv has fallen behind.
 
     Covers the cases `quern update` cannot reach — a manual `git pull`, a branch
@@ -100,6 +102,9 @@ def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
     Args:
         quiet: only print on an actual install or failure.
         force: install regardless of the stamp (used by `quern doctor --fix`).
+        eager: also pull transitive dependencies up to their newest compatible
+            release, rather than leaving any already-satisfying version alone.
+            Only `quern update` passes this -- see the note below.
 
     Returns:
         True if the venv is in sync, False if an install was needed and failed.
@@ -117,9 +122,24 @@ def _ensure_python_deps(quiet: bool = False, force: bool = False) -> bool:
     if not quiet:
         print(f"Installing Python dependencies ({state['reason']})...")
 
+    # pip's default (--upgrade-strategy only-if-needed) leaves any version that
+    # already satisfies the constraint alone, so a venv drifts arbitrarily far
+    # behind while every declared floor stays satisfied. Our floors are all `>=`
+    # and none is near what ships (see pyproject.toml), so "satisfies" is a very
+    # weak statement about how current the venv is.
+    #
+    # Eager is therefore right for `quern update` -- an explicit "bring me
+    # forward" -- and wrong for the start path, which runs on every launch and
+    # must stay a cheap constraint check rather than a network-bound upgrade.
+    # Doctor --fix stays non-eager too: it repairs a broken venv, and pulling
+    # every transitive dep forward mid-repair changes more than the fault.
+    cmd = [str(venv_pip), "install", "-e", "."]
+    if eager:
+        cmd += ["--upgrade", "--upgrade-strategy", "eager"]
+
     try:
         result = subprocess.run(
-            [str(venv_pip), "install", "-e", "."],
+            cmd,
             cwd=str(project_root), capture_output=True, text=True, timeout=300,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
