@@ -441,7 +441,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 ## Troubleshooting
 
-**Tools missing or misbehaving?** `quern doctor` reports device-tool availability
+**Tools missing or misbehaving?** `quern doctor` reports device-tool availability, venv sync, and the version and provenance of every external tool quern uses (including what would upgrade each one)
 (adb, simctl, idb, devicectl, pymobiledevice3) as read-only diagnostics, and
 `GET /tools` returns the same data over HTTP. Both are deliberately kept off the
 `/health` path so the liveness probe stays sub-millisecond — do not expect

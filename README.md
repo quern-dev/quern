@@ -114,6 +114,7 @@ quern start -f             # run in the foreground (Ctrl-C to stop)
 quern status               # check status
 quern stop                 # stop
 quern update               # update to latest release and rebuild
+quern update --tools       # ...and upgrade external tools (pipx/brew) too
 quern grant-full-perms     # allow all quern MCP tools in Claude Code without prompting
 quern mcp-install          # register quern MCP server with AI coding tools
 quern uninstall            # remove Quern and its dependencies
@@ -187,6 +188,28 @@ the venv is actually stale or a previous install failed — never the eager tran
 upgrade `quern update` performs. `quern doctor --fix` is also non-eager, because it
 repairs a broken venv and pulling every transitive dependency forward mid-repair
 changes more than the fault being fixed.
+
+External tools are a separate matter. `pymobiledevice3` is installed twice on a
+typical machine — a library in the venv and a `pipx` binary — and they drift apart.
+Every update run reports external tools that have fallen behind, with the exact
+command to move each one; `--tools` runs those commands for you.
+
+Reporting is the default because a `pipx` or `brew` upgrade changes state for every
+other consumer on the machine, not just quern. Tools that arrived as a dependency of
+something else are reported but not offered — upgrading those directly can be undone
+by whatever pulled them in. Tools quern does not manage (node under `fnm`, `adb`
+inside Android Studio's SDK) are named along with who does manage them, decided by
+where the tool came from rather than by its name.
+
+`quern doctor` shows the same analysis for *every* install site, not just the stale
+ones, including which other brew formulae depend on each — the thing that turns a
+later upgrade into a decision rather than a command. Use it when two machines
+disagree about behaviour: a boolean "is pymobiledevice3 installed" reads identical on
+both while one runs a 9.15.1 binary and the other an 11.3.1 one.
+
+`quern doctor --fix` reconciles the venv and stops there. It does not upgrade external
+tools, and says so when it finds some it cannot help with, rather than printing
+"nothing to do" above a tool it just flagged as behind.
 
 Setting the channel only writes `~/.quern/config.json` — nothing changes until the next `quern update`. Git-clone installs follow the `release/stable` / `release/beta` pointer branches; tarball installs follow GitHub Releases, filtered on the prerelease flag. Full details, including the maintainer release procedure, are in [`docs/release-channels.md`](docs/release-channels.md).
 
@@ -275,9 +298,11 @@ quern start -f               # Foreground
 quern stop                   # Graceful shutdown
 quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
-quern doctor                 # Read-only device-tool diagnostics
+quern doctor                 # Read-only diagnostics: device tools, venv, external tool versions
+quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
 quern version                # Print the installed version
 quern update                 # Update to the latest release on your channel and rebuild
+quern update --tools         # Also upgrade external tools quern installed (pipx, brew)
 quern set-channel [name]     # Show or set the update channel (stable / beta)
 quern uninstall              # Remove Quern and dependencies installed by setup
 quern regenerate-key         # New API key

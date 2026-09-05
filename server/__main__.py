@@ -589,7 +589,7 @@ def main() -> None:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import run_update
-        sys.exit(run_update())
+        sys.exit(run_update(apply_tools="--tools" in sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
         sys.exit(_cmd_set_channel(sys.argv[2:]))

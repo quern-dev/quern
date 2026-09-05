@@ -291,16 +291,13 @@ async def collect_sites() -> list[ToolSite]:
 
     # --- libimobiledevice -------------------------------------------------
     imd_path = shutil.which("idevice_id")
-    site = ToolSite(
+    sites.append(ToolSite(
         name="libimobiledevice", role="cli",
         available=imd_path is not None,
         version=await binary_version(imd_path, ["--version"]) if imd_path else None,
         path=imd_path, source=classify_source(imd_path),
         volatile_path=is_volatile(imd_path),
-    )
-    if site.source == "brew":
-        site.requested, site.required_by = await brew_provenance("libimobiledevice")
-    sites.append(site)
+    ))
 
     # --- node -------------------------------------------------------------
     node_path = shutil.which("node")
@@ -313,7 +310,36 @@ async def collect_sites() -> list[ToolSite]:
         detail="runs the MCP server",
     ))
 
+    await _attach_brew_provenance(sites)
     return sites
+
+
+async def _attach_brew_provenance(sites: list[ToolSite]) -> None:
+    """Fill in `requested` and `required_by` for every site that came from brew.
+
+    This used to be done for `libimobiledevice` alone, because that was the only
+    brew install on the machine it was written on. That is a property of one
+    machine, not of the tool: mitmproxy, adb and pymobiledevice3 are all
+    brew-installable, and on a machine that installed them that way the
+    provenance -- which is the thing that decides whether an upgrade is safe to
+    offer -- was simply missing.
+
+    Concurrent because each formula costs a `brew info` plus a `brew uses`, and
+    serially that is the slowest thing in the inventory.
+    """
+    brewed = [s for s in sites if s.source == "brew" and s.available]
+    if not brewed:
+        return
+    results = await asyncio.gather(
+        *(brew_provenance(site.name) for site in brewed), return_exceptions=True,
+    )
+    for site, result in zip(brewed, results, strict=True):
+        if isinstance(result, BaseException):
+            # Best effort, as brew_provenance already documents: an unreadable
+            # formula leaves both fields at their "not recorded" defaults rather
+            # than failing the whole inventory.
+            continue
+        site.requested, site.required_by = result
 
 
 def _android_sdk_adb() -> str | None:

@@ -408,8 +408,61 @@ def _rebuild_and_restart(project_root: Path) -> bool:
     return deps_ok
 
 
-def run_update() -> int:
+def _report_tool_updates(apply: bool = False) -> None:
+    """Show external tools that have moved on, and optionally move them.
+
+    Runs on every `quern update`, including the "already up to date" path.
+    External tools go stale on their own schedule, so gating this on quern
+    having an update means learning about a two-major-old binary only when
+    something unrelated happens to ship.
+
+    Reporting is the default because these commands touch state outside the
+    project -- a pipx or brew upgrade affects every other consumer on the
+    machine, and doing that unasked as a side effect of updating quern is not
+    the caller's decision to have made for them.
+    """
+    import asyncio
+
+    from server.device.tool_updates import actionable, format_offer, plan_updates
+    from server.device.tool_versions import collect_sites
+
+    try:
+        async def gather():
+            return await plan_updates(await collect_sites())
+
+        updates = asyncio.run(gather())
+    except Exception as exc:
+        # Never fail an update over a version check.
+        print(f"Note: could not check external tool versions ({exc}).")
+        return
+
+    offer = format_offer(updates)
+    if not offer:
+        return
+    print(offer)
+
+    todo = actionable(updates)
+    if not apply:
+        print("\n  Run `quern update --tools` to apply these.")
+        return
+
+    for update in todo:
+        print(f"\nUpgrading {update.name}...")
+        try:
+            result = subprocess.run(update.command, timeout=600)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            print(f"  failed: {exc}")
+            continue
+        if result.returncode != 0:
+            print(f"  failed: {' '.join(update.command)} exited {result.returncode}")
+
+
+def run_update(apply_tools: bool = False) -> int:
     """Pull latest changes and rebuild.
+
+    Args:
+        apply_tools: also run the external-tool upgrades, instead of only
+            reporting them.
 
     Returns 0 on success, 1 on failure.
     """
@@ -426,11 +479,15 @@ def run_update() -> int:
     if rc == 1:
         return 1  # Error
     if rc == 2:
-        return 0  # Already up to date — nothing to rebuild
+        # Nothing to rebuild, but external tools age independently of quern.
+        _report_tool_updates(apply_tools)
+        return 0
 
     if not _rebuild_and_restart(project_root):
         # The source is updated but the venv is not. Saying "success" here is
         # the exact failure this reporting exists to prevent.
         print("Update incomplete: dependencies could not be installed.")
         return 1
+
+    _report_tool_updates(apply_tools)
     return 0
