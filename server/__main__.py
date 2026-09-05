@@ -159,7 +159,14 @@ def _ensure_python_deps(
             cmd,
             cwd=str(project_root), capture_output=True, text=True, timeout=300,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
+        # The two base classes, not a list of the ones seen so far. Naming
+        # concrete exceptions cost three rounds here: FileNotFoundError alone
+        # missed TimeoutExpired, and adding that missed PermissionError -- which
+        # a non-executable .venv/bin/pip raises, and which propagated uncaught
+        # into the start path rather than merely leaving a stale stamp.
+        # OSError covers the whole errno family; SubprocessError covers
+        # TimeoutExpired and CalledProcessError.
         print(f"Error: dependency install failed: {exc}")
         return failed()
 

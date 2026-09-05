@@ -332,6 +332,12 @@ def test_a_successful_forced_install_still_stamps(project, monkeypatch):
 @pytest.mark.parametrize("failure", [
     subprocess.TimeoutExpired(cmd="pip", timeout=300),
     FileNotFoundError("pip is gone"),
+    # A non-executable .venv/bin/pip. This one did not merely leave a stale
+    # stamp -- it propagated uncaught out of _ensure_python_deps and into the
+    # start path, which calls it on every launch.
+    PermissionError("pip is not executable"),
+    NotADirectoryError("venv/bin is a file"),
+    subprocess.SubprocessError("pip died in some other way"),
 ])
 def test_a_raised_install_failure_also_clears_the_stamp(project, monkeypatch, failure):
     """The first version of this fix cleared the stamp only on a non-zero exit.
