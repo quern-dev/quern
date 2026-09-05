@@ -173,9 +173,14 @@ def test_updater_propagates_a_failed_install(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
     monkeypatch.setattr(updater, "_update_via_git", lambda _p: 0)
     monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: ["dependencies"])
+    monkeypatch.setattr(updater, "_report_tool_updates", lambda apply=False: True)
 
     assert updater.run_update() == 1
-    assert "Update incomplete" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Update incomplete" in out
+    # Name the step, not just the failure: the message is the only thing
+    # telling a reader which part of the rebuild to go and look at.
+    assert "dependencies failed" in out
 
 
 def test_updater_reports_success_when_deps_install(tmp_path, monkeypatch):
@@ -185,6 +190,10 @@ def test_updater_reports_success_when_deps_install(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
     monkeypatch.setattr(updater, "_update_via_git", lambda _p: 0)
     monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: [])
+    # Without this the success path runs the real _report_tool_updates, which
+    # calls collect_sites() and plan_updates() with no injected lookups -- so
+    # the suite would query PyPI and shell out to brew for real.
+    monkeypatch.setattr(updater, "_report_tool_updates", lambda apply=False: True)
 
     assert updater.run_update() == 0
 

@@ -395,8 +395,16 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     # Rebuild MCP server
     from server.__main__ import _ensure_mcp_built
 
-    if not _ensure_mcp_built(quiet=False):
-        print("Warning: MCP server build failed — MCP tools may be stale")
+    try:
+        if not _ensure_mcp_built(quiet=False):
+            print("Warning: MCP server build failed — MCP tools may be stale")
+            failures.append("MCP build")
+    except (OSError, subprocess.SubprocessError) as exc:
+        # _ensure_mcp_built shells out to npm twice with timeouts and catches
+        # neither, so a machine without npm -- or a slow install -- raised
+        # straight through this function and crashed `quern update` before it
+        # could report anything, or run setup and restart.
+        print(f"Warning: MCP server build failed: {exc}")
         failures.append("MCP build")
 
     # Run setup to check for new external dependencies
@@ -522,6 +530,13 @@ def run_update(apply_tools: bool = False) -> int:
         return 0 if _report_tool_updates(apply_tools) else 1
 
     failures = _rebuild_and_restart(project_root)
+
+    # External tools live outside the project and do not depend on the rebuild
+    # having worked, so they are reported either way. Returning early here meant
+    # a failed rebuild also silently dropped `--tools`, which the caller asked
+    # for explicitly.
+    tools_ok = _report_tool_updates(apply_tools)
+
     if failures:
         # The source moved but part of the rebuild did not. Saying "success"
         # here is the exact failure this reporting exists to prevent, and
@@ -530,4 +545,4 @@ def run_update(apply_tools: bool = False) -> int:
         print(f"Update incomplete: {', '.join(failures)} failed.")
         return 1
 
-    return 0 if _report_tool_updates(apply_tools) else 1
+    return 0 if tools_ok else 1

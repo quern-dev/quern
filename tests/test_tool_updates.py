@@ -1073,8 +1073,67 @@ def test_run_update_names_the_step_that_failed(monkeypatch, capsys):
     monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
     monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
     monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: ["restart"])
+    # run_update now reports external tools before checking rebuild failures,
+    # so without this the test would query PyPI and shell out to brew.
+    monkeypatch.setattr(updater, "_report_tool_updates", lambda apply=False: True)
 
     assert updater.run_update() == 1
     out = capsys.readouterr().out
     assert "restart failed" in out
     assert "dependencies could not be installed" not in out
+
+
+def test_external_tools_are_reported_even_when_the_rebuild_failed(monkeypatch, capsys):
+    """A failed rebuild used to return before the tool report, so `--tools`
+    was silently dropped even though the caller asked for it explicitly.
+
+    External tools live outside the project and do not depend on the rebuild
+    having worked, so the two are independent.
+    """
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_find_project_root", lambda: __import__("pathlib").Path("/tmp"))
+    monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+    monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+    monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: ["dependencies"])
+
+    asked: list[bool] = []
+
+    def record(apply=False):
+        asked.append(apply)
+        return True
+
+    monkeypatch.setattr(updater, "_report_tool_updates", record)
+
+    assert updater.run_update(apply_tools=True) == 1
+    assert asked == [True], "--tools was dropped when the rebuild failed"
+
+
+def test_a_raised_mcp_build_does_not_crash_the_update(rebuild):
+    """_ensure_mcp_built shells out to npm twice with timeouts and catches
+    neither, so a machine without npm raised straight through the rebuild."""
+    import server.__main__ as entry
+
+    def boom(**_kw):
+        raise FileNotFoundError("npm not found")
+
+    original = entry._ensure_mcp_built
+    entry._ensure_mcp_built = boom
+    try:
+        assert rebuild["_run"]() == ["MCP build"]
+    finally:
+        entry._ensure_mcp_built = original
+
+
+def test_an_mcp_build_timeout_is_recorded(rebuild):
+    import server.__main__ as entry
+
+    def boom(**_kw):
+        raise subprocess.TimeoutExpired(cmd="npm run build", timeout=60)
+
+    original = entry._ensure_mcp_built
+    entry._ensure_mcp_built = boom
+    try:
+        assert rebuild["_run"]() == ["MCP build"]
+    finally:
+        entry._ensure_mcp_built = original
