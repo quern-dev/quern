@@ -519,3 +519,36 @@ def test_a_broken_check_does_not_break_doctor(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "could not be checked" in out
     assert out.count("could not be checked") == 2, "each check must fail independently"
+
+
+def test_reinstall_refuses_rather_than_unpacking_unfiltered(shipped_tar, monkeypatch, tmp_path):
+    """`extractall(filter=...)` arrived in 3.12 and was backported only to
+    3.11.4, but requires-python allows >=3.11 -- so 3.11.0 to 3.11.3 raise
+    TypeError here. It escaped `reinstall()` and aborted `quern doctor --fix`.
+
+    The filter is what rejects absolute paths, traversal and device nodes, so
+    the fix must not be to retry without it. CI installs the newest 3.11.x and
+    would never have caught this.
+    """
+    shipped_tar("2.1", "3")
+    monkeypatch.setattr(ext_mod, "INSTALL_DIR", tmp_path / "installed")
+
+    calls: list[dict] = []
+    real_extractall = tarfile.TarFile.extractall
+
+    def no_filter_support(self, *args, **kwargs):
+        calls.append(kwargs)
+        if "filter" in kwargs:
+            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
+        return real_extractall(self, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", no_filter_support)
+
+    opened = []
+    monkeypatch.setattr(ext_mod.subprocess, "run", lambda *a, **k: opened.append(a))
+
+    ok, message = ext_mod.reinstall()
+    assert ok is False
+    assert "3.11.4" in message
+    assert len(calls) == 1, "must not retry extraction without the filter"
+    assert opened == [], "nothing should be launched after a refused unpack"

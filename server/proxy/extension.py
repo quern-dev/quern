@@ -200,6 +200,18 @@ def reinstall() -> tuple[bool, str]:
             # The archive is trusted, but this runs against whatever version of
             # the wheel happens to be installed, which is not a thing to assume.
             archive.extractall(INSTALL_DIR, filter="data")
+    except TypeError as exc:
+        # `extractall(filter=...)` arrived in 3.12 and was backported only as far
+        # as 3.11.4, while requires-python allows >=3.11 -- so 3.11.0 to 3.11.3
+        # raise TypeError here. Refuse rather than retrying without the filter:
+        # the filter is the control that rejects absolute paths, traversal and
+        # device nodes, and dropping it to make an unattended repair succeed is
+        # the wrong trade. CI installs the newest 3.11.x, so nothing here would
+        # have caught this.
+        return False, (
+            f"cannot unpack the redirector safely on this interpreter ({exc}); "
+            "Python 3.11.4 or newer is required for filtered tar extraction"
+        )
     except (OSError, tarfile.TarError, ValueError) as exc:
         return False, f"could not unpack the redirector: {exc}"
 
