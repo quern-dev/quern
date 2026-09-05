@@ -33,7 +33,64 @@ import sys
 import time
 from datetime import datetime
 
-REPO = "jerimiah797/quern"
+
+def detect_repo() -> str:
+    """The `owner/name` this clone actually pushes to.
+
+    Hardcoded as `jerimiah797/quern` until the repo moved to the `quern-dev`
+    org. That kept working only because GitHub serves a permanent 301 from the
+    old owner path -- so the scripts were reaching the right repo by redirect,
+    not by knowing where it was. A repo later created at the old path would
+    supersede the redirect and silently point these at somebody else's PRs.
+
+    Reading the remote also makes a fork work without editing the script, which
+    the hardcoded value never did.
+    """
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.exit(f"cannot determine the repo: git remote get-url origin failed ({exc})")
+    slug = parse_remote(url)
+    if slug is None:
+        sys.exit(f"cannot determine the repo from origin url: {url!r}")
+    return slug
+
+
+def parse_remote(url: str) -> str | None:
+    """`owner/name` from any spelling of a GitHub remote, or None.
+
+    Covers scp-style (`git@host:owner/name.git`), https, ssh:// and a bare
+    path. Returning None rather than a guess matters: a wrong slug here sends a
+    merge at somebody else's repository.
+    """
+    url = url.strip()
+    if not url:
+        return None
+    if url.endswith(".git"):
+        url = url[:-4]
+    # scp-style has no scheme and separates host from path with a colon.
+    if "://" not in url and ":" in url:
+        url = url.split(":", 1)[1]
+    else:
+        for scheme in ("https://", "http://", "ssh://", "git://"):
+            if url.startswith(scheme):
+                url = url[len(scheme):]
+                # Drop host (and any user@ prefix) -- the path is what we want.
+                url = url.split("/", 1)[1] if "/" in url else ""
+                break
+    parts = [seg for seg in url.strip("/").split("/") if seg]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:])
+
+
+# Detected once, at startup, and only when run as a script. Importing this
+# module -- which the tests do, to exercise parse_remote -- must not shell out to
+# git or sys.exit on a machine that has no origin remote.
+REPO = detect_repo() if __name__ == "__main__" else "unknown/unknown"
 
 # Distinct exit codes, so a caller can tell *why* a PR is not mergeable.
 # merge-pr.sh needs that: requesting a review helps a pending PR and is pure
@@ -285,7 +342,15 @@ def main() -> int:
                          "comment, so it is off by default: a status check "
                          "should not change the thing it reports on.")
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--repo-slug", action="store_true",
+                    help="print the detected owner/name and exit. merge-pr.sh "
+                         "uses this so the gate and the merge cannot disagree "
+                         "about which repository they are acting on.")
     args = ap.parse_args()
+
+    if args.repo_slug:
+        print(REPO)
+        return 0
 
     numbers = args.prs or open_prs()
     if not numbers:
