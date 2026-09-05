@@ -211,6 +211,24 @@ both while one runs a 9.15.1 binary and the other an 11.3.1 one.
 tools, and says so when it finds some it cannot help with, rather than printing
 "nothing to do" above a tool it just flagged as behind.
 
+Doctor also reports **service health**, which is a different question from whether a
+tool is installed:
+
+- **tunneld** — a failed device pairing can leave the daemon alive but not serving. It
+  holds no listener and never exits, so `KeepAlive` never fires and launchd reports it
+  healthy indefinitely. Doctor separates that *wedged* state from a merely *stopped*
+  one by pairing the HTTP probe with the launchd job state, and prints the `bootout` +
+  `bootstrap` recovery. It never runs it — recovery is tracked in issue #73.
+- **local capture extension** — the mitmproxy macOS system extension is approved once
+  by a human and then upgraded underneath that approval by ordinary dependency updates.
+  When the version macOS runs falls behind the version the installed wheel ships, local
+  capture reports itself enabled while capturing nothing. Doctor compares the two, and
+  `--fix` re-runs the shipped app so macOS can activate the newer one (you still have
+  to approve it in System Settings).
+
+Neither check needs a password: `launchctl print` on a system job and
+`systemextensionsctl list` are both readable unprivileged.
+
 Setting the channel only writes `~/.quern/config.json` — nothing changes until the next `quern update`. Git-clone installs follow the `release/stable` / `release/beta` pointer branches; tarball installs follow GitHub Releases, filtered on the prerelease flag. Full details, including the maintainer release procedure, are in [`docs/release-channels.md`](docs/release-channels.md).
 
 ## What Quern Does
@@ -298,7 +316,7 @@ quern start -f               # Foreground
 quern stop                   # Graceful shutdown
 quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
-quern doctor                 # Read-only diagnostics: device tools, venv, external tool versions
+quern doctor                 # Read-only diagnostics: device tools, venv, tool versions, service health
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
 quern version                # Print the installed version
 quern update                 # Update to the latest release on your channel and rebuild

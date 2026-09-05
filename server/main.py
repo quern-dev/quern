@@ -1064,7 +1064,73 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
 
     _report_python_deps(getattr(args, "fix", False))
     _report_external_tools(getattr(args, "fix", False))
+    _report_service_health(getattr(args, "fix", False))
     sys.exit(0)
+
+
+_HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
+
+
+def _report_service_health(fix: bool = False) -> None:
+    """Whether tunneld and local capture are actually working, not just present.
+
+    Both fail in the same shape: the thing quern checks stays green while the
+    thing that matters stops working. `check_tools()` reports tunneld from an
+    HTTP probe that cannot separate "wedged" from "never started", and nothing
+    looked at the mitmproxy system extension at all -- so local capture reports
+    itself enabled while macOS runs an extension the installed wheel replaced.
+
+    tunneld is reported and never repaired here, deliberately. Recovery is
+    `bootout` + `bootstrap` and belongs to #73, which has a live wedged instance
+    being preserved for testing; a `--fix` that silently restarted it would
+    destroy the only real reproduction anyone has.
+    """
+    import asyncio
+
+    print()
+    print("Service health:")
+
+    try:
+        from server.device.tunneld import tunneld_health
+
+        health = asyncio.run(tunneld_health())
+    except Exception as exc:
+        print(f"  ? tunneld — could not be checked ({exc})")
+    else:
+        marker = _HEALTH_MARKERS.get(health.status, "\u2717")
+        print(f"  {marker} tunneld — {health.detail}")
+        if health.remedy:
+            print(f"      {health.remedy}")
+        if health.status == "wedged":
+            print("      not repaired automatically: see issue #73")
+
+    try:
+        from server.proxy.extension import extension_health
+
+        ext = extension_health()
+    except Exception as exc:
+        print(f"  ? local capture extension — could not be checked ({exc})")
+        return
+
+    marker = _HEALTH_MARKERS.get(ext.status, "\u2717")
+    print(f"  {marker} local capture extension — {ext.detail}")
+
+    if not ext.fixable:
+        if ext.remedy:
+            print(f"      {ext.remedy}")
+        return
+
+    if not fix:
+        print(f"      {ext.remedy}")
+        return
+
+    from server.proxy.extension import reinstall
+
+    ok, message = reinstall()
+    # "handed off to macOS", not "fixed": approval is a human step, so claiming
+    # success here would be reporting a repair that has not happened yet.
+    outcome = "\u2192" if ok else "\u2717"
+    print(f"      {outcome} {message}")
 
 
 def _report_external_tools(fix: bool = False) -> None:
