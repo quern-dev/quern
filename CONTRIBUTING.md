@@ -12,7 +12,7 @@ A debug server for AI-assisted iOS development. Captures device logs, intercepts
 
 ## Architecture
 
-```
+```text
 AI Agent (Claude Code, Cursor, etc.)
     │
     ├── via MCP ──→ mcp/          (thin TypeScript stdio wrapper)
@@ -32,7 +32,7 @@ The MCP server is intentionally thin — just translates tool calls into HTTP re
 
 ## Project structure
 
-```
+```text
 server/              Python FastAPI server (the core)
   api/               Route handlers: logs, proxy, device, device_pool, builds, crashes
   sources/           Log source adapters (syslog, oslog, crash, build, simulator)
@@ -58,16 +58,23 @@ docs/                Agent guide
 
 ## Running it
 
-Use the `./quern` wrapper script — it activates the venv, which tool discovery
-depends on:
+Use the `./quern` wrapper script:
 
-```
+```shell
 ./quern setup          # First-time setup
 ./quern start          # Start as daemon
 ./quern start -f       # Foreground (for debugging the server itself)
 ./quern status         # Check status
 ./quern stop           # Stop daemon
 ```
+
+The wrapper itself is three lines — it just `exec`s `python3 -m server`. Selecting
+the project environment happens one level down, in `_maybe_reexec_in_venv`
+(`server/__main__.py`): if the current interpreter is not already in a virtualenv,
+the bootstrap `os.execv`s itself under `.venv/bin/python` before doing anything
+that needs project dependencies. So no activation step is required, and none of
+this depends on which `python3` is first on `PATH` — but the wrapper is not what
+arranges that, and it will not help a command that bypasses the bootstrap.
 
 State lives at `~/.quern/state.json`, the API key at `~/.quern/api-key`, logs at
 `~/.quern/server.log`. The full command list is in [`README.md`](README.md), which
