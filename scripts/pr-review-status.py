@@ -53,17 +53,33 @@ def detect_repo() -> str:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         sys.exit(f"cannot determine the repo: git remote get-url origin failed ({exc})")
-    slug = parse_remote(url)
-    if slug is None:
-        sys.exit(f"cannot determine the repo from origin url: {url!r}")
-    return slug
+    parsed = parse_remote(url)
+    if parsed is None:
+        # Never echo the URL: a remote can carry credentials in its userinfo
+        # (https://user:token@host/...), and this runs in CI where stderr is
+        # captured and kept.
+        sys.exit(f"cannot determine the repo from the origin url ({redact(url)})")
+    return parsed
 
 
-def parse_remote(url: str) -> str | None:
-    """`owner/name` from any spelling of a GitHub remote, or None.
+def redact(url: str) -> str:
+    """A remote URL safe to print: userinfo removed, host and path kept."""
+    if "@" in url and "://" in url:
+        scheme, _, rest = url.partition("://")
+        return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    return url
 
-    Covers scp-style (`git@host:owner/name.git`), https, ssh:// and a bare
-    path. Returning None rather than a guess matters: a wrong slug here sends a
+
+def parse_remote(url: str) -> tuple[str, str] | None:
+    """`(host, "owner/name")` from any spelling of a git remote, or None.
+
+    The host is kept, not discarded. `gh --repo owner/name` resolves against the
+    default host, so dropping it means a remote on a self-hosted forge selects a
+    same-named repository on github.com instead -- which is the exact class of
+    bug this whole change exists to remove, reintroduced one layer down.
+
+    Covers scp-style (`git@host:owner/name.git`), https, ssh:// and git://.
+    Returning None rather than a guess matters: a wrong answer here sends a
     merge at somebody else's repository.
     """
     url = url.strip()
@@ -71,26 +87,36 @@ def parse_remote(url: str) -> str | None:
         return None
     if url.endswith(".git"):
         url = url[:-4]
+
+    host = ""
     # scp-style has no scheme and separates host from path with a colon.
     if "://" not in url and ":" in url:
-        url = url.split(":", 1)[1]
+        host, _, url = url.partition(":")
     else:
         for scheme in ("https://", "http://", "ssh://", "git://"):
             if url.startswith(scheme):
                 url = url[len(scheme):]
-                # Drop host (and any user@ prefix) -- the path is what we want.
-                url = url.split("/", 1)[1] if "/" in url else ""
+                host, _, url = url.partition("/")
                 break
+        else:
+            return None
+    host = host.rsplit("@", 1)[-1]          # strip any user@ prefix
     parts = [seg for seg in url.strip("/").split("/") if seg]
-    if len(parts) < 2:
+    if not host or len(parts) < 2:
         return None
-    return "/".join(parts[-2:])
+    return host, "/".join(parts[-2:])
 
 
 # Detected once, at startup, and only when run as a script. Importing this
 # module -- which the tests do, to exercise parse_remote -- must not shell out to
 # git or sys.exit on a machine that has no origin remote.
-REPO = detect_repo() if __name__ == "__main__" else "unknown/unknown"
+HOST, REPO = detect_repo() if __name__ == "__main__" else ("unknown", "unknown/unknown")
+
+
+def repo_arg() -> str:
+    """What to pass to `gh --repo`. Host-qualified, which gh accepts for
+    github.com too, so there is one form rather than a conditional."""
+    return f"{HOST}/{REPO}"
 
 # Distinct exit codes, so a caller can tell *why* a PR is not mergeable.
 # merge-pr.sh needs that: requesting a review helps a pending PR and is pure
@@ -125,6 +151,11 @@ class GhError(RuntimeError):
 
 
 def gh(*args: str) -> str:
+    # `gh api` resolves paths against whichever host is configured as default,
+    # not against the one this clone points at, so the hostname travels with
+    # every call rather than being assumed.
+    if args and args[0] == "api" and "--hostname" not in args:
+        args = ("api", "--hostname", HOST, *args[1:])
     try:
         result = subprocess.run(["gh", *args], capture_output=True, text=True)
     except OSError as exc:  # gh not installed, not on PATH, not executable
@@ -141,7 +172,7 @@ def ts(value: str | None) -> float:
 
 
 def open_prs() -> list[int]:
-    raw = gh("pr", "list", "--repo", REPO, "--state", "open", "--json", "number")
+    raw = gh("pr", "list", "--repo", repo_arg(), "--state", "open", "--json", "number")
     return [p["number"] for p in json.loads(raw or "[]")]
 
 
@@ -236,7 +267,7 @@ def status(number: int, ask: bool = False) -> tuple[str, str]:
 
 
 def _status(number: int, ask: bool = False) -> tuple[str, str]:
-    raw = gh("pr", "view", str(number), "--repo", REPO,
+    raw = gh("pr", "view", str(number), "--repo", repo_arg(),
              "--json", "title,headRefName,headRefOid")
     pr = json.loads(raw)
 
@@ -272,7 +303,7 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
         )
     _VERIFIED_HEAD[number] = head
 
-    commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits"))
+    commits = json.loads(gh("pr", "view", str(number), "--repo", repo_arg(), "--json", "commits"))
     dates = [c["committedDate"] for c in commits["commits"]]
     if not dates:
         raise ValueError("the PR reported no commits")
@@ -349,7 +380,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.repo_slug:
-        print(REPO)
+        print(repo_arg())
         return 0
 
     numbers = args.prs or open_prs()
