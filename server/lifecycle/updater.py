@@ -366,29 +366,45 @@ def _update_via_tarball(project_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _rebuild_and_restart(project_root: Path) -> bool:
+def _rebuild_and_restart(project_root: Path) -> list[str]:
     """Reinstall deps, rebuild MCP, run setup, restart server if running.
 
-    Returns False if dependency installation failed, so the caller can report
-    the update as unsuccessful rather than announcing success onto a stale venv.
+    Returns the steps that failed, empty when everything worked.
+
+    Every step runs even after an earlier one fails -- an update that cannot
+    build the MCP wrapper should still reconcile the venv -- but each failure is
+    recorded, because only `deps` used to be. A failed MCP build was a warning,
+    `run_setup`'s exit code was discarded outright, and the restart's was never
+    read, so `quern update` could exit 0 having left the MCP tools stale or the
+    server down.
+
+    Named steps rather than one bool so the caller can say which part failed:
+    reporting "dependencies could not be installed" after a failed restart sends
+    the reader to the wrong place.
     """
+    failures: list[str] = []
+
     # Reinstall Python deps. Delegated so there is one implementation and one
     # failure semantic — this used to be a separate pip call whose failure was
     # only a warning, so an update could report success onto a stale venv.
     from server.__main__ import _ensure_python_deps
 
-    deps_ok = _ensure_python_deps(quiet=False, force=True, eager=True)
+    if not _ensure_python_deps(quiet=False, force=True, eager=True):
+        failures.append("dependencies")
 
     # Rebuild MCP server
     from server.__main__ import _ensure_mcp_built
 
     if not _ensure_mcp_built(quiet=False):
         print("Warning: MCP server build failed — MCP tools may be stale")
+        failures.append("MCP build")
 
     # Run setup to check for new external dependencies
     from server.lifecycle.setup import run_setup
 
-    run_setup()
+    if run_setup() != 0:
+        print("Warning: setup reported errors — see above")
+        failures.append("setup")
 
     # Restart the server if it was running
     from server.lifecycle.state import is_server_healthy, read_state
@@ -397,15 +413,26 @@ def _rebuild_and_restart(project_root: Path) -> bool:
     if state and is_server_healthy(state.get("server_port", 9100)):
         print("Restarting server to pick up changes...")
         venv_python = project_root / ".venv" / "bin" / "python"
-        subprocess.run(
-            [str(venv_python), "-m", "server", "restart"],
-            cwd=str(project_root),
-            timeout=30,
-        )
+        try:
+            restart = subprocess.run(
+                [str(venv_python), "-m", "server", "restart"],
+                cwd=str(project_root),
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # A 30s timeout here left the exception uncaught, so an update that
+            # hung on restart crashed rather than reporting.
+            print(f"Warning: restart failed: {exc}")
+            failures.append("restart")
+        else:
+            if restart.returncode != 0:
+                print(f"Warning: restart exited {restart.returncode} — "
+                      "the server may be down; check `quern status`")
+                failures.append("restart")
     else:
         print("Server is not running — start it with: quern start")
 
-    return deps_ok
+    return failures
 
 
 def _report_tool_updates(apply: bool = False) -> bool:
@@ -494,10 +521,13 @@ def run_update(apply_tools: bool = False) -> int:
         # Nothing to rebuild, but external tools age independently of quern.
         return 0 if _report_tool_updates(apply_tools) else 1
 
-    if not _rebuild_and_restart(project_root):
-        # The source is updated but the venv is not. Saying "success" here is
-        # the exact failure this reporting exists to prevent.
-        print("Update incomplete: dependencies could not be installed.")
+    failures = _rebuild_and_restart(project_root)
+    if failures:
+        # The source moved but part of the rebuild did not. Saying "success"
+        # here is the exact failure this reporting exists to prevent, and
+        # naming the step matters: "dependencies could not be installed" after
+        # a failed restart sends the reader to the wrong place.
+        print(f"Update incomplete: {', '.join(failures)} failed.")
         return 1
 
     return 0 if _report_tool_updates(apply_tools) else 1

@@ -21,6 +21,8 @@ same way `probe_container` takes `describe_point`.
 from __future__ import annotations
 
 import json
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -981,3 +983,98 @@ def test_doctor_reports_external_tools_when_no_device_tools_are_found(monkeypatc
     source = inspect.getsource(main._cmd_doctor)
     empty_branch = source.split("if not tools:")[1].split("sys.exit(0)")[0]
     assert "_report_external_tools" in empty_branch
+
+
+# --------------------------------------------------------------------------
+# Every rebuild step has to reach the exit code
+# --------------------------------------------------------------------------
+#
+# `_rebuild_and_restart` used to return only the dependency result. A failed MCP
+# build was a warning, `run_setup`'s exit code was discarded outright, and the
+# restart's was never read -- so `quern update` could exit 0 having left the MCP
+# tools stale or the server down.
+
+
+@pytest.fixture
+def rebuild(monkeypatch, tmp_path):
+    """Drive each step of _rebuild_and_restart independently."""
+    from server.lifecycle import updater
+
+    state = {"deps": True, "mcp": True, "setup": 0, "restart": 0, "running": True}
+
+    monkeypatch.setattr("server.__main__._ensure_python_deps",
+                        lambda **_kw: state["deps"])
+    monkeypatch.setattr("server.__main__._ensure_mcp_built", lambda **_kw: state["mcp"])
+    monkeypatch.setattr("server.lifecycle.setup.run_setup", lambda: state["setup"])
+    monkeypatch.setattr("server.lifecycle.state.read_state",
+                        lambda: {"server_port": 9100} if state["running"] else None)
+    monkeypatch.setattr("server.lifecycle.state.is_server_healthy", lambda _p: state["running"])
+
+    def fake_run(_cmd, **_kw):
+        if isinstance(state["restart"], BaseException):
+            raise state["restart"]
+        return SimpleNamespace(returncode=state["restart"])
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+    state["_run"] = lambda: updater._rebuild_and_restart(tmp_path)
+    return state
+
+
+def test_everything_working_reports_no_failures(rebuild):
+    assert rebuild["_run"]() == []
+
+
+def test_a_failed_mcp_build_is_no_longer_only_a_warning(rebuild):
+    rebuild["mcp"] = False
+    assert rebuild["_run"]() == ["MCP build"]
+
+
+def test_a_nonzero_setup_is_reported(rebuild):
+    rebuild["setup"] = 1
+    assert rebuild["_run"]() == ["setup"]
+
+
+def test_a_failed_restart_is_reported(rebuild):
+    """Leaving the server down and exiting 0 is the worst of these: the update
+    looks clean and nothing is listening."""
+    rebuild["restart"] = 1
+    assert rebuild["_run"]() == ["restart"]
+
+
+def test_a_restart_that_raises_does_not_crash_the_update(rebuild):
+    """The restart carries a 30s timeout whose exception was uncaught, so an
+    update that hung on restart crashed instead of reporting."""
+    rebuild["restart"] = subprocess.TimeoutExpired(cmd="restart", timeout=30)
+    assert rebuild["_run"]() == ["restart"]
+
+
+def test_later_steps_still_run_after_an_early_failure(rebuild):
+    """An update that cannot build the MCP wrapper should still reconcile the
+    venv, so failures accumulate rather than short-circuiting."""
+    rebuild["deps"] = False
+    rebuild["mcp"] = False
+    rebuild["setup"] = 1
+    rebuild["restart"] = 1
+    assert rebuild["_run"]() == ["dependencies", "MCP build", "setup", "restart"]
+
+
+def test_no_restart_is_attempted_when_the_server_is_stopped(rebuild):
+    rebuild["running"] = False
+    rebuild["restart"] = 1          # would fail if it were attempted
+    assert rebuild["_run"]() == []
+
+
+def test_run_update_names_the_step_that_failed(monkeypatch, capsys):
+    """"dependencies could not be installed" after a failed restart sends the
+    reader to the wrong place."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_find_project_root", lambda: __import__("pathlib").Path("/tmp"))
+    monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+    monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+    monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: ["restart"])
+
+    assert updater.run_update() == 1
+    out = capsys.readouterr().out
+    assert "restart failed" in out
+    assert "dependencies could not be installed" not in out
