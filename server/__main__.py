@@ -147,6 +147,20 @@ def _ensure_python_deps(
         return False
 
     if result.returncode != 0:
+        # Drop the stamp, so the next start genuinely retries.
+        #
+        # Not writing it on failure is enough only when the stamp is absent or
+        # older than pyproject.toml. A forced install runs regardless of the
+        # stamp, so it can fail against one that is already current -- from an
+        # earlier successful install -- and simply leaving it alone records the
+        # failure as done. The next start reads "up to date" and skips, and the
+        # message printed just below ("starting Quern again will retry
+        # automatically") is then false.
+        #
+        # That matters most for the eager path: it moves the whole transitive
+        # tree, so a mid-way failure can leave a partially upgraded venv marked
+        # complete.
+        (project_root / ".venv" / DEPS_STAMP_NAME).unlink(missing_ok=True)
         err = (result.stderr or result.stdout or "").strip()
         print("Error: dependency install failed. Quern will start, but features "
               "needing the missing packages will fail.")

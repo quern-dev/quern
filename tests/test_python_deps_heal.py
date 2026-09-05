@@ -262,3 +262,68 @@ def test_update_asks_for_an_eager_install(monkeypatch):
 
     source = inspect.getsource(updater)
     assert "_ensure_python_deps(quiet=False, force=True, eager=True)" in source
+
+
+# --------------------------------------------------------------------------
+# A forced install that fails must not be remembered as done
+# --------------------------------------------------------------------------
+#
+# Not writing the stamp on failure is enough only when the stamp is absent or
+# older than pyproject.toml. A *forced* install runs regardless of the stamp, so
+# it can fail against one that is already current from an earlier success --
+# and leaving it alone records the failure as complete. The next start then
+# reads "up to date" and skips, which makes the message the failure path prints
+# ("starting Quern again will retry automatically") false.
+#
+# Reproduced before fixing: prior success -> failing eager install -> the next
+# start reported in_sync=True with reason "up to date".
+
+
+def test_a_failed_forced_install_clears_a_current_stamp(project, monkeypatch):
+    _stamp(project).touch()
+    assert python_deps_state()["in_sync"] is True
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _pip_result(1, "boom"))
+    assert _ensure_python_deps(quiet=True, force=True, eager=True) is False
+
+    assert not _stamp(project).exists()
+    state = python_deps_state()
+    assert state["in_sync"] is False, "the failed upgrade was remembered as done"
+
+
+def test_the_next_start_retries_after_a_failed_eager_update(project, monkeypatch):
+    """End to end: the promise the failure message makes must hold.
+
+    An eager `quern update` fails against a healthy stamp; the following start
+    must run pip again rather than skipping on a venv that may be half upgraded.
+    """
+    _stamp(project).touch()
+
+    calls: list[list[str]] = []
+
+    def failing(cmd, **_kw):
+        calls.append(cmd)
+        return _pip_result(1, "boom")
+
+    monkeypatch.setattr(subprocess, "run", failing)
+    assert _ensure_python_deps(quiet=True, force=True, eager=True) is False
+
+    # The start path: stamp-gated, no force.
+    def succeeding(cmd, **_kw):
+        calls.append(cmd)
+        return _pip_result(0)
+
+    monkeypatch.setattr(subprocess, "run", succeeding)
+    assert _ensure_python_deps(quiet=True) is True
+
+    assert len(calls) == 2, "the start path skipped instead of retrying"
+    assert "--upgrade" not in calls[1], "the retry must stay non-eager"
+    assert _stamp(project).exists(), "a successful retry should stamp again"
+
+
+def test_a_successful_forced_install_still_stamps(project, monkeypatch):
+    """Guard the other direction: invalidating on failure must not also clear
+    the stamp on the success path."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _pip_result(0))
+    assert _ensure_python_deps(quiet=True, force=True, eager=True) is True
+    assert _stamp(project).exists()
