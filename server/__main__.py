@@ -137,6 +137,23 @@ def _ensure_python_deps(
     if eager:
         cmd += ["--upgrade", "--upgrade-strategy", "eager"]
 
+    # Every failure path below has to go through this. Not writing the stamp is
+    # enough only when it is absent or older than pyproject.toml; a *forced*
+    # install runs regardless of the stamp, so it can fail against one that is
+    # already current from an earlier success, and leaving it alone records the
+    # failure as done. The next start then reads "up to date" and skips, which
+    # also makes the "starting Quern again will retry automatically" message
+    # printed below false.
+    #
+    # It matters most for the eager path, which moves the whole transitive tree:
+    # a failure part-way through can leave a partially upgraded venv marked
+    # complete. A timeout is the likeliest way to get there, which is exactly
+    # the branch the first version of this fix missed -- hence one helper rather
+    # than the same unlink repeated per path.
+    def failed() -> bool:
+        (project_root / ".venv" / DEPS_STAMP_NAME).unlink(missing_ok=True)
+        return False
+
     try:
         result = subprocess.run(
             cmd,
@@ -144,23 +161,9 @@ def _ensure_python_deps(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         print(f"Error: dependency install failed: {exc}")
-        return False
+        return failed()
 
     if result.returncode != 0:
-        # Drop the stamp, so the next start genuinely retries.
-        #
-        # Not writing it on failure is enough only when the stamp is absent or
-        # older than pyproject.toml. A forced install runs regardless of the
-        # stamp, so it can fail against one that is already current -- from an
-        # earlier successful install -- and simply leaving it alone records the
-        # failure as done. The next start reads "up to date" and skips, and the
-        # message printed just below ("starting Quern again will retry
-        # automatically") is then false.
-        #
-        # That matters most for the eager path: it moves the whole transitive
-        # tree, so a mid-way failure can leave a partially upgraded venv marked
-        # complete.
-        (project_root / ".venv" / DEPS_STAMP_NAME).unlink(missing_ok=True)
         err = (result.stderr or result.stdout or "").strip()
         print("Error: dependency install failed. Quern will start, but features "
               "needing the missing packages will fail.")
@@ -168,7 +171,7 @@ def _ensure_python_deps(
             print(f"  {err.splitlines()[-1][:200]}")
         print("  This is usually a network problem. Once it is reachable, "
               "starting Quern again will retry automatically.")
-        return False
+        return failed()
 
     # Only on success — a failed install must not look done to the next start.
     (project_root / ".venv" / DEPS_STAMP_NAME).touch()

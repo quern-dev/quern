@@ -327,3 +327,28 @@ def test_a_successful_forced_install_still_stamps(project, monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _pip_result(0))
     assert _ensure_python_deps(quiet=True, force=True, eager=True) is True
     assert _stamp(project).exists()
+
+
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired(cmd="pip", timeout=300),
+    FileNotFoundError("pip is gone"),
+])
+def test_a_raised_install_failure_also_clears_the_stamp(project, monkeypatch, failure):
+    """The first version of this fix cleared the stamp only on a non-zero exit.
+
+    A raised failure returned early and left a current stamp behind, so the next
+    start skipped reconciliation exactly as before. The timeout case is the one
+    that matters most: an eager install moves the whole transitive tree, and a
+    300s timeout is the likeliest way to end up with it half applied.
+    """
+    _stamp(project).touch()
+    assert python_deps_state()["in_sync"] is True
+
+    def raising(*_a, **_k):
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", raising)
+    assert _ensure_python_deps(quiet=True, force=True, eager=True) is False
+
+    assert not _stamp(project).exists()
+    assert python_deps_state()["in_sync"] is False
