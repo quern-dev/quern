@@ -51,11 +51,18 @@ def test_the_server_reports_the_declared_version():
     assert get_version() == _pyproject_version()
 
 
-# A SemVer numeric identifier: no leading zeroes. `\d+` would accept `01.2.3`
-# and `1.2.3-beta.01`, which npm rejects as invalid SemVer -- so the guard
-# against a typo in this field would itself have admitted one.
-_NUM = r"(?:0|[1-9]\d*)"
-_SEMVER = re.compile(rf"{_NUM}\.{_NUM}\.{_NUM}(?:-[a-z]+\.{_NUM})?$")
+# The published SemVer 2.0.0 grammar, verbatim from semver.org, rather than a
+# hand-rolled approximation. Two earlier attempts here were each wrong in a
+# different direction: `\d+` per part accepted `01.2.3`, and tightening it to
+# `-[a-z]+\.\d+` then rejected `1.2.3-beta`, `1.2.3-0` and build metadata --
+# all valid, so a legitimate release would have failed CI. The point of this
+# guard is to catch a typo, not to invent a dialect.
+_SEMVER = re.compile(
+    r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+(?P<buildmetadata>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
+)
 
 
 def test_the_version_is_a_release_shape():
@@ -65,21 +72,27 @@ def test_the_version_is_a_release_shape():
 
 
 @pytest.mark.parametrize("version", [
-    "0.15.0", "1.2.3", "0.15.0-beta.1", "10.0.0-rc.12", "0.0.1",
+    "0.15.0", "1.2.3", "0.0.1", "10.20.30",
+    "0.15.0-beta.1", "10.0.0-rc.12",
+    # Valid forms an earlier version of this guard rejected, any of which would
+    # have failed CI on a legitimate release.
+    "1.2.3-beta", "1.2.3-0", "1.2.3-alpha.1.2", "1.2.3-alpha-1",
+    "1.2.3+build.1", "1.2.3-beta.1+exp.sha.5114f85",
 ])
 def test_valid_versions_are_accepted(version):
-    assert _SEMVER.fullmatch(version)
+    assert _SEMVER.fullmatch(version), version
 
 
 @pytest.mark.parametrize("version", [
     "01.2.3",           # leading zero in major
     "1.02.3",           # in minor
     "1.2.03",           # in patch
-    "1.2.3-beta.01",    # in the prerelease number
+    "1.2.3-beta.01",    # in a numeric prerelease identifier
+    "1.2.3-01",         # same, as the only identifier
     "1.2",              # too few parts
     "1.2.3.4",          # too many
     "v1.2.3",           # tag prefix, not a version
-    "1.2.3-beta",       # prerelease without a number
+    "1.2.3-",           # empty prerelease
     "",
 ])
 def test_invalid_versions_are_rejected(version):
