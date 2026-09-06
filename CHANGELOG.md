@@ -74,10 +74,8 @@ differ between machines, and services that report healthy while not working.
 ### Notes
 
 - MCP tool count: 107 → 109.
-- `identify_by:` was retired from the screen templates (below); knowledge bases
-  that still use it load exactly as before.
-- The detection is deliberately narrow. An app mid-launch legitimately reports a single `Application` element, so the zero frame and absent label are what separate "nothing has rendered yet" from "the bridge cannot see anything", and a false positive costs a needless restart.
-- There is no reload path short of killing the process: the port cache belongs to the AX runtime loaded into the bridge, which holds no handle to invalidate it, and `SIGHUP` is not handled. Kill-and-respawn is the only lever available, and at ~1s it does not need to be a better one.
+- **On the bridge-restart detection above** — it is deliberately narrow. An app mid-launch legitimately reports a single `Application` element, so the zero frame and absent label are what separate "nothing has rendered yet" from "the bridge cannot see anything", and a false positive costs a needless restart.
+- **On restarting the bridge rather than reloading it** — there is no reload path short of killing the process: the port cache belongs to the AX runtime loaded into the bridge, which holds no handle to invalidate it, and `SIGHUP` is not handled. Kill-and-respawn is the only lever available, and at ~1s it does not need to be a better one.
 
 ## [0.14.1] - 2026-09-02
 
