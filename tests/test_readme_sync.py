@@ -300,3 +300,79 @@ def test_readme_cli_block_matches_dispatched_commands():
             f"`quern` does not dispatch:\n{_format(stale)}"
         )
     assert not problems, "\n\n".join(problems)
+
+
+# --------------------------------------------------------------------------
+# CLI flags
+# --------------------------------------------------------------------------
+#
+# `cli_commands()` extracts subcommands only, so a flag added to an existing
+# command was invisible to every guard in this file. `quern update --tools` and
+# `quern doctor --fix` both shipped in 0.15.0-beta.1 documented by hand, and
+# nothing would have noticed if they had not been.
+#
+# The bar is the same as for routes: a new flag is documented, or it is
+# allowlisted on purpose. It is not silently absent.
+
+UNDOCUMENTED_CLI_FLAG_ALLOWLIST = {
+    # `quern start` tuning knobs. README documents the commands and the flags
+    # that change what a command *does*; these adjust how the server runs and
+    # are discoverable through `--help`, which is where they belong.
+    "--foreground", "--host", "--port", "--proxy-port", "--buffer-size",
+    "--verbose", "--process", "--subsystem",
+    "--oslog", "--no-oslog", "--syslog", "--no-syslog",
+    "--no-proxy",
+    "--crash-dir", "--crash-process-filter", "--simulator-crashes",
+    "--no-crash", "--on-crash",
+}
+
+
+def cli_flags() -> set[str]:
+    """Every flag the CLI accepts, from both mechanisms.
+
+    argparse `add_argument` covers most, but `--tools` is read straight off
+    `sys.argv` before argparse runs -- the same split that let `set-channel`
+    hide from `cli_commands()` until it was handled explicitly.
+    """
+    flags: set[str] = set()
+    for source in CLI_SOURCES:
+        text = source.read_text()
+        flags.update(re.findall(r'add_argument\(\s*"(--[a-z0-9-]+)"', text))
+        flags.update(re.findall(r'"(--[a-z0-9-]+)"\s*in\s*sys\.argv', text))
+        flags.update(re.findall(r'sys\.argv\[\d+\]\s*==\s*"(--[a-z0-9-]+)"', text))
+    return flags - {"--help"}
+
+
+def documented_cli_flags() -> set[str]:
+    """Flags README shows attached to a command."""
+    text = README.read_text()
+    found = set(re.findall(r"^quern [a-z-]+ (--[a-z0-9-]+)", text, re.M))
+    found |= set(re.findall(r"`quern [a-z-]+ (--[a-z0-9-]+)", text))
+    return found
+
+
+def test_new_cli_flags_are_documented_or_allowlisted():
+    undocumented = cli_flags() - documented_cli_flags() - UNDOCUMENTED_CLI_FLAG_ALLOWLIST
+    assert not undocumented, (
+        f"{len(undocumented)} CLI flag(s) neither documented in README.md nor "
+        f"allowlisted:\n{_format(sorted(undocumented))}\n"
+        f"Document it, or add it to UNDOCUMENTED_CLI_FLAG_ALLOWLIST with a reason."
+    )
+
+
+def test_the_cli_flag_allowlist_is_not_stale():
+    """The allowlist should never outlive the flags it excuses."""
+    orphans = UNDOCUMENTED_CLI_FLAG_ALLOWLIST - cli_flags()
+    assert not orphans, (
+        f"UNDOCUMENTED_CLI_FLAG_ALLOWLIST excuses flag(s) the CLI no longer "
+        f"accepts:\n{_format(sorted(orphans))}"
+    )
+
+
+def test_documented_flags_are_really_accepted():
+    """Catches the other direction: a flag README promises but the CLI dropped."""
+    phantom = documented_cli_flags() - cli_flags()
+    assert not phantom, (
+        f"README.md documents flag(s) the CLI does not accept:\n"
+        f"{_format(sorted(phantom))}"
+    )
