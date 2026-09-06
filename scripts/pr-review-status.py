@@ -33,7 +33,90 @@ import sys
 import time
 from datetime import datetime
 
-REPO = "jerimiah797/quern"
+
+def detect_repo() -> str:
+    """The `owner/name` this clone actually pushes to.
+
+    Hardcoded as `jerimiah797/quern` until the repo moved to the `quern-dev`
+    org. That kept working only because GitHub serves a permanent 301 from the
+    old owner path -- so the scripts were reaching the right repo by redirect,
+    not by knowing where it was. A repo later created at the old path would
+    supersede the redirect and silently point these at somebody else's PRs.
+
+    Reading the remote also makes a fork work without editing the script, which
+    the hardcoded value never did.
+    """
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.exit(f"cannot determine the repo: git remote get-url origin failed ({exc})")
+    parsed = parse_remote(url)
+    if parsed is None:
+        # Never echo the URL: a remote can carry credentials in its userinfo
+        # (https://user:token@host/...), and this runs in CI where stderr is
+        # captured and kept.
+        sys.exit(f"cannot determine the repo from the origin url ({redact(url)})")
+    return parsed
+
+
+def redact(url: str) -> str:
+    """A remote URL safe to print: userinfo removed, host and path kept."""
+    if "@" in url and "://" in url:
+        scheme, _, rest = url.partition("://")
+        return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    return url
+
+
+def parse_remote(url: str) -> tuple[str, str] | None:
+    """`(host, "owner/name")` from any spelling of a git remote, or None.
+
+    The host is kept, not discarded. `gh --repo owner/name` resolves against the
+    default host, so dropping it means a remote on a self-hosted forge selects a
+    same-named repository on github.com instead -- which is the exact class of
+    bug this whole change exists to remove, reintroduced one layer down.
+
+    Covers scp-style (`git@host:owner/name.git`), https, ssh:// and git://.
+    Returning None rather than a guess matters: a wrong answer here sends a
+    merge at somebody else's repository.
+    """
+    url = url.strip()
+    if not url:
+        return None
+    if url.endswith(".git"):
+        url = url[:-4]
+
+    host = ""
+    # scp-style has no scheme and separates host from path with a colon.
+    if "://" not in url and ":" in url:
+        host, _, url = url.partition(":")
+    else:
+        for scheme in ("https://", "http://", "ssh://", "git://"):
+            if url.startswith(scheme):
+                url = url[len(scheme):]
+                host, _, url = url.partition("/")
+                break
+        else:
+            return None
+    host = host.rsplit("@", 1)[-1]          # strip any user@ prefix
+    parts = [seg for seg in url.strip("/").split("/") if seg]
+    if not host or len(parts) < 2:
+        return None
+    return host, "/".join(parts[-2:])
+
+
+# Detected once, at startup, and only when run as a script. Importing this
+# module -- which the tests do, to exercise parse_remote -- must not shell out to
+# git or sys.exit on a machine that has no origin remote.
+HOST, REPO = detect_repo() if __name__ == "__main__" else ("unknown", "unknown/unknown")
+
+
+def repo_arg() -> str:
+    """What to pass to `gh --repo`. Host-qualified, which gh accepts for
+    github.com too, so there is one form rather than a conditional."""
+    return f"{HOST}/{REPO}"
 
 # Distinct exit codes, so a caller can tell *why* a PR is not mergeable.
 # merge-pr.sh needs that: requesting a review helps a pending PR and is pure
@@ -68,6 +151,11 @@ class GhError(RuntimeError):
 
 
 def gh(*args: str) -> str:
+    # `gh api` resolves paths against whichever host is configured as default,
+    # not against the one this clone points at, so the hostname travels with
+    # every call rather than being assumed.
+    if args and args[0] == "api" and "--hostname" not in args:
+        args = ("api", "--hostname", HOST, *args[1:])
     try:
         result = subprocess.run(["gh", *args], capture_output=True, text=True)
     except OSError as exc:  # gh not installed, not on PATH, not executable
@@ -84,7 +172,7 @@ def ts(value: str | None) -> float:
 
 
 def open_prs() -> list[int]:
-    raw = gh("pr", "list", "--repo", REPO, "--state", "open", "--json", "number")
+    raw = gh("pr", "list", "--repo", repo_arg(), "--state", "open", "--json", "number")
     return [p["number"] for p in json.loads(raw or "[]")]
 
 
@@ -179,7 +267,7 @@ def status(number: int, ask: bool = False) -> tuple[str, str]:
 
 
 def _status(number: int, ask: bool = False) -> tuple[str, str]:
-    raw = gh("pr", "view", str(number), "--repo", REPO,
+    raw = gh("pr", "view", str(number), "--repo", repo_arg(),
              "--json", "title,headRefName,headRefOid")
     pr = json.loads(raw)
 
@@ -215,7 +303,7 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
         )
     _VERIFIED_HEAD[number] = head
 
-    commits = json.loads(gh("pr", "view", str(number), "--repo", REPO, "--json", "commits"))
+    commits = json.loads(gh("pr", "view", str(number), "--repo", repo_arg(), "--json", "commits"))
     dates = [c["committedDate"] for c in commits["commits"]]
     if not dates:
         raise ValueError("the PR reported no commits")
@@ -285,7 +373,15 @@ def main() -> int:
                          "comment, so it is off by default: a status check "
                          "should not change the thing it reports on.")
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--repo-slug", action="store_true",
+                    help="print the detected owner/name and exit. merge-pr.sh "
+                         "uses this so the gate and the merge cannot disagree "
+                         "about which repository they are acting on.")
     args = ap.parse_args()
+
+    if args.repo_slug:
+        print(repo_arg())
+        return 0
 
     numbers = args.prs or open_prs()
     if not numbers:

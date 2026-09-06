@@ -28,6 +28,15 @@ for a in "$@"; do
   esac
 done
 
+# Ask the status script which repository this clone belongs to, rather than
+# naming one here. Both must agree: if the gate checked one repo and the merge
+# ran against another, the check would be meaningless in the most dangerous
+# possible way. Sharing one detection makes disagreeing impossible.
+REPO=$(python3 scripts/pr-review-status.py --repo-slug) || {
+  echo "Could not determine the repository from the git remote."
+  exit 1
+}
+
 if [ -n "$FORCE" ]; then
   echo "Skipping the review gate deliberately (--force)."
 else
@@ -62,7 +71,7 @@ if [ -z "$HEAD_SHA" ]; then
     echo "Not merging #$PR: the review check did not report a verified head."
     exit 1
   fi
-  HEAD_SHA=$(gh pr view "$PR" --repo jerimiah797/quern --json headRefOid -q .headRefOid)
+  HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
 fi
-gh pr merge "$PR" --repo jerimiah797/quern --merge --delete-branch \
+gh pr merge "$PR" --repo "$REPO" --merge --delete-branch \
   --match-head-commit "$HEAD_SHA"
