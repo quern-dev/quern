@@ -51,8 +51,37 @@ def test_the_server_reports_the_declared_version():
     assert get_version() == _pyproject_version()
 
 
+# A SemVer numeric identifier: no leading zeroes. `\d+` would accept `01.2.3`
+# and `1.2.3-beta.01`, which npm rejects as invalid SemVer -- so the guard
+# against a typo in this field would itself have admitted one.
+_NUM = r"(?:0|[1-9]\d*)"
+_SEMVER = re.compile(rf"{_NUM}\.{_NUM}\.{_NUM}(?:-[a-z]+\.{_NUM})?$")
+
+
 def test_the_version_is_a_release_shape():
-    """Guards a typo in the one field a release is cut from. Accepts
-    `1.2.3` and prerelease suffixes like `1.2.3-beta.1`."""
+    """Guards a typo in the one field a release is cut from."""
     version = _pyproject_version()
-    assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?", version), version
+    assert _SEMVER.fullmatch(version), version
+
+
+@pytest.mark.parametrize("version", [
+    "0.15.0", "1.2.3", "0.15.0-beta.1", "10.0.0-rc.12", "0.0.1",
+])
+def test_valid_versions_are_accepted(version):
+    assert _SEMVER.fullmatch(version)
+
+
+@pytest.mark.parametrize("version", [
+    "01.2.3",           # leading zero in major
+    "1.02.3",           # in minor
+    "1.2.03",           # in patch
+    "1.2.3-beta.01",    # in the prerelease number
+    "1.2",              # too few parts
+    "1.2.3.4",          # too many
+    "v1.2.3",           # tag prefix, not a version
+    "1.2.3-beta",       # prerelease without a number
+    "",
+])
+def test_invalid_versions_are_rejected(version):
+    """npm requires valid SemVer, and both files ship as packages."""
+    assert not _SEMVER.fullmatch(version), version
