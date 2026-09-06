@@ -21,6 +21,10 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 PACKAGE_JSON = ROOT / "mcp" / "package.json"
+# The lockfile carries the version twice -- once at the top level and once for
+# the root package entry -- and npm rewrites both. It was missed by the first
+# version of this guard, which is the same drift the guard exists to catch.
+PACKAGE_LOCK = ROOT / "mcp" / "package-lock.json"
 
 
 def _pyproject_version() -> str:
@@ -30,19 +34,28 @@ def _pyproject_version() -> str:
     raise AssertionError("no version line in pyproject.toml")
 
 
-@pytest.mark.parametrize("path", [PYPROJECT, PACKAGE_JSON])
+@pytest.mark.parametrize("path", [PYPROJECT, PACKAGE_JSON, PACKAGE_LOCK])
 def test_version_sources_exist(path):
     """Fail loudly rather than silently passing on a missing file."""
     assert path.exists(), f"{path} is missing — this guard cannot run."
 
 
-def test_the_two_declared_versions_agree():
-    npm = json.loads(PACKAGE_JSON.read_text())["version"]
-    assert npm == _pyproject_version(), (
-        "pyproject.toml and mcp/package.json disagree. Both ship in a release; "
-        "the server reports one on /health and the MCP wrapper publishes the "
-        "other."
-    )
+def test_every_declared_version_agrees():
+    """pyproject.toml, package.json and both lockfile entries.
+
+    All four ship in a release: the server reports one on /health, the MCP
+    wrapper publishes another, and npm installs from the lockfile.
+    """
+    expected = _pyproject_version()
+    lock = json.loads(PACKAGE_LOCK.read_text())
+    declared = {
+        "pyproject.toml": expected,
+        "mcp/package.json": json.loads(PACKAGE_JSON.read_text())["version"],
+        "mcp/package-lock.json (top level)": lock["version"],
+        "mcp/package-lock.json (root package)": lock["packages"][""]["version"],
+    }
+    disagreeing = {k: v for k, v in declared.items() if v != expected}
+    assert not disagreeing, f"version disagreement: {disagreeing}"
 
 
 def test_the_server_reports_the_declared_version():

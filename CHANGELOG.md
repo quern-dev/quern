@@ -7,18 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.15.0-beta.1] - 2026-09-06
+
+Twenty-nine PRs since 0.14.1. The theme is **seeing what was previously
+invisible** — web content the accessibility tree stops at, tool versions that
+differ between machines, and services that report healthy while not working.
+
+### Added
+
+- **Web content inside `WKWebView` is readable and tappable** (#90, #91, #92).
+  `describe_all` stops at the web view, so an agent looking at a screen with web
+  content saw native chrome and nothing else. The route is the accessibility
+  hit-test rather than the tree walk, anchored page-space to screen-space by
+  hypothesising an origin from native chrome geometry and confirming one
+  *predicted* element — searching for a match instead produced a 215pt error.
+- **Out-of-process web views too** (#93, #96). `SFSafariViewController` and
+  `ASWebAuthenticationSession` run in processes the host app does not own; the
+  latter reports zero connected applications to the Web Inspector, so hit-testing
+  is the only route that reaches it at all.
+- **Screens can be identified by the page they are showing** (#97), and what a
+  web view taught us is recorded for next time (#94).
+- **`wait_for_settle`** (#101) — waits for the screen to stop changing instead of
+  sleeping, by comparing successive screenshots. Idle noise measures 0.00017, so
+  the threshold sits at 0.001 with two consecutive stable frames.
+- **External tool inventory, updates and service health** (#105, #106, #107,
+  #108). `quern doctor` reports every install site with version, provenance and
+  the command that would upgrade it; `quern update --tools` applies them. Plus
+  health checks that distinguish a *wedged* tunneld from a *stopped* one, and
+  compare the mitmproxy system extension macOS has activated against the one the
+  installed wheel ships.
+
 ### Changed
+
+- **Dependency floors are annotated `verified` or `inherited`** (#106). Not one
+  was load-bearing — `pymobiledevice3` sits three majors above its own — and CI
+  builds a fresh venv, so CI proves *latest* works while nothing tests the floor.
+  Only `pymobiledevice3>=8.0` is verified. `quern update` now upgrades the venv
+  eagerly; start and `doctor --fix` deliberately do not.
+- **Project conventions are tracked** (#109). `CLAUDE.md` was gitignored, so the
+  architecture, layout and conventions existed only on whichever machine wrote
+  them. They now live in `CONTRIBUTING.md`.
+- **The review and merge scripts derive the repository from the git remote**
+  (#110) instead of naming an owner that only resolved by GitHub redirect.
 - **`identify_by:` is gone from the screen templates.** (The alerts template keeps its own — alerts are never scanned by the landmark loader, so there it is the current schema rather than a superseded one.) It was the field before `landmarks:` (April 2026) and the loader has never evaluated it, but the templates kept emitting it, so every knowledge base created since — including ones written this week — carried a field nothing reads. New screens get `landmarks:` alone; prose belongs in the body of the document, where a reader will find it. Existing files are unaffected: a knowledge base that still has `identify_by:` loads exactly as before, and the loader still reports those files with `reason: "legacy_format"` and echoes the entries back so the rename can be done from the response.
 - **The `quern-landmark-migration` skill has been retired.** The window in which `identify_by:` was the only convention was five weeks, and the loader's diagnostic already returns everything the rename needs; a dedicated skill for a mechanical key rename was more machinery than the job.
 
 ### Fixed
+
+- **`clear_text` on a web field actually clears it** (#103), and `type_text`
+  proves the text arrived rather than assuming it (#104).
+- **`scroll_to_element` stops sweeping when nothing is scrolling** (#85).
+- **`quern update` reports every failure.** A failed MCP build, a non-zero
+  `run_setup`, and a failed restart were all invisible to the exit code, so an
+  update could report success having left the MCP tools stale or the server down.
+- **A failed dependency install is no longer remembered as done.** The stamp is
+  cleared on every failure path, including the ones that raise — a forced install
+  can fail against a stamp that is already current from an earlier success.
+- **Upgrade commands use the package's real name.** `idb` ships from `fb-idb` and
+  `adb` from the `android-platform-tools` cask, so planning off the tool's own
+  name queried the wrong PyPI project and emitted a `brew upgrade` for a formula
+  that does not exist.
 - **`quern setup` now clears skill links it left behind.** Skills are symlinked into `~/.claude/skills/`, and setup only ever added them — so retiring one left a link to a directory that no longer exists on every machine that had ever run setup. Only links into Quern's own skills directory whose target is gone are removed; a broken link to somewhere else, or a real directory of the same name, is left alone.
 - **A simulator no longer stays unusable after an XCUITest or WDA run** (#66) — any XCTest-based run leaves that simulator's `CoreSimulatorBridge` holding a stale mach-port cache, after which every foregrounded app reports a single bare `Application` element with a `0x0` frame. Not just the app under test: Safari breaks too, and only SpringBoard keeps reading normally. The empty tree is indistinguishable from every landmark on every screen drifting at once, so the usual response was to go and edit knowledge bases that were never wrong. Quern now recognises the signature and restarts that simulator's bridge, which is launchd-on-demand, so the retried query comes back against a fresh cache. Around a second, app state preserved, and scoped to the one simulator — there is one bridge per booted simulator, so the others are undisturbed. Recovery is attempted once per read; if the tree still looks wedged afterwards the cause is something else, and retrying would only be a slower way to return the same answer.
 
 ### Notes
+
+- MCP tool count: 107 → 109.
+- `identify_by:` was retired from the screen templates (below); knowledge bases
+  that still use it load exactly as before.
 - The detection is deliberately narrow. An app mid-launch legitimately reports a single `Application` element, so the zero frame and absent label are what separate "nothing has rendered yet" from "the bridge cannot see anything", and a false positive costs a needless restart.
 - There is no reload path short of killing the process: the port cache belongs to the AX runtime loaded into the bridge, which holds no handle to invalidate it, and `SIGHUP` is not handled. Kill-and-respawn is the only lever available, and at ~1s it does not need to be a better one.
-
 
 ## [0.14.1] - 2026-09-02
 
@@ -295,6 +354,7 @@ First versioned release — MVP with iOS and Android support.
 - `quern --version` command.
 
 [Unreleased]: https://github.com/quern-dev/quern/compare/v0.14.1...main
+[0.15.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.15.0-beta.1
 [0.14.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1
 [0.14.1-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.2
 [0.14.1-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1-beta.1
