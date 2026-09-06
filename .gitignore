@@ -32,7 +32,6 @@ docs/test-results/
 
 # Local AI
 .claude/
-CLAUDE.md
 
 idb-companion-*.tar.gz
 
