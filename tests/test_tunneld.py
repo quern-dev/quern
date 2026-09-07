@@ -2,25 +2,33 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
+import server.device.tunneld as tunneld_module
 from server.device.tunneld import (
+    LAUNCHCTL,
     LOG_PATH,
     TUNNELD_LABEL,
+    _restart_daemon,
     _run_sudo,
     _tunnel_udid_cache,
+    can_recover_unattended,
     cli_tunneld,
     find_pymobiledevice3_binary,
     generate_plist,
     get_tunneld_devices,
     install_daemon,
+    install_recovery_grant,
     installed_plist_is_current,
     installed_plist_log_path,
     is_tunneld_running,
+    recover_wedged_tunneld,
+    recovery_grant_line,
     resolve_tunnel_udid,
 )
 
@@ -397,7 +405,7 @@ class TestInstallDaemonUpgradePath:
         bootout *before* bootstrap and skip kickstart entirely."""
         calls: list[list[str]] = []
 
-        def fake_run_sudo(args, timeout):
+        def fake_run_sudo(args, timeout, non_interactive=False):
             calls.append(args)
             return True
 
@@ -447,7 +455,7 @@ class TestInstallDaemonUpgradePath:
         once after a settle delay before giving up."""
         bootstrap_attempts = [0]
 
-        def fake_run_sudo(args, timeout):
+        def fake_run_sudo(args, timeout, non_interactive=False):
             if args[:3] == ["launchctl", "bootstrap", "system"]:
                 bootstrap_attempts[0] += 1
                 # First bootstrap fails (the race); second succeeds.
@@ -472,7 +480,7 @@ class TestInstallDaemonUpgradePath:
         """If bootstrap still fails after the settle retry, surface a
         diagnostic message and return 1 — don't silently fall back to
         anything destructive."""
-        def fake_run_sudo(args, timeout):
+        def fake_run_sudo(args, timeout, non_interactive=False):
             # bootstrap fails every time; everything else succeeds.
             return "bootstrap" not in args
 
@@ -491,6 +499,263 @@ class TestInstallDaemonUpgradePath:
 # ---------------------------------------------------------------------------
 # cli_tunneld
 # ---------------------------------------------------------------------------
+
+
+class TestRestartDaemon:
+    """#73: restart is the command reached for when tunneld already looks
+    wrong, so it must neither hang nor lie about having fixed anything."""
+
+    @staticmethod
+    def _patches(tmp_path, calls, serving, loaded=True):
+        def fake_run_sudo(args, timeout, non_interactive=False):
+            calls.append(args)
+            return True
+
+        plist = tmp_path / "tunneld.plist"
+        plist.write_text("")
+        return (
+            patch("server.device.tunneld.PLIST_PATH", plist),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.time.sleep"),
+            patch("server.device.tunneld._tunneld_devices", return_value=(serving, [])),
+            patch(
+                "server.device.tunneld.launchd_job",
+                return_value={"state": "running", "pid": "1"} if loaded else {},
+            ),
+        )
+
+    def test_loaded_job_is_signalled_not_reloaded(self, tmp_path):
+        """KeepAlive respawns a killed daemon, so a loaded job needs only a
+        signal — a smaller privilege than loading and unloading daemons."""
+        calls: list[list[str]] = []
+        with contextlib.ExitStack() as stack:
+            for ctx in self._patches(tmp_path, calls, serving=True):
+                stack.enter_context(ctx)
+            assert _restart_daemon() == 0
+
+        assert calls == [[LAUNCHCTL, "kill", "SIGKILL", f"system/{TUNNELD_LABEL}"]]
+        assert not any("bootout" in c for c in calls)
+
+    def test_unloaded_job_falls_back_to_bootout_bootstrap(self, tmp_path):
+        calls: list[list[str]] = []
+        with contextlib.ExitStack() as stack:
+            for ctx in self._patches(tmp_path, calls, serving=True, loaded=False):
+                stack.enter_context(ctx)
+            assert _restart_daemon() == 0
+
+        operations = [c[1] for c in calls]
+        assert operations == ["bootout", "bootstrap"]
+
+    def test_never_kickstart(self, tmp_path):
+        """kickstart -k sends SIGKILL *and* rebuilds the job, and hung
+        launchctl on macOS 15. Neither path may reach for it."""
+        for loaded in (True, False):
+            calls: list[list[str]] = []
+            with contextlib.ExitStack() as stack:
+                for ctx in self._patches(tmp_path, calls, serving=True, loaded=loaded):
+                    stack.enter_context(ctx)
+                _restart_daemon()
+            for call in calls:
+                assert "kickstart" not in call
+
+    def test_failure_when_reloaded_but_not_serving(self, tmp_path):
+        """The wedge is a live daemon with no listener, which launchd calls
+        healthy. Trusting launchctl's exit code would report success for
+        exactly the state the restart was meant to clear."""
+        calls: list[list[str]] = []
+        with contextlib.ExitStack() as stack:
+            for ctx in self._patches(tmp_path, calls, serving=False):
+                stack.enter_context(ctx)
+            assert _restart_daemon() == 1
+
+    def test_signal_failure_falls_through_to_reload(self, tmp_path):
+        """A signal that does not bring the daemon back is not the end of the
+        road — the heavier reload path is still worth trying."""
+        calls: list[list[str]] = []
+        serving = iter([(False, [])] * 10 + [(True, [])] * 10)
+
+        plist = tmp_path / "tunneld.plist"
+        plist.write_text("")
+        with (
+            patch("server.device.tunneld.PLIST_PATH", plist),
+            patch(
+                "server.device.tunneld._run_sudo",
+                side_effect=lambda args, timeout, non_interactive=False: calls.append(args) or True,
+            ),
+            patch("server.device.tunneld.time.sleep"),
+            patch("server.device.tunneld._tunneld_devices", side_effect=lambda: next(serving)),
+            patch("server.device.tunneld.launchd_job", return_value={"state": "running"}),
+        ):
+            assert _restart_daemon() == 0
+
+        operations = [c[1] for c in calls]
+        assert operations == ["kill", "bootout", "bootstrap"]
+
+    def test_not_installed_touches_nothing(self, tmp_path, capsys):
+        calls: list[list[str]] = []
+
+        def fake_run_sudo(args, timeout, non_interactive=False):
+            calls.append(args)
+            return True
+
+        with (
+            patch("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist"),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+        ):
+            assert _restart_daemon() == 1
+        assert calls == []
+        assert "not installed" in capsys.readouterr().out
+
+
+class TestCanRecoverUnattended:
+    """The probe must answer "runs without a password", not "is permitted"."""
+
+    GRANTED = (
+        "User jerimiah may run the following commands on host:\n"
+        "    (ALL) ALL\n"
+        "    (root) NOPASSWD: /bin/launchctl kill SIGKILL system/com.quern.tunneld\n"
+    )
+    BLANKET_ONLY = (
+        "User jerimiah may run the following commands on host:\n"
+        "    (ALL) ALL\n"
+    )
+
+    def _listing(self, stdout, returncode=0):
+        return patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=returncode, stdout=stdout),
+        )
+
+    def test_true_when_the_rule_is_present(self):
+        with self._listing(self.GRANTED):
+            assert can_recover_unattended() is True
+
+    def test_false_on_blanket_sudo_alone(self):
+        """Regression: `sudo -l <command>` returns 0 for anything an admin
+        could run *with* a password, so a machine with `(ALL) ALL` and no grant
+        reported unattended recovery as available. A false all-clear here means
+        the automatic path silently does nothing."""
+        with self._listing(self.BLANKET_ONLY):
+            assert can_recover_unattended() is False
+
+    def test_false_for_a_different_signal(self):
+        """The grant names SIGKILL. A rule for one signal must not read as a
+        rule for another."""
+        with self._listing(self.GRANTED):
+            with patch.object(
+                tunneld_module,
+                "RECOVERY_ARGS",
+                ["/bin/launchctl", "kill", "SIGSTOP", "system/com.quern.tunneld"],
+            ):
+                assert can_recover_unattended() is False
+
+    def test_false_when_sudo_refuses(self):
+        with self._listing("", returncode=1):
+            assert can_recover_unattended() is False
+
+    def test_false_when_sudo_missing(self):
+        with patch("subprocess.run", side_effect=OSError("no sudo")):
+            assert can_recover_unattended() is False
+
+
+class TestRecoveryIsNonInteractiveWhenAutomatic:
+    def test_passes_dash_n_so_it_cannot_prompt(self):
+        """With no terminal, a password prompt is indistinguishable from a
+        hang, so the automatic path must fail instead of asking."""
+        with (
+            patch("subprocess.run", return_value=MagicMock(returncode=1)) as run,
+            patch("server.device.tunneld._wait_until_serving", return_value=False),
+        ):
+            assert recover_wedged_tunneld(non_interactive=True) is False
+        assert run.call_args[0][0][:2] == ["sudo", "-n"]
+
+    def test_interactive_by_default_for_the_cli(self):
+        with (
+            patch("subprocess.run", return_value=MagicMock(returncode=0)) as run,
+            patch("server.device.tunneld._wait_until_serving", return_value=True),
+        ):
+            assert recover_wedged_tunneld() is True
+        assert run.call_args[0][0][:2] == ["sudo", "/bin/launchctl"]
+
+
+class TestRecoveryGrant:
+    """The grant is what turns "quern noticed" into "quern fixed it", so it
+    has to be tight enough to be worth granting and safe enough to install."""
+
+    def test_rule_is_fully_specified(self):
+        rule = recovery_grant_line()
+        assert "NOPASSWD:" in rule
+        assert f"{LAUNCHCTL} kill SIGKILL system/{TUNNELD_LABEL}" in rule
+        # No wildcard may reach the command spec: ALL after NOPASSWD, or a
+        # glob in the path, would authorise far more than one signal.
+        command_spec = rule.split("NOPASSWD:", 1)[1]
+        assert "*" not in command_spec
+        assert "ALL" not in command_spec
+
+    def test_names_the_human_not_root_under_sudo(self, monkeypatch):
+        """Under sudo, getpass.getuser() is root. A rule granting root the
+        right to do what root can already do reports success and leaves the
+        real user still prompted."""
+        monkeypatch.setenv("SUDO_USER", "jerimiah")
+        monkeypatch.setattr("getpass.getuser", lambda: "root")
+        assert recovery_grant_line().startswith("jerimiah ALL=")
+
+    def test_falls_back_to_current_user_without_sudo(self, monkeypatch):
+        monkeypatch.delenv("SUDO_USER", raising=False)
+        monkeypatch.setattr("getpass.getuser", lambda: "someone")
+        assert recovery_grant_line().startswith("someone ALL=")
+
+    def test_refuses_to_install_invalid_syntax(self, capsys):
+        """A malformed drop-in breaks sudo for everything on the machine, so
+        validation must gate the install rather than follow it."""
+        installed: list[list[str]] = []
+
+        def fake_run_sudo(args, timeout, non_interactive=False):
+            installed.append(args)
+            return True
+
+        with (
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=1, stderr="parse error near line 1"),
+            ),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+        ):
+            assert install_recovery_grant() == 1
+
+        assert installed == [], "must not touch /etc/sudoers.d after visudo rejects it"
+        assert "not valid sudoers syntax" in capsys.readouterr().out
+
+    def test_installs_readonly_root_owned(self, capsys):
+        """sudoers silently ignores a drop-in that is group- or world-writable,
+        so the mode is load-bearing rather than cosmetic."""
+        calls: list[list[str]] = []
+
+        def fake_run_sudo(args, timeout, non_interactive=False):
+            calls.append(args)
+            return True
+
+        with (
+            patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
+            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.tunneld.can_recover_unattended", return_value=True),
+        ):
+            assert install_recovery_grant() == 0
+
+        assert calls[0][0] == "install"
+        assert "0440" in calls[0]
+        assert "root" in calls[0]
+
+    def test_reports_when_grant_does_not_take_effect(self, capsys):
+        """Installing the file and sudo honouring it are different facts, and
+        reporting the first as the second would be a false all-clear."""
+        with (
+            patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
+            patch("server.device.tunneld._run_sudo", return_value=True),
+            patch("server.device.tunneld.can_recover_unattended", return_value=False),
+        ):
+            assert install_recovery_grant() == 1
+        assert "still asks for a password" in capsys.readouterr().out
 
 
 class TestCliTunneld:
