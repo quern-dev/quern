@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`test_updater.py` no longer depends on the developer's update channel** (#115) — five of its twelve tests failed for anyone who had run `quern set-channel beta`. The mocked command tables are keyed on the literal `origin/release/stable`, while the code under test calls the real `_get_release_branch()`, which reads `~/.quern/config.json`; on the beta channel every key missed, and the dispatcher's deliberate default — a silent successful no-op, so a missed mock surfaces as a wrong answer rather than an exception — turned that into five failures pointing at the updater instead of at the machine. An autouse fixture now pins the channel, so the result no longer varies with who runs the suite. This tracks the channel *setting*, not the installed version: `set-channel` writes the config before any beta code exists, so the tests could break on a checkout that had not moved.
+
+
 
 ## [0.15.0-beta.1] - 2026-09-06
 
