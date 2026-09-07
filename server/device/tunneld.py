@@ -13,14 +13,17 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import logging
+import os
 import plistlib
 import shutil
 import subprocess
 import tempfile
 import textwrap
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +38,25 @@ PLIST_PATH = Path("/Library/LaunchDaemons/com.quern.tunneld.plist")
 # daemon can boot before login (or before an external home volume mounts) without
 # launchd auto-creating ghost directories under /Volumes/<HomeVolume>/.
 LOG_PATH = Path("/Library/Logs/com.quern.tunneld.log")
+
+# macOS 26 (Tahoe) launchd needs a moment after `bootout` before it will accept
+# a fresh `bootstrap`; without the pause the load fails with
+# `Bootstrap failed: 5: Input/output error`.
+BOOTOUT_SETTLE_SECONDS = 1.5
+BOOTSTRAP_RETRY_SETTLE_SECONDS = 3.0
+
+# A reloaded daemon binds its port a moment after launchd returns.
+RESTART_SERVING_POLLS = 10
+RESTART_POLL_INTERVAL_SECONDS = 0.5
+
+# Recovery from a wedge is a signal, not a reload: the daemon runs with
+# `KeepAlive`, so getting the stuck process to exit is the whole job -- launchd
+# respawns it against a clean state. `launchctl kill` names the job by label,
+# which is what makes it grantable in sudoers as a single fully-specified
+# command; `kill <pid>` would mean "kill anything as root".
+LAUNCHCTL = "/bin/launchctl"
+RECOVERY_ARGS = [LAUNCHCTL, "kill", "SIGKILL", f"system/{TUNNELD_LABEL}"]
+SUDOERS_PATH = Path("/etc/sudoers.d/quern-tunneld")
 
 # Cache: CoreDevice UUID → pymobiledevice3 UDID
 _tunnel_udid_cache: dict[str, str] = {}
@@ -412,26 +434,11 @@ def install_daemon() -> int:
         if not _run_sudo(["chmod", "644", str(PLIST_PATH)], timeout=10):
             print("Warning: Failed to set plist permissions")
 
-        # macOS 26 (Tahoe) launchd needs a brief settle after bootout before
-        # bootstrap will accept a fresh load — otherwise the second call
-        # fails with `Bootstrap failed: 5: Input/output error`. Manual
-        # bootstrap-after-sleep succeeds reliably; we replicate that here,
-        # and retry once with a longer delay if the first attempt still
-        # races. The delays are short enough to be invisible in practice.
-        time.sleep(1.5)
-        bootstrap_cmd = ["launchctl", "bootstrap", "system", str(PLIST_PATH)]
-        if not _run_sudo(bootstrap_cmd, timeout=30):
-            print("  bootstrap raced launchd state, retrying after settle...")
-            time.sleep(3)
-            if not _run_sudo(bootstrap_cmd, timeout=30):
-                print("Error: launchctl bootstrap failed.")
-                print(
-                    "  Diagnose with: sudo launchctl print system/com.quern.tunneld",
-                )
-                print(
-                    "  Validate plist: sudo plutil -lint " + str(PLIST_PATH),
-                )
-                return 1
+        if not _bootstrap_with_retry():
+            print("Error: launchctl bootstrap failed.")
+            print(f"  Diagnose with: sudo launchctl print system/{TUNNELD_LABEL}")
+            print(f"  Validate plist: sudo plutil -lint {PLIST_PATH}")
+            return 1
 
         print("tunneld LaunchDaemon installed successfully.")
         print(f"  Logs: {LOG_PATH}")
@@ -441,15 +448,210 @@ def install_daemon() -> int:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def _run_sudo(args: list[str], timeout: int) -> bool:
+def _wait_until_serving(
+    polls: int = RESTART_SERVING_POLLS,
+    interval: float = RESTART_POLL_INTERVAL_SECONDS,
+) -> bool:
+    """Poll until tunneld answers on its port, or give up."""
+    for _ in range(polls):
+        serving, _devices = _tunneld_devices()
+        if serving:
+            return True
+        time.sleep(interval)
+    return False
+
+
+def can_recover_unattended() -> bool:
+    """Whether sudo will run the recovery command *without a password*.
+
+    Deliberately not `sudo -l <command>`: that answers "is this permitted by
+    policy", which is a different and much weaker question. Any user with a
+    blanket `(ALL) ALL` entry -- the default for an admin on macOS -- gets a
+    zero exit for every command they could run *with* a password, so the probe
+    reports unattended recovery is available when it is not.
+
+    The listing is parsed instead, for the exact NOPASSWD rule. This is only
+    used to phrase messages; the recovery itself passes `-n` so that a wrong
+    answer here cannot turn into a hidden prompt.
+    """
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "-l"], capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+
+    wanted = " ".join(RECOVERY_ARGS)
+    return any(
+        "NOPASSWD:" in line and wanted in line
+        for line in result.stdout.splitlines()
+    )
+
+
+def recover_wedged_tunneld(non_interactive: bool = False) -> bool:
+    """Kill a wedged tunneld and let launchd bring it back. Returns serving.
+
+    Measured on a real wedge: pid 949 alive with no listener, killed, launchd
+    respawned it as pid 3022 and it was serving 1.0s later. Same shape as the
+    accessibility-bridge reset in #66 -- kill the process holding bad state and
+    let its supervisor rebuild it -- which is available here only because the
+    plist sets `KeepAlive`.
+
+    Deliberately not `kickstart -k`: that tears the job down and rebuilds it,
+    and hung launchctl on macOS 15. A signal leaves the job definition alone.
+
+    Requires root. Callers that cannot obtain it should report
+    `tunneld_health()`'s remedy rather than failing silently.
+    """
+    if not _run_sudo(RECOVERY_ARGS, timeout=30, non_interactive=non_interactive):
+        return False
+    return _wait_until_serving()
+
+
+def _grant_user() -> str:
+    """The human the grant is for, not the identity running the installer.
+
+    `sudo ./quern tunneld grant-recovery` is the natural way to run something
+    that writes to /etc/sudoers.d, and under sudo `getpass.getuser()` is root.
+    Taking that at face value would write a rule granting root permission to do
+    what root can already do, report success, and leave the actual user still
+    being prompted -- a false all-clear that only shows up the next time a
+    wedge is not healed.
+    """
+    return os.environ.get("SUDO_USER") or getpass.getuser()
+
+
+def recovery_grant_line() -> str:
+    """The sudoers rule that lets recovery run without a password.
+
+    Fully specified, no wildcards: it authorises exactly one signal to exactly
+    one job. It does not permit loading, unloading or reconfiguring daemons,
+    and it cannot be widened by argument, because sudoers matches the whole
+    command line rather than the binary.
+    """
+    return f"{_grant_user()} ALL=(root) NOPASSWD: {' '.join(RECOVERY_ARGS)}\n"
+
+
+def install_recovery_grant() -> int:
+    """Install the sudoers rule so a wedge can be healed unattended.
+
+    Root is the one thing standing between "quern noticed the wedge" and
+    "quern fixed it". Taking one narrow, explicit, reversible grant is better
+    than the alternatives: prompting inside unrelated operations puts an auth
+    dialog in front of a screenshot, and leaving it to the user means leaving
+    it to someone who has no reason to suspect the daemon, since a wedged
+    tunneld looks healthy to every obvious check (#73).
+
+    Validated with `visudo -c` before installing. A malformed file in
+    /etc/sudoers.d breaks sudo for everything on the machine, which would be a
+    considerably worse failure than the one being fixed.
+    """
+    rule = recovery_grant_line()
+    print("This authorises exactly one command to run without a password:")
+    print(f"  {rule.strip()}")
+    print()
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sudoers", delete=False) as tmp:
+        tmp.write(rule)
+        tmp_path = tmp.name
+
+    try:
+        check = subprocess.run(
+            ["visudo", "-cf", tmp_path], capture_output=True, text=True, timeout=15,
+        )
+        if check.returncode != 0:
+            print(f"Error: not valid sudoers syntax: {check.stderr.strip()}")
+            return 1
+
+        # `install` sets ownership and mode atomically; sudoers ignores a
+        # drop-in that is group- or world-writable, and would do so silently.
+        if not _run_sudo(
+            ["install", "-o", "root", "-g", "wheel", "-m", "0440", tmp_path, str(SUDOERS_PATH)],
+            timeout=30,
+        ):
+            print("Error: could not install the sudoers rule")
+            return 1
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Error: {exc}")
+        return 1
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    if not can_recover_unattended():
+        print(f"Warning: installed {SUDOERS_PATH}, but sudo still asks for a password.")
+        return 1
+
+    print(f"Installed {SUDOERS_PATH}. A wedged tunneld can now be healed automatically.")
+    return 0
+
+
+def revoke_recovery_grant() -> int:
+    """Remove the sudoers rule."""
+    if not SUDOERS_PATH.exists():
+        print("No recovery grant is installed.")
+        return 0
+    if not _run_sudo(["rm", "-f", str(SUDOERS_PATH)], timeout=30):
+        print("Error: could not remove the sudoers rule")
+        return 1
+    print(f"Removed {SUDOERS_PATH}. Recovery now needs an explicit sudo.")
+    return 0
+
+
+def _bootstrap_with_retry() -> bool:
+    """Load the daemon, retrying once if launchd has not settled.
+
+    macOS 26 (Tahoe) launchd needs a brief settle after `bootout` before
+    `bootstrap` will accept a fresh load -- otherwise it fails with
+    `Bootstrap failed: 5: Input/output error`. Manual bootstrap-after-sleep
+    succeeds reliably, so that is what this replicates. The delays are short
+    enough to be invisible in practice.
+
+    Shared by install and restart deliberately: they had already drifted, and
+    `kickstart -k` got into the restart path through the gap (#73).
+    """
+    time.sleep(BOOTOUT_SETTLE_SECONDS)
+    bootstrap_cmd = ["launchctl", "bootstrap", "system", str(PLIST_PATH)]
+    if _run_sudo(bootstrap_cmd, timeout=30):
+        return True
+
+    print("  bootstrap raced launchd state, retrying after settle...")
+    time.sleep(BOOTSTRAP_RETRY_SETTLE_SECONDS)
+    return _run_sudo(bootstrap_cmd, timeout=30)
+
+
+def _tunneld_devices() -> tuple[bool, list[str]]:
+    """Whether tunneld answers on its port, and the tunnels it reports.
+
+    Synchronous twin of `is_tunneld_running()`, for the CLI paths that are not
+    async. Serving is the signal that separates a healthy daemon from one that
+    is alive and wedged, so it is what a restart has to prove (#73).
+    """
+    try:
+        req = urllib.request.Request(TUNNELD_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status != 200:
+                return False, []
+            return True, json.loads(resp.read())
+    except Exception:
+        return False, []
+
+
+def _run_sudo(args: list[str], timeout: int, non_interactive: bool = False) -> bool:
     """Run a sudo command and return True on exit 0.
 
     Wraps subprocess timeout so a hung launchctl can't crash the install
     script with an unhandled TimeoutExpired. Returns False on any failure
     (non-zero exit, timeout, OS error) without propagating exceptions.
+
+    `non_interactive` adds `-n`, which makes sudo fail rather than ask. Use it
+    anywhere a prompt would have nobody to answer it: a blocked password prompt
+    with no terminal is indistinguishable from a hang.
     """
+    prefix = ["sudo", "-n"] if non_interactive else ["sudo"]
     try:
-        result = subprocess.run(["sudo", *args], timeout=timeout)
+        result = subprocess.run([*prefix, *args], timeout=timeout)
     except subprocess.TimeoutExpired:
         print(f"Warning: `sudo {' '.join(args)}` timed out after {timeout}s")
         return False
@@ -503,18 +705,7 @@ def _print_status() -> int:
         print(f"  Plist log: {old} (outdated — expected {LOG_PATH})")
         print("             Reinstall to migrate: ./quern tunneld install")
 
-    # Check if daemon is running (sync version)
-    running = False
-    try:
-        import urllib.request
-        req = urllib.request.Request(TUNNELD_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            running = resp.status == 200
-            if running:
-                import json
-                devices = json.loads(resp.read())
-    except Exception:
-        devices = []
+    running, devices = _tunneld_devices()
 
     print(f"  Running:   {'yes' if running else 'no'}")
     print(f"  URL:       {TUNNELD_URL}")
@@ -538,23 +729,45 @@ def _print_status() -> int:
 
 
 def _restart_daemon() -> int:
-    """Restart the tunneld daemon. Returns 0 on success."""
+    """Restart the tunneld daemon. Returns 0 on success.
+
+    `bootout` then `bootstrap`, never `kickstart -k`. Kickstart sends SIGKILL
+    and hung launchctl on macOS 15, and this is the command someone reaches for
+    when tunneld already looks wrong -- the worst place to risk a hang.
+
+    Success means *serving*, not exit 0. The wedge this recovers from is a
+    daemon that is alive with no listener, which launchd reports as healthy, so
+    trusting an exit code here would report the very state the restart was
+    meant to clear (#73).
+    """
     if not PLIST_PATH.exists():
         print("tunneld LaunchDaemon is not installed.")
         print("Install it first: ./quern tunneld install")
         return 1
 
-    print("Restarting tunneld...")
-    result = subprocess.run(
-        ["sudo", "launchctl", "kickstart", "-k", f"system/{TUNNELD_LABEL}"],
-        timeout=30,
-    )
-    if result.returncode != 0:
-        print("Error: Failed to restart tunneld")
+    print("Restarting tunneld (requires sudo)...")
+
+    # A loaded job only needs a signal: KeepAlive respawns it in about a
+    # second, and that path needs one narrowly-scoped privilege rather than the
+    # authority to load and unload system daemons.
+    if launchd_job() and recover_wedged_tunneld():
+        print(f"tunneld restarted, serving on {TUNNELD_URL}.")
+        return 0
+
+    # Not loaded, or the respawn did not come back -- reload the definition.
+    _run_sudo([LAUNCHCTL, "bootout", f"system/{TUNNELD_LABEL}"], timeout=30)
+    if not _bootstrap_with_retry():
+        print("Error: launchctl bootstrap failed.")
+        print(f"  Diagnose with: sudo launchctl print system/{TUNNELD_LABEL}")
         return 1
 
-    print("tunneld restarted.")
-    return 0
+    if _wait_until_serving():
+        print(f"tunneld restarted, serving on {TUNNELD_URL}.")
+        return 0
+
+    print(f"Error: tunneld reloaded but is not serving on {TUNNELD_URL}.")
+    print(f"  Check the log: {LOG_PATH}")
+    return 1
 
 
 def cli_tunneld(args: list[str]) -> int:
@@ -563,10 +776,12 @@ def cli_tunneld(args: list[str]) -> int:
         print("Usage: ./quern tunneld <command>")
         print()
         print("Commands:")
-        print("  install     Install tunneld as a LaunchDaemon (requires sudo)")
-        print("  uninstall   Remove the tunneld LaunchDaemon (requires sudo)")
-        print("  status      Show daemon status and connected devices")
-        print("  restart     Restart the tunneld daemon (requires sudo)")
+        print("  install          Install tunneld as a LaunchDaemon (requires sudo)")
+        print("  uninstall        Remove the tunneld LaunchDaemon (requires sudo)")
+        print("  status           Show daemon status and connected devices")
+        print("  restart          Restart the tunneld daemon (requires sudo)")
+        print("  grant-recovery   Allow automatic recovery without a password")
+        print("  revoke-recovery  Remove that authorisation")
         print()
         print("The tunneld daemon provides RemoteXPC tunnels for iOS 17+ devices,")
         print("enabling developer services like screenshots on physical devices.")
@@ -582,6 +797,10 @@ def cli_tunneld(args: list[str]) -> int:
         return _print_status()
     elif cmd == "restart":
         return _restart_daemon()
+    elif cmd == "grant-recovery":
+        return install_recovery_grant()
+    elif cmd == "revoke-recovery":
+        return revoke_recovery_grant()
     else:
         print(f"Unknown command: {cmd}")
         print("Run './quern tunneld --help' for usage.")

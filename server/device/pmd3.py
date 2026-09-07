@@ -11,6 +11,88 @@ from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.pmd3")
 
+# A wedge is permanent; a failed probe may not be. Re-read before acting.
+WEDGE_CONFIRM_DELAY_SECONDS = 2.0
+
+
+async def _recover_tunneld_if_wedged() -> bool:
+    """Heal a wedged tunneld in passing, if that needs no interaction.
+
+    Only for the *wedged* status. A stopped daemon is a different problem and
+    signalling a job that is not running fixes nothing, so a broad "restart it
+    and hope" would trade a clear failure for a confusing one.
+
+    Gated on an existing passwordless grant because a screenshot is the wrong
+    moment to raise an authentication dialog: the caller is usually a script,
+    and a blocked prompt is indistinguishable from a hang.
+    """
+    from server.device.tunneld import (
+        can_recover_unattended,
+        recover_wedged_tunneld,
+        tunneld_health,
+    )
+
+    health = await tunneld_health()
+    if health.status != "wedged":
+        return False
+
+    # One failed probe is not a wedge. The verdict is "HTTP down while launchd
+    # says running", and a probe that times out under load produces exactly
+    # that reading against a daemon which is fine. The remedy is not cheap
+    # enough to spend on a guess -- killing tunneld drops the live tunnels of
+    # every connected device -- so require the reading to persist, and require
+    # the same process to still be the one holding it.
+    await asyncio.sleep(WEDGE_CONFIRM_DELAY_SECONDS)
+    confirmed = await tunneld_health()
+    if confirmed.status != "wedged" or confirmed.pid != health.pid:
+        logger.info(
+            "tunneld looked wedged but recovered on its own (status %s) — "
+            "leaving it alone",
+            confirmed.status,
+        )
+        return False
+
+    if not can_recover_unattended():
+        logger.warning(
+            "tunneld is wedged (pid %s) and recovery needs root — run "
+            "`./quern tunneld restart`, or authorise automatic recovery with "
+            "`./quern tunneld grant-recovery`",
+            health.pid,
+        )
+        return False
+
+    logger.warning(
+        "tunneld is wedged (pid %s) — killing it so launchd can respawn it",
+        health.pid,
+    )
+    return await asyncio.to_thread(recover_wedged_tunneld, True)
+
+
+def _no_tunnel_hint(tunnel_udid: str | None, tunneld_serving: bool) -> str:
+    """Explain a failure that silently took the no-tunnel path.
+
+    The usbmuxd fallback is right for iOS 16 and earlier and wrong for
+    everything since, but there is no device version to branch on here without
+    paying a subprocess per screenshot. So the fallback stays and the likely
+    cause is named when it fails, rather than surfacing pymobiledevice3's
+    downstream error alone.
+
+    Naming it matters most for the wedged case: that daemon is alive, so it
+    looks installed and running to anyone who checks the obvious way (#73).
+    """
+    if tunnel_udid is not None:
+        return ""
+    if not tunneld_serving:
+        return (
+            " — no tunnel was available because tunneld is not serving, and "
+            "iOS 17+ devices need one. Check `./quern tunneld status`; if it "
+            "reports a live pid, it is wedged: `./quern tunneld restart`."
+        )
+    return (
+        " — tunneld is serving but reported no tunnel for this device, and "
+        "iOS 17+ devices need one. Reconnect it and accept the trust prompt."
+    )
+
 
 class Pmd3Backend:
     """Manages physical iOS device operations via pymobiledevice3 subprocess calls."""
@@ -44,7 +126,10 @@ class Pmd3Backend:
 
         # Try tunneld route first (iOS 17+)
         tunnel_udid = None
-        if await is_tunneld_running():
+        tunneld_serving = await is_tunneld_running()
+        if not tunneld_serving:
+            tunneld_serving = await _recover_tunneld_if_wedged()
+        if tunneld_serving:
             tunnel_udid = await resolve_tunnel_udid(uuid)
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -67,10 +152,19 @@ class Pmd3Backend:
                     "--udid", uuid,
                     tmp_path,
                 ]
-                logger.info(
-                    "No tunnel for device %s, trying direct usbmuxd connection",
-                    uuid[:8],
-                )
+                if tunneld_serving:
+                    logger.info(
+                        "No tunnel for device %s, trying direct usbmuxd connection",
+                        uuid[:8],
+                    )
+                else:
+                    # Correct for iOS 16 and earlier, silently wrong after it,
+                    # and tunneld being down is itself worth surfacing (#73).
+                    logger.warning(
+                        "tunneld is not serving, so device %s falls back to "
+                        "usbmuxd — this only works on iOS 16 and earlier",
+                        uuid[:8],
+                    )
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -88,7 +182,8 @@ class Pmd3Backend:
                         tool="pymobiledevice3",
                     )
                 raise DeviceError(
-                    f"pymobiledevice3 screenshot failed: {error_msg}",
+                    f"pymobiledevice3 screenshot failed: {error_msg}"
+                    + _no_tunnel_hint(tunnel_udid, tunneld_serving),
                     tool="pymobiledevice3",
                 )
 
