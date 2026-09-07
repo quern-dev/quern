@@ -13,6 +13,27 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def pinned_channel(monkeypatch):
+    """Keep these tests off whatever channel the developer happens to be on.
+
+    `_get_release_branch()` reads `update_channel` from `~/.quern/config.json`,
+    so without this the command tables below -- which are keyed on the literal
+    `origin/release/stable` -- miss every entry once someone has run
+    `quern set-channel beta`, and the result of the suite depends on who runs
+    it (#115). The dispatcher defaults a missed key to a successful no-op, by
+    design, so the symptom is a wrong answer rather than an error, and it
+    points at the updater rather than at the machine.
+
+    Note this tracks the *setting*, not the installed version: the channel is
+    written by `set-channel` before any beta code exists, so the tests can
+    break on a checkout that has not moved.
+
+    The two tests that are about the mapping itself override this.
+    """
+    monkeypatch.setattr("server.config.get_update_channel", lambda: "stable")
+
+
 def _make_run(returncode: int = 0, stdout: str = "", stderr: str = ""):
     """Build a MagicMock subprocess CompletedProcess-ish object."""
     result = MagicMock()
@@ -95,6 +116,38 @@ def test_check_via_git_compares_to_release_branch_not_current_branch():
     assert len(rev_list_calls) == 1
     assert rev_list_calls[0].args[0] == [
         "git", "rev-list", "HEAD..origin/release/stable", "--count",
+    ]
+
+
+def test_check_via_git_follows_the_configured_channel(monkeypatch):
+    """The beta channel had no coverage at all: every table was keyed on
+    `release/stable`, so the one behaviour the channel setting controls went
+    untested while quietly breaking the suite for anyone who had opted in."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+    responses = {
+        ("git", "fetch", "origin"): _make_run(0),
+        ("git", "rev-parse", "--abbrev-ref", "HEAD"): _make_run(
+            0, stdout="release/beta\n",
+        ),
+        ("git", "rev-list", "HEAD..origin/release/beta", "--count"): _make_run(
+            0, stdout="4\n",
+        ),
+    }
+    with patch(
+        "server.lifecycle.updater.subprocess.run",
+        side_effect=_make_subprocess_dispatcher(responses),
+    ) as run_mock:
+        result = updater._check_via_git(Path("/fake"))
+
+    assert result == (True, "release/beta", 4)
+    rev_list_calls = [
+        c for c in run_mock.call_args_list
+        if c.args[0][:2] == ["git", "rev-list"]
+    ]
+    assert rev_list_calls[0].args[0] == [
+        "git", "rev-list", "HEAD..origin/release/beta", "--count",
     ]
 
 
