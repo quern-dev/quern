@@ -249,7 +249,11 @@ async def tunneld_health() -> TunneldHealth:
         )
 
     serving = await is_tunneld_running()
-    job = launchd_job()
+    # `launchd_job` shells out to `launchctl print` with a 15s timeout. It is
+    # synchronous, and this coroutine is now reached from the screenshot path
+    # rather than only from diagnostics, so leaving it inline would stall every
+    # other in-flight request for as long as launchctl takes to answer.
+    job = await asyncio.to_thread(launchd_job)
     state = job.get("state")
     pid = int(job["pid"]) if job.get("pid", "").isdigit() else None
     program = job.get("program")
@@ -454,14 +458,14 @@ def _wait_until_serving(
 ) -> bool:
     """Poll until tunneld answers on its port, or give up."""
     for _ in range(polls):
-        serving, _devices = _tunneld_devices()
+        serving, _tunnels = _tunneld_devices()
         if serving:
             return True
         time.sleep(interval)
     return False
 
 
-def can_recover_unattended() -> bool:
+def can_recover_unattended(user: str | None = None) -> bool:
     """Whether sudo will run the recovery command *without a password*.
 
     Deliberately not `sudo -l <command>`: that answers "is this permitted by
@@ -474,10 +478,19 @@ def can_recover_unattended() -> bool:
     used to phrase messages; the recovery itself passes `-n` so that a wrong
     answer here cannot turn into a hidden prompt.
     """
+    args = ["sudo", "-n", "-l"]
+    # `-U` asks about somebody else's policy. The installer needs it: run under
+    # `sudo` this process is root, so asking about the current user would report
+    # root's rules and miss the one just written for the human, failing a
+    # successful install. sudoers restricts `-U` to root or to users holding the
+    # list privilege, so it is only relied on where that is certain; when we are
+    # not root we are already the user in question and need not ask about anyone
+    # else.
+    if user is not None and os.geteuid() == 0:
+        args += ["-U", user]
+
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "-l"], capture_output=True, text=True, timeout=10,
-        )
+        result = subprocess.run(args, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
     if result.returncode != 0:
@@ -579,7 +592,7 @@ def install_recovery_grant() -> int:
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
-    if not can_recover_unattended():
+    if not can_recover_unattended(_grant_user()):
         print(f"Warning: installed {SUDOERS_PATH}, but sudo still asks for a password.")
         return 1
 
@@ -621,21 +634,24 @@ def _bootstrap_with_retry() -> bool:
     return _run_sudo(bootstrap_cmd, timeout=30)
 
 
-def _tunneld_devices() -> tuple[bool, list[str]]:
+def _tunneld_devices() -> tuple[bool, dict[str, list[dict]]]:
     """Whether tunneld answers on its port, and the tunnels it reports.
 
     Synchronous twin of `is_tunneld_running()`, for the CLI paths that are not
     async. Serving is the signal that separates a healthy daemon from one that
     is alive and wedged, so it is what a restart has to prove (#73).
+
+    The body maps UDID to that device's tunnels, the same shape
+    `get_tunneld_devices()` returns.
     """
     try:
         req = urllib.request.Request(TUNNELD_URL, method="GET")
         with urllib.request.urlopen(req, timeout=2) as resp:
             if resp.status != 200:
-                return False, []
+                return False, {}
             return True, json.loads(resp.read())
     except Exception:
-        return False, []
+        return False, {}
 
 
 def _run_sudo(args: list[str], timeout: int, non_interactive: bool = False) -> bool:

@@ -30,6 +30,7 @@ from server.device.tunneld import (
     recover_wedged_tunneld,
     recovery_grant_line,
     resolve_tunnel_udid,
+    tunneld_health,
 )
 
 # ---------------------------------------------------------------------------
@@ -678,6 +679,62 @@ class TestRecoveryIsNonInteractiveWhenAutomatic:
         assert run.call_args[0][0][:2] == ["sudo", "/bin/launchctl"]
 
 
+class TestHealthDoesNotBlockTheEventLoop:
+    """`launchd_job` shells out with a 15s timeout. This coroutine is reached
+    from the screenshot path now, not just diagnostics, so running it inline
+    would stall every other in-flight request for as long as launchctl takes."""
+
+    async def test_launchd_job_runs_on_a_worker_thread(self):
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch("server.device.tunneld.installed_plist_is_current", return_value=True),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3"),
+            ),
+            patch.object(Path, "exists", return_value=True),
+            patch("asyncio.to_thread", new_callable=AsyncMock, return_value={}) as to_thread,
+        ):
+            await tunneld_health()
+
+        assert to_thread.await_count == 1, "launchd_job was not moved off the loop"
+        assert to_thread.await_args[0][0] is tunneld_module.launchd_job
+
+
+class TestGrantProbeAsksAboutTheRightUser:
+    """Same class of bug as the grant line itself: under sudo the process is
+    root, and root is not who the rule was written for."""
+
+    LISTING = (
+        "User jerimiah may run the following commands on host:\n"
+        "    (root) NOPASSWD: /bin/launchctl kill SIGKILL system/com.quern.tunneld\n"
+    )
+
+    def test_asks_about_the_named_user_when_root(self):
+        with (
+            patch("os.geteuid", return_value=0),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=self.LISTING),
+            ) as run,
+        ):
+            assert can_recover_unattended("jerimiah") is True
+        assert run.call_args[0][0] == ["sudo", "-n", "-l", "-U", "jerimiah"]
+
+    def test_asks_about_itself_when_not_root(self):
+        """Unprivileged, we are already the user in question, and `-U` may not
+        be available to us at all."""
+        with (
+            patch("os.geteuid", return_value=501),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=self.LISTING),
+            ) as run,
+        ):
+            assert can_recover_unattended("jerimiah") is True
+        assert run.call_args[0][0] == ["sudo", "-n", "-l"]
+
+
 class TestRecoveryGrant:
     """The grant is what turns "quern noticed" into "quern fixed it", so it
     has to be tight enough to be worth granting and safe enough to install."""
@@ -745,6 +802,20 @@ class TestRecoveryGrant:
         assert calls[0][0] == "install"
         assert "0440" in calls[0]
         assert "root" in calls[0]
+
+    def test_verifies_against_the_granted_user(self, capsys):
+        """Under sudo the installer is root; checking root's policy would miss
+        the rule it just wrote and report failure after a successful install."""
+        with (
+            patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
+            patch("server.device.tunneld._run_sudo", return_value=True),
+            patch("server.device.tunneld._grant_user", return_value="jerimiah"),
+            patch(
+                "server.device.tunneld.can_recover_unattended", return_value=True
+            ) as probe,
+        ):
+            assert install_recovery_grant() == 0
+        probe.assert_called_once_with("jerimiah")
 
     def test_reports_when_grant_does_not_take_effect(self, capsys):
         """Installing the file and sudo honouring it are different facts, and
