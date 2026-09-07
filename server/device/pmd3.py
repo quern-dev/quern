@@ -36,6 +36,18 @@ async def _recover_tunneld_if_wedged() -> bool:
     if health.status != "wedged":
         return False
 
+    # Ask whether we may act before spending time establishing that we should.
+    # Without the grant the answer cannot change, so confirming first would
+    # add seconds to a screenshot that is going to fail either way.
+    if not can_recover_unattended():
+        logger.warning(
+            "tunneld is wedged (pid %s) and recovery needs root — run "
+            "`./quern tunneld restart`, or authorise automatic recovery with "
+            "`./quern tunneld grant-recovery`",
+            health.pid,
+        )
+        return False
+
     # One failed probe is not a wedge. The verdict is "HTTP down while launchd
     # says running", and a probe that times out under load produces exactly
     # that reading against a daemon which is fine. The remedy is not cheap
@@ -49,15 +61,6 @@ async def _recover_tunneld_if_wedged() -> bool:
             "tunneld looked wedged but recovered on its own (status %s) — "
             "leaving it alone",
             confirmed.status,
-        )
-        return False
-
-    if not can_recover_unattended():
-        logger.warning(
-            "tunneld is wedged (pid %s) and recovery needs root — run "
-            "`./quern tunneld restart`, or authorise automatic recovery with "
-            "`./quern tunneld grant-recovery`",
-            health.pid,
         )
         return False
 

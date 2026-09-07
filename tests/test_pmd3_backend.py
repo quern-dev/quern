@@ -310,6 +310,18 @@ class TestAutoRecoveryGate:
             assert await _recover_tunneld_if_wedged() is False
         recover.assert_not_called()
 
+    async def test_does_not_pay_the_confirmation_delay_without_the_grant(self):
+        """Without the grant the verdict cannot change anything, so confirming
+        it would only add seconds to a screenshot that fails either way."""
+        with (
+            patch(
+                "server.device.tunneld.tunneld_health", return_value=self._health("wedged")
+            ) as health,
+            patch("server.device.tunneld.can_recover_unattended", return_value=False),
+        ):
+            assert await _recover_tunneld_if_wedged() is False
+        assert health.call_count == 1, "re-probed despite having no authority to act"
+
     async def test_never_prompts_without_the_grant(self, caplog):
         """A screenshot is the wrong moment to raise an auth dialog: the
         caller is usually a script, and a blocked prompt looks like a hang."""
