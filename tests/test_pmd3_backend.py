@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.device.pmd3 import Pmd3Backend
+from server.device.pmd3 import Pmd3Backend, _no_tunnel_hint, _recover_tunneld_if_wedged
 from server.models import DeviceError
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,7 @@ class TestScreenshot:
 
         with (
             patch("server.device.tunneld.is_tunneld_running", return_value=False),
+            patch("server.device.pmd3._recover_tunneld_if_wedged", return_value=False),
             patch(
                 "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
             ),
@@ -183,6 +184,7 @@ class TestScreenshot:
 
         with (
             patch("server.device.tunneld.is_tunneld_running", return_value=False),
+            patch("server.device.pmd3._recover_tunneld_if_wedged", return_value=False),
             patch(
                 "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
             ),
@@ -204,3 +206,129 @@ class TestScreenshot:
 
             with pytest.raises(DeviceError, match="Developer disk image not mounted"):
                 await backend.screenshot("UUID")
+
+
+class TestNoTunnelHint:
+    """#73: a wedged tunneld is alive, so it looks installed and running to
+    anyone who checks the obvious way. When the usbmuxd fallback then fails,
+    the error has to name that as the likely cause -- pymobiledevice3's own
+    message describes the symptom and never the reason."""
+
+    def test_silent_when_a_tunnel_was_used(self):
+        assert _no_tunnel_hint("00008130-AAAA", tunneld_serving=True) == ""
+
+    def test_names_tunneld_when_not_serving(self):
+        hint = _no_tunnel_hint(None, tunneld_serving=False)
+        assert "tunneld is not serving" in hint
+        assert "wedged" in hint
+        assert "tunneld restart" in hint
+
+    def test_distinguishes_serving_but_no_tunnel_for_device(self):
+        """A serving daemon with no tunnel for this device is a pairing
+        problem, not a wedge, and points somewhere else entirely."""
+        hint = _no_tunnel_hint(None, tunneld_serving=True)
+        assert "no tunnel for this device" in hint
+        assert "wedged" not in hint
+
+
+class TestScreenshotFailureNamesTheCause:
+    async def test_usbmuxd_failure_blames_tunneld(self, tmp_path):
+        backend = Pmd3Backend()
+
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=False),
+            patch("server.device.pmd3._recover_tunneld_if_wedged", return_value=False),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
+            mock_file = MagicMock()
+            tmp_file = tmp_path / "screenshot.png"
+            mock_file.name = str(tmp_file)
+            mock_file.__enter__ = MagicMock(return_value=mock_file)
+            mock_file.__exit__ = MagicMock(return_value=False)
+            mock_tmp.return_value = mock_file
+            mock_exec.return_value = _make_proc(1, stderr=b"Device is not connected")
+
+            with pytest.raises(DeviceError, match="tunneld is not serving"):
+                await backend.screenshot("UUID")
+
+    async def test_tunnel_route_failure_carries_no_hint(self, tmp_path):
+        """The hint is about the fallback. A failure on the tunnel path has a
+        tunnel, so blaming tunneld there would be wrong."""
+        backend = Pmd3Backend()
+
+        with (
+            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+            ),
+            patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
+            patch("asyncio.create_subprocess_exec") as mock_exec,
+            patch("tempfile.NamedTemporaryFile") as mock_tmp,
+        ):
+            mock_file = MagicMock()
+            tmp_file = tmp_path / "screenshot.png"
+            mock_file.name = str(tmp_file)
+            mock_file.__enter__ = MagicMock(return_value=mock_file)
+            mock_file.__exit__ = MagicMock(return_value=False)
+            mock_tmp.return_value = mock_file
+            mock_exec.return_value = _make_proc(1, stderr=b"boom")
+
+            with pytest.raises(DeviceError) as excinfo:
+                await backend.screenshot("UUID")
+            assert "tunneld" not in str(excinfo.value)
+
+
+class TestAutoRecoveryGate:
+    """Healing in passing is only safe when it is certain what is broken and
+    certain nobody has to be asked."""
+
+    @staticmethod
+    def _health(status, pid=949):
+        return MagicMock(status=status, pid=pid)
+
+    async def test_recovers_a_wedge_when_authorised(self):
+        with (
+            patch("server.device.tunneld.tunneld_health", return_value=self._health("wedged")),
+            patch("server.device.tunneld.can_recover_unattended", return_value=True),
+            patch("server.device.tunneld.recover_wedged_tunneld", return_value=True) as recover,
+        ):
+            assert await _recover_tunneld_if_wedged() is True
+        recover.assert_called_once()
+
+    async def test_leaves_a_stopped_daemon_alone(self):
+        """Signalling a job that is not running fixes nothing, and would trade
+        a clear failure for a confusing one."""
+        with (
+            patch("server.device.tunneld.tunneld_health", return_value=self._health("stopped")),
+            patch("server.device.tunneld.can_recover_unattended", return_value=True),
+            patch("server.device.tunneld.recover_wedged_tunneld") as recover,
+        ):
+            assert await _recover_tunneld_if_wedged() is False
+        recover.assert_not_called()
+
+    async def test_does_not_pay_the_confirmation_delay_without_the_grant(self):
+        """Without the grant the verdict cannot change anything, so confirming
+        it would only add seconds to a screenshot that fails either way."""
+        with (
+            patch(
+                "server.device.tunneld.tunneld_health", return_value=self._health("wedged")
+            ) as health,
+            patch("server.device.tunneld.can_recover_unattended", return_value=False),
+        ):
+            assert await _recover_tunneld_if_wedged() is False
+        assert health.call_count == 1, "re-probed despite having no authority to act"
+
+    async def test_never_prompts_without_the_grant(self, caplog):
+        """A screenshot is the wrong moment to raise an auth dialog: the
+        caller is usually a script, and a blocked prompt looks like a hang."""
+        with (
+            patch("server.device.tunneld.tunneld_health", return_value=self._health("wedged")),
+            patch("server.device.tunneld.can_recover_unattended", return_value=False),
+            patch("server.device.tunneld.recover_wedged_tunneld") as recover,
+        ):
+            assert await _recover_tunneld_if_wedged() is False
+        recover.assert_not_called()
