@@ -151,11 +151,23 @@ async def test_update_trigger_reports_skipped_on_oserror(
 @pytest.fixture
 def isolated_config(tmp_path, monkeypatch):
     """Redirect ~/.quern/config.json to a temp dir so tests don't mutate
-    the real user config."""
+    the real user config.
+
+    The update-check files are redirected too, and not defensively: setting the
+    channel invalidates the cached check, and update_check binds its paths at
+    import time from the real CONFIG_DIR, so patching server.config alone left
+    PUT /channel deleting update-info.json and last-update-check out of the
+    developer's actual home directory.
+    """
     monkeypatch.setattr("server.config.CONFIG_DIR", tmp_path)
     monkeypatch.setattr(
         "server.config.USER_CONFIG_FILE", tmp_path / "config.json",
     )
+    from server.lifecycle import update_check
+
+    monkeypatch.setattr(update_check, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(update_check, "LAST_CHECK_FILE", tmp_path / "last-update-check")
+    monkeypatch.setattr(update_check, "UPDATE_INFO_FILE", tmp_path / "update-info.json")
     return tmp_path
 
 
@@ -194,6 +206,57 @@ async def test_put_channel_persists_and_returns_new_state(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/system/channel", headers=auth_headers)
         assert resp.json()["channel"] == "beta"
+
+
+@pytest.mark.asyncio
+async def test_put_channel_discards_the_previous_channels_verdict(
+    app, auth_headers, isolated_config,
+):
+    """The cached check was measured against the old channel's pointer branch,
+    and the rate-limit stamp would pin it for 24 hours -- so a user moving to
+    beta would keep being told how they stood against stable.
+
+    This also pins the fixture down. These paths are bound at import from the
+    real CONFIG_DIR, so a redirect that misses them makes this assertion pass
+    by deleting the developer's own files.
+    """
+    (isolated_config / "update-info.json").write_text(
+        '{"update_available": true, "channel": "stable"}'
+    )
+    (isolated_config / "last-update-check").touch()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.put(
+            "/api/v1/system/channel",
+            headers=auth_headers,
+            json={"channel": "beta"},
+        )
+        assert resp.status_code == 200
+
+    assert not (isolated_config / "update-info.json").exists()
+    assert not (isolated_config / "last-update-check").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_channel_leaves_the_cached_check_alone(
+    app, auth_headers, isolated_config,
+):
+    """Nothing changed, so there is nothing to invalidate. Throwing away a
+    valid check because of a typo would cost a real update notification."""
+    info = isolated_config / "update-info.json"
+    info.write_text('{"update_available": true, "channel": "stable"}')
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.put(
+            "/api/v1/system/channel",
+            headers=auth_headers,
+            json={"channel": "nightly"},
+        )
+        assert resp.status_code == 400
+
+    assert info.exists()
 
 
 @pytest.mark.asyncio
