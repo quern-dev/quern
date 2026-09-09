@@ -60,7 +60,7 @@ struct SettingsView: View {
             Text("Quern").font(.title2).bold()
 
             GroupBox("Server") {
-                grid([
+                grid("Server", [
                     ("Status", s.running ? "Running" : "Stopped"),
                     ("Address", s.host != nil ? "\(s.host!):\(s.port ?? 0)" : "—"),
                     ("Version", Updater.installedVersion() ?? u.currentVersion ?? "—"),
@@ -69,15 +69,15 @@ struct SettingsView: View {
             }
 
             GroupBox("Proxy") {
-                grid([
+                grid("Proxy", [
                     ("Status", s.proxyStatus?.capitalized ?? (s.proxyEnabled ? "Enabled" : "Disabled")),
                     ("Port", s.proxyPort.map(String.init) ?? "—"),
                 ])
             }
 
             GroupBox("Active device") {
-                grid([
-                    ("Device", d.name ?? "—"),
+                grid("Active device", [
+                    ("Name", d.name ?? "—"),
                     ("UDID", d.udid ?? "—"),
                 ])
             }
@@ -101,6 +101,8 @@ struct SettingsView: View {
                         guard newValue != model.snapshot.update.channel else { return }
                         QuernCLI.setChannel(newValue)
                     }
+                    .accessibilityLabel("Update channel")
+                    .accessibilityValue(model.channel)
                     if u.updateAvailable, let latest = u.latestVersion {
                         Text("Update available: v\(latest)")
                             .foregroundColor(.secondary).font(.callout)
@@ -110,6 +112,14 @@ struct SettingsView: View {
                 }
             }
 
+            // No .accessibilityLabel here, and not for want of trying. In an
+            // NSHostingController the modifier reaches Text but is dropped by
+            // Toggle, Button and GroupBox's label -- measured: the checkbox
+            // ends up with no AXTitle and no AXDescription attribute at all,
+            // and neither .accessibilityLabel nor .accessibilityElement
+            // (children: .combine) changes that. So VoiceOver announces this
+            // as a bare "checkbox". Left unfixed rather than papered over with
+            // a modifier that does nothing.
             Toggle("Launch at login", isOn: $model.loginEnabled)
                 .onChange(of: model.loginEnabled) { newValue in
                     if !LoginItem.setEnabled(newValue) {
@@ -129,11 +139,22 @@ struct SettingsView: View {
         .frame(width: 420)
     }
 
-    private func grid(_ rows: [(String, String)]) -> some View {
+    /// A label/value table. `section` is not shown -- it exists only to
+    /// disambiguate the accessible names.
+    ///
+    /// Each row is exposed as a single element rather than two loose strings,
+    /// because read individually they lose their pairing: the Server and Proxy
+    /// boxes both contain a "Status" and a "Running", so a screen reader
+    /// walking the window heard the same two words twice with nothing to say
+    /// which was which. Qualifying with the section makes each name unique.
+    private func grid(_ section: String, _ rows: [(String, String)]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(rows, id: \.0) { row in
                 HStack(alignment: .top) {
-                    Text(row.0).foregroundColor(.secondary).frame(width: 90, alignment: .leading)
+                    Text(row.0)
+                        .foregroundColor(.secondary)
+                        .frame(width: 90, alignment: .leading)
+                        .accessibilityLabel("\(section) \(row.0)")
                     Text(row.1).textSelection(.enabled)
                     Spacer()
                 }
