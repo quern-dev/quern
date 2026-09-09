@@ -8,6 +8,7 @@ update, mentions it, and can call ``POST /update`` if the user agrees.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -119,11 +120,14 @@ async def put_channel(body: SetUpdateChannelRequest) -> UpdateChannelResponse:
     /update`` once the user is ready (and, for dev clones, has
     explicitly switched their branch).
     """
+    # Both of these are synchronous filesystem work -- a config write and two
+    # unlinks -- so they go off the event loop rather than stalling the handler
+    # if the disk does.
     try:
-        set_update_channel(body.channel)
+        await asyncio.to_thread(set_update_channel, body.channel)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    invalidate_update_check()
+    await asyncio.to_thread(invalidate_update_check)
     return UpdateChannelResponse(
         channel=body.channel,
         release_branch=channel_to_release_branch(body.channel),

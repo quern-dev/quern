@@ -209,6 +209,22 @@ def check_for_updates() -> str | None:
             )
         else:
             message = 'Update available \u2014 run "quern update" to get the latest version'
+        # The network call above can block for up to TIMEOUT seconds, which is
+        # long enough for the user to switch channels underneath it. That
+        # switch deletes both cache files precisely because this answer no
+        # longer applies -- so writing it now would undo the invalidation and
+        # leave read_update_info() reporting the old channel's verdict as
+        # current. Re-read and discard rather than resurrect.
+        #
+        # This narrows the window to the gap between the comparison and the
+        # write, instead of the whole request. An interprocess lock would close
+        # it completely, but the update check is a best-effort background hint
+        # whose worst case is a stale notification until the next run, and the
+        # switch already cleared the rate-limit stamp so the next run is
+        # immediate.
+        if get_update_channel() != channel:
+            return None
+
         # Persist structured result for the system API + MCP. Older
         # deployments of quern.dev returned only update_available, so
         # latest_version may still be absent.

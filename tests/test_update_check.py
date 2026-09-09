@@ -150,6 +150,58 @@ def test_check_for_updates_sends_the_configured_channel(
     assert persisted["channel"] == channel
 
 
+def test_a_channel_switch_mid_check_discards_the_result(
+    isolated_update_files, monkeypatch,
+):
+    """The network call can block for seconds, long enough for the user to
+    switch channels. That switch deletes the cache precisely because the
+    in-flight answer no longer applies, so writing it would undo the
+    invalidation and leave the old channel's verdict reading as current.
+    """
+    from server.lifecycle import update_check
+
+    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+    # "stable" when the request is built, "beta" by the time it returns.
+    channels = iter(["stable", "beta"])
+    monkeypatch.setattr("server.config.get_update_channel", lambda: next(channels))
+
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_fake_response({"update_available": True, "latest_version": "9.9.9"}),
+    ):
+        message = update_check.check_for_updates()
+
+    assert message is None
+    assert not (isolated_update_files / "update-info.json").exists()
+
+
+def test_an_unchanged_channel_still_writes_the_result(
+    isolated_update_files, monkeypatch,
+):
+    """The guard must only fire on an actual switch. Discarding every result
+    would silently disable update notifications altogether."""
+    from server.lifecycle import update_check
+
+    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+    monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_fake_response({"update_available": True, "latest_version": "9.9.9"}),
+    ):
+        message = update_check.check_for_updates()
+
+    assert message is not None and "9.9.9" in message
+    persisted = json.loads((isolated_update_files / "update-info.json").read_text())
+    assert persisted["channel"] == "beta"
+    assert persisted["update_available"] is True
+
+
 def test_invalidate_clears_both_the_stamp_and_the_answer(isolated_update_files):
     """Switching channel must not leave the old channel's answer in place.
 

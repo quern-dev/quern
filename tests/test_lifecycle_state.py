@@ -105,6 +105,32 @@ def test_read_active_device_missing_and_malformed(tmp_state_dir):
     assert read_active_device() == {}
 
 
+def test_a_blocked_writer_never_empties_the_sidecar(tmp_state_dir, monkeypatch):
+    """Opening with "w" truncates before the lock is taken, so a reader holding
+    LOCK_SH could observe an empty file and report no active device for as long
+    as the writer waited. The file must still hold the old value at the moment
+    the writer blocks."""
+    import fcntl as _fcntl
+
+    write_active_udid("OLD-UDID", "Old Phone")
+
+    seen: dict[str, dict] = {}
+    real_flock = _fcntl.flock
+
+    def spy(fd, op):
+        # Read the file as a competing process would, at the instant this
+        # writer asks for its exclusive lock.
+        if op == _fcntl.LOCK_EX and "at_lock" not in seen:
+            seen["at_lock"] = read_active_device()
+        return real_flock(fd, op)
+
+    monkeypatch.setattr("server.lifecycle.state.fcntl.flock", spy)
+    write_active_udid("NEW-UDID", "New Phone")
+
+    assert seen["at_lock"] == {"udid": "OLD-UDID", "name": "Old Phone"}
+    assert read_active_device() == {"udid": "NEW-UDID", "name": "New Phone"}
+
+
 def test_active_udid_survives_remove_state(tmp_state_dir):
     """The bug regression test: remove_state() must NOT touch the
     active-device sidecar. Active device is user preference and survives

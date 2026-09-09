@@ -172,9 +172,16 @@ def write_active_udid(udid: str | None, name: str | None = None) -> None:
             payload["name"] = name
     else:
         payload = {}
-    fd = ACTIVE_DEVICE_FILE.open("w")
+    # "a+" rather than "w", then truncate under the lock. "w" empties the file
+    # on open, before the lock is taken, so a concurrent read_active_device()
+    # holding LOCK_SH could see an empty file and report no active device --
+    # for as long as this writer waited for LOCK_EX. Same pattern update_state
+    # already uses below.
+    fd = ACTIVE_DEVICE_FILE.open("a+")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        fd.truncate()
         fd.write(json.dumps(payload, indent=2))
         fd.flush()
     finally:
