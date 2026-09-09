@@ -84,25 +84,37 @@ struct SettingsView: View {
 
             GroupBox("Updates") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Picker("Channel", selection: $model.channel) {
-                        Text("Stable").tag("stable")
-                        Text("Beta").tag("beta")
+                    HStack(alignment: .firstTextBaseline) {
+                        // Same 90pt label column as grid(), so this row lines
+                        // up with every other label in the window. A Picker
+                        // renders its own label instead, which indented the
+                        // control and left it as the one row not flush left.
+                        Text("Channel")
+                            .foregroundColor(.secondary)
+                            .frame(width: 90, alignment: .leading)
+                        Picker("Channel", selection: $model.channel) {
+                            Text("Stable").tag("stable")
+                            Text("Beta").tag("beta")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 220)
+                        .onChange(of: model.channel) { newValue in
+                            // Only write when the user actually moved the
+                            // picker. `apply()` assigns this too, whenever a
+                            // fresh snapshot lands, and writing back on that
+                            // path shells out to `quern set-channel` with the
+                            // value already on disk. That is not a no-op:
+                            // setting the channel clears the cached update
+                            // check, so merely opening Settings on a beta
+                            // machine wiped the update hint.
+                            guard newValue != model.snapshot.update.channel else { return }
+                            QuernCLI.setChannel(newValue)
+                        }
+                        .accessibilityLabel("Update channel")
+                        .accessibilityValue(model.channel)
+                        Spacer()
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 220)
-                    .onChange(of: model.channel) { newValue in
-                        // Only write when the user actually moved the picker.
-                        // `apply()` assigns this too, whenever a fresh
-                        // snapshot lands, and writing back on that path shells
-                        // out to `quern set-channel` with the value already on
-                        // disk. That is not a no-op: setting the channel
-                        // clears the cached update check, so merely opening
-                        // Settings on a beta machine wiped the update hint.
-                        guard newValue != model.snapshot.update.channel else { return }
-                        QuernCLI.setChannel(newValue)
-                    }
-                    .accessibilityLabel("Update channel")
-                    .accessibilityValue(model.channel)
                     if u.updateAvailable, let latest = u.latestVersion {
                         Text("Update available: v\(latest)")
                             .foregroundColor(.secondary).font(.callout)
@@ -130,7 +142,7 @@ struct SettingsView: View {
 
             HStack {
                 Button("Documentation") {
-                    NSWorkspace.shared.open(URL(string: "https://quern.dev")!)
+                    NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
                 }
                 Spacer()
             }

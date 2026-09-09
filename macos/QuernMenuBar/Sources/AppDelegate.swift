@@ -131,8 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Self.screenMirrorApp != nil {
             menu.addItem(action("Screen Mirror…", #selector(openScreenMirror)))
         }
-        menu.addItem(action("Settings…", #selector(openSettings), key: ","))
         menu.addItem(action("Documentation", #selector(openDocs)))
+
+        // Settings sits alone deliberately. macOS attaches an SF Symbol gear
+        // to this item on its own -- renaming it and dropping the comma
+        // shortcut both failed to stop it, and the image is re-derived rather
+        // than stored, so assigning nil does nothing either. A menu reserves
+        // an icon gutter per section, so while the gear shared a section it
+        // indented Screen Mirror and Documentation with it. Given the icon
+        // cannot be removed, it gets its own section instead of a fight.
+        menu.addItem(.separator())
+        menu.addItem(action("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
 
         // Quit, with an Option-revealed "Quit and Stop Server" alternate.
@@ -188,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettings() { settings.show() }
 
     @objc private func openDocs() {
-        NSWorkspace.shared.open(URL(string: "https://quern.dev")!)
+        NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
     }
 
     /// The screen-mirror bundle quern installs alongside its other binaries,
