@@ -91,10 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Lifecycle (monitor + manual control — never owns the daemon).
         if s.running {
-            menu.addItem(action("Stop", #selector(stopServer)))
-            menu.addItem(action("Restart", #selector(restartServer)))
+            menu.addItem(action("Stop Server", #selector(stopServer)))
+            menu.addItem(action("Restart Server", #selector(restartServer)))
         } else {
-            menu.addItem(action("Start", #selector(startServer)))
+            menu.addItem(action("Start Server", #selector(startServer)))
         }
 
         // The Ollama parallel: only appears once an update is staged.

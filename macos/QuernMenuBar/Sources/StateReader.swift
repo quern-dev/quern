@@ -119,7 +119,7 @@ final class StateReader {
         s.proxyStatus = d["proxy_status"] as? String
         s.proxyPort = d["proxy_port"] as? Int
         if let started = d["started_at"] as? String {
-            s.startedAt = ISO8601DateFormatter().date(from: started)
+            s.startedAt = Self.parseISO8601(started)
         }
         // state.json exists only while the daemon is up, but a stale file can
         // linger after a crash — confirm the PID is actually alive.
@@ -127,6 +127,24 @@ final class StateReader {
             s.running = (kill(pid_t(pid), 0) == 0) || (errno == EPERM)
         }
         return s
+    }
+
+
+    /// Parse an ISO-8601 timestamp with or without fractional seconds.
+    ///
+    /// A bare `ISO8601DateFormatter()` rejects fractional seconds, and quern
+    /// writes them: `2026-09-09T00:21:34.042778+00:00`. So `startedAt` was
+    /// always nil and uptime silently never appeared — the menu header already
+    /// asked for it. Enabling `.withFractionalSeconds` alone would invert the
+    /// bug, since that variant rejects timestamps *without* them, so both are
+    /// tried.
+    static func parseISO8601(_ value: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = withFraction.date(from: value) { return d }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: value)
     }
 
     private static func readUpdateInfo() -> UpdateInfo {
