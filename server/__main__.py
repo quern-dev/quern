@@ -440,7 +440,6 @@ def _cmd_set_channel(args: list[str]) -> int:
         VALID_UPDATE_CHANNELS,
         channel_to_release_branch,
         get_update_channel,
-        set_update_channel,
     )
 
     if not args:
@@ -451,8 +450,14 @@ def _cmd_set_channel(args: list[str]) -> int:
         return 0
 
     target = args[0]
+    # switch_channel persists the preference and drops the cached check as one
+    # locked operation, so the next check is asked afresh instead of waiting
+    # out the 24h rate limit, and a check already in flight cannot put the old
+    # channel's answer back afterwards.
+    from server.lifecycle.update_check import switch_channel
+
     try:
-        set_update_channel(target)
+        switch_channel(target)
     except ValueError as e:
         print(f"Error: {e}")
         return 1

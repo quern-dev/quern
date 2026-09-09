@@ -126,17 +126,62 @@ def read_active_udid() -> str | None:
         return None
 
 
-def write_active_udid(udid: str | None) -> None:
+def read_active_device() -> dict:
+    """Read the whole active-device sidecar, not just the UDID.
+
+    Returns {} when the file is missing, empty or malformed, so callers
+    can treat every failure the same way.
+    """
+    if not ACTIVE_DEVICE_FILE.exists():
+        return {}
+    try:
+        fd = ACTIVE_DEVICE_FILE.open("r")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            content = fd.read()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        if not content.strip():
+            return {}
+        data = json.loads(content)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to read active-device.json: %s", e)
+        return {}
+
+
+def write_active_udid(udid: str | None, name: str | None = None) -> None:
     """Persist the active-device UDID to its sidecar file.
 
     Pass None (or empty string) to clear. Survives `quern stop` —
     `remove_state()` deletes state.json but does not touch this file.
+
+    `name` is the human-readable device name, written alongside so that
+    readers outside the server -- the menu-bar app is the one that
+    prompted this -- can show "iPhone 17 Pro" instead of a 36-character
+    UDID. It is optional and best-effort: the name comes from a cache
+    the caller may not have warmed yet, and a device is still perfectly
+    usable without one. Readers must therefore treat it as absent-able
+    and fall back to the UDID rather than showing an empty label.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"udid": udid} if udid else {}
-    fd = ACTIVE_DEVICE_FILE.open("w")
+    if udid:
+        payload: dict[str, str] = {"udid": udid}
+        if name:
+            payload["name"] = name
+    else:
+        payload = {}
+    # "a+" rather than "w", then truncate under the lock. "w" empties the file
+    # on open, before the lock is taken, so a concurrent read_active_device()
+    # holding LOCK_SH could see an empty file and report no active device --
+    # for as long as this writer waited for LOCK_EX. Same pattern update_state
+    # already uses below.
+    fd = ACTIVE_DEVICE_FILE.open("a+")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        fd.truncate()
         fd.write(json.dumps(payload, indent=2))
         fd.flush()
     finally:

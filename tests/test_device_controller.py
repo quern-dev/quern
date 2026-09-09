@@ -30,6 +30,97 @@ def _device(
 
 
 # ---------------------------------------------------------------------------
+# Active-device sidecar — the name written beside the UDID
+# ---------------------------------------------------------------------------
+
+
+class TestActiveDeviceName:
+    async def test_name_is_persisted_beside_the_udid(self):
+        """Readers outside the server -- the menu-bar app -- show the active
+        device, and a 36-character UDID is not something a person recognises."""
+        from server.lifecycle.state import read_active_device
+
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[_device(udid="AAAA-1111", name="iPhone 16 Pro")]
+        )
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.adb.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+
+        await ctrl.resolve_udid("AAAA-1111")
+
+        assert read_active_device() == {"udid": "AAAA-1111", "name": "iPhone 16 Pro"}
+
+    async def test_an_unknown_device_still_persists_its_udid(self):
+        """The name is best-effort. A UDID assigned with no enumeration behind
+        it -- the pool takes this path -- must still be recorded, with readers
+        falling back to the UDID rather than losing the active device."""
+        from server.lifecycle.state import read_active_device
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "ZZZZ-9999"
+
+        assert read_active_device() == {"udid": "ZZZZ-9999"}
+
+    async def test_reassigning_the_same_device_does_not_rewrite_the_sidecar(self):
+        """resolve_udid() assigns the active device on every call that names
+        one, which is most tool calls. Rewriting the file each time took
+        LOCK_EX on the event loop to store the value it already held."""
+        from server.lifecycle import state
+
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {"AAAA-1111": "iPhone 16 Pro"}
+
+        writes = 0
+        real = state.write_active_udid
+
+        def counting(udid, name=None):
+            nonlocal writes
+            writes += 1
+            return real(udid, name)
+
+        with patch.object(
+            __import__("server.device.controller", fromlist=["x"]),
+            "write_active_udid", counting,
+        ):
+            ctrl._active_udid = "AAAA-1111"
+            assert writes == 1
+            for _ in range(10):
+                ctrl._active_udid = "AAAA-1111"
+            assert writes == 1, "unchanged reassignment still wrote"
+            ctrl._active_udid = "BBBB-2222"
+            assert writes == 2
+
+    async def test_a_name_arriving_later_is_written(self):
+        """The name cache is warmed by list_devices() and can fill in after the
+        UDID was already set. That later fill is exactly when the sidecar needs
+        rewriting, so the guard compares the name too, not just the UDID."""
+        from server.lifecycle.state import read_active_device
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        assert read_active_device() == {"udid": "AAAA-1111"}
+
+        ctrl._device_name_cache["AAAA-1111"] = "iPhone 16 Pro"
+        ctrl._active_udid = "AAAA-1111"
+
+        assert read_active_device() == {"udid": "AAAA-1111", "name": "iPhone 16 Pro"}
+
+    async def test_switching_devices_replaces_the_name(self):
+        """A stale name on a new UDID would mislabel the device outright."""
+        from server.lifecycle.state import read_active_device
+
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {"AAAA-1111": "iPhone 16 Pro"}
+        ctrl._active_udid = "AAAA-1111"
+        ctrl._active_udid = "BBBB-2222"
+
+        assert read_active_device() == {"udid": "BBBB-2222"}
+
+
+# ---------------------------------------------------------------------------
 # resolve_udid
 # ---------------------------------------------------------------------------
 
