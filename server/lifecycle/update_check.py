@@ -169,12 +169,13 @@ def check_for_updates() -> str | None:
         # to anyone on beta.
         from server.config import get_update_channel
 
+        channel = get_update_channel()
         params = []
         if head_sha:
             params.append(f"sha={head_sha}")
         if version:
             params.append(f"version={version}")
-        params.append(f"channel={get_update_channel()}")
+        params.append(f"channel={channel}")
 
         # Hit the endpoint
         url = f"{ENDPOINT}?{'&'.join(params)}"
@@ -217,6 +218,11 @@ def check_for_updates() -> str | None:
             "latest_version": latest_version,
             "update_available": update_available,
             "message": message,
+            # The answer above is only meaningful for the channel it was asked
+            # about -- quern.dev compares against that channel's pointer branch
+            # -- so record which one, and let readers detect a result cached
+            # before a channel switch instead of trusting it for 24 hours.
+            "channel": channel,
         })
         return message
 
@@ -234,6 +240,25 @@ def _write_update_info(info: dict) -> None:
         UPDATE_INFO_FILE.write_text(json.dumps(info, indent=2))
     except OSError as e:
         logger.debug("Failed to persist update info: %s", e)
+
+
+def invalidate_update_check() -> None:
+    """Discard the cached update check so the next one runs immediately.
+
+    Called when the update channel changes. The cached answer was computed
+    against the old channel's pointer branch, and the rate-limit stamp would
+    otherwise suppress a fresh check for up to 24 hours -- so a user who
+    switched to beta could keep being told they were up to date against
+    stable, or be offered a "newer" version they had just switched away from.
+
+    Best-effort: this only makes a check happen sooner, so a failed unlink is
+    not worth propagating.
+    """
+    for path in (LAST_CHECK_FILE, UPDATE_INFO_FILE):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug("Failed to clear %s: %s", path.name, e)
 
 
 def read_update_info() -> dict | None:

@@ -143,6 +143,39 @@ def test_check_for_updates_sends_the_configured_channel(
     requested_url = urlopen.call_args[0][0].full_url
     assert f"channel={channel}" in requested_url
     assert "sha=abc123" in requested_url
+    # The persisted answer records which channel produced it. Without this a
+    # reader cannot tell a "you are up to date" cached under stable from one
+    # cached under beta, and the two mean different things.
+    persisted = json.loads((isolated_update_files / "update-info.json").read_text())
+    assert persisted["channel"] == channel
+
+
+def test_invalidate_clears_both_the_stamp_and_the_answer(isolated_update_files):
+    """Switching channel must not leave the old channel's answer in place.
+
+    The rate-limit stamp alone would suppress a fresh check for 24 hours, so
+    clearing only the answer would leave no answer at all for a day.
+    """
+    from server.lifecycle import update_check
+
+    stamp = isolated_update_files / "last-update-check"
+    info = isolated_update_files / "update-info.json"
+    stamp.touch()
+    info.write_text(json.dumps({"update_available": True, "channel": "stable"}))
+
+    update_check.invalidate_update_check()
+
+    assert not stamp.exists()
+    assert not info.exists()
+    assert update_check.read_update_info() is None
+
+
+def test_invalidate_is_a_no_op_when_nothing_is_cached(isolated_update_files):
+    """Called on a fresh install, before any check has ever run."""
+    from server.lifecycle import update_check
+
+    update_check.invalidate_update_check()  # must not raise
+    assert update_check.read_update_info() is None
 
 
 def test_message_names_the_version_when_the_endpoint_supplies_one(

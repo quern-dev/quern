@@ -8,6 +8,7 @@ import pytest
 
 from server.lifecycle.state import (
     is_server_healthy,
+    read_active_device,
     read_active_udid,
     read_state,
     remove_state,
@@ -65,6 +66,43 @@ def test_active_udid_clear(tmp_state_dir):
 def test_active_udid_missing_file(tmp_state_dir):
     """read_active_udid returns None when the sidecar doesn't exist."""
     assert read_active_udid() is None
+
+
+def test_active_device_name_round_trip(tmp_state_dir):
+    """The name is written alongside the UDID so readers outside the server
+    can show it instead of a 36-character identifier."""
+    write_active_udid("ABC-123-DEF", "iPhone 17 Pro")
+    assert read_active_device() == {"udid": "ABC-123-DEF", "name": "iPhone 17 Pro"}
+    assert read_active_udid() == "ABC-123-DEF"
+
+
+def test_active_device_name_omitted_when_unknown(tmp_state_dir):
+    """The name is best-effort. When the caller has none, the key is absent
+    rather than written empty -- readers key off absence to fall back to the
+    UDID, and an empty string would render as a blank label instead."""
+    write_active_udid("ABC-123-DEF")
+    assert read_active_device() == {"udid": "ABC-123-DEF"}
+    write_active_udid("ABC-123-DEF", "")
+    assert read_active_device() == {"udid": "ABC-123-DEF"}
+
+
+def test_active_device_name_cleared_with_udid(tmp_state_dir):
+    """Clearing the device must not leave the previous device's name behind."""
+    write_active_udid("ABC-123-DEF", "iPhone 17 Pro")
+    write_active_udid(None)
+    assert read_active_device() == {}
+    assert read_active_udid() is None
+
+
+def test_read_active_device_missing_and_malformed(tmp_state_dir):
+    """Every failure mode collapses to {} so callers need one branch."""
+    assert read_active_device() == {}
+    (tmp_state_dir / "active-device.json").write_text("")
+    assert read_active_device() == {}
+    (tmp_state_dir / "active-device.json").write_text("not json")
+    assert read_active_device() == {}
+    (tmp_state_dir / "active-device.json").write_text("[1, 2]")
+    assert read_active_device() == {}
 
 
 def test_active_udid_survives_remove_state(tmp_state_dir):

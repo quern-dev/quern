@@ -23,7 +23,7 @@ from server.config import (
     get_update_channel,
     set_update_channel,
 )
-from server.lifecycle.update_check import read_update_info
+from server.lifecycle.update_check import invalidate_update_check, read_update_info
 
 logger = logging.getLogger("quern-debug-server.system")
 
@@ -123,6 +123,7 @@ async def put_channel(body: SetUpdateChannelRequest) -> UpdateChannelResponse:
         set_update_channel(body.channel)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    invalidate_update_check()
     return UpdateChannelResponse(
         channel=body.channel,
         release_branch=channel_to_release_branch(body.channel),

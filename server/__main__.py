@@ -457,6 +457,12 @@ def _cmd_set_channel(args: list[str]) -> int:
         print(f"Error: {e}")
         return 1
 
+    # The cached check was answered against the old channel; drop it so the
+    # next one is asked afresh rather than waiting out the 24h rate limit.
+    from server.lifecycle.update_check import invalidate_update_check
+
+    invalidate_update_check()
+
     branch = channel_to_release_branch(target)
     print(f"Update channel set to: {target} (tracks origin/{branch})")
     print("Run `quern update` to apply changes from this channel.")

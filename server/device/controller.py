@@ -72,6 +72,10 @@ class DeviceController(DeviceControllerUI):
         self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        # Device name cache: udid -> human-readable name (populated by
+        # list_devices). Only consumer is the active-device sidecar, so that
+        # readers outside the server can show a name instead of a UDID.
+        self._device_name_cache: dict[str, str] = {}
         # CoreDevice UUID -> libimobiledevice UDID mapping (populated by list_devices)
         self._usbmux_udid_map: dict[str, str] = {}
 
@@ -82,7 +86,11 @@ class DeviceController(DeviceControllerUI):
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
         self.__active_udid = value
-        write_active_udid(value)
+        # Best-effort name: the cache is filled by list_devices(), which
+        # every resolve path runs before landing here, but the pool and the
+        # set-active-device API can assign a UDID directly. A miss writes no
+        # name and readers fall back to the UDID -- the previous behaviour.
+        write_active_udid(value, self._device_name_cache.get(value) if value else None)
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
@@ -282,6 +290,11 @@ class DeviceController(DeviceControllerUI):
                 self.wda_client._device_names[d.udid] = d.name
         for d in android_devices:
             self._device_type_cache[d.udid] = d.device_type
+        # One pass over every backend rather than four: the name is wanted
+        # for all device kinds and nothing else here varies by kind.
+        for d in sim_devices + physical_devices + usbmux_devices + android_devices:
+            if d.name:
+                self._device_name_cache[d.udid] = d.name
 
         # Build CoreDevice UUID -> libimobiledevice UDID mapping
         # by correlating device names between devicectl and usbmux
