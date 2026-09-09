@@ -7,6 +7,7 @@ call so test runs are deterministic.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -186,3 +187,79 @@ def test_message_falls_back_when_endpoint_omits_the_version(
     assert msg is not None
     assert "Update available" in msg
     assert update_check.read_update_info()["latest_version"] is None
+
+
+# --------------------------------------------------------------------------
+# A git install that is ahead of its channel is not "out of date" (#123)
+# --------------------------------------------------------------------------
+#
+# quern.dev answers the sha question with string equality, because a Cloudflare
+# Worker holding only branch refs has no commit graph and cannot distinguish
+# "ahead" from "behind". A git install working on main is ahead of its channel
+# pointer, so the endpoint reported an update available to an *ancestor* of the
+# local HEAD.
+#
+# `_update_via_git` never believed it — it counts HEAD..origin/<ref> and returns
+# "no update needed" at zero — so the update was always refused and only the
+# notification was wrong. These pin that the notification now agrees with the
+# action.
+#
+# Tarball installs never send a sha and never reach this path; their behaviour
+# is unchanged.
+
+
+def _fake_git(monkeypatch, tmp_path, *, behind: int, has_repo: bool = True,
+              fail: bool = False):
+    """Stand in for the git calls _is_ahead_of_channel makes.
+
+    Uses a real temp directory rather than patching `Path.exists` on the class —
+    doing that globally broke an autouse fixture's teardown, which surfaced as
+    four errors in unrelated tests.
+    """
+    from server.lifecycle import update_check as uc
+
+    if has_repo:
+        (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(uc, "_find_project_root", lambda: tmp_path)
+
+    def run(cmd, **_kw):
+        if "fetch" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if fail:
+            return SimpleNamespace(returncode=128, stdout="", stderr="fatal")
+        return SimpleNamespace(returncode=0, stdout=f"{behind}\n", stderr="")
+
+    monkeypatch.setattr(uc.subprocess, "run", run)
+
+
+def test_ahead_of_the_channel_reads_as_up_to_date(monkeypatch, tmp_path):
+    from server.lifecycle.update_check import _is_ahead_of_channel
+
+    _fake_git(monkeypatch, tmp_path, behind=0)
+    assert _is_ahead_of_channel() is True
+
+
+def test_genuinely_behind_is_not_suppressed(monkeypatch, tmp_path):
+    """The guard must not swallow a real update."""
+    from server.lifecycle.update_check import _is_ahead_of_channel
+
+    _fake_git(monkeypatch, tmp_path, behind=7)
+    assert _is_ahead_of_channel() is False
+
+
+def test_a_non_git_install_never_claims_to_be_ahead(monkeypatch, tmp_path):
+    """Tarball installs have no repository. Returning True here would suppress
+    every update they are ever offered."""
+    from server.lifecycle.update_check import _is_ahead_of_channel
+
+    _fake_git(monkeypatch, tmp_path, behind=0, has_repo=False)
+    assert _is_ahead_of_channel() is False
+
+
+def test_a_git_failure_falls_back_to_the_endpoint(monkeypatch, tmp_path):
+    """An unexpected git state must not silently suppress a real update — the
+    conservative answer is to believe the endpoint."""
+    from server.lifecycle.update_check import _is_ahead_of_channel
+
+    _fake_git(monkeypatch, tmp_path, behind=0, fail=True)
+    assert _is_ahead_of_channel() is False

@@ -605,3 +605,67 @@ def test_kill_stale_mitmdump_lsof_fails():
             # Should not raise
             ProxyAdapter._kill_stale_mitmdump(9101)
             mock_kill.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# state.json's proxy_status must reach "running" (#122)
+# --------------------------------------------------------------------------
+#
+# It was written as "starting" at boot (server/main.py) and only ever changed
+# again by the watchdog writing "crashed". Nothing wrote "running", although
+# state.py's own annotation lists it as a valid value — so the state machine was
+# `starting -> (crashed)` with the success transition missing.
+#
+# Invisible while every consumer was authenticated, because the *API* computes
+# status live and was always right. The menu-bar app reads the unauthenticated
+# state files on purpose (no API key), so it was the first thing to surface a
+# proxy that had been "starting" for three days.
+
+
+def _adapter():
+    from server.sources.proxy import ProxyAdapter
+
+    return ProxyAdapter(on_entry=lambda _e: None)
+
+
+def test_the_addon_started_event_marks_the_proxy_running(monkeypatch):
+    written = {}
+    monkeypatch.setattr("server.sources.proxy.update_state",
+                        lambda **kw: written.update(kw))
+
+    _adapter()._handle_status_event({"type": "status", "event": "started"})
+    assert written == {"proxy_status": "running"}
+
+
+def test_the_addon_stopped_event_marks_it_stopped(monkeypatch):
+    written = {}
+    monkeypatch.setattr("server.sources.proxy.update_state",
+                        lambda **kw: written.update(kw))
+
+    _adapter()._handle_status_event({"type": "status", "event": "stopped"})
+    assert written == {"proxy_status": "stopped"}
+
+
+async def test_an_explicit_stop_writes_stopped_without_the_addon(monkeypatch):
+    """A hard kill gives the addon no chance to emit its own `stopped`, and the
+    state file would otherwise keep claiming the proxy is running."""
+    written = {}
+    monkeypatch.setattr("server.sources.proxy.update_state",
+                        lambda **kw: written.update(kw))
+
+    a = _adapter()
+    await a.stop()
+    assert written.get("proxy_status") == "stopped"
+
+
+def test_other_status_events_do_not_touch_proxy_status(monkeypatch):
+    """`intercept_set` and friends share this handler; only lifecycle events
+    should move the field."""
+    written = {}
+    monkeypatch.setattr("server.sources.proxy.update_state",
+                        lambda **kw: written.update(kw))
+
+    a = _adapter()
+    a._handle_status_event({"type": "status", "event": "intercept_set", "pattern": "~u x"})
+    a._handle_status_event({"type": "status", "event": "mocks_cleared"})
+    assert written == {}

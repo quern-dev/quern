@@ -84,6 +84,42 @@ def _get_head_sha() -> str | None:
     return None
 
 
+
+def _is_ahead_of_channel() -> bool:
+    """Whether the local HEAD is at or ahead of its channel's pointer branch.
+
+    Only meaningful for git installs; a tarball install has no repository and
+    never sends a sha, so it never reaches here. Counts commits the pointer has
+    that HEAD does not -- zero means nothing to pull, which is what
+    ``_update_via_git`` requires before it will do anything.
+
+    Returns False on any failure, so an unexpected git state falls back to the
+    endpoint's answer rather than silently suppressing a real update.
+    """
+    project_root = _find_project_root()
+    if project_root is None or not (project_root / ".git").exists():
+        return False
+    try:
+        from server.lifecycle.updater import _get_release_branch
+
+        ref = f"origin/{_get_release_branch()}"
+        # Fetch first: without it the pointer ref may be stale enough to report
+        # zero commits behind on an install that genuinely has an update.
+        subprocess.run(
+            ["git", "fetch", "--quiet", "origin"],
+            cwd=str(project_root), capture_output=True, timeout=15,
+        )
+        result = subprocess.run(
+            ["git", "rev-list", f"HEAD..{ref}", "--count"],
+            cwd=str(project_root), capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return False
+        return int(result.stdout.strip()) == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 def check_for_updates() -> str | None:
     """Return a message if updates are available, None otherwise.
 
@@ -135,6 +171,21 @@ def check_for_updates() -> str | None:
 
         update_available = bool(data.get("update_available"))
         latest_version = data.get("latest_version")
+
+        # quern.dev answers the sha question with string equality
+        # (`clientSha !== latestSha`), because a Cloudflare Worker holding only
+        # branch refs has no commit graph and cannot tell "ahead" from "behind".
+        # A git install working on main is ahead of its channel pointer, so it
+        # was told an update was available to an ancestor of its own HEAD (#123).
+        #
+        # `_update_via_git` never believed this -- it counts `HEAD..origin/<ref>`
+        # and declines when that is zero -- so the update itself was always
+        # refused and the defect was confined to the notification. This makes the
+        # notification consult the same reality the action already does, rather
+        # than adding a second mechanism.
+        if update_available and head_sha and _is_ahead_of_channel():
+            update_available = False
+            latest_version = None
         if not update_available:
             message = None
         elif latest_version:
