@@ -91,6 +91,14 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 220)
                     .onChange(of: model.channel) { newValue in
+                        // Only write when the user actually moved the picker.
+                        // `apply()` assigns this too, whenever a fresh
+                        // snapshot lands, and writing back on that path shells
+                        // out to `quern set-channel` with the value already on
+                        // disk. That is not a no-op: setting the channel
+                        // clears the cached update check, so merely opening
+                        // Settings on a beta machine wiped the update hint.
+                        guard newValue != model.snapshot.update.channel else { return }
                         QuernCLI.setChannel(newValue)
                     }
                     if u.updateAvailable, let latest = u.latestVersion {

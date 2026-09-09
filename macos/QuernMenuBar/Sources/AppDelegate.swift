@@ -36,20 +36,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         button.image = Self.statusImage(running: false, updateAvailable: false)
         button.image?.isTemplate = true
-        button.toolTip = "Quern"
+        button.appearsDisabled = true
+        button.toolTip = "Quern is stopped"
     }
 
     private func refreshStatusButton() {
         guard let button = statusItem.button else { return }
-        button.image = Self.statusImage(
-            running: snapshot.server.running,
-            updateAvailable: snapshot.update.updateAvailable
-        )
-        button.image?.isTemplate = !snapshot.update.updateAvailable
+        let running = snapshot.server.running
+        let updateAvailable = snapshot.update.updateAvailable
+        button.image = Self.statusImage(running: running, updateAvailable: updateAvailable)
+        // Always a template. The bundled icon is pure black with alpha, so
+        // rendering it untemplated would paint solid black -- fine on a light
+        // menu bar, invisible on a dark one. The SF Symbol fallback has the
+        // same problem, which is why this is unconditional rather than a
+        // property of which image was loaded.
+        button.image?.isTemplate = true
+        // State instead comes from the standard status-item idiom: dimmed when
+        // the daemon is down. It reads correctly in both appearances, which a
+        // colour swap does not.
+        button.appearsDisabled = !running
+        if updateAvailable {
+            let version = snapshot.update.latestVersion.map { " (v\($0))" } ?? ""
+            button.toolTip = "Quern — update available\(version)"
+        } else {
+            button.toolTip = running ? "Quern is running" : "Quern is stopped"
+        }
     }
 
-    /// Prefer a bundled template icon; fall back to an SF Symbol so the app is
-    /// always usable even before a custom icon ships.
+    /// Prefer the bundled template icon; fall back to an SF Symbol so the app
+    /// is still usable if the asset is missing from the bundle.
+    ///
+    /// The bundled icon is one image for every state, so it does not vary the
+    /// way the symbol fallback does. That is deliberate: a menu bar full of
+    /// glyphs is easier to scan when each app keeps a constant silhouette, and
+    /// the states it dropped are all still shown -- running and stopped by the
+    /// dimming above, an available update by its own menu item.
     private static func statusImage(running: Bool, updateAvailable: Bool) -> NSImage? {
         if let url = Bundle.main.url(forResource: "StatusIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {
@@ -104,6 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        // Only offered when the bundle is actually there. quern writes it into
+        // ~/.quern/bin on setup, so a menu bar running against an install that
+        // predates it would otherwise show an item that does nothing.
+        if Self.screenMirrorApp != nil {
+            menu.addItem(action("Screen Mirror…", #selector(openScreenMirror)))
+        }
         menu.addItem(action("Settings…", #selector(openSettings), key: ","))
         menu.addItem(action("Documentation", #selector(openDocs)))
         menu.addItem(.separator())
@@ -162,6 +189,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openDocs() {
         NSWorkspace.shared.open(URL(string: "https://quern.dev")!)
+    }
+
+    /// The screen-mirror bundle quern installs alongside its other binaries,
+    /// or nil if this install doesn't have one.
+    static var screenMirrorApp: URL? {
+        let url = StateReader.quernDir
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("Quern Preview.app", isDirectory: true)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Launch the mirror straight from its bundle rather than through the CLI.
+    ///
+    /// There is no `quern` subcommand for it, and the HTTP route needs the API
+    /// key — but neither is necessary: `ios-preview` with no arguments already
+    /// means "offer every device", which is exactly what a user picking this
+    /// from a menu wants. Opening the bundle also gets a Dock icon and the
+    /// camera-access prompt attributed to "Quern Preview", which spawning the
+    /// bare executable would not.
+    @objc private func openScreenMirror() {
+        guard let url = Self.screenMirrorApp else { return }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+            guard let error else { return }
+            NSLog("Screen mirror launch failed: \(error.localizedDescription)")
+        }
     }
 
     @objc private func quitApp() { NSApp.terminate(nil) }

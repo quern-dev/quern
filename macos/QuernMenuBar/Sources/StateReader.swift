@@ -4,7 +4,8 @@
 // source of truth (no bearer token / HTTP needed):
 //   • state.json        — written while the daemon runs, deleted on stop
 //   • update-info.json   — the cached "update available" hint (24h refresh)
-//   • active-device.json — the active device UDID
+//   • active-device.json — the active device UDID and name
+//   • config.json        — user preferences; the update channel lives here
 //
 // Field names mirror server/lifecycle/state.py exactly.
 
@@ -149,13 +150,35 @@ final class StateReader {
 
     private static func readUpdateInfo() -> UpdateInfo {
         var u = UpdateInfo()
+        u.channel = readChannel()
         guard let d = json("update-info.json") else { return u }
         u.updateAvailable = d["update_available"] as? Bool ?? false
         u.currentVersion = d["current_version"] as? String
         u.latestVersion = d["latest_version"] as? String
         u.message = d["message"] as? String
-        u.channel = d["channel"] as? String
         return u
+    }
+
+    /// The update channel, read from config.json — where the server keeps it.
+    ///
+    /// Not from update-info.json, which only caches the *result* of a check.
+    /// That file is deleted when the channel changes (the cached verdict was
+    /// measured against the old channel's pointer branch and would be wrong
+    /// for a day), so reading the channel from it showed the default right
+    /// after a switch — exactly when the user was looking.
+    ///
+    /// Mirrors `get_update_channel()`: an unrecognised value falls back to the
+    /// default rather than being displayed, so a hand-edited typo in
+    /// config.json cannot put the picker in a state the user can't get out of.
+    static let validChannels = ["stable", "beta"]
+    static let defaultChannel = "stable"
+
+    private static func readChannel() -> String {
+        guard let d = json("config.json"),
+              let raw = d["update_channel"] as? String,
+              validChannels.contains(raw)
+        else { return defaultChannel }
+        return raw
     }
 
     private static func readActiveDevice() -> ActiveDevice {
