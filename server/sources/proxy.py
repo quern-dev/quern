@@ -304,8 +304,9 @@ class ProxyAdapter(BaseSourceAdapter):
         self._running = False
         # Also written here, not only from the addon's "stopped" event: a hard
         # kill gives the addon no chance to emit, and the state file would then
-        # keep claiming the proxy is running.
-        update_state(proxy_status="stopped")
+        # keep claiming the proxy is running. Off-thread for the same reason as
+        # the handler -- this runs on the event loop.
+        await asyncio.to_thread(update_state, proxy_status="stopped")
 
         if self._process and self._process.returncode is None:
             self._process.terminate()
@@ -536,7 +537,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 elif msg_type == "mock_hit":
                     await self._handle_mock_hit(data)
                 elif msg_type == "status":
-                    self._handle_status_event(data)
+                    await self._handle_status_event(data)
                 elif msg_type == "error":
                     logger.warning("Addon error: %s", data)
         except asyncio.CancelledError:
@@ -644,18 +645,22 @@ class ProxyAdapter(BaseSourceAdapter):
         )
         await self.emit(entry)
 
-    def _handle_status_event(self, data: dict) -> None:
+    async def _handle_status_event(self, data: dict) -> None:
         """Handle status events from the addon that update local state mirrors."""
         event = data.get("event")
+        # update_state() takes fcntl.LOCK_EX and does synchronous file I/O, so
+        # calling it inline would block the event loop behind whichever writer
+        # holds the lock -- stalling unrelated coroutines for a state write
+        # nothing is waiting on.
         if event == "started":
             # state.json's proxy_status was written as "starting" at boot and
             # never advanced, so every unauthenticated consumer saw a proxy that
             # was permanently starting up (#122). The addon's own "started" is
             # the honest signal -- it means the script loaded and mitmproxy is
             # up, rather than merely that the subprocess was spawned.
-            update_state(proxy_status="running")
+            await asyncio.to_thread(update_state, proxy_status="running")
         elif event == "stopped":
-            update_state(proxy_status="stopped")
+            await asyncio.to_thread(update_state, proxy_status="stopped")
         elif event == "intercept_set":
             self._intercept_pattern = data.get("pattern")
         elif event == "intercept_cleared":

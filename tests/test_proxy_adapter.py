@@ -407,7 +407,7 @@ async def test_wait_for_held_signal(adapter):
 @pytest.mark.asyncio
 async def test_handle_status_event_intercept_set(adapter):
     """intercept_set status should update pattern."""
-    adapter._handle_status_event({"event": "intercept_set", "pattern": "~d test.com"})
+    await adapter._handle_status_event({"event": "intercept_set", "pattern": "~d test.com"})
     assert adapter._intercept_pattern == "~d test.com"
 
 
@@ -416,7 +416,7 @@ async def test_handle_status_event_intercept_cleared(adapter):
     """intercept_cleared status should clear pattern and held flows."""
     adapter._intercept_pattern = "~d test.com"
     adapter._held_flows["f_1"] = {"id": "f_1"}
-    adapter._handle_status_event({"event": "intercept_cleared"})
+    await adapter._handle_status_event({"event": "intercept_cleared"})
     assert adapter._intercept_pattern is None
     assert len(adapter._held_flows) == 0
 
@@ -425,7 +425,7 @@ async def test_handle_status_event_intercept_cleared(adapter):
 async def test_handle_status_event_mocks_cleared(adapter):
     """mocks_cleared status should clear mock rules."""
     adapter._mock_rules = [{"rule_id": "a"}, {"rule_id": "b"}]
-    adapter._handle_status_event({"event": "mocks_cleared", "rule_id": None})
+    await adapter._handle_status_event({"event": "mocks_cleared", "rule_id": None})
     assert len(adapter._mock_rules) == 0
 
 
@@ -433,7 +433,7 @@ async def test_handle_status_event_mocks_cleared(adapter):
 async def test_handle_status_event_mock_cleared_specific_is_noop(adapter):
     """mocks_cleared with rule_id should be a no-op (caller already handled it)."""
     adapter._mock_rules = [{"rule_id": "a"}, {"rule_id": "b"}]
-    adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "a"})
+    await adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "a"})
     # Per-rule echo is ignored — both rules still present
     assert len(adapter._mock_rules) == 2
 
@@ -465,7 +465,7 @@ async def test_update_mock_preserves_rule(adapter):
     assert adapter._mock_rules[0]["response"]["status_code"] == 404
 
     # Simulate the echo arriving — should NOT wipe the rule
-    adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "r1"})
+    await adapter._handle_status_event({"event": "mocks_cleared", "rule_id": "r1"})
     assert len(adapter._mock_rules) == 1
 
 
@@ -628,21 +628,21 @@ def _adapter():
     return ProxyAdapter(on_entry=lambda _e: None)
 
 
-def test_the_addon_started_event_marks_the_proxy_running(monkeypatch):
+async def test_the_addon_started_event_marks_the_proxy_running(monkeypatch):
     written = {}
     monkeypatch.setattr("server.sources.proxy.update_state",
                         lambda **kw: written.update(kw))
 
-    _adapter()._handle_status_event({"type": "status", "event": "started"})
+    await _adapter()._handle_status_event({"type": "status", "event": "started"})
     assert written == {"proxy_status": "running"}
 
 
-def test_the_addon_stopped_event_marks_it_stopped(monkeypatch):
+async def test_the_addon_stopped_event_marks_it_stopped(monkeypatch):
     written = {}
     monkeypatch.setattr("server.sources.proxy.update_state",
                         lambda **kw: written.update(kw))
 
-    _adapter()._handle_status_event({"type": "status", "event": "stopped"})
+    await _adapter()._handle_status_event({"type": "status", "event": "stopped"})
     assert written == {"proxy_status": "stopped"}
 
 
@@ -658,7 +658,7 @@ async def test_an_explicit_stop_writes_stopped_without_the_addon(monkeypatch):
     assert written.get("proxy_status") == "stopped"
 
 
-def test_other_status_events_do_not_touch_proxy_status(monkeypatch):
+async def test_other_status_events_do_not_touch_proxy_status(monkeypatch):
     """`intercept_set` and friends share this handler; only lifecycle events
     should move the field."""
     written = {}
@@ -666,6 +666,30 @@ def test_other_status_events_do_not_touch_proxy_status(monkeypatch):
                         lambda **kw: written.update(kw))
 
     a = _adapter()
-    a._handle_status_event({"type": "status", "event": "intercept_set", "pattern": "~u x"})
-    a._handle_status_event({"type": "status", "event": "mocks_cleared"})
+    await a._handle_status_event({"type": "status", "event": "intercept_set", "pattern": "~u x"})
+    await a._handle_status_event({"type": "status", "event": "mocks_cleared"})
     assert written == {}
+
+
+async def test_state_writes_never_block_the_event_loop(monkeypatch):
+    """update_state() takes fcntl.LOCK_EX and does synchronous file I/O. Called
+    inline it would stall every other coroutine behind whichever writer holds
+    the lock, for a write nothing is waiting on."""
+
+    loop_thread = __import__("threading").get_ident()
+    seen_on = []
+
+    def blocking_write(**_kw):
+        seen_on.append(__import__("threading").get_ident())
+
+    monkeypatch.setattr("server.sources.proxy.update_state", blocking_write)
+
+    a = _adapter()
+    await a._handle_status_event({"type": "status", "event": "started"})
+    await a.stop()
+
+    assert seen_on, "no state write happened"
+    assert all(t != loop_thread for t in seen_on), (
+        "update_state ran on the event loop thread; it must go through "
+        "asyncio.to_thread"
+    )

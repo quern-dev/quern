@@ -85,38 +85,51 @@ def _get_head_sha() -> str | None:
 
 
 
-def _is_ahead_of_channel() -> bool:
-    """Whether the local HEAD is at or ahead of its channel's pointer branch.
+def _is_ahead_of(latest_sha: str | None) -> bool:
+    """Whether the local HEAD already contains ``latest_sha``.
 
-    Only meaningful for git installs; a tarball install has no repository and
-    never sends a sha, so it never reaches here. Counts commits the pointer has
-    that HEAD does not -- zero means nothing to pull, which is what
-    ``_update_via_git`` requires before it will do anything.
+    Answers the question quern.dev structurally cannot: it holds branch refs
+    with no commit graph, so `clientSha !== latestSha` is the best it can do and
+    "ahead" is indistinguishable from "behind" (#123).
 
-    Returns False on any failure, so an unexpected git state falls back to the
-    endpoint's answer rather than silently suppressing a real update.
+    Deliberately does **not** fetch. An earlier version did, and it was wrong
+    twice over: a failed fetch left a stale ref, `rev-list` then reported zero
+    commits behind, and a genuinely outdated install was told nothing — the exact
+    inversion of this function's contract. It also added up to 25s of blocking
+    git to `check_for_updates()`, which `server/main.py` calls synchronously on
+    the foreground startup path.
+
+    Using the sha the endpoint just asserted avoids both. If the object is
+    present locally, ancestry is decidable offline in milliseconds. If it is not
+    present — a shallow clone, a genuinely newer upstream commit, a tarball
+    install — the answer is unknowable here, and False means "believe the
+    endpoint".
+
+    Returns False on anything unexpected, so this can only ever suppress a claim
+    it positively disproves. It can never invent an update or hide a real one.
     """
+    if not latest_sha:
+        return False
     project_root = _find_project_root()
     if project_root is None or not (project_root / ".git").exists():
         return False
     try:
-        from server.lifecycle.updater import _get_release_branch
-
-        ref = f"origin/{_get_release_branch()}"
-        # Fetch first: without it the pointer ref may be stale enough to report
-        # zero commits behind on an install that genuinely has an update.
-        subprocess.run(
-            ["git", "fetch", "--quiet", "origin"],
-            cwd=str(project_root), capture_output=True, timeout=15,
+        # Confirm we actually have the object before asking about ancestry:
+        # `merge-base` on an unknown sha errors, and we must not read that as
+        # a negative answer to a question we never got to ask.
+        have = subprocess.run(
+            ["git", "cat-file", "-e", f"{latest_sha}^{{commit}}"],
+            cwd=str(project_root), capture_output=True, timeout=10,
         )
-        result = subprocess.run(
-            ["git", "rev-list", f"HEAD..{ref}", "--count"],
-            cwd=str(project_root), capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
+        if have.returncode != 0:
             return False
-        return int(result.stdout.strip()) == 0
-    except (OSError, subprocess.SubprocessError, ValueError):
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", latest_sha, "HEAD"],
+            cwd=str(project_root), capture_output=True, timeout=10,
+        )
+        # 0 = latest_sha is an ancestor of HEAD, i.e. we already contain it.
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -183,7 +196,7 @@ def check_for_updates() -> str | None:
         # refused and the defect was confined to the notification. This makes the
         # notification consult the same reality the action already does, rather
         # than adding a second mechanism.
-        if update_available and head_sha and _is_ahead_of_channel():
+        if update_available and head_sha and _is_ahead_of(data.get("latest_sha")):
             update_available = False
             latest_version = None
         if not update_available:
