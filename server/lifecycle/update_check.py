@@ -84,6 +84,55 @@ def _get_head_sha() -> str | None:
     return None
 
 
+
+def _is_ahead_of(latest_sha: str | None) -> bool:
+    """Whether the local HEAD already contains ``latest_sha``.
+
+    Answers the question quern.dev structurally cannot: it holds branch refs
+    with no commit graph, so `clientSha !== latestSha` is the best it can do and
+    "ahead" is indistinguishable from "behind" (#123).
+
+    Deliberately does **not** fetch. An earlier version did, and it was wrong
+    twice over: a failed fetch left a stale ref, `rev-list` then reported zero
+    commits behind, and a genuinely outdated install was told nothing — the exact
+    inversion of this function's contract. It also added up to 25s of blocking
+    git to `check_for_updates()`, which `server/main.py` calls synchronously on
+    the foreground startup path.
+
+    Using the sha the endpoint just asserted avoids both. If the object is
+    present locally, ancestry is decidable offline in milliseconds. If it is not
+    present — a shallow clone, a genuinely newer upstream commit, a tarball
+    install — the answer is unknowable here, and False means "believe the
+    endpoint".
+
+    Returns False on anything unexpected, so this can only ever suppress a claim
+    it positively disproves. It can never invent an update or hide a real one.
+    """
+    if not latest_sha:
+        return False
+    project_root = _find_project_root()
+    if project_root is None or not (project_root / ".git").exists():
+        return False
+    try:
+        # Confirm we actually have the object before asking about ancestry:
+        # `merge-base` on an unknown sha errors, and we must not read that as
+        # a negative answer to a question we never got to ask.
+        have = subprocess.run(
+            ["git", "cat-file", "-e", f"{latest_sha}^{{commit}}"],
+            cwd=str(project_root), capture_output=True, timeout=10,
+        )
+        if have.returncode != 0:
+            return False
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", latest_sha, "HEAD"],
+            cwd=str(project_root), capture_output=True, timeout=10,
+        )
+        # 0 = latest_sha is an ancestor of HEAD, i.e. we already contain it.
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def check_for_updates() -> str | None:
     """Return a message if updates are available, None otherwise.
 
@@ -135,6 +184,21 @@ def check_for_updates() -> str | None:
 
         update_available = bool(data.get("update_available"))
         latest_version = data.get("latest_version")
+
+        # quern.dev answers the sha question with string equality
+        # (`clientSha !== latestSha`), because a Cloudflare Worker holding only
+        # branch refs has no commit graph and cannot tell "ahead" from "behind".
+        # A git install working on main is ahead of its channel pointer, so it
+        # was told an update was available to an ancestor of its own HEAD (#123).
+        #
+        # `_update_via_git` never believed this -- it counts `HEAD..origin/<ref>`
+        # and declines when that is zero -- so the update itself was always
+        # refused and the defect was confined to the notification. This makes the
+        # notification consult the same reality the action already does, rather
+        # than adding a second mechanism.
+        if update_available and head_sha and _is_ahead_of(data.get("latest_sha")):
+            update_available = False
+            latest_version = None
         if not update_available:
             message = None
         elif latest_version:

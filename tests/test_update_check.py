@@ -7,6 +7,7 @@ call so test runs are deterministic.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -186,3 +187,119 @@ def test_message_falls_back_when_endpoint_omits_the_version(
     assert msg is not None
     assert "Update available" in msg
     assert update_check.read_update_info()["latest_version"] is None
+
+
+# --------------------------------------------------------------------------
+# A git install that is ahead of its channel is not "out of date" (#123)
+# --------------------------------------------------------------------------
+#
+# quern.dev answers the sha question with string equality, because a Cloudflare
+# Worker holding only branch refs has no commit graph and cannot distinguish
+# "ahead" from "behind". A git install working on main is ahead of its channel
+# pointer, so the endpoint reported an update available to an *ancestor* of the
+# local HEAD.
+#
+# `_update_via_git` never believed it — it counts HEAD..origin/<ref> and returns
+# "no update needed" at zero — so the update was always refused and only the
+# notification was wrong. These pin that the notification now agrees with the
+# action.
+#
+# Tarball installs never send a sha and never reach this path; their behaviour
+# is unchanged.
+
+
+def _fake_git(monkeypatch, tmp_path, *, is_ancestor: bool = True,
+              has_object: bool = True, has_repo: bool = True, fail: bool = False):
+    """Stand in for the git calls _is_ahead_of makes.
+
+    Uses a real temp directory rather than patching `Path.exists` on the class —
+    doing that globally broke an autouse fixture's teardown.
+    """
+    from server.lifecycle import update_check as uc
+
+    if has_repo:
+        (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(uc, "_find_project_root", lambda: tmp_path)
+
+    def run(cmd, **_kw):
+        if fail:
+            raise OSError("git exploded")
+        if "cat-file" in cmd:
+            return SimpleNamespace(returncode=0 if has_object else 128, stdout="", stderr="")
+        if "merge-base" in cmd:
+            return SimpleNamespace(returncode=0 if is_ancestor else 1, stdout="", stderr="")
+        raise AssertionError(f"unexpected git call: {cmd}")
+
+    monkeypatch.setattr(uc.subprocess, "run", run)
+
+
+SHA = "d9710814f46fcdd27190f683f24921ecf8658142"
+
+
+def test_already_containing_the_latest_sha_reads_as_ahead(monkeypatch, tmp_path):
+    from server.lifecycle.update_check import _is_ahead_of
+
+    _fake_git(monkeypatch, tmp_path, is_ancestor=True)
+    assert _is_ahead_of(SHA) is True
+
+
+def test_genuinely_behind_is_not_suppressed(monkeypatch, tmp_path):
+    """The guard must never swallow a real update."""
+    from server.lifecycle.update_check import _is_ahead_of
+
+    _fake_git(monkeypatch, tmp_path, is_ancestor=False)
+    assert _is_ahead_of(SHA) is False
+
+
+def test_an_unknown_commit_is_not_treated_as_behind(monkeypatch, tmp_path):
+    """`merge-base` errors on a sha we do not have, and that must not be read as
+    a negative answer to a question we never got to ask — a shallow clone would
+    otherwise report itself ahead of everything."""
+    from server.lifecycle.update_check import _is_ahead_of
+
+    _fake_git(monkeypatch, tmp_path, has_object=False)
+    assert _is_ahead_of(SHA) is False
+
+
+def test_a_non_git_install_never_claims_to_be_ahead(monkeypatch, tmp_path):
+    """Tarball installs have no repository. True here would suppress every
+    update they are ever offered."""
+    from server.lifecycle.update_check import _is_ahead_of
+
+    _fake_git(monkeypatch, tmp_path, has_repo=False)
+    assert _is_ahead_of(SHA) is False
+
+
+def test_a_git_failure_falls_back_to_the_endpoint(monkeypatch, tmp_path):
+    from server.lifecycle.update_check import _is_ahead_of
+
+    _fake_git(monkeypatch, tmp_path, fail=True)
+    assert _is_ahead_of(SHA) is False
+
+
+def test_a_missing_latest_sha_is_unanswerable(monkeypatch, tmp_path):
+    """An older quern.dev deployment may omit it."""
+    from server.lifecycle.update_check import _is_ahead_of
+
+    _fake_git(monkeypatch, tmp_path)
+    assert _is_ahead_of(None) is False
+    assert _is_ahead_of("") is False
+
+
+def test_the_guard_never_fetches(monkeypatch, tmp_path):
+    """check_for_updates() runs synchronously on the foreground startup path
+    (server/main.py), so this must not add blocking network git. An earlier
+    version fetched and could stall startup for up to 25s."""
+    from server.lifecycle import update_check as uc
+
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(uc, "_find_project_root", lambda: tmp_path)
+    seen = []
+
+    def run(cmd, **_kw):
+        seen.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(uc.subprocess, "run", run)
+    uc._is_ahead_of(SHA)
+    assert not any("fetch" in c for c in seen), f"guard fetched: {seen}"
