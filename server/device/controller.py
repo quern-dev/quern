@@ -39,6 +39,11 @@ class DeviceController(DeviceControllerUI):
         self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
         self._sim_bridge_ok = False
         self.__active_udid: str | None = None
+        # What was last persisted, so an assignment that changes nothing can
+        # skip the write entirely. Separate from __active_udid, which is
+        # assigned before the comparison runs. See the setter.
+        self.__active_name_key: str | None = None
+        self.__active_name: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
 
         # Restore active device from its sidecar file (lives separately
@@ -85,12 +90,30 @@ class DeviceController(DeviceControllerUI):
 
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
-        self.__active_udid = value
         # Best-effort name: the cache is filled by list_devices(), which
         # every resolve path runs before landing here, but the pool and the
         # set-active-device API can assign a UDID directly. A miss writes no
         # name and readers fall back to the UDID -- the previous behaviour.
-        write_active_udid(value, self._device_name_cache.get(value) if value else None)
+        name = self._device_name_cache.get(value) if value else None
+        self.__active_udid = value
+
+        # Write only on an actual change. resolve_udid() assigns this on every
+        # call that names a device, which is most tool calls, so the sidecar
+        # was being rewritten -- taking LOCK_EX on the event loop each time --
+        # to store the value it already held. The active device changes rarely,
+        # so this takes the I/O off the hot path altogether rather than moving
+        # it to a thread, which a property setter cannot await anyway and which
+        # would make two rapid switches race to land out of order.
+        #
+        # The name is part of the comparison, not just the UDID: the name cache
+        # is warmed by list_devices() and can arrive after the first
+        # assignment, and that later fill is exactly when the sidecar needs
+        # rewriting.
+        if value == self.__active_name_key and name == self.__active_name:
+            return
+        self.__active_name_key = value
+        self.__active_name = name
+        write_active_udid(value, name)
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""

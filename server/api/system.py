@@ -22,9 +22,8 @@ from server.config import (
     VALID_UPDATE_CHANNELS,
     channel_to_release_branch,
     get_update_channel,
-    set_update_channel,
 )
-from server.lifecycle.update_check import invalidate_update_check, read_update_info
+from server.lifecycle.update_check import read_update_info, switch_channel
 
 logger = logging.getLogger("quern-debug-server.system")
 
@@ -120,14 +119,14 @@ async def put_channel(body: SetUpdateChannelRequest) -> UpdateChannelResponse:
     /update`` once the user is ready (and, for dev clones, has
     explicitly switched their branch).
     """
-    # Both of these are synchronous filesystem work -- a config write and two
-    # unlinks -- so they go off the event loop rather than stalling the handler
-    # if the disk does.
+    # switch_channel does the config write and the cache invalidation under one
+    # lock, so a check running concurrently cannot land its old-channel result
+    # after the invalidation. Off the event loop because it is blocking
+    # filesystem work that waits on that lock.
     try:
-        await asyncio.to_thread(set_update_channel, body.channel)
+        await asyncio.to_thread(switch_channel, body.channel)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await asyncio.to_thread(invalidate_update_check)
     return UpdateChannelResponse(
         channel=body.channel,
         release_branch=channel_to_release_branch(body.channel),

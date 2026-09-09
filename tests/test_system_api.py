@@ -168,6 +168,7 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(update_check, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(update_check, "LAST_CHECK_FILE", tmp_path / "last-update-check")
     monkeypatch.setattr(update_check, "UPDATE_INFO_FILE", tmp_path / "update-info.json")
+    monkeypatch.setattr(update_check, "CHANNEL_LOCK_FILE", tmp_path / "channel.lock")
     return tmp_path
 
 

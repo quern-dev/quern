@@ -7,6 +7,7 @@ call so test runs are deterministic.
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,12 +19,15 @@ def isolated_update_files(tmp_path, monkeypatch):
     """Redirect CONFIG_DIR / LAST_CHECK_FILE / UPDATE_INFO_FILE to tmp_path.
 
     The update check writes files in CONFIG_DIR; without redirection the
-    test would mutate the real ~/.quern.
+    test would mutate the real ~/.quern. CHANNEL_LOCK_FILE is included for a
+    second reason as well as tidiness: left pointing at the real path, a test
+    would contend for the same lock as the developer's running server.
     """
     from server.lifecycle import update_check
     monkeypatch.setattr(update_check, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(update_check, "LAST_CHECK_FILE", tmp_path / "last-update-check")
     monkeypatch.setattr(update_check, "UPDATE_INFO_FILE", tmp_path / "update-info.json")
+    monkeypatch.setattr(update_check, "CHANNEL_LOCK_FILE", tmp_path / "channel.lock")
     return tmp_path
 
 
@@ -200,6 +204,84 @@ def test_an_unchanged_channel_still_writes_the_result(
     persisted = json.loads((isolated_update_files / "update-info.json").read_text())
     assert persisted["channel"] == "beta"
     assert persisted["update_available"] is True
+
+
+def test_a_switch_during_the_commit_cannot_leave_a_stale_verdict(
+    isolated_update_files, monkeypatch,
+):
+    """The interleaving a bare comparison cannot cover.
+
+    The check passes its channel comparison, and only *then* does the switch
+    land. Without a shared lock the check writes its stable answer after the
+    invalidation removed it, leaving config saying beta and the cache saying
+    stable. The invariant: whatever the ordering, the cached verdict either is
+    absent or names the channel that config now holds.
+    """
+    import threading
+
+    from server.lifecycle import update_check
+
+    config: dict = {}
+    monkeypatch.setattr(update_check, "read_user_config", lambda: config)
+    monkeypatch.setattr("server.config.read_user_config", lambda: config)
+    monkeypatch.setattr("server.config.USER_CONFIG_FILE",
+                        isolated_update_files / "config.json")
+    monkeypatch.setattr("server.config.CONFIG_DIR", isolated_update_files)
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+    switched = threading.Event()
+    real_write = update_check._write_update_info
+
+    def slow_write(info):
+        # Inside the lock, past the comparison. Kick off the switch and give it
+        # time to block, so the commit really is the one holding the lock.
+        switched.set()
+        time.sleep(0.25)
+        real_write(info)
+
+    monkeypatch.setattr(update_check, "_write_update_info", slow_write)
+
+    def switcher():
+        switched.wait(timeout=5)
+        update_check.switch_channel("beta")
+
+    t = threading.Thread(target=switcher)
+    t.start()
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_fake_response({"update_available": True, "latest_version": "9.9.9"}),
+    ):
+        update_check.check_for_updates()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+    from server.config import get_update_channel
+
+    assert get_update_channel() == "beta"
+    persisted = update_check.read_update_info()
+    assert persisted is None or persisted["channel"] == "beta", (
+        f"stale verdict survived the switch: {persisted}"
+    )
+
+
+def test_switch_channel_reports_a_bad_name_before_invalidating(
+    isolated_update_files, monkeypatch,
+):
+    """The cache must survive a typo. Raising after invalidating would cost a
+    valid update notification for nothing."""
+    from server.lifecycle import update_check
+
+    monkeypatch.setattr("server.config.USER_CONFIG_FILE",
+                        isolated_update_files / "config.json")
+    monkeypatch.setattr("server.config.CONFIG_DIR", isolated_update_files)
+    info = isolated_update_files / "update-info.json"
+    info.write_text('{"update_available": true, "channel": "stable"}')
+
+    with pytest.raises(ValueError):
+        update_check.switch_channel("nightly")
+
+    assert info.exists()
 
 
 def test_invalidate_clears_both_the_stamp_and_the_answer(isolated_update_files):
