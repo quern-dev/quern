@@ -22,6 +22,10 @@ struct ServerState {
     var startedAt: Date?
 }
 
+struct ProxyPolicy {
+    var autoInstallCert = false
+}
+
 struct UpdateInfo {
     var updateAvailable = false
     var currentVersion: String?
@@ -43,6 +47,7 @@ struct QuernSnapshot {
     var server = ServerState()
     var update = UpdateInfo()
     var device = ActiveDevice()
+    var proxy = ProxyPolicy()
 }
 
 final class StateReader {
@@ -102,6 +107,7 @@ final class StateReader {
         snap.server = Self.readServerState()
         snap.update = Self.readUpdateInfo()
         snap.device = Self.readActiveDevice()
+        snap.proxy = ProxyPolicy(autoInstallCert: Self.readAutoInstallCert())
         snapshot = snap
         onChange?(snap)
     }
@@ -176,6 +182,17 @@ final class StateReader {
     /// config.json cannot put the picker in a state the user can't get out of.
     static let validChannels = ["stable", "beta"]
     static let defaultChannel = "stable"
+
+    /// Whether Quern installs the mitmproxy CA by itself when capture needs
+    /// it. Read from config.json rather than the server, so it is correct
+    /// even when the daemon is stopped -- the same reason the channel is.
+    ///
+    /// Anything other than a real boolean reads as off. A malformed config
+    /// should mean "ask me", never consent to installing a root CA.
+    private static func readAutoInstallCert() -> Bool {
+        guard let d = json("config.json") else { return false }
+        return (d["auto_install_cert"] as? Bool) == true
+    }
 
     private static func readChannel() -> String {
         guard let d = json("config.json"),

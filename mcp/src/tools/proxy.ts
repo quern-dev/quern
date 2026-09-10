@@ -687,7 +687,11 @@ For physical devices, pass client_ip to isolate that device's traffic — the re
 Use this after start_proxy when you're ready to begin capturing traffic.
 Remember to call unconfigure_system_proxy when done to restore the user's browser.
 
-NOTE: The proxy must be running first (call start_proxy).`,
+NOTE: The proxy must be running first (call start_proxy).
+
+CERTIFICATE CHECK. This refuses with HTTP 428 when a booted simulator does not trust the mitmproxy CA, because capturing in that state fails every HTTPS request from that device with no indication the proxy is the cause -- what the user sees is a blank screen or an app with no network, and the natural next move is to debug the app. The refusal is NOT a transient error and retrying will not clear it. The response body names the affected devices and three resolutions: install_proxy_cert on each device, set auto_install_cert so Quern handles it from now on, or pass skip_cert_check to proceed anyway.
+
+Ask the user which they want before acting -- installing a root certificate authority is a larger and longer-lived commitment than enabling capture, so it needs their consent, the same way update_quern does. skip_cert_check is the right answer when they are deliberately exercising TLS-failure paths.`,
     inputSchema: strictParams({
       interface: z
         .string()

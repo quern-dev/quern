@@ -106,6 +106,34 @@ def set_update_channel(channel: str) -> None:
     USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
 
 
+def get_auto_install_cert() -> bool:
+    """Whether to install the mitmproxy CA automatically when capture needs it.
+
+    Defaults to False, and deliberately: installing a MITM root CA is a larger
+    and longer-lived commitment than the proxy toggle that prompts it. It
+    persists across sessions, outlives the capture window, and the user has to
+    know it happened in order to undo it. So the first encounter costs one
+    round of asking, and this makes the second onwards free.
+
+    Anything other than a real boolean is treated as unset -- a typo should
+    read as "ask me", never as consent.
+    """
+    return read_user_config().get("auto_install_cert") is True
+
+
+def set_auto_install_cert(enabled: bool) -> None:
+    """Persist the auto-install policy.
+
+    Surfaced in ``proxy_status`` and in the menu-bar app's Settings pane, both
+    on purpose: a silent, persistent CA-install policy would be worse than the
+    failure it exists to prevent.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = read_user_config()
+    config["auto_install_cert"] = bool(enabled)
+    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+
 def channel_to_release_branch(channel: str) -> str:
     """Map a channel name to its reserved release pointer branch.
 

@@ -496,7 +496,13 @@ class ProxyStatusResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     """Network-state warnings the agent should surface. Currently:
     ``"multi_interface_active"`` — more than one interface is on a distinct
-    /24, so ``local_ip`` is not the right answer for every device."""
+    /24, so ``local_ip`` is not the right answer for every device.
+    ``"capture_without_cert"`` — a booted simulator does not trust the
+    mitmproxy CA, so HTTPS from it fails with nothing pointing at the proxy."""
+    auto_install_cert: bool = False
+    """Whether Quern will install the CA by itself when capture needs it.
+    Reported because a persistent, silent CA-install policy would be worse
+    than the failure it prevents — see ``server/config.py``."""
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
     network_state: dict | None = None

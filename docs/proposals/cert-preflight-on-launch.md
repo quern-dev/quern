@@ -1,6 +1,10 @@
 # Cert Preflight on `launch_app` — Proposal
 
-**Status:** proposal, not a decision. Written up for consideration; nothing implemented.
+**Status:** partially implemented. The preflight ships on `configure_system_proxy`
+rather than `launch_app` — enabling capture is where the broken state is created, and
+catching it there costs no relaunch. `auto_install_cert` (§4.2) ships as proposed, and
+is surfaced in `proxy_status` and the menu-bar Settings pane. The `launch_app`
+preflight in §4 is **not** implemented; §6's known gap is therefore wider than written.
 **Raised by:** a live debugging session on 2026-09-01 (see §1).
 **Scope:** `launch_app`, `proxy_status`, one new config field.
 

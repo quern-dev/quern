@@ -101,6 +101,14 @@ async def _get_proxy_status(
     distinct_subnets = {iface.subnet for iface in local_ips if iface.subnet}
     if len(distinct_subnets) >= 2:
         warnings.append("multi_interface_active")
+    # The diagnostic path for the cases the preflight cannot reach: an app
+    # launched by tapping its icon, or capture enabled before the device booted.
+    from server.config import get_auto_install_cert
+    from server.proxy.cert_preflight import simulators_without_cert
+
+    auto_install_cert = get_auto_install_cert()
+    if await simulators_without_cert(getattr(request.app.state, "device_controller", None)):
+        warnings.append("capture_without_cert")
     try:
         from server.proxy.cert_state import read_cert_state, strip_noncanonical_fields
         device_certs = read_cert_state()
@@ -193,6 +201,7 @@ async def _get_proxy_status(
             local_ip=local_ip,
             local_ips=local_ips,
             warnings=warnings,
+            auto_install_cert=auto_install_cert,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
             network_state=network_state_dict,
@@ -213,6 +222,7 @@ async def _get_proxy_status(
             local_ip=local_ip,
             local_ips=local_ips,
             warnings=warnings,
+            auto_install_cert=auto_install_cert,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
             network_state=network_state_dict,
@@ -233,6 +243,7 @@ async def _get_proxy_status(
             local_ip=local_ip,
             local_ips=local_ips,
             warnings=warnings,
+            auto_install_cert=auto_install_cert,
             cert_setup=cert_setup,
             system_proxy=system_proxy_info,
             network_state=network_state_dict,
@@ -410,6 +421,44 @@ async def configure_system(request: Request, body: dict | None = None) -> System
         raise HTTPException(status_code=409, detail="System proxy already configured by Quern")
 
     interface_override = body.get("interface") if body else None
+    skip_cert_check = bool(body.get("skip_cert_check")) if body else False
+
+    # Preflight: capture through a device that does not trust the CA fails
+    # every HTTPS request, and the symptom -- a blank screen, an app with no
+    # network -- points nowhere near the proxy. Both halves of that state are
+    # ours, so refuse to create it rather than let it be discovered later.
+    if not skip_cert_check:
+        from server.config import get_auto_install_cert
+        from server.proxy.cert_preflight import refusal_detail, simulators_without_cert
+
+        controller = getattr(request.app.state, "device_controller", None)
+        missing = await simulators_without_cert(controller)
+        if missing:
+            if get_auto_install_cert():
+                from server.proxy.cert_manager import install_cert
+
+                for dev in missing:
+                    try:
+                        await install_cert(
+                            controller, dev["udid"], device_name=dev["name"],
+                        )
+                        _proxy_logger.info(
+                            "Auto-installed the CA on %s (%s)", dev["name"], dev["udid"][:8],
+                        )
+                    except Exception as e:
+                        # Report the failure rather than configuring anyway: the
+                        # user opted into having this handled, and silently
+                        # proceeding recreates exactly the state they opted out of.
+                        raise HTTPException(
+                            status_code=500,
+                            detail=(
+                                f"auto_install_cert is set but installing the CA on "
+                                f"{dev['name']} failed: {e}"
+                            ),
+                        ) from e
+            else:
+                # 428: the request is fine, the world is not ready for it yet.
+                raise HTTPException(status_code=428, detail=refusal_detail(missing))
 
     try:
         snap = await asyncio.to_thread(

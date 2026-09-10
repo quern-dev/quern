@@ -348,6 +348,9 @@ quern version                # Print the installed version
 quern update                 # Update to the latest release on your channel and rebuild
 quern update --tools         # Also upgrade external tools quern installed (pipx, brew)
 quern set-channel [name]     # Show or set the update channel (stable / beta)
+quern set-auto-install-cert [on|off]
+                             # Show or set whether the capture certificate is installed
+                             #   automatically, or Quern asks first (default: ask)
 quern uninstall              # Remove Quern and dependencies installed by setup
 quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
