@@ -237,8 +237,14 @@ tool is installed:
 - **tunneld** — a failed device pairing can leave the daemon alive but not serving. It
   holds no listener and never exits, so `KeepAlive` never fires and launchd reports it
   healthy indefinitely. Doctor separates that *wedged* state from a merely *stopped*
-  one by pairing the HTTP probe with the launchd job state, and prints the `bootout` +
-  `bootstrap` recovery. It never runs it — recovery is tracked in issue #73.
+  one by pairing the HTTP probe with the launchd job state.
+
+  Since v0.15.0 Quern can also recover it. Getting the stuck process to exit is the
+  entire fix, because the plist sets `KeepAlive` and launchd respawns it against clean
+  state in about a second. That needs root, so the authorisation is taken once and
+  explicitly with `quern tunneld grant-recovery` — a single `NOPASSWD` rule for one
+  signal to one job, nothing else. Without the grant the behaviour is unchanged: the
+  wedge is reported, not healed.
 - **local capture extension** — the mitmproxy macOS system extension is approved once
   by a human and then upgraded underneath that approval by ordinary dependency updates.
   When the version macOS runs falls behind the version the installed wheel ships, local
@@ -349,7 +355,8 @@ quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without 
 quern install-precommit-hook # Install the pre-commit checklist hook
 quern enable-local-capture   # Enable transparent simulator traffic capture
 quern disable-local-capture  # Disable local capture
-quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart)
+quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart,
+                             #   grant-recovery/revoke-recovery for password-free wedge recovery)
 ```
 
 `~/.quern/state.json` is the single source of truth for discovering a running instance.
@@ -409,7 +416,7 @@ server/
   device/              Simulator control (simctl, sim-bridge, idb fallback) + physical device control (WDA, pymobiledevice3), device pool
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
-tests/                 993 tests
+tests/                 pytest suite (~2,000 tests)
 ```
 
 ## Development
