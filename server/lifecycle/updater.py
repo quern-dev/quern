@@ -48,17 +48,25 @@ def _read_local_version(project_root: Path) -> str | None:
     return None
 
 
-def _select_asset_url(assets: list) -> str | None:
-    """Return the download URL of the bundled release tarball asset, if any.
+def _select_asset_url(assets: list, version: str) -> str | None:
+    """Return the download URL of this release's bundled tarball, if any.
 
-    Matches ``quern-*.tar.gz`` (the asset produced by
-    ``scripts/release-menubar.sh``, which bundles the signed menu-bar app with
-    the source tree). Returns None when no matching asset exists so the caller
-    falls back to GitHub's auto-generated source tarball.
+    Requires the exact ``quern-<version>.tar.gz`` produced by
+    ``scripts/release-menubar.sh`` for *this* tag. Matching ``quern-*.tar.gz``
+    loosely took whichever such asset happened to be listed first, so a stale
+    or hand-uploaded archive left on a release would be installed while the
+    caller went on reporting the current tag as ``latest_version`` -- an
+    install silently older or newer than the version it claims to be.
+
+    Returns None when this release has no matching asset, so the caller falls
+    back to GitHub's auto-generated source tarball. That covers releases made
+    before the asset existed, and source-only installs.
     """
+    if not version:
+        return None
+    wanted = f"quern-{version}.tar.gz"
     for asset in assets:
-        name = asset.get("name", "")
-        if name.startswith("quern-") and name.endswith(".tar.gz"):
+        if asset.get("name", "") == wanted:
             url = asset.get("browser_download_url")
             if url:
                 return url
@@ -109,7 +117,9 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
         # tree (see scripts/release-menubar.sh). Fall back to GitHub's
         # auto-generated source ``tarball_url`` for releases without an asset,
         # so older releases and source-only installs keep working.
-        tarball_url = _select_asset_url(data.get("assets", [])) or data.get("tarball_url", "")
+        tarball_url = _select_asset_url(data.get("assets", []), version) or data.get(
+            "tarball_url", ""
+        )
         if version and tarball_url:
             return version, tarball_url
     except Exception as e:
