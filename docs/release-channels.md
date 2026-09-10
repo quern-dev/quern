@@ -262,12 +262,20 @@ else
   CHANNELS="release/stable release/beta"
 fi
 
-# 1. Tag. Reuse an existing one only when it points where this run intends;
-#    a mismatch means the tag was cut somewhere else and must be resolved by
-#    hand. Without this, any retry after a later step failed dies here on
-#    "tag already exists" with the remote tag already pushed.
+# 1. Tag. Reuse an existing one only when it points at the commit this run is
+#    releasing; a mismatch means the tag was cut somewhere else, and moving a
+#    published tag is not something a script should decide to do. Without the
+#    reuse, any retry after a later step failed dies here on "tag already
+#    exists" with the remote tag already pushed.
+INTENDED=$(git rev-parse HEAD)
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-  echo "note: $TAG already exists locally, reusing it"
+  EXISTING=$(git rev-parse "$TAG^{commit}")
+  if [ "$EXISTING" != "$INTENDED" ]; then
+    echo "error: $TAG exists at ${EXISTING:0:8} but HEAD is ${INTENDED:0:8}" >&2
+    echo "       Resolve that by hand before rerunning." >&2
+    exit 1
+  fi
+  echo "note: $TAG already exists at ${EXISTING:0:8}, reusing it"
 else
   git tag -a "$TAG" -m "$TAG"
 fi
