@@ -788,6 +788,13 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     }
 
     func handleCommand(cmd: String, json: [String: Any]) {
+        // The command id, echoed back on whatever event completes the command.
+        // The device name alone cannot correlate a reply with its request: the
+        // server times a write out after a few seconds, but the command was
+        // already delivered and may still run, so a late reply would otherwise
+        // be matched against whatever request holds that name next.
+        let id = json["id"] as? String
+
         switch cmd {
         case "add":
             guard let name = json["name"] as? String else {
@@ -795,14 +802,14 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
                 return
             }
             let position = json["position"] as? Int ?? nextPosition()
-            handleAdd(name: name, position: position)
+            handleAdd(name: name, position: position, id: id)
 
         case "remove":
             guard let name = json["name"] as? String else {
                 emit(["event": "error", "message": "remove requires 'name'"])
                 return
             }
-            handleRemove(name: name)
+            handleRemove(name: name, id: id)
 
         case "list":
             handleList()
@@ -817,16 +824,16 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
     // MARK: Command handlers
 
-    func handleAdd(name: String, position: Int) {
+    func handleAdd(name: String, position: Int, id: String? = nil) {
         // Already previewing?
         if sessions[name] != nil {
-            emit(["event": "add_failed", "name": name, "error": "Already previewing"])
+            emit(["event": "add_failed", "name": name, "error": "Already previewing", "id": id as Any])
             return
         }
 
         // Find device by exact name
         guard let device = allDevices.first(where: { $0.localizedName == name }) else {
-            emit(["event": "add_failed", "name": name, "error": "Device not found"])
+            emit(["event": "add_failed", "name": name, "error": "Device not found", "id": id as Any])
             return
         }
 
@@ -835,7 +842,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
         if session.session.inputs.isEmpty {
             session.stop()
-            emit(["event": "add_failed", "name": name, "error": "Cannot create input"])
+            emit(["event": "add_failed", "name": name, "error": "Cannot create input", "id": id as Any])
             return
         }
 
@@ -849,7 +856,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         // Start capture, then emit added after a brief delay for CoreMediaIO
         session.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.emit(["event": "added", "name": name])
+            self.emit(["event": "added", "name": name, "id": id as Any])
         }
     }
 
@@ -887,7 +894,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         emit(["event": "connected", "name": device.localizedName, "id": device.uniqueID])
     }
 
-    func handleRemove(name: String) {
+    func handleRemove(name: String, id: String? = nil) {
         guard let session = sessions[name] else {
             emit(["event": "error", "message": "Not previewing: \(name)"])
             return
@@ -898,7 +905,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         sessions.removeValue(forKey: name)
         // Release position (we don't track which position maps to which session, so just rebuild)
         rebuildPositions()
-        emit(["event": "removed", "name": name])
+        emit(["event": "removed", "name": name, "id": id as Any])
     }
 
     func handleList() {
@@ -956,8 +963,21 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
     func emit(_ dict: [String: Any]) {
         guard stdinConnected else { return }
-        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+        // Drop keys holding a nil Optional before serialising. Callers pass
+        // optionals through `as Any` -- `"id": id as Any` with no id is the
+        // reason this exists -- and JSONSerialization rejects that value for
+        // the whole dictionary, not just the key. Paired with `try?` below,
+        // that turned one absent id into an event the server never receives.
+        var clean: [String: Any] = [:]
+        for (key, value) in dict {
+            if case Optional<Any>.none = value { continue }
+            clean[key] = value
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: clean),
               let str = String(data: data, encoding: .utf8) else {
+            // Never silently: the server is waiting on this event, and a
+            // dropped one reads to it as a hang rather than a failure.
+            fputs("  emit failed for event \(clean["event"] ?? "?")\n", stderr)
             return
         }
         print(str)

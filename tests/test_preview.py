@@ -87,11 +87,11 @@ class TestDisconnectEvent:
     """`_pending` holds futures for both add and remove, so a disconnect has to
     settle them differently."""
 
-    def _manager_with_pending(self, op: str):
+    def _manager_with_pending(self, op: str, cid: str = "c1"):
         loop = asyncio.new_event_loop()
         mgr = PreviewManager()
         fut = loop.create_future()
-        mgr._pending["iPhone 11"] = (op, fut)
+        mgr._pending["iPhone 11"] = (cid, op, fut)
         return loop, mgr, fut
 
     def test_a_disconnect_fails_an_in_flight_add(self):
@@ -131,3 +131,52 @@ class TestDisconnectEvent:
         mgr._dispatch_event({"event": "connected", "name": "iPhone 11", "id": "A"})
         assert [d.name for d in mgr._available] == ["iPhone 11"]
         assert mgr._active == {}
+
+
+class TestCommandCorrelation:
+    """A write that times out was still delivered and may still run, so its
+    late reply must not be matched against whatever holds that name next."""
+
+    def _pending(self, op: str, cid: str):
+        loop = asyncio.new_event_loop()
+        mgr = PreviewManager()
+        fut = loop.create_future()
+        mgr._pending["iPhone 11"] = (cid, op, fut)
+        return loop, mgr, fut
+
+    def test_a_late_reply_does_not_settle_a_newer_command(self):
+        """The exact sequence: remove() times out, add() takes its place, then
+        the delayed `removed` arrives. Resolving it would have add() record a
+        preview the subprocess had already torn down."""
+        loop, mgr, add_fut = self._pending("add", "c2")
+        try:
+            mgr._dispatch_event(
+                {"event": "removed", "name": "iPhone 11", "id": "c1"}
+            )
+            assert not add_fut.done(), "a stale reply settled the new command"
+            assert "iPhone 11" in mgr._pending, "the new command was discarded"
+        finally:
+            loop.close()
+
+    def test_the_matching_reply_settles_it(self):
+        loop, mgr, fut = self._pending("add", "c2")
+        try:
+            mgr._dispatch_event({"event": "added", "name": "iPhone 11", "id": "c2"})
+            assert fut.result() is True
+        finally:
+            loop.close()
+
+    def test_a_reply_with_no_id_is_still_accepted(self):
+        """An older subprocess does not echo ids, and refusing those would hang
+        every call against a binary the user has not rebuilt yet."""
+        loop, mgr, fut = self._pending("add", "c2")
+        try:
+            mgr._dispatch_event({"event": "added", "name": "iPhone 11"})
+            assert fut.result() is True
+        finally:
+            loop.close()
+
+    def test_commands_get_distinct_ids(self):
+        mgr = PreviewManager()
+        ids = {mgr._next_command_id() for _ in range(50)}
+        assert len(ids) == 50

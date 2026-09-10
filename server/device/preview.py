@@ -182,9 +182,19 @@ class PreviewManager:
         self._available: list[PreviewDeviceInfo] = []
         self._ready = asyncio.Event()
         self._reader_task: asyncio.Task | None = None
-        # name -> (operation, future). The operation matters: a disconnect
-        # while an add is in flight must fail that add, not complete it.
-        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
+        # name -> (command id, operation, future).
+        #
+        # The id is what correlates a reply with the request that caused it.
+        # The name cannot: a write that times out was still delivered and may
+        # still run, so its late reply would otherwise be matched against
+        # whatever request holds that name next -- a delayed `removed` landing
+        # on a subsequent `add` and reporting a preview the process had just
+        # torn down.
+        #
+        # The operation matters too: a disconnect while an add is in flight
+        # must fail that add, not complete it.
+        self._pending: dict[str, tuple[str, str, asyncio.Future]] = {}
+        self._command_seq = 0
         self._positions: set[int] = set()
         self._stagger_lock = asyncio.Lock()
         self._bundle_path = QUERN_BIN_DIR / APP_BUNDLE_NAME
@@ -256,7 +266,7 @@ class PreviewManager:
             self._reader_task.cancel()
         self._reader_task = None
         # Reject all pending futures
-        for _name, (_op, fut) in self._pending.items():
+        for _name, (_cid, _op, fut) in self._pending.items():
             if not fut.done():
                 fut.set_exception(RuntimeError("Preview process exited"))
         self._pending.clear()
@@ -286,6 +296,34 @@ class PreviewManager:
             logger.info("ios-preview stdout closed")
             self._cleanup_state()
 
+    def _take_pending(self, name: str, event: dict) -> tuple[str, asyncio.Future] | None:
+        """Claim the pending command this event answers, if it answers one.
+
+        A reply carrying a different id belongs to a request that already timed
+        out, so it is discarded rather than applied to whatever is waiting now.
+        A reply with no id at all is accepted: the subprocess may predate the
+        id, and refusing those would hang every call against an older binary.
+        """
+        entry = self._pending.get(name)
+        if entry is None:
+            return None
+        cid, op, fut = entry
+        reply_id = event.get("id")
+        if reply_id is not None and reply_id != cid:
+            logger.debug(
+                "Ignoring stale %s for %s (id %s, waiting on %s)",
+                event.get("event"), name, reply_id, cid,
+            )
+            return None
+        self._pending.pop(name, None)
+        return op, fut
+
+    def _next_command_id(self) -> str:
+        """Monotonic per-process id. Uniqueness within this process is the
+        whole requirement -- the subprocess only ever echoes it back."""
+        self._command_seq += 1
+        return f"c{self._command_seq}"
+
     def _dispatch_event(self, event: dict) -> None:
         """Handle a single event from the subprocess."""
         evt_type = event.get("event")
@@ -304,20 +342,20 @@ class PreviewManager:
             )
 
         elif evt_type == "added":
-            entry = self._pending.pop(name, None)
+            entry = self._take_pending(name, event)
             if entry and not entry[1].done():
                 entry[1].set_result(True)
 
         elif evt_type == "add_failed":
             error = event.get("error", "Unknown error")
-            entry = self._pending.pop(name, None)
+            entry = self._take_pending(name, event)
             if entry and not entry[1].done():
                 entry[1].set_exception(
                     RuntimeError(f"Failed to add preview for {name}: {error}")
                 )
 
         elif evt_type == "removed":
-            entry = self._pending.pop(name, None)
+            entry = self._take_pending(name, event)
             if entry and not entry[1].done():
                 entry[1].set_result(True)
 
@@ -335,9 +373,11 @@ class PreviewManager:
             # remove got what it wanted -- the preview is gone. An add did not:
             # completing it successfully would have add() record a preview for
             # an unplugged device and reserve a window position for it.
+            # No id to match against: a disconnect answers no command, it
+            # just invalidates whatever is outstanding for this device.
             entry = self._pending.pop(name, None)
-            if entry and not entry[1].done():
-                op, fut = entry
+            if entry and not entry[2].done():
+                _cid, op, fut = entry
                 if op == "remove":
                     fut.set_result(True)
                 else:
@@ -422,9 +462,12 @@ class PreviewManager:
 
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
-            self._pending[name] = ("add", fut)
+            cid = self._next_command_id()
+            self._pending[name] = (cid, "add", fut)
 
-            await self._send({"cmd": "add", "name": name, "position": position})
+            await self._send(
+                {"cmd": "add", "name": name, "position": position, "id": cid}
+            )
 
             try:
                 await asyncio.wait_for(fut, timeout=10.0)
@@ -452,9 +495,10 @@ class PreviewManager:
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
-        self._pending[name] = ("remove", fut)
+        cid = self._next_command_id()
+        self._pending[name] = (cid, "remove", fut)
 
-        await self._send({"cmd": "remove", "name": name})
+        await self._send({"cmd": "remove", "name": name, "id": cid})
 
         try:
             await asyncio.wait_for(fut, timeout=5.0)
