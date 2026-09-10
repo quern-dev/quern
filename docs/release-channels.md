@@ -247,38 +247,51 @@ remember:
 
 ```sh
 #!/bin/bash
-# scripts/cut-stable-release.sh — usage: ./scripts/cut-stable-release.sh vN.M.K
+# scripts/cut-release.sh — usage: ./scripts/cut-release.sh vN.M.K [--prerelease]
 set -euo pipefail
 TAG="$1"
+PRERELEASE=""
+[ "${2:-}" = "--prerelease" ] && PRERELEASE="--prerelease"
+
+# Which channels this release moves. A stable cut advances both -- leaving beta
+# behind hands beta users older content than stable users get. A prerelease
+# advances only beta; release/stable must stay on the last stable tag.
+if [ -n "$PRERELEASE" ]; then
+  CHANNELS="release/beta"
+else
+  CHANNELS="release/stable release/beta"
+fi
 
 # 1. Tag
 git tag -a "$TAG" -m "$TAG"
 git push origin "$TAG"
 
-# 2. Fast-forward BOTH channel branches — MUST happen before step 3.
-#    Beta too: a stable release is newer than anything beta users are on, so
-#    leaving beta behind hands them older content than stable users get.
-git push origin main:refs/heads/release/stable
-git push origin main:refs/heads/release/beta
+# 2. Fast-forward the channel branches — MUST happen before step 4.
+#    From the tag, not from main: the tag is what was published, and a
+#    prerelease is often cut somewhere other than main HEAD.
+for ref in $CHANNELS; do
+  git push origin "$TAG:refs/heads/$ref"
+done
 
 # 3. Verify — the rejection above is silent, so this has to fail loudly.
 git fetch origin
-main_sha=$(git rev-parse origin/main)
-for ref in release/stable release/beta; do
-  ref_sha=$(git rev-parse "origin/$ref")
-  if [ "$ref_sha" != "$main_sha" ]; then
-    echo "error: origin/$ref is at ${ref_sha:0:8}, expected ${main_sha:0:8}" >&2
+expected=$(git rev-parse "$TAG^{commit}")
+for ref in $CHANNELS; do
+  actual=$(git rev-parse "origin/$ref")
+  if [ "$actual" != "$expected" ]; then
+    echo "error: origin/$ref is at ${actual:0:8}, expected ${expected:0:8}" >&2
     echo "       The push above was rejected. Do NOT create the Release." >&2
     exit 1
   fi
 done
 
 # 4. Now create the Release
-gh release create "$TAG" --title "$TAG" --notes "see CHANGELOG.md"
+gh release create "$TAG" $PRERELEASE --title "$TAG" --notes "see CHANGELOG.md"
 ```
 
-For a **prerelease**, advance only `release/beta` and add `--prerelease` to
-step 4; `release/stable` should keep pointing at the last stable tag.
+The verification compares against the tag rather than `origin/main` on purpose.
+Only the branches this release actually moves are checked, so a prerelease is
+not failed for leaving `release/stable` where it belongs.
 
 ---
 
