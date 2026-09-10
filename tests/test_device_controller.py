@@ -68,6 +68,35 @@ class TestActiveDeviceName:
 
         assert read_active_device() == {"udid": "ZZZZ-9999"}
 
+    async def test_a_restored_device_gains_its_name_and_type(self):
+        """The restore path is the one a restart actually takes. __init__ puts
+        the persisted UDID straight into the backing field, deliberately
+        bypassing the setter, and resolve_udid() then returned early on it --
+        so a sidecar written before these fields existed, or by an older
+        server, kept only its UDID no matter how many tool calls ran. The
+        menu bar showed a bare UDID until someone resolved by UDID explicitly."""
+        from server.lifecycle.state import read_active_device, write_active_udid
+
+        write_active_udid("AAAA-1111")
+
+        ctrl = DeviceController()
+        assert ctrl._active_udid == "AAAA-1111", "sidecar was not restored"
+        ctrl.simctl.list_devices = AsyncMock(
+            return_value=[_device(udid="AAAA-1111", name="iPhone 16 Pro")]
+        )
+        ctrl.devicectl.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.adb.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+
+        assert await ctrl.resolve_udid() == "AAAA-1111"
+
+        assert read_active_device() == {
+            "udid": "AAAA-1111",
+            "name": "iPhone 16 Pro",
+            "type": "simulator",
+        }
+
     async def test_reassigning_the_same_device_does_not_rewrite_the_sidecar(self):
         """resolve_udid() assigns the active device on every call that names
         one, which is most tool calls. Rewriting the file each time took

@@ -242,8 +242,18 @@ class DeviceController(DeviceControllerUI):
             return udid
 
         if self._active_udid:
-            await self._ensure_device_type_cached(self._active_udid)
-            return self._active_udid
+            restored = self._active_udid
+            await self._ensure_device_type_cached(restored)
+            # Reassign through the setter now the caches are warm. __init__
+            # puts the persisted UDID straight into the backing field, on
+            # purpose -- restoring a device is not a change worth writing --
+            # so nothing has run the setter yet on this path, and it is the
+            # path a restart takes. Returning early left a sidecar written by
+            # an older server holding only its UDID however many tool calls
+            # ran, and the menu bar showed the UDID. The dedup guard makes
+            # this a no-op once the name and type have landed.
+            self._active_udid = restored
+            return restored
 
         # Step 3: try pool-based resolution (silent upgrade)
         if self._pool is not None:
