@@ -52,22 +52,37 @@ final class Updater {
         }
     }
 
-    private func relaunch(into version: String) {
+    private func relaunch(into version: String, retriesLeft: Int = 1) {
         let bundleURL = Bundle.main.bundleURL
         // The bundle was replaced on disk during the update; if it's briefly
-        // missing (delete-then-move window) wait a beat and retry once.
+        // missing (delete-then-move window) wait a beat and retry. The retry
+        // is counted rather than open-ended: the earlier version recursed on
+        // the same condition forever, so an update that left no bundle behind
+        // rescheduled every 1.5s for the life of the process while the menu
+        // still read "Restarting to v…", which is the one state that tells
+        // the user nothing is wrong.
         guard FileManager.default.fileExists(atPath: bundleURL.path) else {
+            guard retriesLeft > 0 else {
+                onStatus?("Update installed — restart Quern to finish")
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.relaunch(into: version)
+                self?.relaunch(into: version, retriesLeft: retriesLeft - 1)
             }
             return
         }
         onStatus?("Restarting to v\(version)…")
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { _, error in
+        NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { [weak self] _, error in
             if let error {
                 NSLog("Relaunch failed: \(error.localizedDescription)")
+                // Same reasoning as the missing-bundle path: without this the
+                // status stays on "Restarting…" forever after a launch that
+                // never happened.
+                DispatchQueue.main.async {
+                    self?.onStatus?("Update installed — restart Quern to finish")
+                }
                 return
             }
             DispatchQueue.main.async { NSApp.terminate(nil) }

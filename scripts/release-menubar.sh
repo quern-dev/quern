@@ -52,7 +52,13 @@ ZIP="$WORK/Quern.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$APP"
-spctl -a -vvv "$APP" || echo "warning: spctl assessment reported an issue — review above"
+# A gate, not a warning. This runs immediately before the tarball is built
+# and uploaded, so a printed warning here published an app that Gatekeeper
+# refuses to open -- and the release looked successful.
+if ! spctl -a -vvv "$APP"; then
+  echo "error: Gatekeeper rejected the stapled app — refusing to publish" >&2
+  exit 1
+fi
 
 echo "==> Assembling release tarball: $TARBALL"
 # Source tree at the tag (respects .gitignore/.gitattributes), then drop the

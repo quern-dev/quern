@@ -266,7 +266,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func quitApp() { NSApp.terminate(nil) }
 
     @objc private func quitAndStop() {
-        QuernCLI.stop { _, _ in NSApp.terminate(nil) }
+        QuernCLI.stop { [weak self] code, output in
+            guard code == 0 else {
+                // Quitting anyway is the one outcome this item must not
+                // produce: the server keeps running and the menu bar that
+                // would have said so is gone, so the failure is invisible and
+                // the next launch finds a daemon the user believes they
+                // stopped. Stay up and report it instead.
+                self?.reportFailure("Could not stop the server", detail: output)
+                return
+            }
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Surfaces a failed action. The menu bar has no window to put an error
+    /// in, so this is a modal alert -- rare by construction, since it only
+    /// fires when an explicit command the user chose did not do what it said.
+    private func reportFailure(_ message: String, detail: String) {
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = message
+            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            alert.informativeText = trimmed.isEmpty
+                ? "Run `quern status` to see what state it is in."
+                : trimmed
+            alert.runModal()
+        }
     }
 
     // MARK: - Login item
@@ -276,7 +303,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         if #available(macOS 13.0, *) {
             if SMAppService.mainApp.status == .notRegistered {
-                LoginItem.setEnabled(true)
+                // Marking first launch done on a failed registration burns the
+                // only attempt: the guard above returns on every later launch,
+                // so a transient failure here means the app never launches at
+                // login and never tries again. Leave the marker unset and let
+                // the next launch retry.
+                guard LoginItem.setEnabled(true) else { return }
             }
         }
         UserDefaults.standard.set(true, forKey: key)
