@@ -299,17 +299,24 @@ class PreviewManager:
     def _take_pending(self, name: str, event: dict) -> tuple[str, asyncio.Future] | None:
         """Claim the pending command this event answers, if it answers one.
 
-        A reply carrying a different id belongs to a request that already timed
-        out, so it is discarded rather than applied to whatever is waiting now.
-        A reply with no id at all is accepted: the subprocess may predate the
-        id, and refusing those would hang every call against an older binary.
+        A reply must carry the id of the command it answers. Anything else
+        belongs to a request that already timed out, and applying it to the one
+        waiting now is the whole failure this guards against.
+
+        That includes a reply with no id at all. Accepting those was meant to
+        tolerate a subprocess built before the id existed, but it reopened the
+        same hole from the other side: an id-less `removed` arriving late still
+        settles a newer add. The tolerance is not needed anyway -- the
+        subprocess is compiled from source that ships with this server and is
+        rebuilt whenever that source is newer, so a binary that cannot echo an
+        id is one this code never sent an id to.
         """
         entry = self._pending.get(name)
         if entry is None:
             return None
         cid, op, fut = entry
         reply_id = event.get("id")
-        if reply_id is not None and reply_id != cid:
+        if reply_id != cid:
             logger.debug(
                 "Ignoring stale %s for %s (id %s, waiting on %s)",
                 event.get("event"), name, reply_id, cid,

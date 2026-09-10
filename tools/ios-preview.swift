@@ -853,9 +853,26 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         sessions[name] = session
         positions.insert(position)
 
-        // Start capture, then emit added after a brief delay for CoreMediaIO
+        // Start capture, then acknowledge after a brief delay for CoreMediaIO.
+        //
+        // The window can be closed inside that second. Acknowledging anyway
+        // told the server an add had succeeded, and it would record an active
+        // preview with no window behind it -- and go on refusing a fresh add
+        // for that device, because it believed one was already running. So the
+        // session has to still be the one this call created; a `window_closed`
+        // has already gone out for it otherwise.
         session.start()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak session] in
+            guard let self else { return }
+            guard let session, self.sessions[name] === session else {
+                self.emit([
+                    "event": "add_failed",
+                    "name": name,
+                    "error": "Window closed before the preview was acknowledged",
+                    "id": id as Any,
+                ])
+                return
+            }
             self.emit(["event": "added", "name": name, "id": id as Any])
         }
     }

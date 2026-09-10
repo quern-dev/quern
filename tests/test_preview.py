@@ -166,13 +166,16 @@ class TestCommandCorrelation:
         finally:
             loop.close()
 
-    def test_a_reply_with_no_id_is_still_accepted(self):
-        """An older subprocess does not echo ids, and refusing those would hang
-        every call against a binary the user has not rebuilt yet."""
+    def test_a_reply_with_no_id_is_refused(self):
+        """Accepting id-less replies was meant to tolerate an older subprocess,
+        but it reopened the same hole from the other side: a late id-less
+        `removed` would still settle a newer add. The subprocess is compiled
+        from source shipping with this server, so a binary that cannot echo an
+        id is one this code never sent an id to."""
         loop, mgr, fut = self._pending("add", "c2")
         try:
             mgr._dispatch_event({"event": "added", "name": "iPhone 11"})
-            assert fut.result() is True
+            assert not fut.done(), "an id-less reply settled an id-bearing command"
         finally:
             loop.close()
 
@@ -180,3 +183,28 @@ class TestCommandCorrelation:
         mgr = PreviewManager()
         ids = {mgr._next_command_id() for _ in range(50)}
         assert len(ids) == 50
+
+
+class TestAddAcknowledgement:
+    def test_a_window_closed_before_ack_fails_the_add(self):
+        """The subprocess acknowledges an add a second after starting capture,
+        and the window can be closed inside that second. Acknowledging anyway
+        left the server holding an active preview with no window, and refusing
+        fresh adds for that device because it believed one was running."""
+        loop = asyncio.new_event_loop()
+        mgr = PreviewManager()
+        fut = loop.create_future()
+        mgr._pending["iPhone 11"] = ("c1", "add", fut)
+        try:
+            mgr._dispatch_event({
+                "event": "add_failed",
+                "name": "iPhone 11",
+                "error": "Window closed before the preview was acknowledged",
+                "id": "c1",
+            })
+            assert fut.done()
+            with pytest.raises(RuntimeError, match="Window closed"):
+                fut.result()
+            assert mgr._active == {}
+        finally:
+            loop.close()
