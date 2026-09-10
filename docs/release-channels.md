@@ -109,17 +109,46 @@ git rev-parse origin/release/stable origin/release/beta origin/main   # expect t
 # 5. Now create the GitHub Release.
 gh release create vN.M.K --title "vN.M.K — short release headline" --notes-file RELEASE_NOTES.md
 
-# 5. Build, sign, notarize, and attach the menu-bar app asset.
-#    Run on a Mac with the Developer ID identity + notarytool profile.
-#    See macos/QuernMenuBar/README.md for the one-time credential setup.
+# 6. Attach the menu-bar app asset, using the app staged in step 0.
 DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
-NOTARY_PROFILE="quern-notary" \
-  scripts/release-menubar.sh vN.M.K
+  scripts/release-menubar.sh --publish vN.M.K
 ```
 
-**Why the ordering matters:** see the *GitHub quirk* section. Once step 5 has
-happened, you cannot retroactively move any branch to that commit. The
-fast-forwards in step 3 have to happen first.
+**Step 0, before any of the above.** Build, sign and notarize the app first,
+while nothing has been cut yet:
+
+```sh
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+NOTARY_PROFILE="your-notarytool-profile" \
+  scripts/release-menubar.sh --app-only N.M.K      # note: no leading v
+```
+
+That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
+`--publish` command to run at step 6.
+
+Doing it first is the point of the split. Notarization is the slow step, the
+one that depends on Apple's service being reachable, and the one that would
+otherwise abort a release *after* the tag and Release existed — leaving
+nothing to clean up except by hand. If Apple is having a bad day you find out
+before anything is published.
+
+`--publish` re-verifies the staged app rather than trusting it: stamped
+version against the tag, signature validity, stapled ticket, Gatekeeper
+acceptance, and that the signing team matches `DEVELOPER_ID_APP`. Hence that
+variable is required in both phases.
+
+The one-shot form, `scripts/release-menubar.sh vN.M.K`, still does everything
+in a single run. It needs the tag and Release to already exist, so it belongs
+at step 6, not step 0.
+
+Both forms need a `notarytool` keychain profile; see
+`macos/QuernMenuBar/README.md` for the one-time credential setup. Use whatever
+name you gave it when you ran `store-credentials`.
+
+**Why the ordering matters:** see the *GitHub quirk* section. Once the Release
+in step 5 exists, you cannot retroactively move any branch to that commit. The
+fast-forwards in step 3 have to happen first, and step 4 exists because a
+rejection there is silent.
 
 **Why `release/beta` too.** A stable release is by definition newer than
 anything beta users are running, so leaving `release/beta` behind means
@@ -226,16 +255,24 @@ TAG="$1"
 git tag -a "$TAG" -m "$TAG"
 git push origin "$TAG"
 
-# 2. Fast-forward release/stable — MUST happen before step 3
+# 2. Fast-forward BOTH channel branches — MUST happen before step 3.
+#    Beta too: a stable release is newer than anything beta users are on, so
+#    leaving beta behind hands them older content than stable users get.
 git push origin main:refs/heads/release/stable
+git push origin main:refs/heads/release/beta
 
-# 3. Now create the Release
+# 3. Verify — the rejection above is silent.
+git fetch origin
+for ref in release/stable release/beta main; do
+  echo "  $ref $(git rev-parse --short "origin/$ref")"
+done   # expect three identical SHAs, and stop here if they differ
+
+# 4. Now create the Release
 gh release create "$TAG" --title "$TAG" --notes "see CHANGELOG.md"
-
-echo "release/stable now at $(git rev-parse "$TAG")"
 ```
 
-(Same shape works for `release/beta`; swap `--prerelease` in for step 3.)
+For a **prerelease**, advance only `release/beta` and add `--prerelease` to
+step 4; `release/stable` should keep pointing at the last stable tag.
 
 ---
 
