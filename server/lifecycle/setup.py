@@ -555,6 +555,70 @@ exec "{venv_python}" -m server "$@"
         )
 
 
+def build_preview_app() -> CheckResult:
+    """Compile the screen-mirror app during setup rather than on first use.
+
+    It used to be built lazily, the first time something asked for a preview.
+    That left a hole: the menu-bar app only offers "Screen Mirror…" when the
+    bundle exists on disk, so on a fresh install the item was missing until
+    the user had already driven a preview from the API or an MCP tool. The
+    menu bar is the route for people who would rather not do that, so the
+    feature was hidden from exactly the audience it is for.
+
+    Building it here costs about 1.5 seconds and makes the menu item appear.
+
+    Treated as optional, the way scrcpy is: a machine without Xcode Command
+    Line Tools cannot compile it, and that is a missing convenience rather
+    than a broken install.
+    """
+    name = "Screen mirror (Quern Preview)"
+
+    if _which("swiftc") is None:
+        result = CheckResult(
+            name=name,
+            status=CheckStatus.SKIPPED,
+            message="Xcode Command Line Tools not found — screen mirror unavailable",
+            detail="Install with: xcode-select --install",
+            fixable=True,
+        )
+        if _prompt_yn(
+            "    Xcode Command Line Tools not found (needed for the screen-mirror "
+            "app). Open the installer?",
+        ):
+            # `xcode-select --install` hands off to a macOS dialog and returns
+            # immediately, so there is nothing to wait on and no exit code
+            # worth trusting -- it also reports failure when the tools are
+            # already present. Say what happens next instead.
+            _run(["xcode-select", "--install"])
+            print("    A macOS installer dialog should have opened.")
+            print("    Re-run `quern setup` once it finishes to build the app.")
+        return result
+
+    try:
+        from server.device.preview import build_preview_bundle
+
+        build_preview_bundle()
+    except (RuntimeError, OSError) as e:
+        # OSError as well as RuntimeError, per the error-path convention in
+        # CONTRIBUTING: catch the base class, not the subclasses seen so far.
+        # The build stats files, creates directories, writes a plist, copies an
+        # icon and launches a process -- an unwritable ~/.quern or a transient
+        # filesystem fault raises OSError, and catching only RuntimeError would
+        # end setup entirely over an optional convenience.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Could not build the screen-mirror app",
+            detail=str(e),
+        )
+
+    return CheckResult(
+        name=name,
+        status=CheckStatus.OK,
+        message="Built (available from the menu bar)",
+    )
+
+
 def launch_menubar_app(project_root: Path) -> CheckResult | None:
     """Launch the bundled menu-bar app so it self-registers as a login item.
 
@@ -2090,6 +2154,13 @@ def run_setup() -> int:
     # ── Wrapper script installation ──
 
     report.add(install_wrapper_script())
+
+    # ── Screen-mirror app ──
+    #
+    # Before the menu-bar launch below, deliberately: the menu only shows
+    # "Screen Mirror…" when this bundle exists, and it reads that at launch.
+
+    report.add(build_preview_app())
 
     # ── Menu-bar app (only present in bundled release tarballs) ──
 
