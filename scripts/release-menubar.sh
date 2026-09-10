@@ -73,9 +73,22 @@ VERSION="${ARG#v}"
 TAG="$ARG"
 [[ "$TAG" == v* ]] || TAG="v$TAG"
 
+# DEVELOPER_ID_APP is required in every mode. Phase 1 signs with it; phase 2
+# checks the staged bundle against it. "Validly signed and notarized" says
+# nothing about *whose* signature it carries, and --publish will accept a
+# bundle handed to it by path, so without this any Developer ID app would pass.
+: "${DEVELOPER_ID_APP:?set DEVELOPER_ID_APP to your Developer ID Application identity}"
 if [[ "$MODE" != "publish" ]]; then
-  : "${DEVELOPER_ID_APP:?set DEVELOPER_ID_APP to your Developer ID Application identity}"
   : "${NOTARY_PROFILE:?set NOTARY_PROFILE to your notarytool keychain profile}"
+fi
+
+# The team identifier out of "Developer ID Application: Name (TEAMID)".
+EXPECTED_TEAM="${DEVELOPER_ID_APP##*(}"
+EXPECTED_TEAM="${EXPECTED_TEAM%)}"
+if [[ -z "$EXPECTED_TEAM" || "$EXPECTED_TEAM" == "$DEVELOPER_ID_APP" ]]; then
+  echo "error: could not read a team id from DEVELOPER_ID_APP" >&2
+  echo "       expected the form: Developer ID Application: Name (TEAMID)" >&2
+  exit 2
 fi
 
 # Capture the caller's APP before the internal one shadows it.
@@ -130,9 +143,15 @@ notarize_wait() {
   i=0
   while (( i < 60 )); do
     i=$((i + 1))
+    # `|| true` is load-bearing, and the reason this differs from the burrows
+    # original it was taken from: that script runs under `set -eu`, where awk
+    # succeeding masks a failed `notarytool info`. This one adds `pipefail`, so
+    # the pipeline reports the failure, `set -e` acts on it, and the shell
+    # exits mid-poll -- defeating the entire point of polling instead of using
+    # `--wait`. An empty `st` is already the loop's "retry" case.
     st=$(xcrun notarytool info "$sub_id" \
       --keychain-profile "$NOTARY_PROFILE" 2>/dev/null \
-      | awk -F': ' '/status:/{print $2; exit}')
+      | awk -F': ' '/status:/{print $2; exit}') || true
     echo "  [$i] status: ${st:-<timeout, retrying>}"
     case "$st" in
       Accepted) return 0 ;;
@@ -211,7 +230,13 @@ if [[ "$MODE" == "publish" ]]; then
     echo "error: staged app has no stapled notarization ticket" >&2; exit 1; }
   spctl -a -vvv "$APP" || {
     echo "error: Gatekeeper rejects the staged app" >&2; exit 1; }
-  echo "  signed, stapled, Gatekeeper-accepted, v$staged_version"
+  staged_team=$(codesign -dv "$APP" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')
+  if [[ "$staged_team" != "$EXPECTED_TEAM" ]]; then
+    echo "error: staged app is signed by team ${staged_team:-<none>}, expected $EXPECTED_TEAM" >&2
+    echo "       Refusing to publish a bundle this release did not sign." >&2
+    exit 1
+  fi
+  echo "  signed by $staged_team, stapled, Gatekeeper-accepted, v$staged_version"
 fi
 
 # The tag has to exist by now: the archive is taken from it, not from HEAD.
