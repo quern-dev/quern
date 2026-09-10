@@ -12,6 +12,9 @@
 #              parsed from the repo's pyproject.toml (single source of truth).
 #   UNIVERSAL  If "1" (default), builds a universal arm64+x86_64 binary via lipo.
 #              Set to "0" for a faster native-arch-only dev build.
+#   STRICT     If "1", compiler warnings become errors. CI sets this so a new
+#              warning fails the build; left off locally so a warning mid-edit
+#              does not block an iteration.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="${1:-$SCRIPT_DIR/build}"
 APP="$OUT_DIR/Quern.app"
 UNIVERSAL="${UNIVERSAL:-1}"
+STRICT="${STRICT:-0}"
 
 # --- Resolve version (arg/env wins, else parse pyproject.toml) ---------------
 if [[ -z "${VERSION:-}" ]]; then
@@ -43,10 +47,14 @@ SOURCES=("$SCRIPT_DIR"/Sources/*.swift)
 BIN="$MACOS_DIR/QuernMenuBar"
 DEPLOY_TARGET="13.0"
 
+STRICT_FLAGS=()
+[[ "$STRICT" == "1" ]] && STRICT_FLAGS+=(-warnings-as-errors)
+
 compile_arch() {
   local arch="$1" out="$2"
   "$SWIFTC" -O -whole-module-optimization \
     -target "${arch}-apple-macos${DEPLOY_TARGET}" \
+    "${STRICT_FLAGS[@]+"${STRICT_FLAGS[@]}"}" \
     -o "$out" "${SOURCES[@]}"
 }
 
