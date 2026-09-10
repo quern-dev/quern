@@ -262,8 +262,15 @@ else
   CHANNELS="release/stable release/beta"
 fi
 
-# 1. Tag
-git tag -a "$TAG" -m "$TAG"
+# 1. Tag. Reuse an existing one only when it points where this run intends;
+#    a mismatch means the tag was cut somewhere else and must be resolved by
+#    hand. Without this, any retry after a later step failed dies here on
+#    "tag already exists" with the remote tag already pushed.
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+  echo "note: $TAG already exists locally, reusing it"
+else
+  git tag -a "$TAG" -m "$TAG"
+fi
 git push origin "$TAG"
 
 # 2. Fast-forward the channel branches — MUST happen before step 4.
@@ -292,6 +299,16 @@ gh release create "$TAG" $PRERELEASE --title "$TAG" --notes "see CHANGELOG.md"
 The verification compares against the tag rather than `origin/main` on purpose.
 Only the branches this release actually moves are checked, so a prerelease is
 not failed for leaving `release/stable` where it belongs.
+
+**If it stops partway.** Every step before the Release is repeatable: the tag
+is reused when it already points at the intended commit, and pushing a channel
+branch to the same tag twice is a no-op. So the fix for a failed run is
+normally to resolve the cause and run it again.
+
+The exception is the one the ordering exists for. Once the Release is created,
+GitHub silently refuses to point any branch at that commit, so a channel branch
+left behind at that moment cannot be fixed by rerunning — it has to wait for
+the next cut. That is why step 3 refuses to continue rather than warning.
 
 ---
 
