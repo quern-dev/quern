@@ -125,13 +125,33 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | File | Purpose |
 |------|---------|
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
-| `active-device.json` | UDID of the active device set via `resolve_device` — persists across stop/start so you don't have to re-resolve after every restart |
+| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the menu-bar app reads |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture settings and other configuration |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
+
+### The menu bar app
+
+On macOS, Quern installs a menu-bar app so you can see whether the server is up
+without opening a terminal. It appears automatically after `quern setup`, and
+`quern update` keeps it current.
+
+It shows the daemon's state and uptime, the active device, the proxy's port,
+and an update notice when one is available. From its menu you can start, stop
+and restart the server, open a live screen mirror of a connected device, and
+reach Settings — which carries the update channel picker and a launch-at-login
+toggle.
+
+It does not own the daemon. Starting Quern from the app and starting it from
+the CLI do the same thing, and quitting the app leaves the server running;
+"Quit and Stop Server" is a separate item for when you mean both.
+
+The app is signed and notarized, and ships inside the release asset rather than
+the source tarball. If you installed before v0.15.0 and have never run
+`quern update`, you will not have it — updating brings it in.
 
 ### Connect via MCP
 
