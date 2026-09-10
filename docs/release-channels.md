@@ -109,17 +109,46 @@ git rev-parse origin/release/stable origin/release/beta origin/main   # expect t
 # 5. Now create the GitHub Release.
 gh release create vN.M.K --title "vN.M.K — short release headline" --notes-file RELEASE_NOTES.md
 
-# 5. Build, sign, notarize, and attach the menu-bar app asset.
-#    Run on a Mac with the Developer ID identity + notarytool profile.
-#    See macos/QuernMenuBar/README.md for the one-time credential setup.
+# 6. Attach the menu-bar app asset, using the app staged in step 0.
 DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
-NOTARY_PROFILE="quern-notary" \
-  scripts/release-menubar.sh vN.M.K
+  scripts/release-menubar.sh --publish vN.M.K
 ```
 
-**Why the ordering matters:** see the *GitHub quirk* section. Once step 5 has
-happened, you cannot retroactively move any branch to that commit. The
-fast-forwards in step 3 have to happen first.
+**Step 0, before any of the above.** Build, sign and notarize the app first,
+while nothing has been cut yet:
+
+```sh
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+NOTARY_PROFILE="your-notarytool-profile" \
+  scripts/release-menubar.sh --app-only N.M.K      # note: no leading v
+```
+
+That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
+`--publish` command to run at step 6.
+
+Doing it first is the point of the split. Notarization is the slow step, the
+one that depends on Apple's service being reachable, and the one that would
+otherwise abort a release *after* the tag and Release existed — leaving
+nothing to clean up except by hand. If Apple is having a bad day you find out
+before anything is published.
+
+`--publish` re-verifies the staged app rather than trusting it: stamped
+version against the tag, signature validity, stapled ticket, Gatekeeper
+acceptance, and that the signing team matches `DEVELOPER_ID_APP`. Hence that
+variable is required in both phases.
+
+The one-shot form, `scripts/release-menubar.sh vN.M.K`, still does everything
+in a single run. It needs the tag and Release to already exist, so it belongs
+at step 6, not step 0.
+
+Both forms need a `notarytool` keychain profile; see
+`macos/QuernMenuBar/README.md` for the one-time credential setup. Use whatever
+name you gave it when you ran `store-credentials`.
+
+**Why the ordering matters:** see the *GitHub quirk* section. Once the Release
+in step 5 exists, you cannot retroactively move any branch to that commit. The
+fast-forwards in step 3 have to happen first, and step 4 exists because a
+rejection there is silent.
 
 **Why `release/beta` too.** A stable release is by definition newer than
 anything beta users are running, so leaving `release/beta` behind means
@@ -218,24 +247,76 @@ remember:
 
 ```sh
 #!/bin/bash
-# scripts/cut-stable-release.sh — usage: ./scripts/cut-stable-release.sh vN.M.K
+# scripts/cut-release.sh — usage: ./scripts/cut-release.sh vN.M.K [--prerelease]
 set -euo pipefail
 TAG="$1"
+PRERELEASE=""
+[ "${2:-}" = "--prerelease" ] && PRERELEASE="--prerelease"
 
-# 1. Tag
-git tag -a "$TAG" -m "$TAG"
+# Which channels this release moves. A stable cut advances both -- leaving beta
+# behind hands beta users older content than stable users get. A prerelease
+# advances only beta; release/stable must stay on the last stable tag.
+if [ -n "$PRERELEASE" ]; then
+  CHANNELS="release/beta"
+else
+  CHANNELS="release/stable release/beta"
+fi
+
+# 1. Tag. Reuse an existing one only when it points at the commit this run is
+#    releasing; a mismatch means the tag was cut somewhere else, and moving a
+#    published tag is not something a script should decide to do. Without the
+#    reuse, any retry after a later step failed dies here on "tag already
+#    exists" with the remote tag already pushed.
+INTENDED=$(git rev-parse HEAD)
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+  EXISTING=$(git rev-parse "$TAG^{commit}")
+  if [ "$EXISTING" != "$INTENDED" ]; then
+    echo "error: $TAG exists at ${EXISTING:0:8} but HEAD is ${INTENDED:0:8}" >&2
+    echo "       Resolve that by hand before rerunning." >&2
+    exit 1
+  fi
+  echo "note: $TAG already exists at ${EXISTING:0:8}, reusing it"
+else
+  git tag -a "$TAG" -m "$TAG"
+fi
 git push origin "$TAG"
 
-# 2. Fast-forward release/stable — MUST happen before step 3
-git push origin main:refs/heads/release/stable
+# 2. Fast-forward the channel branches — MUST happen before step 4.
+#    From the tag, not from main: the tag is what was published, and a
+#    prerelease is often cut somewhere other than main HEAD.
+for ref in $CHANNELS; do
+  git push origin "$TAG:refs/heads/$ref"
+done
 
-# 3. Now create the Release
-gh release create "$TAG" --title "$TAG" --notes "see CHANGELOG.md"
+# 3. Verify — the rejection above is silent, so this has to fail loudly.
+git fetch origin
+expected=$(git rev-parse "$TAG^{commit}")
+for ref in $CHANNELS; do
+  actual=$(git rev-parse "origin/$ref")
+  if [ "$actual" != "$expected" ]; then
+    echo "error: origin/$ref is at ${actual:0:8}, expected ${expected:0:8}" >&2
+    echo "       The push above was rejected. Do NOT create the Release." >&2
+    exit 1
+  fi
+done
 
-echo "release/stable now at $(git rev-parse "$TAG")"
+# 4. Now create the Release
+gh release create "$TAG" $PRERELEASE --title "$TAG" --notes "see CHANGELOG.md"
 ```
 
-(Same shape works for `release/beta`; swap `--prerelease` in for step 3.)
+The verification compares against the tag rather than `origin/main` on purpose.
+Only the branches this release actually moves are checked, so a prerelease is
+not failed for leaving `release/stable` where it belongs.
+
+**If it stops partway.** Every step before the Release is repeatable: the tag
+is reused when it already points at the intended commit, and pushing a channel
+branch to the same tag twice is a no-op. So the fix for a failed run is
+normally to resolve the cause and run it again.
+
+The exception is the one the ordering exists for. Once the Release is created,
+GitHub silently refuses to point any branch at that commit, so a channel branch
+left behind at that moment cannot be fixed by rerunning — it has to wait for
+the next cut. That is why step 3 refuses to continue rather than warning.
 
 ---
 

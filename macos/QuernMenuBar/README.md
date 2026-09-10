@@ -58,20 +58,53 @@ Quern's existing updater (Option A — no Sparkle, no second update path).
 One-time credential setup:
 
 ```sh
-# Store an App Store Connect API key (or Apple ID) for notarytool.
-xcrun notarytool store-credentials quern-notary \
+# Apple ID credentials, with an app-specific password (not your Apple ID
+# password). The profile name is yours to choose -- pass the same one to the
+# script below.
+xcrun notarytool store-credentials my-notary-profile \
   --apple-id "you@example.com" --team-id TEAMID --password "app-specific-pw"
 ```
 
-Per release (also documented in `docs/release-channels.md`, step 5):
+An App Store Connect API key works too, and avoids storing a password:
+
+```sh
+xcrun notarytool store-credentials my-notary-profile \
+  --key AuthKey_XXXXXXXXXX.p8 --key-id XXXXXXXXXX --issuer "issuer-uuid"
+```
+
+Per release, in two phases. The full procedure is in
+`docs/release-channels.md`; this is the part that runs here.
+
+**Before cutting the tag** — build, sign and notarize:
 
 ```sh
 DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
-NOTARY_PROFILE="quern-notary" \
-  ../../scripts/release-menubar.sh v0.14.0
+NOTARY_PROFILE="my-notary-profile" \
+  ../../scripts/release-menubar.sh --app-only 0.15.0     # no leading v
 ```
 
-That script builds a universal binary, signs with hardened runtime, notarizes
-and staples, assembles `dist/quern-<version>.tar.gz` (source tree + signed
-`Quern.app` at the top level), and uploads it as a release asset. The updater
-(`_select_asset_url` in `server/lifecycle/updater.py`) prefers this asset.
+This leaves a signed, notarized `Quern.app` in `dist/` and prints the publish
+command for later. Doing it first means a notary-service failure costs you
+nothing: no tag has been cut and no Release exists yet.
+
+**After the tag and Release exist** — assemble and upload:
+
+```sh
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+  ../../scripts/release-menubar.sh --publish v0.15.0
+```
+
+That assembles `dist/quern-<version>.tar.gz` (source tree at the tag + the
+signed `Quern.app` at the top level) and uploads it as a release asset. Both
+the updater (`_select_asset_url` in `server/lifecycle/updater.py`) and the
+install script on quern.dev prefer this asset over GitHub's generated source
+tarball, so a fresh install and an upgrade both get the app.
+
+`--publish` re-verifies the staged app before uploading anything: stamped
+version against the tag, signature validity, stapled ticket, Gatekeeper
+acceptance, and that the signing team matches `DEVELOPER_ID_APP` — which is
+why that variable is needed in both phases. A staged app can come from
+anywhere, including a previous release.
+
+The one-shot form, `release-menubar.sh v0.15.0`, still does everything in a
+single run, but it needs the tag and Release to already exist.
