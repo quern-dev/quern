@@ -73,7 +73,11 @@ Use `wait_for_element` instead of calling `get_ui_tree` in a loop. It polls serv
 
 Use `wait_for_flow` after triggering a UI action to observe the resulting network request — it blocks until a matching flow appears or times out. Auto-sets `since` to 5 seconds before the call to catch flows that completed between the action and the wait. Use `list_held_flows` with a `timeout` when you need to intercept and *modify* flows.
 
-Use `wait_for_settle` when you are waiting for the screen to stop changing rather than for a specific element — after a navigation, a pull-to-refresh, or an animation you cannot name a target inside. It is the right tool when "wait until this is done" has no single element that marks done.
+Use `wait_for_settle` when you are waiting for the screen to stop changing rather than for a specific element — after a navigation, an animation, or before interacting with a web view, whose content is invisible to the accessibility tree so nothing else can tell you it has finished drawing.
+
+It answers "has drawing stopped", not "has content arrived". A blank page still loading is perfectly still, and will be called settled in under two seconds. Raising the timeout does not help, because nothing is moving. So for a slow load, wait for the content first — poll `get_web_content` until it returns elements, or `wait_for_element` for a native one — and use `wait_for_settle` afterwards to let the result stop moving.
+
+Check the `settled` field before acting on the result. `settled: false` means something is animating rather than loading — a spinner, a video, a carousel — and will never settle. Treat that as a fact about the screen, not a failed wait.
 
 ---
 
@@ -167,6 +171,18 @@ and it is easy to read that as a failed load or a blank screen. Call
 `get_web_content` — it pairs the Web Inspector's view of the DOM with the
 native tree so elements come back with real screen frames, which means you can
 tap them like any other element.
+
+The results are merged into subsequent UI reads, so `tap_element`,
+`get_ui_tree` and `get_screen_summary` all see them and you can tap by label as
+usual. That overlay is dropped as soon as anything changes the screen — a tap,
+swipe, scroll or launch — so **call `get_web_content` again after each
+interaction with the page** rather than reusing an earlier read. A tap against
+stale web content is refused with reason `stale_web_content` instead of landing
+somewhere wrong.
+
+If the response reports `anchored: false`, the page was found but its position
+on screen could not be confirmed, and the elements are withheld rather than
+returned at a guessed offset. Treat that as "look again", not "no content".
 
 Simulator only, and deliberately: Android's accessibility tree already descends
 into `WebView`, and physical iOS devices are reached over a different
@@ -296,7 +312,8 @@ Open real-time video windows to see what's happening on USB-connected physical d
 **"The screen looks empty, or I know it's a web view"**
 - `get_web_content` — reads `WKWebView` content the accessibility tree cannot see, with real screen coordinates
 - iOS simulator only; on Android and physical iOS the normal `get_ui_tree` already covers web views
-- Optional `bundle_id` when several apps are running, and `hints` to narrow what comes back
+- Optional `bundle_id` when several apps are running, and `udid` to target a specific simulator
+- Re-read after every interaction; the merged results are dropped when the screen changes
 
 **"I need to tap/interact with UI"**
 - Known element: `tap_element` with label and element_type

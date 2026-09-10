@@ -261,11 +261,17 @@ git push origin "$TAG"
 git push origin main:refs/heads/release/stable
 git push origin main:refs/heads/release/beta
 
-# 3. Verify — the rejection above is silent.
+# 3. Verify — the rejection above is silent, so this has to fail loudly.
 git fetch origin
-for ref in release/stable release/beta main; do
-  echo "  $ref $(git rev-parse --short "origin/$ref")"
-done   # expect three identical SHAs, and stop here if they differ
+main_sha=$(git rev-parse origin/main)
+for ref in release/stable release/beta; do
+  ref_sha=$(git rev-parse "origin/$ref")
+  if [ "$ref_sha" != "$main_sha" ]; then
+    echo "error: origin/$ref is at ${ref_sha:0:8}, expected ${main_sha:0:8}" >&2
+    echo "       The push above was rejected. Do NOT create the Release." >&2
+    exit 1
+  fi
+done
 
 # 4. Now create the Release
 gh release create "$TAG" --title "$TAG" --notes "see CHANGELOG.md"

@@ -58,10 +58,18 @@ Quern's existing updater (Option A — no Sparkle, no second update path).
 One-time credential setup:
 
 ```sh
-# Store an App Store Connect API key (or Apple ID) for notarytool. The profile
-# name is yours to choose -- pass the same one to the script below.
+# Apple ID credentials, with an app-specific password (not your Apple ID
+# password). The profile name is yours to choose -- pass the same one to the
+# script below.
 xcrun notarytool store-credentials my-notary-profile \
   --apple-id "you@example.com" --team-id TEAMID --password "app-specific-pw"
+```
+
+An App Store Connect API key works too, and avoids storing a password:
+
+```sh
+xcrun notarytool store-credentials my-notary-profile \
+  --key AuthKey_XXXXXXXXXX.p8 --key-id XXXXXXXXXX --issuer "issuer-uuid"
 ```
 
 Per release, in two phases. The full procedure is in
