@@ -31,6 +31,34 @@ func enableScreenCaptureDevices() {
 
 // MARK: - Discover iOS devices
 
+/// A connected iPhone publishes more than its screen. On a device that
+/// supports Continuity Camera, its rear camera arrives as a second
+/// `.external` device, and previewing it opened a window showing a black
+/// rectangle -- the camera is not streaming and nobody asked to see it.
+///
+/// The two are cleanly distinguishable, but not by the obvious route: a
+/// `.continuityCamera` discovery session returns nothing, because the camera
+/// is published as a plain external device. What separates them is what they
+/// carry. A screen-capture device is muxed (audio and video together) and
+/// reports the generic `iOS Device` model; a Continuity Camera is video-only
+/// and reports the actual hardware model, e.g. `iPhone16,1`.
+///
+/// Measured with an iPhone 15 Pro and an iPhone 11 attached:
+///
+///     external/muxed:  J iPhone 15 Pro         modelID=iOS Device   muxed
+///                      iPhone 11               modelID=iOS Device   muxed
+///     external/video:  J iPhone 15 Pro Camera  modelID=iPhone16,1   video
+private let screenCaptureModelID = "iOS Device"
+
+func isScreenCaptureDevice(_ d: AVCaptureDevice) -> Bool {
+    if d.hasMediaType(.muxed) { return true }
+    // The video-only fallback is kept rather than dropped: screen-capture
+    // devices are muxed on every macOS this has been run on, but the model ID
+    // is the thing actually being asserted, and keeping the branch means a
+    // host that types them as video still mirrors instead of showing nothing.
+    return d.modelID == screenCaptureModelID
+}
+
 func discoverDevices() -> [AVCaptureDevice] {
     let muxed = AVCaptureDevice.DiscoverySession(
         deviceTypes: [.external],
@@ -46,12 +74,54 @@ func discoverDevices() -> [AVCaptureDevice] {
 
     var seen = Set<String>()
     var result: [AVCaptureDevice] = []
-    for d in muxed + videoOnly {
+    for d in muxed + videoOnly where isScreenCaptureDevice(d) {
         if seen.insert(d.uniqueID).inserted {
             result.append(d)
         }
     }
     return result
+}
+
+// MARK: - Device attach / detach
+
+/// AVFoundation posts both notifications for CoreMediaIO screen-capture
+/// devices, verified by observing an unplug/replug of an iPhone 11:
+///
+///     DISCONNECTED name=iPhone 11 model=iOS Device muxed=true
+///     CONNECTED    name=iPhone 11 model=iOS Device muxed=true
+///
+/// The notification carries the device itself, so `isScreenCaptureDevice`
+/// applies directly and a Continuity Camera appearing alongside its phone is
+/// filtered out here too, rather than being noticed later.
+func observeDeviceChanges(
+    onConnect: @escaping (AVCaptureDevice) -> Void,
+    onDisconnect: @escaping (AVCaptureDevice) -> Void
+) -> [NSObjectProtocol] {
+    let connected = NotificationCenter.default.addObserver(
+        forName: AVCaptureDevice.wasConnectedNotification, object: nil, queue: .main
+    ) { note in
+        guard let d = note.object as? AVCaptureDevice, isScreenCaptureDevice(d) else { return }
+        traceDeviceEvent("attach", d)
+        onConnect(d)
+    }
+    let disconnected = NotificationCenter.default.addObserver(
+        forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: .main
+    ) { note in
+        guard let d = note.object as? AVCaptureDevice, isScreenCaptureDevice(d) else { return }
+        traceDeviceEvent("detach", d)
+        onDisconnect(d)
+    }
+    return [connected, disconnected]
+}
+
+/// Every attach and detach as AVFoundation reports it, before any policy is
+/// applied. One line per event, on stderr, because what the window ends up
+/// doing is a decision layered on top -- and when the two disagree, this is
+/// the record that says which half was surprising.
+func traceDeviceEvent(_ kind: String, _ device: AVCaptureDevice) {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss.SSS"
+    fputs("  [\(f.string(from: Date()))] \(kind): \(device.localizedName)\n", stderr)
 }
 
 // MARK: - Filter devices by args
@@ -226,6 +296,8 @@ class PreviewWindow: NSObject, NSWindowDelegate {
     let session: AVCaptureSession
     let device: AVCaptureDevice
     var onWindowClosed: ((String) -> Void)?
+    private var input: AVCaptureDeviceInput?
+    private var sizeTimer: Timer?
 
     init(device: AVCaptureDevice, index: Int) {
         self.device = device
@@ -236,6 +308,7 @@ class PreviewWindow: NSObject, NSWindowDelegate {
             let input = try AVCaptureDeviceInput(device: device)
             if session.canAddInput(input) {
                 session.addInput(input)
+                self.input = input
             } else {
                 fputs("  Warning: canAddInput returned false for \(device.localizedName)\n", stderr)
             }
@@ -276,15 +349,75 @@ class PreviewWindow: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    func start() { session.startRunning() }
+    func start() {
+        session.startRunning()
+        beginSizingToStream()
+    }
+
+    /// Resize the window to the stream's own proportions once they are known.
+    ///
+    /// The window opens at a fixed 400x710 because nothing better is available
+    /// yet: a screen-capture device advertises a single format of 0x0 until it
+    /// is actually streaming, so its real size cannot be read at construction
+    /// time. 400x710 is 0.563 wide-to-tall while a modern iPhone is nearer
+    /// 0.462, and `videoGravity = .resizeAspect` letterboxes the difference --
+    /// the black bars down each side.
+    ///
+    /// So poll the input port until it reports real dimensions, then match
+    /// them. Polling rather than KVO because the wait is short, bounded, and
+    /// this is a single-file script; an observer here would be more ceremony
+    /// than the problem deserves.
+    private func beginSizingToStream() {
+        sizeTimer?.invalidate()
+        var attempts = 0
+        sizeTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            attempts += 1
+            if let dims = self.streamDimensions() {
+                t.invalidate()
+                self.sizeTimer = nil
+                self.applyStreamAspect(dims)
+            } else if attempts >= 40 {
+                // ~10s. Keep the default window rather than retrying forever;
+                // a device that never reports dimensions still mirrors fine,
+                // it just keeps the bars.
+                t.invalidate()
+                self.sizeTimer = nil
+            }
+        }
+    }
+
+    private func streamDimensions() -> CMVideoDimensions? {
+        // A muxed device exposes separate audio and video ports; only the
+        // video one carries the picture size.
+        guard let port = input?.ports.first(where: { $0.mediaType == .video }),
+              let desc = port.formatDescription else { return nil }
+        let dims = CMVideoFormatDescriptionGetDimensions(desc)
+        return (dims.width > 0 && dims.height > 0) ? dims : nil
+    }
+
+    private func applyStreamAspect(_ dims: CMVideoDimensions) {
+        let aspect = CGFloat(dims.width) / CGFloat(dims.height)
+        guard aspect.isFinite, aspect > 0 else { return }
+        let contentHeight = window.contentView?.frame.height ?? 710
+        let newWidth = (contentHeight * aspect).rounded()
+        window.setContentSize(NSSize(width: newWidth, height: contentHeight))
+        // Hold the ratio through any later user resize, so the bars cannot
+        // come back by dragging a corner.
+        window.contentAspectRatio = NSSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
+    }
 
     func stop() {
+        sizeTimer?.invalidate()
+        sizeTimer = nil
         session.stopRunning()
         window.delegate = nil
         window.close()
     }
 
     func windowWillClose(_ notification: Notification) {
+        sizeTimer?.invalidate()
+        sizeTimer = nil
         session.stopRunning()
         onWindowClosed?(device.localizedName)
     }
@@ -297,6 +430,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var activePreviews: [String: PreviewWindow] = [:]
     let devicesMenuDelegate = DevicesMenuDelegate()
     let mode: FilterMode
+    private var deviceObservers: [NSObjectProtocol] = []
 
     var activeDeviceNames: Set<String> {
         return Set(activePreviews.keys)
@@ -312,11 +446,61 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
         devicesMenuDelegate.controller = self
         setupMenuBar(devicesMenuDelegate: devicesMenuDelegate)
         enableScreenCaptureDevices()
+        watchForDeviceChanges()
         fputs("Waiting for devices...\n", stderr)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             self.onDevicesReady()
         }
+    }
+
+    private func watchForDeviceChanges() {
+        deviceObservers = observeDeviceChanges(
+            onConnect: { [weak self] device in self?.deviceAppeared(device) },
+            onDisconnect: { [weak self] device in self?.deviceVanished(device) }
+        )
+    }
+
+    /// Unplugging a phone left its window on screen forever, showing a frozen
+    /// last frame and holding a session bound to a device that no longer
+    /// exists -- which also meant replugging could not attach to it, because
+    /// the name was still taken.
+    private func deviceVanished(_ device: AVCaptureDevice) {
+        let name = device.localizedName
+        allDevices.removeAll { $0.uniqueID == device.uniqueID }
+        guard let preview = activePreviews[name] else { return }
+        fputs("  \(name) disconnected — closing its window\n", stderr)
+        preview.onWindowClosed = nil  // we are already removing it
+        preview.stop()
+        activePreviews.removeValue(forKey: name)
+    }
+
+    /// Plugging a phone in opens its window, so the app keeps showing what is
+    /// attached rather than a snapshot of whatever was attached at launch.
+    ///
+    /// Honours the launch filter: started with no arguments means "everything",
+    /// so anything new qualifies, but `ios-preview "iPhone 11"` asked for one
+    /// device and must not sprout windows for the rest. List mode never gets
+    /// here -- it prints and exits.
+    private func deviceAppeared(_ device: AVCaptureDevice) {
+        let name = device.localizedName
+        if !allDevices.contains(where: { $0.uniqueID == device.uniqueID }) {
+            allDevices.append(device)
+        }
+
+        guard activePreviews[name] == nil else { return }
+
+        switch mode {
+        case .all:
+            break
+        case .byArgs(let args):
+            guard !filterDevices([device], args: args).isEmpty else { return }
+        case .listOnly, .interactive:
+            return
+        }
+
+        fputs("  \(name) connected — opening its window\n", stderr)
+        togglePreview(name: name, position: nextPosition())
     }
 
     func onDevicesReady() {
@@ -491,6 +675,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var positions: Set<Int> = []
     var stdinConnected = true
     let devicesMenuDelegate = DevicesMenuDelegate()
+    private var deviceObservers: [NSObjectProtocol] = []
 
     var activeDeviceNames: Set<String> {
         return Set(sessions.keys)
@@ -502,6 +687,10 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         devicesMenuDelegate.controller = self
         setupMenuBar(devicesMenuDelegate: devicesMenuDelegate, quitTarget: self, quitAction: #selector(menuQuit(_:)))
         enableScreenCaptureDevices()
+        deviceObservers = observeDeviceChanges(
+            onConnect: { [weak self] device in self?.deviceAppeared(device) },
+            onDisconnect: { [weak self] device in self?.deviceVanished(device) }
+        )
         fputs("Interactive mode: waiting for device discovery...\n", stderr)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
@@ -618,6 +807,35 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.emit(["event": "added", "name": name])
         }
+    }
+
+    /// A window whose device is gone must close here too, but the server is
+    /// the one tracking what is previewing, so it is told rather than left to
+    /// discover the mismatch on its next command. Reported as `disconnected`
+    /// and not `removed`: the server asked for neither, and a caller that
+    /// requested this preview should be able to tell "the phone was unplugged"
+    /// from "someone called remove".
+    private func deviceVanished(_ device: AVCaptureDevice) {
+        let name = device.localizedName
+        allDevices.removeAll { $0.uniqueID == device.uniqueID }
+        guard let session = sessions[name] else { return }
+        fputs("  \(name) disconnected — closing its window\n", stderr)
+        session.onWindowClosed = nil
+        session.stop()
+        sessions.removeValue(forKey: name)
+        rebuildPositions()
+        emit(["event": "disconnected", "name": name])
+    }
+
+    /// No window is opened here on purpose. In interactive mode the server
+    /// decides what is on screen, and a window appearing by itself would
+    /// contradict the caller that asked for a specific set. Announce it
+    /// instead, so the server can offer it or open it deliberately.
+    private func deviceAppeared(_ device: AVCaptureDevice) {
+        if !allDevices.contains(where: { $0.uniqueID == device.uniqueID }) {
+            allDevices.append(device)
+        }
+        emit(["event": "connected", "name": device.localizedName, "id": device.uniqueID])
     }
 
     func handleRemove(name: String) {

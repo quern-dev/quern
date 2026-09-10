@@ -299,6 +299,31 @@ class PreviewManager:
             if fut and not fut.done():
                 fut.set_result(True)
 
+        elif evt_type == "disconnected":
+            # The phone was unplugged. Distinct from "removed", which answers a
+            # remove command we sent: nobody asked for this, and the preview is
+            # gone whether or not anything was waiting on it. Drop it from the
+            # active set so its slot is free and a reconnect can take the name.
+            if name in self._active:
+                preview = self._active.pop(name)
+                self._positions.discard(preview.position)
+                logger.info("Preview device disconnected: %s", name)
+            self._available = [d for d in self._available if d.name != name]
+            # A remove in flight for this device will never be answered now.
+            fut = self._pending.pop(name, None)
+            if fut and not fut.done():
+                fut.set_result(True)
+
+        elif evt_type == "connected":
+            # Announced, not opened -- in interactive mode the server decides
+            # what is on screen. Recording it keeps the available list honest
+            # between explicit `list` calls.
+            if not any(d.name == name for d in self._available):
+                self._available.append(
+                    PreviewDeviceInfo(name=name, cmio_id=event.get("id", ""))
+                )
+                logger.info("Preview device connected: %s", name)
+
         elif evt_type == "window_closed":
             # User closed the window manually
             if name in self._active:
