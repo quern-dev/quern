@@ -422,3 +422,49 @@ def test_update_via_git_on_release_branch_with_updates_still_pulls(
     assert len(pull_calls) == 1
     captured = capsys.readouterr()
     assert "0.13.5" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Release asset selection — the tarball must belong to the tag being installed
+# ---------------------------------------------------------------------------
+
+
+def test_asset_must_match_the_release_version():
+    """A release can carry more than one ``quern-*.tar.gz``: a stale upload, a
+    hand-built archive, a re-cut asset left behind. Taking the first match
+    installs whichever GitHub happened to list first while the caller reports
+    the current tag as the version -- an install that lies about what it is."""
+    from server.lifecycle.updater import _select_asset_url
+
+    assets = [
+        {"name": "quern-0.14.0.tar.gz", "browser_download_url": "https://x/old"},
+        {"name": "quern-0.15.0.tar.gz", "browser_download_url": "https://x/new"},
+    ]
+
+    assert _select_asset_url(assets, "0.15.0") == "https://x/new"
+    assert _select_asset_url(assets, "0.14.0") == "https://x/old"
+
+
+def test_asset_absent_falls_back_rather_than_guessing():
+    """No asset for this tag means None, so the caller uses GitHub's generated
+    source tarball. Releases cut before the asset existed still update."""
+    from server.lifecycle.updater import _select_asset_url
+
+    assets = [{"name": "quern-0.14.0.tar.gz", "browser_download_url": "https://x/old"}]
+
+    assert _select_asset_url(assets, "0.15.0") is None
+    assert _select_asset_url([], "0.15.0") is None
+    assert _select_asset_url(assets, "") is None
+
+
+def test_asset_ignores_near_miss_names():
+    """Prefix matching also accepted names that merely start with the version,
+    so quern-0.15.0-rc1 could be served to someone installing 0.15.0."""
+    from server.lifecycle.updater import _select_asset_url
+
+    assets = [
+        {"name": "quern-0.15.0-rc1.tar.gz", "browser_download_url": "https://x/rc"},
+        {"name": "quern-0.15.0.tar.gz.sha256", "browser_download_url": "https://x/sum"},
+    ]
+
+    assert _select_asset_url(assets, "0.15.0") is None

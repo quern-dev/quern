@@ -32,6 +32,29 @@ jobs:
       - name: Lint
         run: .venv/bin/ruff check server/
 
+  menubar-build:
+    # The Swift menu-bar app is not covered by the Python suite, and nothing
+    # else here compiles it -- a syntax error in it would pass every other
+    # check and only surface when someone ran build.sh by hand. Universal, so
+    # this builds exactly what a release ships rather than the host arch only.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Quern.app
+        env:
+          UNIVERSAL: "1"
+          STRICT: "1"
+        run: ./macos/QuernMenuBar/build.sh "$RUNNER_TEMP/menubar"
+
+      - name: Verify the bundle is well formed
+        run: |
+          APP="$RUNNER_TEMP/menubar/Quern.app"
+          test -x "$APP/Contents/MacOS/QuernMenuBar"
+          plutil -lint "$APP/Contents/Info.plist"
+          lipo -archs "$APP/Contents/MacOS/QuernMenuBar"
+
   mcp-build:
     runs-on: ubuntu-latest
 

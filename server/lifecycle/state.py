@@ -151,7 +151,9 @@ def read_active_device() -> dict:
         return {}
 
 
-def write_active_udid(udid: str | None, name: str | None = None) -> None:
+def write_active_udid(
+    udid: str | None, name: str | None = None, kind: str | None = None
+) -> None:
     """Persist the active-device UDID to its sidecar file.
 
     Pass None (or empty string) to clear. Survives `quern stop` —
@@ -164,12 +166,20 @@ def write_active_udid(udid: str | None, name: str | None = None) -> None:
     the caller may not have warmed yet, and a device is still perfectly
     usable without one. Readers must therefore treat it as absent-able
     and fall back to the UDID rather than showing an empty label.
+
+    `kind` is the DeviceType value -- "simulator", "device",
+    "android_emulator", "android_device" -- carried for the same reason as
+    the name: the menu bar says whether it is driving a simulator or real
+    hardware, and cannot work that out from a UDID. Optional and
+    best-effort on the same terms; readers must tolerate its absence.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if udid:
         payload: dict[str, str] = {"udid": udid}
         if name:
             payload["name"] = name
+        if kind:
+            payload["type"] = kind
     else:
         payload = {}
     # "a+" rather than "w", then truncate under the lock. "w" empties the file
