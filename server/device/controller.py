@@ -23,6 +23,25 @@ from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceT
 logger = logging.getLogger("quern-debug-server.device")
 
 
+def _display_name(name: str | None, kind: str | None) -> str | None:
+    """Turn an AVD name into something meant for a person to read.
+
+    AVD names cannot contain spaces, so the emulator reports "Pixel_7". The
+    underscores are a naming-rule artefact rather than anyone's choice, and
+    the sidecar feeds the menu bar, which shows the value verbatim.
+
+    Deliberately restricted to emulators. An underscore in a simulator's or a
+    physical device's name was typed by a person -- "J_iPhone" is a name, not
+    an encoding -- and rewriting it would be wrong. The canonical AVD name is
+    untouched either way: it keys the AVD config lookup, the duplicate
+    suppression against list_avds(), and boot-by-name, none of which would
+    match a prettified string.
+    """
+    if not name or kind != DeviceType.ANDROID_EMULATOR.value:
+        return name
+    return name.replace("_", " ")
+
+
 class DeviceController(DeviceControllerUI):
     """High-level device management: resolves active device, delegates to backends."""
 
@@ -44,6 +63,7 @@ class DeviceController(DeviceControllerUI):
         # assigned before the comparison runs. See the setter.
         self.__active_name_key: str | None = None
         self.__active_name: str | None = None
+        self.__active_kind: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
 
         # Restore active device from its sidecar file (lives separately
@@ -95,6 +115,13 @@ class DeviceController(DeviceControllerUI):
         # set-active-device API can assign a UDID directly. A miss writes no
         # name and readers fall back to the UDID -- the previous behaviour.
         name = self._device_name_cache.get(value) if value else None
+        # The cache, not _device_type(), which answers SIMULATOR for an
+        # unknown UDID. A guess persisted to the sidecar would have the menu
+        # bar label real hardware as a simulator, so an unknown type is
+        # written as absent and the reader shows no qualifier at all.
+        cached_kind = self._device_type_cache.get(value) if value else None
+        kind = cached_kind.value if cached_kind else None
+        name = _display_name(name, kind)
         self.__active_udid = value
 
         # Write only on an actual change. resolve_udid() assigns this on every
@@ -105,15 +132,20 @@ class DeviceController(DeviceControllerUI):
         # it to a thread, which a property setter cannot await anyway and which
         # would make two rapid switches race to land out of order.
         #
-        # The name is part of the comparison, not just the UDID: the name cache
-        # is warmed by list_devices() and can arrive after the first
-        # assignment, and that later fill is exactly when the sidecar needs
-        # rewriting.
-        if value == self.__active_name_key and name == self.__active_name:
+        # The name and the type are part of the comparison, not just the UDID:
+        # both caches are warmed by list_devices() and can arrive after the
+        # first assignment, and that later fill is exactly when the sidecar
+        # needs rewriting.
+        if (
+            value == self.__active_name_key
+            and name == self.__active_name
+            and kind == self.__active_kind
+        ):
             return
         self.__active_name_key = value
         self.__active_name = name
-        write_active_udid(value, name)
+        self.__active_kind = kind
+        write_active_udid(value, name, kind)
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""

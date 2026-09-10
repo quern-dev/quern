@@ -51,7 +51,11 @@ class TestActiveDeviceName:
 
         await ctrl.resolve_udid("AAAA-1111")
 
-        assert read_active_device() == {"udid": "AAAA-1111", "name": "iPhone 16 Pro"}
+        assert read_active_device() == {
+            "udid": "AAAA-1111",
+            "name": "iPhone 16 Pro",
+            "type": "simulator",
+        }
 
     async def test_an_unknown_device_still_persists_its_udid(self):
         """The name is best-effort. A UDID assigned with no enumeration behind
@@ -76,10 +80,10 @@ class TestActiveDeviceName:
         writes = 0
         real = state.write_active_udid
 
-        def counting(udid, name=None):
+        def counting(udid, name=None, kind=None):
             nonlocal writes
             writes += 1
-            return real(udid, name)
+            return real(udid, name, kind)
 
         with patch.object(
             __import__("server.device.controller", fromlist=["x"]),
@@ -107,6 +111,80 @@ class TestActiveDeviceName:
         ctrl._active_udid = "AAAA-1111"
 
         assert read_active_device() == {"udid": "AAAA-1111", "name": "iPhone 16 Pro"}
+
+    async def test_a_type_arriving_later_is_written(self):
+        """Same reason the name is in the guard: the type cache is warmed by
+        list_devices() and can fill in after the UDID was set. Without the
+        type in the comparison the sidecar would keep an untyped device
+        forever, and the menu bar would never qualify it."""
+        from server.lifecycle.state import read_active_device
+        from server.models import DeviceType
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        assert read_active_device() == {"udid": "AAAA-1111"}
+
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.DEVICE
+        ctrl._active_udid = "AAAA-1111"
+
+        assert read_active_device() == {"udid": "AAAA-1111", "type": "device"}
+
+    async def test_an_uncached_type_is_absent_not_guessed(self):
+        """_device_type() answers SIMULATOR for an unknown UDID, which is a
+        safe default for routing a command and a bad one to persist: it would
+        have the menu bar label a physical device a simulator. The setter
+        reads the cache directly so an unknown type stays absent."""
+        from server.lifecycle.state import read_active_device
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "ZZZZ-9999"
+
+        assert "type" not in read_active_device()
+
+    async def test_switching_devices_replaces_the_type(self):
+        """A stale type on a new UDID mislabels the device as confidently as a
+        stale name does."""
+        from server.lifecycle.state import read_active_device
+        from server.models import DeviceType
+
+        ctrl = DeviceController()
+        ctrl._device_type_cache = {
+            "AAAA-1111": DeviceType.SIMULATOR,
+            "BBBB-2222": DeviceType.DEVICE,
+        }
+        ctrl._active_udid = "AAAA-1111"
+        assert read_active_device()["type"] == "simulator"
+
+        ctrl._active_udid = "BBBB-2222"
+        assert read_active_device()["type"] == "device"
+
+    async def test_avd_underscores_become_spaces(self):
+        """AVD names cannot contain spaces, so the emulator reports
+        "Pixel_7". The menu bar shows this to a person, and the underscore is
+        a naming rule rather than anyone's choice."""
+        from server.lifecycle.state import read_active_device
+        from server.models import DeviceType
+
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {"emulator-5554": "Pixel_7"}
+        ctrl._device_type_cache = {"emulator-5554": DeviceType.ANDROID_EMULATOR}
+        ctrl._active_udid = "emulator-5554"
+
+        assert read_active_device()["name"] == "Pixel 7"
+
+    async def test_underscores_survive_on_non_emulators(self):
+        """An underscore in a simulator's or a physical device's name was
+        typed by a person. Rewriting it would corrupt a name they chose."""
+        from server.lifecycle.state import read_active_device
+        from server.models import DeviceType
+
+        for kind in (DeviceType.SIMULATOR, DeviceType.DEVICE, DeviceType.ANDROID_DEVICE):
+            ctrl = DeviceController()
+            ctrl._device_name_cache = {"AAAA-1111": "J_iPhone"}
+            ctrl._device_type_cache = {"AAAA-1111": kind}
+            ctrl._active_udid = "AAAA-1111"
+
+            assert read_active_device()["name"] == "J_iPhone", kind
 
     async def test_switching_devices_replaces_the_name(self):
         """A stale name on a new UDID would mislabel the device outright."""

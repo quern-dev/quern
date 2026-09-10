@@ -86,9 +86,38 @@ def test_active_device_name_omitted_when_unknown(tmp_state_dir):
     assert read_active_device() == {"udid": "ABC-123-DEF"}
 
 
+def test_active_device_type_round_trip(tmp_state_dir):
+    """The menu bar says whether it is driving a simulator or real hardware,
+    and a UDID does not tell it apart -- a simulator and the phone on the desk
+    both answer to "iPhone 17 Pro"."""
+    write_active_udid("ABC-123-DEF", "iPhone 17 Pro", "simulator")
+    assert read_active_device() == {
+        "udid": "ABC-123-DEF",
+        "name": "iPhone 17 Pro",
+        "type": "simulator",
+    }
+
+
+def test_active_device_type_omitted_when_unknown(tmp_state_dir):
+    """Absent, never guessed. The server writes no type when it has not
+    enumerated the device, and a reader shows no qualifier rather than
+    labelling real hardware a simulator."""
+    write_active_udid("ABC-123-DEF", "iPhone 17 Pro")
+    assert read_active_device() == {"udid": "ABC-123-DEF", "name": "iPhone 17 Pro"}
+    write_active_udid("ABC-123-DEF", "iPhone 17 Pro", "")
+    assert read_active_device() == {"udid": "ABC-123-DEF", "name": "iPhone 17 Pro"}
+
+
+def test_active_device_type_without_a_name(tmp_state_dir):
+    """The two optional fields are independent -- a type can be known while
+    the name cache is still cold."""
+    write_active_udid("ABC-123-DEF", None, "device")
+    assert read_active_device() == {"udid": "ABC-123-DEF", "type": "device"}
+
+
 def test_active_device_name_cleared_with_udid(tmp_state_dir):
     """Clearing the device must not leave the previous device's name behind."""
-    write_active_udid("ABC-123-DEF", "iPhone 17 Pro")
+    write_active_udid("ABC-123-DEF", "iPhone 17 Pro", "simulator")
     write_active_udid(None)
     assert read_active_device() == {}
     assert read_active_udid() is None
