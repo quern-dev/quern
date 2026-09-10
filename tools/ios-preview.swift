@@ -51,11 +51,13 @@ func enableScreenCaptureDevices() {
 private let screenCaptureModelID = "iOS Device"
 
 func isScreenCaptureDevice(_ d: AVCaptureDevice) -> Bool {
-    if d.hasMediaType(.muxed) { return true }
-    // The video-only fallback is kept rather than dropped: screen-capture
-    // devices are muxed on every macOS this has been run on, but the model ID
-    // is the thing actually being asserted, and keeping the branch means a
-    // host that types them as video still mirrors instead of showing nothing.
+    // The model ID is the whole assertion, on either media type. Accepting
+    // any muxed external device was looser than the claim above it: muxed
+    // means "audio and video together", which an unrelated capture device can
+    // also be, and one of those would have opened a preview window. Media
+    // type is not checked at all now -- screen-capture devices are muxed on
+    // every macOS this has run on, but a host that typed them as video would
+    // still be recognised by model.
     return d.modelID == screenCaptureModelID
 }
 
@@ -74,9 +76,16 @@ func discoverDevices() -> [AVCaptureDevice] {
 
     var seen = Set<String>()
     var result: [AVCaptureDevice] = []
-    for d in muxed + videoOnly where isScreenCaptureDevice(d) {
-        if seen.insert(d.uniqueID).inserted {
+    for d in muxed + videoOnly {
+        guard seen.insert(d.uniqueID).inserted else { continue }
+        if isScreenCaptureDevice(d) {
             result.append(d)
+        } else {
+            // Say what was turned away and why. The filter runs before any
+            // other logging, so without this a device rejected for an
+            // unexpected model ID -- a future macOS reporting something other
+            // than "iOS Device" -- would look exactly like no device at all.
+            fputs("  ignoring \(d.localizedName) (model \(d.modelID))\n", stderr)
         }
     }
     return result
@@ -289,6 +298,86 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
+// MARK: - Stream-aspect window sizing
+
+/// Resizes a window to its stream's own proportions once they are known.
+///
+/// Shared because there are two preview classes -- `PreviewWindow` for the
+/// standalone app and `PreviewSession` for server-driven interactive mode --
+/// and they are near-duplicates. The first version of this fix went into one
+/// of them, so previews opened through the MCP tool kept their bars while the
+/// menu-bar ones did not. Owning the behaviour in one place is what stops
+/// that recurring.
+///
+/// A window opens at a fixed size because nothing better is available yet: a
+/// screen-capture device advertises a single format of 0x0 until it is
+/// actually streaming, so its real size cannot be read at construction time.
+/// The default 400x710 is 0.563 wide-to-tall while a modern iPhone is nearer
+/// 0.462, and `videoGravity = .resizeAspect` letterboxes the difference into
+/// black bars down each side.
+final class StreamAspectSizer {
+    private weak var window: NSWindow?
+    private let input: AVCaptureDeviceInput?
+    private var timer: Timer?
+
+    init(window: NSWindow, input: AVCaptureDeviceInput?) {
+        self.window = window
+        self.input = input
+    }
+
+    /// Poll the input port until it reports real dimensions, then match them.
+    /// Polling rather than KVO because the wait is short, bounded, and this is
+    /// a single-file script; an observer would be more ceremony than the
+    /// problem deserves.
+    func begin() {
+        cancel()
+        var attempts = 0
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            attempts += 1
+            if let dims = self.streamDimensions() {
+                t.invalidate()
+                self.timer = nil
+                self.apply(dims)
+            } else if attempts >= 40 {
+                // ~10s. Keep the default window rather than retrying forever;
+                // a device that never reports dimensions still mirrors fine,
+                // it just keeps the bars.
+                t.invalidate()
+                self.timer = nil
+            }
+        }
+    }
+
+    func cancel() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func streamDimensions() -> CMVideoDimensions? {
+        // A muxed device exposes separate audio and video ports; only the
+        // video one carries the picture size.
+        guard let port = input?.ports.first(where: { $0.mediaType == .video }),
+              let desc = port.formatDescription else { return nil }
+        let dims = CMVideoFormatDescriptionGetDimensions(desc)
+        return (dims.width > 0 && dims.height > 0) ? dims : nil
+    }
+
+    private func apply(_ dims: CMVideoDimensions) {
+        guard let window else { return }
+        let aspect = CGFloat(dims.width) / CGFloat(dims.height)
+        guard aspect.isFinite, aspect > 0 else { return }
+        let contentHeight = window.contentView?.frame.height ?? 710
+        let newWidth = (contentHeight * aspect).rounded()
+        window.setContentSize(NSSize(width: newWidth, height: contentHeight))
+        // Hold the ratio through any later user resize, so the bars cannot
+        // come back by dragging a corner.
+        window.contentAspectRatio = NSSize(
+            width: CGFloat(dims.width), height: CGFloat(dims.height)
+        )
+    }
+}
+
 // MARK: - Preview window
 
 class PreviewWindow: NSObject, NSWindowDelegate {
@@ -297,7 +386,7 @@ class PreviewWindow: NSObject, NSWindowDelegate {
     let device: AVCaptureDevice
     var onWindowClosed: ((String) -> Void)?
     private var input: AVCaptureDeviceInput?
-    private var sizeTimer: Timer?
+    private var sizer: StreamAspectSizer?
 
     init(device: AVCaptureDevice, index: Int) {
         self.device = device
@@ -345,79 +434,25 @@ class PreviewWindow: NSObject, NSWindowDelegate {
         window.contentView = view
 
         super.init()
+        sizer = StreamAspectSizer(window: window, input: input)
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
     }
 
     func start() {
         session.startRunning()
-        beginSizingToStream()
-    }
-
-    /// Resize the window to the stream's own proportions once they are known.
-    ///
-    /// The window opens at a fixed 400x710 because nothing better is available
-    /// yet: a screen-capture device advertises a single format of 0x0 until it
-    /// is actually streaming, so its real size cannot be read at construction
-    /// time. 400x710 is 0.563 wide-to-tall while a modern iPhone is nearer
-    /// 0.462, and `videoGravity = .resizeAspect` letterboxes the difference --
-    /// the black bars down each side.
-    ///
-    /// So poll the input port until it reports real dimensions, then match
-    /// them. Polling rather than KVO because the wait is short, bounded, and
-    /// this is a single-file script; an observer here would be more ceremony
-    /// than the problem deserves.
-    private func beginSizingToStream() {
-        sizeTimer?.invalidate()
-        var attempts = 0
-        sizeTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] t in
-            guard let self else { t.invalidate(); return }
-            attempts += 1
-            if let dims = self.streamDimensions() {
-                t.invalidate()
-                self.sizeTimer = nil
-                self.applyStreamAspect(dims)
-            } else if attempts >= 40 {
-                // ~10s. Keep the default window rather than retrying forever;
-                // a device that never reports dimensions still mirrors fine,
-                // it just keeps the bars.
-                t.invalidate()
-                self.sizeTimer = nil
-            }
-        }
-    }
-
-    private func streamDimensions() -> CMVideoDimensions? {
-        // A muxed device exposes separate audio and video ports; only the
-        // video one carries the picture size.
-        guard let port = input?.ports.first(where: { $0.mediaType == .video }),
-              let desc = port.formatDescription else { return nil }
-        let dims = CMVideoFormatDescriptionGetDimensions(desc)
-        return (dims.width > 0 && dims.height > 0) ? dims : nil
-    }
-
-    private func applyStreamAspect(_ dims: CMVideoDimensions) {
-        let aspect = CGFloat(dims.width) / CGFloat(dims.height)
-        guard aspect.isFinite, aspect > 0 else { return }
-        let contentHeight = window.contentView?.frame.height ?? 710
-        let newWidth = (contentHeight * aspect).rounded()
-        window.setContentSize(NSSize(width: newWidth, height: contentHeight))
-        // Hold the ratio through any later user resize, so the bars cannot
-        // come back by dragging a corner.
-        window.contentAspectRatio = NSSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
+        sizer?.begin()
     }
 
     func stop() {
-        sizeTimer?.invalidate()
-        sizeTimer = nil
+        sizer?.cancel()
         session.stopRunning()
         window.delegate = nil
         window.close()
     }
 
     func windowWillClose(_ notification: Notification) {
-        sizeTimer?.invalidate()
-        sizeTimer = nil
+        sizer?.cancel()
         session.stopRunning()
         onWindowClosed?(device.localizedName)
     }
@@ -605,6 +640,8 @@ class PreviewSession: NSObject, NSWindowDelegate {
     let window: NSWindow
     let session: AVCaptureSession
     var onWindowClosed: ((String) -> Void)?
+    private var input: AVCaptureDeviceInput?
+    private var sizer: StreamAspectSizer?
 
     init(device: AVCaptureDevice, position: Int) {
         self.deviceName = device.localizedName
@@ -615,6 +652,7 @@ class PreviewSession: NSObject, NSWindowDelegate {
             let input = try AVCaptureDeviceInput(device: device)
             if session.canAddInput(input) {
                 session.addInput(input)
+                self.input = input
             }
         } catch {
             // Error handled by caller checking session inputs
@@ -649,19 +687,25 @@ class PreviewSession: NSObject, NSWindowDelegate {
         window.contentView = view
 
         super.init()
+        sizer = StreamAspectSizer(window: window, input: input)
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
     }
 
-    func start() { session.startRunning() }
+    func start() {
+        session.startRunning()
+        sizer?.begin()
+    }
 
     func stop() {
+        sizer?.cancel()
         session.stopRunning()
         window.delegate = nil
         window.close()
     }
 
     func windowWillClose(_ notification: Notification) {
+        sizer?.cancel()
         session.stopRunning()
         onWindowClosed?(deviceName)
     }
@@ -818,12 +862,17 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     private func deviceVanished(_ device: AVCaptureDevice) {
         let name = device.localizedName
         allDevices.removeAll { $0.uniqueID == device.uniqueID }
-        guard let session = sessions[name] else { return }
-        fputs("  \(name) disconnected — closing its window\n", stderr)
-        session.onWindowClosed = nil
-        session.stop()
-        sessions.removeValue(forKey: name)
-        rebuildPositions()
+        if let session = sessions[name] {
+            fputs("  \(name) disconnected — closing its window\n", stderr)
+            session.onWindowClosed = nil
+            session.stop()
+            sessions.removeValue(forKey: name)
+            rebuildPositions()
+        }
+        // Emitted whether or not a window was open. The server prunes its
+        // available-devices list on this event, so returning early for a
+        // device nobody was previewing left the server advertising an
+        // unplugged phone until something forced a refresh.
         emit(["event": "disconnected", "name": name])
     }
 

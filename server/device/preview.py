@@ -102,6 +102,13 @@ def build_preview_bundle() -> Path:
 
     bundle, binary = bundle_paths()
     if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+        # Rewrite the bundle scaffolding even on the fast path. The freshness
+        # test only asks about the binary, so a run that compiled and then
+        # failed to finish the bundle -- no Info.plist, no icon -- leaves a
+        # binary newer than the source, and every later call would sail past
+        # this return and report success for an app macOS cannot launch.
+        # Idempotent and cheap: one small plist write and one icon copy.
+        write_app_bundle(bundle)
         return binary
 
     swiftc = shutil.which("swiftc")
@@ -114,18 +121,29 @@ def build_preview_bundle() -> Path:
     (bundle / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
     logger.info("Compiling ios-preview: %s -> %s", source, binary)
 
-    proc = subprocess.run(  # noqa: S603
-        [
-            swiftc,
-            "-o", str(binary),
-            str(source),
-            "-framework", "AVFoundation",
-            "-framework", "CoreMediaIO",
-            "-framework", "AppKit",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [
+                swiftc,
+                "-o", str(binary),
+                str(source),
+                "-framework", "AVFoundation",
+                "-framework", "CoreMediaIO",
+                "-framework", "AppKit",
+            ],
+            capture_output=True,
+            text=True,
+            # The compile takes ~1.5s. A minute is not a performance budget,
+            # it is the line past which swiftc is stuck rather than slow --
+            # and unbounded, a stuck compiler hangs `quern setup` with no
+            # output and no way to tell it apart from a hang in Quern itself.
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            "swiftc did not finish within 60s while building the screen-mirror "
+            "app. Try `xcode-select -p` to check the active toolchain."
+        ) from e
     if proc.returncode != 0:
         err = proc.stderr.strip() or proc.stdout.strip()
         raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
@@ -164,7 +182,9 @@ class PreviewManager:
         self._available: list[PreviewDeviceInfo] = []
         self._ready = asyncio.Event()
         self._reader_task: asyncio.Task | None = None
-        self._pending: dict[str, asyncio.Future] = {}
+        # name -> (operation, future). The operation matters: a disconnect
+        # while an add is in flight must fail that add, not complete it.
+        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
         self._positions: set[int] = set()
         self._stagger_lock = asyncio.Lock()
         self._bundle_path = QUERN_BIN_DIR / APP_BUNDLE_NAME
@@ -236,7 +256,7 @@ class PreviewManager:
             self._reader_task.cancel()
         self._reader_task = None
         # Reject all pending futures
-        for name, fut in self._pending.items():
+        for _name, (_op, fut) in self._pending.items():
             if not fut.done():
                 fut.set_exception(RuntimeError("Preview process exited"))
         self._pending.clear()
@@ -284,20 +304,22 @@ class PreviewManager:
             )
 
         elif evt_type == "added":
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_result(True)
+            entry = self._pending.pop(name, None)
+            if entry and not entry[1].done():
+                entry[1].set_result(True)
 
         elif evt_type == "add_failed":
             error = event.get("error", "Unknown error")
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_exception(RuntimeError(f"Failed to add preview for {name}: {error}"))
+            entry = self._pending.pop(name, None)
+            if entry and not entry[1].done():
+                entry[1].set_exception(
+                    RuntimeError(f"Failed to add preview for {name}: {error}")
+                )
 
         elif evt_type == "removed":
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_result(True)
+            entry = self._pending.pop(name, None)
+            if entry and not entry[1].done():
+                entry[1].set_result(True)
 
         elif evt_type == "disconnected":
             # The phone was unplugged. Distinct from "removed", which answers a
@@ -309,10 +331,19 @@ class PreviewManager:
                 self._positions.discard(preview.position)
                 logger.info("Preview device disconnected: %s", name)
             self._available = [d for d in self._available if d.name != name]
-            # A remove in flight for this device will never be answered now.
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_result(True)
+            # Settle whatever was in flight, according to what it asked for. A
+            # remove got what it wanted -- the preview is gone. An add did not:
+            # completing it successfully would have add() record a preview for
+            # an unplugged device and reserve a window position for it.
+            entry = self._pending.pop(name, None)
+            if entry and not entry[1].done():
+                op, fut = entry
+                if op == "remove":
+                    fut.set_result(True)
+                else:
+                    fut.set_exception(
+                        RuntimeError(f"{name} disconnected before its preview opened")
+                    )
 
         elif evt_type == "connected":
             # Announced, not opened -- in interactive mode the server decides
@@ -391,7 +422,7 @@ class PreviewManager:
 
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
-            self._pending[name] = fut
+            self._pending[name] = ("add", fut)
 
             await self._send({"cmd": "add", "name": name, "position": position})
 
@@ -421,7 +452,7 @@ class PreviewManager:
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
-        self._pending[name] = fut
+        self._pending[name] = ("remove", fut)
 
         await self._send({"cmd": "remove", "name": name})
 

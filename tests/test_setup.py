@@ -1175,6 +1175,20 @@ class TestBuildPreviewApp:
 
         run.assert_not_called()
 
+    def test_a_filesystem_failure_warns_rather_than_stopping_setup(self):
+        """The build stats files, makes directories, writes a plist, copies an
+        icon and launches a process. An unwritable ~/.quern raises OSError, and
+        catching only RuntimeError would end setup over an optional extra."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.preview.build_preview_bundle",
+                   side_effect=PermissionError("~/.quern is not writable")):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.WARNING
+        assert "not writable" in (result.detail or "")
+
     def test_a_failed_build_warns_rather_than_stopping_setup(self):
         """Setup continues: everything else about the install is still fine."""
         from server.lifecycle.setup import build_preview_app

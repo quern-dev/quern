@@ -598,7 +598,13 @@ def build_preview_app() -> CheckResult:
         from server.device.preview import build_preview_bundle
 
         build_preview_bundle()
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
+        # OSError as well as RuntimeError, per the error-path convention in
+        # CONTRIBUTING: catch the base class, not the subclasses seen so far.
+        # The build stats files, creates directories, writes a plist, copies an
+        # icon and launches a process -- an unwritable ~/.quern or a transient
+        # filesystem fault raises OSError, and catching only RuntimeError would
+        # end setup entirely over an optional convenience.
         return CheckResult(
             name=name,
             status=CheckStatus.WARNING,
