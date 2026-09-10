@@ -101,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(header)
 
         if s.running {
-            menu.addItem(info("Active device: \(snapshot.device.name ?? snapshot.device.udid ?? "none")"))
+            menu.addItem(info("Active device: \(activeDeviceLabel)"))
             menu.addItem(info("Proxy: \(proxyDescription(s))"))
         }
         if let status = updateStatusText {
@@ -165,6 +165,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
         return item
+    }
+
+    /// The name, never the full UDID. A 36-character UDID set the width of
+    /// the entire dropdown, and every other row inherited it -- the name is
+    /// both friendlier and far narrower. The server fills the name into the
+    /// active-device sidecar on every resolve, so the fallback is rare: an
+    /// older server, or a device set by UDID before the name cache warmed.
+    /// It shows a short prefix rather than nothing, so the row still tells
+    /// two simulators apart. Settings keeps the full UDID on its own row.
+    private var activeDeviceLabel: String {
+        var label: String
+        if let name = snapshot.device.name, !name.isEmpty {
+            label = name
+        } else if let udid = snapshot.device.udid, !udid.isEmpty {
+            label = String(udid.prefix(8))
+        } else {
+            return "none"
+        }
+        if let kind = deviceKindSuffix { label += " (\(kind))" }
+        return label
+    }
+
+    /// Simulator or real hardware, which a name alone does not settle -- a
+    /// simulator carries the same "iPhone 16 Pro" as the phone on the desk.
+    /// The platform is left implied by the device name rather than spelled
+    /// out, so an Android emulator reads "(Emulator)" and not "(Android
+    /// Emulator)". An unrecognised or missing value adds no qualifier: the
+    /// sidecar omits the type when the server has not cached one, and a
+    /// wrong guess here is worse than silence.
+    private var deviceKindSuffix: String? {
+        switch snapshot.device.kind {
+        case "simulator": return "Simulator"
+        case "device", "android_device": return "Device"
+        case "android_emulator": return "Emulator"
+        default: return nil
+        }
     }
 
     private func proxyDescription(_ s: ServerState) -> String {

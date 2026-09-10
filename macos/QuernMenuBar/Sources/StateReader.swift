@@ -33,6 +33,10 @@ struct UpdateInfo {
 struct ActiveDevice {
     var udid: String?
     var name: String?
+    /// DeviceType from server/models.py: "simulator", "device",
+    /// "android_emulator", "android_device". Absent when the server has not
+    /// cached a type for this UDID, or when it predates the field.
+    var kind: String?
 }
 
 struct QuernSnapshot {
@@ -186,6 +190,7 @@ final class StateReader {
         guard let d = json("active-device.json") else { return a }
         a.udid = d["udid"] as? String
         a.name = (d["name"] as? String) ?? (d["localized_name"] as? String)
+        a.kind = d["type"] as? String
         return a
     }
 }
