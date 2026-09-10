@@ -1115,3 +1115,74 @@ class TestXcodeGate:
         for call in run_mock.call_args_list:
             args = call.args[0]
             assert args[0] != "xcrun", f"unexpected xcrun call: {args}"
+
+
+class TestBuildPreviewApp:
+    """The screen-mirror app is built during setup, not on first use.
+
+    Lazy building left the menu-bar app's "Screen Mirror…" item hidden on a
+    fresh install: the item only appears when the bundle exists, and nothing
+    created it until someone had already driven a preview from the API or an
+    MCP tool. That is the opposite of who the menu bar is for.
+    """
+
+    def test_builds_when_swiftc_is_available(self):
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.preview.build_preview_bundle") as build:
+            result = build_preview_app()
+
+        build.assert_called_once()
+        assert result.status == CheckStatus.OK
+
+    def test_missing_command_line_tools_is_skipped_not_failed(self):
+        """A machine without swiftc has a missing convenience, not a broken
+        install -- the same call scrcpy gets for Android preview."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=False):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.SKIPPED
+        assert result.fixable is True
+        assert "xcode-select --install" in (result.detail or "")
+
+    def test_accepting_the_prompt_opens_the_installer(self):
+        """`xcode-select --install` hands off to a macOS dialog rather than
+        installing inline, so setup can only open it and say what comes next."""
+        from server.lifecycle.setup import build_preview_app
+
+        ran: list[list[str]] = []
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=True), \
+             patch("server.lifecycle.setup._run",
+                   side_effect=lambda cmd, **kw: (ran.append(cmd), (0, "", ""))[1]):
+            result = build_preview_app()
+
+        assert ran == [["xcode-select", "--install"]]
+        # Still skipped: the dialog is asynchronous, so nothing was built.
+        assert result.status == CheckStatus.SKIPPED
+
+    def test_declining_the_prompt_runs_nothing(self):
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=False), \
+             patch("server.lifecycle.setup._run") as run:
+            build_preview_app()
+
+        run.assert_not_called()
+
+    def test_a_failed_build_warns_rather_than_stopping_setup(self):
+        """Setup continues: everything else about the install is still fine."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.preview.build_preview_bundle",
+                   side_effect=RuntimeError("swiftc exploded")):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.WARNING
+        assert "swiftc exploded" in (result.detail or "")

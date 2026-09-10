@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +55,86 @@ _INFO_PLIST = """\
 """
 
 
+def bundle_paths() -> tuple[Path, Path]:
+    """Where the preview app bundle and its binary live."""
+    bundle = QUERN_BIN_DIR / APP_BUNDLE_NAME
+    return bundle, bundle / "Contents" / "MacOS" / BINARY_NAME
+
+
+def write_app_bundle(bundle: Path) -> None:
+    """Create a minimal .app bundle so macOS shows the correct name and icon."""
+    contents = bundle / "Contents"
+    macos_dir = contents / "MacOS"
+    resources_dir = contents / "Resources"
+
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    resources_dir.mkdir(parents=True, exist_ok=True)
+
+    (contents / "Info.plist").write_text(_INFO_PLIST)
+
+    icon_src = _RESOURCES_DIR / "wda-icon.png"
+    icon_dst = resources_dir / "AppIcon.png"
+    if icon_src.exists():
+        shutil.copy2(icon_src, icon_dst)
+
+    logger.info("Created app bundle: %s", bundle)
+
+
+def build_preview_bundle() -> Path:
+    """Compile ios-preview into its .app bundle, and return the binary path.
+
+    Synchronous on purpose: `quern setup` is a synchronous CLI path and calls
+    this directly, while the server reaches it through a worker thread. One
+    implementation rather than two, because a second copy of the compile
+    command is exactly the kind of thing that drifts.
+
+    A no-op when the binary is newer than the source. Raises RuntimeError with
+    an actionable message when the source or swiftc is missing -- callers
+    decide whether that is fatal (the preview API) or a skipped optional check
+    (setup).
+    """
+    source = _find_source()
+    if source is None:
+        raise RuntimeError(
+            "ios-preview.swift source not found. "
+            "Expected at tools/ios-preview.swift relative to the project root."
+        )
+
+    bundle, binary = bundle_paths()
+    if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+        return binary
+
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        raise RuntimeError(
+            "swiftc not found. Install Xcode or Xcode Command Line Tools: "
+            "xcode-select --install"
+        )
+
+    (bundle / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+    logger.info("Compiling ios-preview: %s -> %s", source, binary)
+
+    proc = subprocess.run(  # noqa: S603
+        [
+            swiftc,
+            "-o", str(binary),
+            str(source),
+            "-framework", "AVFoundation",
+            "-framework", "CoreMediaIO",
+            "-framework", "AppKit",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
+
+    logger.info("ios-preview compiled successfully")
+    write_app_bundle(bundle)
+    return binary
+
+
 def _find_source() -> Path | None:
     for p in _SOURCE_CANDIDATES:
         if p.exists():
@@ -90,75 +171,15 @@ class PreviewManager:
         self._binary_path = self._bundle_path / "Contents" / "MacOS" / BINARY_NAME
 
     async def ensure_binary(self) -> Path:
-        """Lazy-compile ios-preview if needed. Returns path to binary."""
-        source = _find_source()
-        if source is None:
-            raise RuntimeError(
-                "ios-preview.swift source not found. "
-                "Expected at tools/ios-preview.swift relative to the project root."
-            )
+        """Lazy-compile ios-preview if needed. Returns path to binary.
 
-        if self._binary_path.exists():
-            src_mtime = source.stat().st_mtime
-            bin_mtime = self._binary_path.stat().st_mtime
-            if bin_mtime >= src_mtime:
-                return self._binary_path
-
-        swiftc = shutil.which("swiftc")
-        if swiftc is None:
-            raise RuntimeError(
-                "swiftc not found. Install Xcode or Xcode Command Line Tools: "
-                "xcode-select --install"
-            )
-
-        # Create bundle directory structure before compiling into it
-        macos_dir = self._bundle_path / "Contents" / "MacOS"
-        macos_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Compiling ios-preview: %s → %s", source, self._binary_path)
-
-        proc = await asyncio.create_subprocess_exec(
-            swiftc,
-            "-o", str(self._binary_path),
-            str(source),
-            "-framework", "AVFoundation",
-            "-framework", "CoreMediaIO",
-            "-framework", "AppKit",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            err = stderr.decode().strip() or stdout.decode().strip()
-            raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
-
-        logger.info("ios-preview compiled successfully")
-
-        # Finalize .app bundle (Info.plist, icon)
-        self._create_app_bundle()
-
-        return self._binary_path
+        Off the event loop: the compile takes ~1.5s, which is a long time to
+        stall every other request for.
+        """
+        return await asyncio.to_thread(build_preview_bundle)
 
     def _create_app_bundle(self) -> None:
-        """Create a minimal .app bundle so macOS shows the correct name and icon."""
-        contents = self._bundle_path / "Contents"
-        macos_dir = contents / "MacOS"
-        resources_dir = contents / "Resources"
-
-        macos_dir.mkdir(parents=True, exist_ok=True)
-        resources_dir.mkdir(parents=True, exist_ok=True)
-
-        # Write Info.plist
-        plist_path = contents / "Info.plist"
-        plist_path.write_text(_INFO_PLIST)
-
-        # Copy icon
-        icon_src = _RESOURCES_DIR / "wda-icon.png"
-        icon_dst = resources_dir / "AppIcon.png"
-        if icon_src.exists():
-            shutil.copy2(icon_src, icon_dst)
-
-        logger.info("Created app bundle: %s", self._bundle_path)
+        write_app_bundle(self._bundle_path)
 
     # ------------------------------------------------------------------
     # Process lifecycle
