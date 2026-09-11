@@ -20,6 +20,11 @@
 #
 # Either way it installs to ~/Applications/Quern.app, the same place a release
 # install uses, and quits a running copy first so the new one actually starts.
+#
+# The app starts the daemon when it launches, so this is the whole setup: run
+# it once and the CLI is optional from then on. That depends on one thing the
+# app cannot do for itself -- finding the `quern` wrapper -- so this checks for
+# it rather than letting the app launch into a failure.
 set -euo pipefail
 
 MODE="release"
@@ -115,7 +120,28 @@ rm -rf "$STAGING"
 rm -rf "$DEST"
 mv "$STAGING" "$DEST"
 
+# The app drives the daemon through this wrapper, which `quern setup` writes.
+# Without it the app launches, tries to start the server and cannot, which is a
+# confusing first impression of an install that otherwise just succeeded. A GUI
+# app does not inherit your shell's PATH, so a `quern` that works in your
+# terminal is not enough -- this exact file is what it looks for.
+WRAPPER="$HOME/.local/bin/quern"
+if [[ ! -x "$WRAPPER" ]]; then
+  echo
+  echo "warning: $WRAPPER is missing."
+  echo "  The app will launch, but it cannot start or control the server"
+  echo "  without it. Run setup once to write it:"
+  echo
+  echo "      cd $REPO_ROOT && ./quern setup"
+  echo
+  echo "  Then quit the app from its menu bar icon and 'open $DEST'."
+fi
+
 open "$DEST"
 echo
 echo "Done. Running from $DEST"
+if [[ -x "$WRAPPER" ]]; then
+  echo "It starts the server itself, so you should not need the CLI from here."
+  echo "Settings has a toggle if you would rather it did not."
+fi
 echo "Quit it from its menu bar icon; 'open $DEST' brings it back."
