@@ -637,6 +637,15 @@ def main() -> None:
         from server.lifecycle.updater import run_update
         sys.exit(run_update(apply_tools="--tools" in sys.argv[2:]))
 
+    # `help` is what people type. argparse only understands -h/--help, so
+    # without this the most obvious command in the tool exits 2 with an
+    # "invalid choice" error.
+    if len(sys.argv) >= 2 and sys.argv[1] in ("help", "--help", "-h"):
+        from server.main import cli
+        sys.argv = [sys.argv[0], "--help"]
+        cli()
+        return
+
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
         sys.exit(_cmd_set_channel(sys.argv[2:]))
 

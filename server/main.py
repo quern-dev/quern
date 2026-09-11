@@ -1296,7 +1296,21 @@ def _cmd_disable_local_capture() -> None:
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
+        # Without this the usage line reads "__main__.py", because the `quern`
+        # wrapper execs `python3 -m server` and argparse takes argv[0].
+        prog="quern",
         description="Quern — capture device logs for AI agents",
+        epilog=(
+            "Other commands:\n"
+            "  version, --version, -V        Print the installed version\n"
+            "  update [--tools]              Update to the latest release on your channel\n"
+            "  set-channel [name]            Show or set the update channel (stable / beta)\n"
+            "  set-auto-install-cert [on|off]\n"
+            "                                Show or set automatic capture-certificate install\n"
+            "  install-precommit-hook        Install the pre-commit checklist hook\n"
+            "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.set_defaults(command=None)
 
