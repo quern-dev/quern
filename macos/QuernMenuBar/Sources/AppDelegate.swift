@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let updater = Updater()
     private var snapshot = QuernSnapshot()
     private var updateStatusText: String?
-    private var launchStatusText: String?
+    private var lifecycleStatusText: String?
     private var didAttemptLaunchStart = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -24,7 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reader.onChange = { [weak self] snap in
             guard let self else { return }
             self.snapshot = snap
-            if snap.server.running { self.launchStatusText = nil }
+            if snap.server.running { self.lifecycleStatusText = nil }
             // Same reasoning, for the other status line: without this a failed
             // update left its message in the menu for the life of the process,
             // including long after the user had fixed the cause.
@@ -63,9 +63,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // right answer for a server that failed to come up and the wrong
             // one for a setup step that was never run, and the two are not
             // distinguishable from the outside.
-            self.launchStatusText = code == QuernCLI.notFoundStatus
-                ? "quern not found — run `quern setup`"
-                : "Could not start the server — see Console"
+            guard code != QuernCLI.notFoundStatus else {
+                self.lifecycleStatusText = "quern not found — run `quern setup`"
+                return
+            }
+            // Same grace as a clicked Start: the daemon may still be coming up.
+            self.lifecycleStatusText = "Starting…"
+            self.confirmStartFailed { [weak self] in
+                self?.lifecycleStatusText = "Could not start the server — see Console"
+            }
         }
     }
 
@@ -146,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let status = updateStatusText {
             menu.addItem(info(status))
         }
-        if !s.running, let status = launchStatusText {
+        if !s.running, let status = lifecycleStatusText {
             menu.addItem(info(status))
         }
 
@@ -279,7 +285,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.reader.refresh()
             guard code != 0 else { return }
-            self.reportFailure("Could not \(verb) the server", detail: output)
+
+            // Nothing ran, so nothing is going to change on its own.
+            if code == QuernCLI.notFoundStatus {
+                self.reportFailure("Could not \(verb) the server", detail: output)
+                return
+            }
+
+            // A nonzero `start` does not mean no server. Its parent gives up
+            // waiting after 30s and deliberately leaves the child running, so
+            // the daemon can come up seconds later -- and an alert saying it
+            // could not start, sitting in front of a menu that now says it is
+            // running, is worse than the delay. Give it a window and only
+            // report what is still true afterwards.
+            if verb == "stop" {
+                self.reportFailure("Could not stop the server", detail: output)
+                return
+            }
+            self.lifecycleStatusText = "Starting…"
+            self.confirmStartFailed { [weak self] in
+                self?.lifecycleStatusText = nil
+                self?.reportFailure("Could not \(verb) the server", detail: output)
+            }
+        }
+    }
+
+    /// Run `giveUp` only once the server has had time to appear and has not.
+    ///
+    /// ~15s: `quern start` has already waited 30s of its own, so this covers
+    /// the tail of a slow startup rather than the whole of it. `giveUp` differs
+    /// by caller -- an alert for a click the user is waiting on, a menu line
+    /// for the automatic start at launch, where a modal would be taking focus
+    /// as they open their laptop.
+    private func confirmStartFailed(attemptsLeft: Int = 10, giveUp: @escaping () -> Void) {
+        reader.refresh()
+        if reader.snapshot.server.running {
+            lifecycleStatusText = nil
+            return
+        }
+        guard attemptsLeft > 0 else {
+            giveUp()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.confirmStartFailed(attemptsLeft: attemptsLeft - 1, giveUp: giveUp)
         }
     }
 
