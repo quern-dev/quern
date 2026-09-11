@@ -453,7 +453,15 @@ def test_help_output_lists_every_dispatched_command():
         cwd=str(REPO_ROOT),
     )
     help_text = proc.stdout + proc.stderr
-    missing = [c for c in cli_commands() if c not in help_text]
+    # A command must be *listed*, which means starting its own line in the
+    # help. Substring containment passed because `update` occurs inside
+    # set-channel's description; word boundaries passed for the same reason.
+    # Only the listing column actually answers "can a user find this".
+    listed = {
+        m.group(1)
+        for m in re.finditer(r"^\s+([a-z][a-z0-9-]*)(?:[,\s]|$)", help_text, re.M)
+    }
+    missing = [c for c in cli_commands() if c.lstrip("-") not in listed]
     assert not missing, (
         f"{len(missing)} command(s) the CLI dispatches are absent from "
         f"`quern --help`:\n  - " + "\n  - ".join(sorted(missing))

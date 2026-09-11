@@ -1252,6 +1252,7 @@ class TestTunneldDriftReporting:
         plist = tmp_path / "com.quern.tunneld.plist"
         plist.write_text("")
         monkeypatch.setattr(tunneld, "PLIST_PATH", plist)
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: None)
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
         monkeypatch.setattr(
@@ -1291,23 +1292,39 @@ class TestTunneldDriftReporting:
         assert tunneld.installed_plist_drift() is None
 
 
+def _forbid_network(monkeypatch):
+    """Make any outbound request an immediate failure.
+
+    These tests pass today only because an early return fires first. Reorder
+    or remove that return and they would quietly start calling api.github.com
+    -- slow, nondeterministic, broken offline, and exactly what CONTRIBUTING
+    warns about.
+    """
+    def _boom(*a, **kw):
+        raise AssertionError("test reached the network")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+
+
 class TestFetchMenubarApp:
     """v0.15.0 reached existing users without the menu-bar app, and those
     machines cannot repair themselves: `quern update` sees the latest version
     already installed and downloads nothing. Setup is the first code of ours
     that runs on them."""
 
-    def test_a_git_checkout_is_left_alone(self, tmp_path):
+    def test_a_git_checkout_is_left_alone(self, tmp_path, monkeypatch):
         """A developer builds the app themselves; fetching a release build
         over a working tree would be wrong."""
         from server.lifecycle.setup import fetch_menubar_app
 
+        _forbid_network(monkeypatch)
         (tmp_path / ".git").mkdir()
         assert fetch_menubar_app(tmp_path) is None
 
-    def test_an_install_that_has_the_app_is_left_alone(self, tmp_path):
+    def test_an_install_that_has_the_app_is_left_alone(self, tmp_path, monkeypatch):
         from server.lifecycle.setup import fetch_menubar_app
 
+        _forbid_network(monkeypatch)
         (tmp_path / "Quern.app").mkdir()
         assert fetch_menubar_app(tmp_path) is None
 
@@ -1378,7 +1395,7 @@ class TestFetchMenubarApp:
         payload = json.dumps({
             "assets": [{
                 "name": "quern-9.9.9.tar.gz",
-                "browser_download_url": "https://example.invalid/q.tar.gz",
+                "browser_download_url": "https://github.com/quern-dev/quern/releases/download/v9.9.9/q.tar.gz",
             }]
         }).encode()
 
@@ -1509,3 +1526,92 @@ class TestFetchMenubarApp:
 
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise
+
+
+    def test_verification_runs_before_the_app_is_installed(self, tmp_path, monkeypatch):
+        """Every other test calls _verify_menubar_app directly. Deleting its
+        call site left the whole suite green while setup would download,
+        install and launch an unverified bundle -- and because urllib writes
+        no quarantine attribute, macOS gives it no first-launch assessment
+        either. This is the only trust gate in that path."""
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://github.com/quern-dev/quern/releases/download/v9.9.9/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self):
+                self._body = payload
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+
+        def fake_tar(cmd, **kw):
+            # Stand in for a successful extraction.
+            if cmd and "tar" in str(cmd[0]):
+                member = Path(kw.get("cwd") or cmd[cmd.index("-C") + 1])
+                (member / "quern-9.9.9" / "Quern.app").mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_tar)
+
+        called: list[str] = []
+
+        def refusing_verify(app, version):
+            called.append(str(app))
+            raise setup_mod._UntrustedBundle("substituted asset")
+
+        monkeypatch.setattr(setup_mod, "_verify_menubar_app", refusing_verify)
+
+        result = setup_mod.fetch_menubar_app(tmp_path)
+
+        assert called, "the bundle was installed without ever being verified"
+        assert not (tmp_path / "Quern.app").exists(), "a rejected bundle was installed"
+        assert result.status == CheckStatus.ERROR
+
+    def test_an_asset_url_off_github_is_refused(self, tmp_path, monkeypatch):
+        """The URL comes out of the API response. Anything not on github.com
+        means the response is not what we think it is, and following it would
+        fetch code from somewhere else entirely."""
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://evil.example/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self):
+                self._body = payload
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.ERROR
+        assert "not on github.com" in (result.detail or "")

@@ -400,6 +400,13 @@ def installed_plist_drift() -> str | None:
     path whichever one failed -- so a binary that had drifted read as a
     stale log path, and reinstalling appeared not to fix it.
     """
+    if _read_installed_plist() is None:
+        # Distinguish "could not read it" from "read it, and it says the wrong
+        # thing". Collapsing the two reported a confident, specific diagnosis
+        # of a plist that could not be parsed at all -- the same defect this
+        # function was written to fix, one level down.
+        return "the installed plist could not be read"
+
     installed_log = installed_plist_log_path()
     if installed_log != LOG_PATH:
         return f"log path is {installed_log}, expected {LOG_PATH}"

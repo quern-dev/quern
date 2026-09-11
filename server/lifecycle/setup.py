@@ -624,6 +624,16 @@ def build_preview_app() -> CheckResult:
 RELEASE_TEAM_ID = "3QUH73KW5Q"
 
 
+class _UntrustedBundle(RuntimeError):
+    """The downloaded app is not the one we would have published.
+
+    Separate from every other failure in the fetch so it can be reported
+    differently: a transfer that failed is a network problem and the manual
+    download is a fine answer, while a bundle that failed verification must
+    not be installed by hand either.
+    """
+
+
 def _verify_menubar_app(app: Path, expected_version: str) -> None:
     """Raise unless the bundle is signed by us, notarized, accepted and current.
 
@@ -634,15 +644,26 @@ def _verify_menubar_app(app: Path, expected_version: str) -> None:
     an earlier version of this function produced exactly it by extracting with
     Python's tarfile.
     """
+    # The designated requirement is the check that actually anchors to Apple.
+    # `codesign --verify` alone validates the internal seal, not the
+    # certificate chain, and TeamIdentifier is read out of the leaf's OU field
+    # -- a self-signed certificate can simply claim ours. `spctl` does anchor,
+    # but a user can turn assessments off. `-R` cannot be disabled or spoofed.
+    requirement = (
+        f'anchor apple generic and certificate leaf[subject.OU] = "{RELEASE_TEAM_ID}"'
+    )
     checks = [
-        (["codesign", "--verify", "--deep", "--strict", str(app)], "signature is not valid"),
+        (
+            ["codesign", "--verify", "--deep", "--strict", f"-R={requirement}", str(app)],
+            "signature is not valid, or is not ours",
+        ),
         (["spctl", "-a", "-vvv", str(app)], "Gatekeeper rejects it"),
     ]
     for cmd, failure in checks:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"refusing to install the downloaded app: {failure} "
+            raise _UntrustedBundle(
+                f"{failure} "
                 f"({proc.stderr.strip() or proc.stdout.strip()})"
             )
 
@@ -655,9 +676,8 @@ def _verify_menubar_app(app: Path, expected_version: str) -> None:
             team = line.split("=", 1)[1].strip()
             break
     if team != RELEASE_TEAM_ID:
-        raise RuntimeError(
-            f"refusing to install the downloaded app: signed by team "
-            f"{team or '<none>'}, expected {RELEASE_TEAM_ID}"
+        raise _UntrustedBundle(
+            f"signed by team {team or '<none>'}, expected {RELEASE_TEAM_ID}"
         )
 
     # Bind the bundle to the release that was asked for. Everything above is
@@ -674,9 +694,8 @@ def _verify_menubar_app(app: Path, expected_version: str) -> None:
     )
     stamped = proc.stdout.strip()
     if proc.returncode != 0 or stamped != expected_version:
-        raise RuntimeError(
-            f"refusing to install the downloaded app: it is v{stamped or '<unknown>'}, "
-            f"but v{expected_version} was requested"
+        raise _UntrustedBundle(
+            f"it is v{stamped or '<unknown>'}, but v{expected_version} was requested"
         )
 
 
@@ -734,6 +753,11 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             ),
             None,
         )
+        if url and not url.startswith("https://github.com/"):
+            # The URL comes out of the API response. Releases are served from
+            # github.com; anything else means the response is not what we
+            # think it is, and following it would fetch code from elsewhere.
+            raise _UntrustedBundle(f"asset URL is not on github.com: {url}")
         if not url:
             # Releases cut before the asset existed have nothing to offer, and
             # saying "not available for this release" is more useful than a
@@ -746,7 +770,13 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             )
 
         print(f"    Menu-bar app missing — fetching it from the v{version} release...")
-        with tempfile.TemporaryDirectory() as tmp:
+        # Beside the destination, not in $TMPDIR. On this project's own
+        # machines project_root and $TMPDIR sit on different volumes, and
+        # shutil.move then falls back to copytree + rmtree: a failure mid-copy
+        # leaves a partial Quern.app that later runs treat as installed, and
+        # what gets verified is not byte-for-byte what gets installed. Staying
+        # on one filesystem makes the final step a rename.
+        with tempfile.TemporaryDirectory(dir=project_root) as tmp:
             tarball = Path(tmp) / asset_name
             # urlretrieve takes no timeout and defaults to none, so a stalled
             # transfer hangs setup with no deadline at all. Stream it instead,
@@ -754,6 +784,12 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             # download that never finishes is the failure mode here, not a slow
             # one.
             deadline = time.monotonic() + 180
+            # A size cap as well as a clock. The deadline bounds how long a
+            # hostile or broken server can stream, not how much it can write:
+            # at line rate, 180s is tens of gigabytes into the install volume.
+            # The real asset is single-digit megabytes.
+            max_bytes = 200 * 1024 * 1024
+            written = 0
             with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
                 with open(tarball, "wb") as out:
                     while True:
@@ -765,6 +801,12 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
                         chunk = resp.read(64 * 1024)
                         if not chunk:
                             break
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise RuntimeError(
+                                f"download exceeded {max_bytes // (1024 * 1024)}MB; "
+                                "refusing to keep writing"
+                            )
                         out.write(chunk)
 
             # macOS tar, not Python's tarfile. The archive carries AppleDouble
@@ -799,7 +841,27 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             # releases, not merely "validly signed by someone".
             _verify_menubar_app(extracted, version)
 
-            shutil.move(str(extracted), str(app))
+            # os.replace, so the destination either has the whole verified
+            # bundle or nothing at all. A half-written Quern.app would be
+            # launched by the next step and would make every future setup
+            # return early, wedging the install with no route back.
+            os.replace(str(extracted), str(app))
+    except _UntrustedBundle as e:
+        # Distinct from a transfer failure on purpose. This is the one case
+        # where the manual route must NOT be offered: it would tell the user
+        # to download by hand the very asset that just failed verification,
+        # bypassing the check entirely.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.ERROR,
+            message="The downloaded menu-bar app failed verification",
+            detail=(
+                f"{e}\n"
+                "      Not installed. This is not a network problem -- the "
+                "asset did not verify.\n"
+                "      Do not install it by hand; report it instead."
+            ),
+        )
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
         # Never fatal. A missing menu-bar app is a missing convenience, and
         # failing setup over it would be worse than the gap it fills.

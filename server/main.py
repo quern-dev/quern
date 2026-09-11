@@ -357,9 +357,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # leaving it to a later resolve: the pool's sticky-active path
             # returns the UDID without running the setter, so a session that
             # never resolves by name or UDID would never refresh the sidecar.
-            device_controller.refresh_active_device()
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
+            return
+        try:
+            device_controller.refresh_active_device()
+        except OSError:
+            # Its own handler, at its own level. Folded into the warmup catch
+            # this was logged as "Device warmup failed" at debug -- invisible
+            # by default and pointing at device discovery rather than at an
+            # unwritable ~/.quern.
+            logger.warning(
+                "Could not refresh the active-device sidecar; the menu bar may "
+                "show a UDID instead of a name", exc_info=True,
+            )
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
@@ -1302,6 +1313,7 @@ def cli() -> None:
         description="Quern — capture device logs for AI agents",
         epilog=(
             "Other commands:\n"
+            "  help                          Show this message\n"
             "  version, --version, -V        Print the installed version\n"
             "  update [--tools]              Update to the latest release on your channel\n"
             "  set-channel [name]            Show or set the update channel (stable / beta)\n"

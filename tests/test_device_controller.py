@@ -1638,6 +1638,40 @@ class TestActiveDeviceRefreshAtStartup:
             "type": "simulator",
         }
 
+    async def test_an_empty_cache_does_not_erase_a_good_name(self):
+        """list_devices() swallows DeviceError per backend, so a failed simctl
+        or a deleted simulator produces exactly the same empty cache as
+        "nothing is connected". Refreshing on that replaced a good name with a
+        bare UDID -- the symptom this method exists to prevent, caused by it."""
+        from server.lifecycle.state import read_active_device, write_active_udid
+
+        write_active_udid("AAAA-1111", "iPhone 16 Pro", "simulator")
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {}
+        ctrl._device_type_cache = {}
+
+        ctrl.refresh_active_device()
+
+        assert read_active_device() == {
+            "udid": "AAAA-1111",
+            "name": "iPhone 16 Pro",
+            "type": "simulator",
+        }, "a cache miss erased the stored name"
+
+    async def test_a_type_only_cache_hit_still_refreshes(self):
+        """The two caches are filled by the same call but are not identical --
+        a device can be typed without being named."""
+        from server.lifecycle.state import read_active_device, write_active_udid
+
+        write_active_udid("AAAA-1111")
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {}
+        ctrl._device_type_cache = {"AAAA-1111": DeviceType.SIMULATOR}
+
+        ctrl.refresh_active_device()
+
+        assert read_active_device() == {"udid": "AAAA-1111", "type": "simulator"}
+
     async def test_it_does_nothing_without_an_active_device(self):
         from server.lifecycle.state import read_active_device
 

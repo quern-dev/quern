@@ -168,8 +168,22 @@ class DeviceController(DeviceControllerUI):
         the sidecar already agrees.
         """
         udid = self._active_udid
-        if udid:
-            self._active_udid = udid
+        if not udid:
+            return
+        # Only when the caches actually know this device. An empty cache is
+        # not evidence that the device has no name -- list_devices() swallows
+        # DeviceError per backend, so a simctl or adb failure yields exactly
+        # the same empty cache as "nothing is connected". Writing on that
+        # replaces a good name with a bare UDID, which is the symptom this
+        # method exists to prevent, caused by this method.
+        if udid not in self._device_name_cache and udid not in self._device_type_cache:
+            logger.debug(
+                "Not refreshing the active-device sidecar: %s is not in the "
+                "device caches, so any name it already holds is better than "
+                "what this would write", udid[:8],
+            )
+            return
+        self._active_udid = udid
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
