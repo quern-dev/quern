@@ -7,7 +7,10 @@
 //   • active-device.json — the active device UDID and name
 //   • config.json        — user preferences; the update channel lives here
 //
-// Field names mirror server/lifecycle/state.py exactly.
+// Field names mirror what the server writes. That is checked, not asserted:
+// tests/test_menubar_state_sync.py pins every key read here against the module
+// that writes it. A rename is otherwise silent -- the key is absent, the read
+// gives nil, and the menu says the daemon is stopped for good.
 
 import Foundation
 
@@ -254,7 +257,7 @@ final class StateReader {
         var a = ActiveDevice()
         guard let d = json("active-device.json") else { return a }
         a.udid = d["udid"] as? String
-        a.name = (d["name"] as? String) ?? (d["localized_name"] as? String)
+        a.name = d["name"] as? String
         a.kind = d["type"] as? String
         return a
     }
