@@ -357,22 +357,30 @@ def _prompt_yn(question: str, default: bool = True) -> bool:
     unanswered.
     """
     suffix = " [Y/n] " if default else " [y/N] "
-    if not _can_prompt():
-        _UNASKED.append(question)
-        print(f"{question}{suffix}— no terminal to ask on, assuming no")
-        return False
-    try:
-        if sys.stdin.isatty():
+    if sys.stdin.isatty():
+        try:
             answer = input(question + suffix).strip().lower()
-        else:
-            # stdin is a pipe (curl | bash) — read from the real terminal
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+    else:
+        # stdin is a pipe (curl | bash) — read from the real terminal. One
+        # open attempt, and its failure is the test for whether anyone is
+        # there: asking separately meant opening /dev/tty twice per question.
+        try:
             tty = open("/dev/tty")
+        except OSError:
+            _UNASKED.append(question)
+            print(f"{question}{suffix}— no terminal to ask on, assuming no")
+            return False
+        try:
             print(question + suffix, end="", flush=True)
             answer = tty.readline().strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return False
+        finally:
             tty.close()
-    except (EOFError, KeyboardInterrupt, OSError):
-        print()
-        return False
     if not answer:
         return default
     return answer in ("y", "yes")

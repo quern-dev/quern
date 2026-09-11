@@ -917,6 +917,38 @@ class TestBrewInstallTracking:
 
 
 class TestPromptYn:
+    def test_no_terminal_declines_and_says_so(self, capsys):
+        """`quern update` runs setup, and the menu bar's "Restart to Update"
+        runs `quern update` — so setup runs with no controlling terminal, where
+        /dev/tty cannot be opened. It used to decline every question silently."""
+        from server.lifecycle.setup import _UNASKED, _prompt_yn
+
+        _UNASKED.clear()
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install the thing?", default=True) is False
+
+        out = capsys.readouterr().out
+        assert "Install the thing?" in out, "the question must be shown, not swallowed"
+        assert "no terminal" in out
+        assert _UNASKED == ["Install the thing?"], "it must be recallable at the end"
+
+    def test_a_declined_default_is_not_taken_as_a_yes(self, capsys):
+        """Several of these install things. Answering the default would have
+        setup say yes on the user's behalf, which is worse than doing less."""
+        from server.lifecycle.setup import _UNASKED, _prompt_yn
+
+        _UNASKED.clear()
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install it?", default=True) is False
+
     def test_tty_stdin(self):
         """Normal TTY stdin reads via input()."""
         from server.lifecycle.setup import _prompt_yn
