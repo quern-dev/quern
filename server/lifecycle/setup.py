@@ -619,6 +619,118 @@ def build_preview_app() -> CheckResult:
     )
 
 
+def fetch_menubar_app(project_root: Path) -> CheckResult | None:
+    """Fetch the menu-bar app when a release install is missing it.
+
+    v0.15.0 reached existing users without the app. Their updater ran from an
+    older version that fetched GitHub's generated source tarball, because the
+    code that prefers the release asset shipped *inside* that asset and so
+    could not help itself. The update reported success, setup reported all
+    checks passed, and the app was simply absent with nothing saying so.
+
+    Those machines will not repair themselves: `quern update` sees the latest
+    version already installed and downloads nothing. Setup is the first code
+    of ours that runs on them, so the guarantee belongs here rather than in
+    the download path -- any future capability delivered only via the asset
+    would hit the same bootstrap problem.
+
+    Returns None when there is nothing to do: not macOS, a git checkout (where
+    a developer builds the app themselves), or the app is already present.
+    """
+    if platform.system() != "Darwin":
+        return None
+    if (project_root / ".git").exists():
+        return None
+    app = project_root / "Quern.app"
+    if app.exists():
+        return None
+
+    import json as _json
+    import tempfile
+    import urllib.request
+
+    from server import get_version
+
+    name = "Menu-bar app"
+    version = get_version()
+    asset_name = f"quern-{version}.tar.gz"
+    manual = (
+        f"Download {asset_name} from\n"
+        f"      https://github.com/quern-dev/quern/releases/tag/v{version}\n"
+        f"      and copy Quern.app to {project_root}"
+    )
+
+    try:
+        api = f"https://api.github.com/repos/quern-dev/quern/releases/tags/v{version}"
+        with urllib.request.urlopen(api, timeout=15) as resp:  # noqa: S310
+            release = _json.loads(resp.read())
+
+        url = next(
+            (
+                a.get("browser_download_url")
+                for a in release.get("assets", [])
+                if a.get("name") == asset_name
+            ),
+            None,
+        )
+        if not url:
+            # Releases cut before the asset existed have nothing to offer, and
+            # saying "not available for this release" is more useful than a
+            # download error.
+            return CheckResult(
+                name=name,
+                status=CheckStatus.SKIPPED,
+                message=f"Not published with v{version}",
+                detail="This release has no menu-bar app asset.",
+            )
+
+        print(f"    Menu-bar app missing — fetching it from the v{version} release...")
+        with tempfile.TemporaryDirectory() as tmp:
+            tarball = Path(tmp) / asset_name
+            urllib.request.urlretrieve(url, tarball)  # noqa: S310
+
+            # macOS tar, not Python's tarfile. The archive carries AppleDouble
+            # metadata (`._Contents` and friends); macOS tar applies those as
+            # extended attributes and removes them, while tarfile extracts them
+            # as literal files *inside* the bundle. That breaks the code
+            # signature seal -- CodeResources sealed a directory that did not
+            # contain them -- and Gatekeeper then rejects the app with "a
+            # sealed resource is missing or invalid". Measured: 21 entries
+            # extracted where a correct bundle has 10.
+            #
+            # Only the app is extracted. The source tree beside it is already
+            # installed, and unpacking it over a running install is not this
+            # step's job.
+            member = f"quern-{version}/Quern.app"
+            proc = subprocess.run(  # noqa: S603
+                ["/usr/bin/tar", "-xzf", str(tarball), "-C", tmp, member],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"could not extract {member}: {proc.stderr.strip() or proc.stdout.strip()}"
+                )
+            extracted = Path(tmp) / member
+            if not extracted.is_dir():
+                raise RuntimeError(f"{asset_name} contains no Quern.app")
+            shutil.move(str(extracted), str(app))
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+        # Never fatal. A missing menu-bar app is a missing convenience, and
+        # failing setup over it would be worse than the gap it fills.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Could not fetch the menu-bar app",
+            detail=f"{e}\n      {manual}",
+        )
+
+    return CheckResult(
+        name=name,
+        status=CheckStatus.OK,
+        message=f"Fetched from the v{version} release",
+    )
+
+
 def launch_menubar_app(project_root: Path) -> CheckResult | None:
     """Launch the bundled menu-bar app so it self-registers as a login item.
 
@@ -2165,6 +2277,12 @@ def run_setup() -> int:
     # ── Menu-bar app (only present in bundled release tarballs) ──
 
     if project_root:
+        # Fetch before launching: a release install that arrived without the
+        # app has nothing to launch, and reported nothing at all rather than
+        # saying so.
+        fetch_result = fetch_menubar_app(project_root)
+        if fetch_result is not None:
+            report.add(fetch_result)
         menubar_result = launch_menubar_app(project_root)
         if menubar_result is not None:
             report.add(menubar_result)

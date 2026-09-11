@@ -352,6 +352,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             devices = await device_controller.list_devices()
             logger.info("Device warmup: discovered %d device(s)", len(devices))
+            # The caches are warm now, so the restored active device can be
+            # written back with its name and type. Doing it here rather than
+            # leaving it to a later resolve: the pool's sticky-active path
+            # returns the UDID without running the setter, so a session that
+            # never resolves by name or UDID would never refresh the sidecar.
+            device_controller.refresh_active_device()
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
 

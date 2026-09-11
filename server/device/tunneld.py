@@ -284,7 +284,10 @@ async def tunneld_health() -> TunneldHealth:
         return TunneldHealth(
             status="stale_plist", serving=True, launchd_state=state, pid=pid,
             program=program,
-            detail=f"serving, but the installed plist is outdated ({installed_plist_log_path()})",
+            detail=(
+                "serving, but the installed plist is outdated — "
+                f"{installed_plist_drift()}"
+            ),
             remedy="./quern tunneld install",
         )
 
@@ -362,6 +365,33 @@ def installed_plist_program() -> Path | None:
         return None
     args = data.get("ProgramArguments") or []
     return Path(args[0]) if args else None
+
+
+def installed_plist_drift() -> str | None:
+    """What differs between the installed plist and what we'd generate now.
+
+    Returns a human-readable description of the first mismatch, or None when
+    the plist is current. Separate from the boolean because the two conditions
+    have completely different remedies and the caller was reporting the log
+    path whichever one failed -- so a binary that had drifted read as a
+    stale log path, and reinstalling appeared not to fix it.
+    """
+    installed_log = installed_plist_log_path()
+    if installed_log != LOG_PATH:
+        return f"log path is {installed_log}, expected {LOG_PATH}"
+
+    program = installed_plist_program()
+    if program is None:
+        return "no ProgramArguments recorded"
+
+    current = find_pymobiledevice3_binary()
+    if current is None:
+        if not program.exists():
+            return f"recorded binary {program} no longer exists"
+        return None
+    if program != current:
+        return f"binary is {program}, but quern now resolves {current}"
+    return None
 
 
 def installed_plist_is_current() -> bool:
