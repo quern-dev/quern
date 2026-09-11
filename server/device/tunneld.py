@@ -91,10 +91,13 @@ def shadowing_roots() -> list[Path]:
     """
     roots: list[Path] = []
     if sys.prefix != sys.base_prefix:
-        roots.append(Path(sys.prefix))
+        # Resolved, because the candidate it is compared against is. A venv at
+        # /tmp/v resolves to /private/tmp/v on macOS, so an unresolved root
+        # never matched and the shadowing script came straight back.
+        roots.append(Path(sys.prefix).resolve())
     project = _project_root()
     if project is not None:
-        roots.append(project)
+        roots.append(project.resolve())
     return roots
 
 
@@ -139,8 +142,16 @@ def find_pymobiledevice3_binary(
     # nothing usable, so this is a fallback rather than a preference -- if PATH
     # resolves a real CLI, that one wins, whatever this order says.
     for candidate in pipx_candidates():
-        if candidate.exists():
-            return candidate.resolve()
+        if not candidate.exists():
+            continue
+        resolved = candidate.resolve()
+        # The same exclusion the PATH branch applies. Without it the fallback
+        # was a way back in: `~/.local/bin/pymobiledevice3` is a shim whose
+        # target is unconstrained, so it could resolve into the very venv the
+        # branch above had just rejected.
+        if any(_is_inside(resolved, root) for root in roots):
+            continue
+        return resolved
 
     return None
 
@@ -381,13 +392,18 @@ async def tunneld_health() -> TunneldHealth:
         )
 
     if not installed_plist_is_current():
+        # `is_current` stays the gate. It and `drift` do not ask quite the same
+        # question -- drift compares the whole ProgramArguments array -- and
+        # switching the gate to drift collapsed this into the `binary_drift`
+        # case below, which is a different fault: this one is "the plist file is
+        # wrong", that one is "the plist is fine but the running daemon is from
+        # an older one". The only real problem was reporting `None` when drift
+        # found nothing is_current objected to, so that case gets words.
+        reason = installed_plist_drift() or "it does not match what quern would write now"
         return TunneldHealth(
             status="stale_plist", serving=True, launchd_state=state, pid=pid,
             program=program,
-            detail=(
-                "serving, but the installed plist is outdated — "
-                f"{installed_plist_drift()}"
-            ),
+            detail=f"serving, but the installed plist is outdated — {reason}",
             remedy="./quern tunneld install",
         )
 
@@ -924,7 +940,11 @@ def _print_status() -> int:
         drift = installed_plist_drift()
         if drift:
             print(f"  Plist:     outdated — {drift}")
-        print("             Reinstall to migrate: ./quern tunneld install")
+            # Under the drift, not beside it. Left one level out, this told
+            # every healthy install to reinstall -- a passing check reading as
+            # a failed one, advising the exact command the guard below refuses
+            # on a home-on-external machine.
+            print("             Reinstall to migrate: ./quern tunneld install")
 
     running, devices = _tunneld_devices()
 

@@ -14,9 +14,7 @@ reading, or emits anything credential-shaped.
 
 from __future__ import annotations
 
-import builtins
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -77,41 +75,33 @@ def _load():
 
 
 @pytest.fixture
-def captured(monkeypatch):
-    """Capture, recording every file path the script opens while it runs."""
-    opened: list[str] = []
-    real_open = builtins.open
-    real_read_text = Path.read_text
-    real_run = subprocess.run
-    real_listdir = os.listdir
+def captured():
+    """Capture, recording every file the script opens, at the interpreter level.
 
-    def watched_open(file, *a, **kw):
-        opened.append(str(file))
-        return real_open(file, *a, **kw)
+    An audit hook rather than wrapping functions. Wrapping `builtins.open`,
+    `Path.read_text` and `subprocess.run` covered the calls someone thought of:
+    `Path.read_bytes` goes through `io.open`, and a `subprocess.run(..., shell=True)`
+    passes a string rather than a list. Both were measured reading
+    ~/.quern/api-key with the suite green. `sys.addaudithook` sees `open`,
+    `os.listdir`, `subprocess.Popen` and `os.system` at one layer, below every
+    wrapper, so a new way to read a file does not need a new watcher.
+    """
+    import sys as real_sys
 
-    def watched_read_text(self, *a, **kw):
-        opened.append(str(self))
-        return real_read_text(self, *a, **kw)
+    touched: list[str] = []
 
-    # The module reads files through `subprocess` (plutil) and `os.listdir`, not
-    # through `open`. Watching only `open` meant a `subprocess.run(["cat",
-    # "~/.quern/api-key"])` added to the module passed the whole suite —
-    # measured. The denylist was aimed at the wrong layer.
-    def watched_run(cmd, *a, **kw):
-        opened.extend(str(part) for part in cmd) if isinstance(cmd, (list, tuple)) else None
-        return real_run(cmd, *a, **kw)
+    def hook(event: str, args: tuple) -> None:
+        if event in ("open", "os.listdir", "os.scandir"):
+            touched.append(str(args[0]))
+        elif event in ("subprocess.Popen", "os.system", "os.exec"):
+            touched.append(" ".join(str(a) for a in args))
 
-    def watched_listdir(path="."):
-        opened.append(str(path))
-        return real_listdir(path)
-
-    monkeypatch.setattr(builtins, "open", watched_open)
-    monkeypatch.setattr(Path, "read_text", watched_read_text)
-    monkeypatch.setattr(subprocess, "run", watched_run)
-    monkeypatch.setattr(os, "listdir", watched_listdir)
+    real_sys.addaudithook(hook)
     data = _load().capture(ROOT)
-    monkeypatch.undo()
-    return data, opened
+    # Audit hooks cannot be removed, so record only while capturing.
+    touched_snapshot = list(touched)
+    touched.clear()
+    return data, touched_snapshot
 
 
 def test_it_emits_only_the_fields_it_is_allowed_to(captured):
@@ -171,7 +161,6 @@ def test_it_still_parses_on_the_oldest_python_it_must_run_on():
     """A syntax or stdlib feature newer than the floor makes the fallback fail
     on exactly the machine it exists for, and nothing else would catch it: the
     suite runs on 3.11+."""
-    import subprocess
 
     candidates = ["/usr/bin/python3", f"python{OLDEST_PYTHON[0]}.{OLDEST_PYTHON[1]}"]
     for candidate in candidates:

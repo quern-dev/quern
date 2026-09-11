@@ -239,8 +239,9 @@ and the configuration can be replayed as a test rather than guessed at from a
 description; `tests/fixtures/envs/` holds the ones that have already found bugs.
 
 It is read-only and deliberately narrow. It never opens `~/.quern/api-key`,
-`state.json`, the certificate state or the device pool, and `tests/test_capture_env.py`
-fails if it ever starts to — the output is meant for a public issue, so what it may
+`state.json`, the certificate state or the device pool, and
+`tests/test_capture_env.py` watches every read through an interpreter audit hook,
+so it fails if it ever starts to — whatever mechanism it uses to read — the output is meant for a public issue, so what it may
 contain is pinned rather than remembered.
 
 `PATH` is filtered to the entries that matter: anything recognisably a toolchain
@@ -255,7 +256,9 @@ matching on a toolchain name carries whatever else is in its path. Read it befor
 attaching it if that matters to you.
 
 If quern is broken enough that the command will not run, `python3
-scripts/capture-env.py` does the same thing. It is stdlib-only and works on the
+scripts/capture-env.py` does the same thing, including recording what `which`
+resolves once setup has prepended the project venv — which is the value the
+checks see, and not the one a plain shell shows. It is stdlib-only and works on the
 Python that ships with Xcode's Command Line Tools, so it does not need the venv
 that may be the problem.
 

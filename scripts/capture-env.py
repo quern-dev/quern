@@ -32,5 +32,24 @@ except (ImportError, SyntaxError) as exc:  # pragma: no cover - exercised by han
     print("Try: python3.11 scripts/capture-env.py, or `quern capture-env`.", file=sys.stderr)
     raise SystemExit(1) from None
 
+def _main(argv: list[str]) -> int:
+    # The same flag handling `quern capture-env` has. It was fixed only there,
+    # leaving it live in the file the README points at for when quern is broken
+    # -- so `--help` wrote a file called "--help" and exited 0.
+    if any(arg.startswith("-") for arg in argv):
+        print("Usage: python3 scripts/capture-env.py [FILE]")
+        print()
+        print("Writes an environment report for attaching to a bug report.")
+        print("With no FILE, prints to stdout.")
+        if argv not in (["-h"], ["--help"]):
+            print(f"unrecognised option: {argv[0]}", file=sys.stderr)
+            return 2
+        return 0
+    if len(argv) > 1:
+        print(f"Expected at most one FILE, got {len(argv)}.", file=sys.stderr)
+        return 2
+    return run(argv[0] if argv else None)
+
+
 if __name__ == "__main__":
-    sys.exit(run(sys.argv[1] if len(sys.argv) > 1 else None))
+    sys.exit(_main(sys.argv[1:]))

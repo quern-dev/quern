@@ -147,6 +147,82 @@ class TestTheLookupFindsTheCLI:
         assert without == with_venv
 
 
+class TestTheExclusionCoversBothShadowingRoots:
+    """The `sys.prefix` half had no coverage at all: deleting it left 230 tests
+    green. It is the half that matters most -- setup identifies the shadowing
+    directory by the running interpreter, not by where the checkout is."""
+
+    def test_the_running_interpreters_venv_is_excluded(self, monkeypatch):
+        import sys as real_sys
+
+        fake_venv = Path("/Volumes/elsewhere/venvs/quern")
+        monkeypatch.setattr(real_sys, "prefix", str(fake_venv))
+        monkeypatch.setattr(real_sys, "base_prefix", "/usr")
+        monkeypatch.setattr(tunneld, "_project_root", lambda: None)
+
+        roots = tunneld.shadowing_roots()
+
+        assert fake_venv in roots, (
+            "a venv outside the checkout still shadows, and is identified by "
+            "sys.prefix -- which is how run_setup identifies it"
+        )
+
+    def test_the_checkout_is_excluded_too(self, monkeypatch):
+        import sys as real_sys
+
+        monkeypatch.setattr(real_sys, "prefix", "/usr")
+        monkeypatch.setattr(real_sys, "base_prefix", "/usr")
+        checkout = Path("/Volumes/Home/someone/Dev/quern")
+        monkeypatch.setattr(tunneld, "_project_root", lambda: checkout)
+
+        assert tunneld.shadowing_roots() == [checkout]
+
+    def test_a_venv_reached_through_a_symlink_is_still_excluded(self, monkeypatch, tmp_path):
+        """The root is compared against a resolved candidate, so it has to be
+        resolved too. /tmp/v resolves to /private/tmp/v on macOS, and an
+        unresolved root never matched -- handing back the shadowing script.
+
+        Goes through `shadowing_roots()` rather than passing `excluded_roots`,
+        because the resolve being tested happens inside it. The first version
+        passed the root in already resolved and proved nothing: leaving the
+        `.resolve()` off still passed.
+        """
+        import sys as real_sys
+
+        real = tmp_path / "real-venv"
+        (real / "bin").mkdir(parents=True)
+        script = real / "bin" / "pymobiledevice3"
+        script.write_text("")
+        link = tmp_path / "link-venv"
+        link.symlink_to(real)
+
+        monkeypatch.setattr(real_sys, "prefix", str(link))
+        monkeypatch.setattr(real_sys, "base_prefix", "/usr")
+        monkeypatch.setattr(tunneld, "_project_root", lambda: None)
+        monkeypatch.setattr(tunneld, "pipx_candidates", list)
+
+        found = tunneld.find_pymobiledevice3_binary(
+            which=lambda _n: str(link / "bin" / "pymobiledevice3"),
+        )
+
+        assert found is None, "the shadowing script came back through a symlinked root"
+
+    def test_the_pipx_fallback_applies_the_exclusion_too(self, monkeypatch, tmp_path):
+        """The fallback skipped it entirely, and one of its entries is a shim
+        whose symlink target is unconstrained — so it was a way back in."""
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        shim = venv / "bin" / "pymobiledevice3"
+        shim.write_text("")
+
+        monkeypatch.setattr(tunneld, "pipx_candidates", lambda: [shim])
+        found = tunneld.find_pymobiledevice3_binary(
+            which=lambda _n: None, excluded_roots=[venv]
+        )
+
+        assert found is None, "the fallback returned a binary inside an excluded root"
+
+
 class TestTheDriftIsReportedHonestly:
     def test_a_drifted_binary_is_not_described_as_a_stale_log_path(
         self, home_on_external, monkeypatch
@@ -240,6 +316,40 @@ class TestSetupReportsWhatDrifted:
         assert "log path" in result.message
 
 
+class TestStatusDoesNotInventProblems:
+    """`_print_status` had no test, and the fix that gave it an honest drift
+    reason left the "Reinstall to migrate" advice one level out -- so every
+    healthy install was told to reinstall, with no reason above it."""
+
+    def _status(self, monkeypatch, capsys, tmp_path, drift):
+        monkeypatch.setattr(tunneld, "installed_plist_drift", lambda: drift)
+        monkeypatch.setattr(tunneld, "_tunneld_devices", lambda: (True, {}))
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda *a, **k: Path("/x"))
+        # A real file, not a blanket `Path.exists` patch -- that leaked into an
+        # autouse teardown fixture and made it unlink something never created.
+        # Second time today.
+        installed = tmp_path / "com.quern.tunneld.plist"
+        installed.write_text("")
+        monkeypatch.setattr(tunneld, "PLIST_PATH", installed)
+        tunneld._print_status()
+        return capsys.readouterr().out
+
+    def test_a_healthy_plist_is_not_told_to_reinstall(self, monkeypatch, capsys, tmp_path):
+        out = self._status(monkeypatch, capsys, tmp_path, None)
+        assert "Reinstall" not in out, (
+            "a passing check must not read as a failed one -- and the advice is "
+            "the command the install guard refuses on a home-on-external machine"
+        )
+        assert "outdated" not in out
+
+    def test_a_drifted_plist_names_the_reason_and_the_remedy(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        out = self._status(monkeypatch, capsys, tmp_path, "binary is X, but quern resolves Y")
+        assert "binary is X" in out
+        assert "Reinstall" in out
+
+
 class TestTheInstallRefusesToBreakItself:
     def test_a_binary_on_an_external_volume_is_never_written_into_the_daemon(
         self, home_on_external, monkeypatch, capsys, tmp_path
@@ -248,6 +358,10 @@ class TestTheInstallRefusesToBreakItself:
         Recording one there produces a daemon that works until the next reboot
         and then does not, having reported success."""
         env = home_on_external
+        # The guard's own error message tells the user to set this. Inheriting
+        # it from the developer's shell turned the test green-for-the-wrong-
+        # reason into red-for-the-wrong-reason.
+        monkeypatch.delenv(tunneld.BOOT_OVERRIDE, raising=False)
         monkeypatch.setattr(
             tunneld, "find_pymobiledevice3_binary", lambda *a, **k: env.venv_script
         )
@@ -259,7 +373,12 @@ class TestTheInstallRefusesToBreakItself:
         # `pytest -q`. A guard whose mutation test is unsafe to run is a guard
         # nobody will verify.
         sudo_calls: list = []
-        monkeypatch.setattr(tunneld, "_run_sudo", lambda *a, **k: sudo_calls.append(a) or 0)
+        # Returns True, the way a successful _run_sudo does. Returning 0 made
+        # install_daemon read every call as a failure, so `rc != 0` passed
+        # whether the guard existed or not -- and anyone "correcting" it later
+        # would have reached the unstubbed launchctl bootstrap from pytest.
+        monkeypatch.setattr(tunneld, "_run_sudo", lambda *a, **k: sudo_calls.append(a) or True)
+        monkeypatch.setattr(tunneld, "_bootstrap_with_retry", lambda *a, **k: 0)
         monkeypatch.setattr(tunneld, "PLIST_PATH", tmp_path / "com.quern.tunneld.plist")
 
         rc = tunneld.install_daemon()

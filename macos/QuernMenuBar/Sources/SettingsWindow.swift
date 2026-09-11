@@ -50,8 +50,16 @@ final class SettingsModel: ObservableObject {
     /// briefly unrunnable mid-update, and blanking the field then would be a
     /// worse reading than a slightly old one. That is only true of a value this
     /// app read itself; it is not a licence to show someone else's cache.
+    /// How the version is read. Injected for the same reason `Updater` injects
+    /// its own: without a seam here the only production caller of
+    /// `apply(version:)` was untested, and reinstating a `guard let version
+    /// else { return }` inside this function left all 27 tests green -- which
+    /// makes `.unavailable` unreachable and parks the row on "checking…"
+    /// forever, for exactly the user this was written for.
+    var readVersion: (@escaping (String?, String) -> Void) -> Void = Updater.installedVersion
+
     func refreshInstalledVersion() {
-        Updater.installedVersion { [weak self] version, _ in
+        readVersion { [weak self] version, _ in
             self?.apply(version: version)
         }
     }

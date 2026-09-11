@@ -140,20 +140,25 @@ def filter_path(entries: list[str]) -> tuple[list[dict], int]:
     return kept, len(entries) - len(kept)
 
 
-def _which_with_venv_first() -> str | None:
-    """What `which` returns once `run_setup` has prepended the venv.
+def _which_with_venv_first(project_root: Path) -> str | None:
+    """What `which` returns once `run_setup` has prepended the project venv.
 
-    Setup does this before any check runs, so this -- not the plain lookup --
+    Setup does that before any check runs, so this -- not the plain lookup --
     is the value the checks actually see. Reproduced rather than described, so
     a capture taken from an ordinary shell still records the shadowing.
+
+    Keyed on the project's venv, not on `sys.prefix`. Under the documented
+    fallback (`python3 scripts/capture-env.py`) the interpreter is Xcode's, so
+    `sys.prefix` is the base and this reported "nothing is shadowed" on a
+    machine that was -- producing exactly the report the field exists to
+    prevent. And the prepend is unconditional: returning early when the venv
+    bin was merely *somewhere* on PATH gave the answer for whatever came first.
     """
-    if sys.prefix == sys.base_prefix:
+    venv_bin = project_root / ".venv" / "bin"
+    if not venv_bin.is_dir():
         return shutil.which("pymobiledevice3")
-    venv_bin = str(Path(sys.prefix) / "bin")
     path = os.environ.get("PATH", "")
-    if venv_bin in path.split(":"):
-        return shutil.which("pymobiledevice3")
-    return shutil.which("pymobiledevice3", path=venv_bin + ":" + path)
+    return shutil.which("pymobiledevice3", path=f"{venv_bin}:{path}")
 
 
 def _plist() -> dict:
@@ -221,7 +226,7 @@ def capture(project_root: Path) -> dict:
         "sys_base_prefix": sys.base_prefix,
         "virtual_env": os.environ.get("VIRTUAL_ENV"),
         "which_pymobiledevice3": shutil.which("pymobiledevice3"),
-        "which_pymobiledevice3_as_setup_sees_it": _which_with_venv_first(),
+        "which_pymobiledevice3_as_setup_sees_it": _which_with_venv_first(project_root),
         "pymobiledevice3_installs": installs,
         "tunneld_plist": _plist(),
     }

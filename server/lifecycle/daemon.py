@@ -162,12 +162,14 @@ def _print_status(state: dict) -> None:
             print(f"{prefix}{line}")
 
     try:
-        from server.device.tunneld import PLIST_PATH, installed_plist_is_current
-        if PLIST_PATH.exists() and not installed_plist_is_current():
-            print(
-                "  Warning:    tunneld plist is outdated "
-                "(old user-home log path). Run: ./quern tunneld install",
-            )
+        from server.device.tunneld import PLIST_PATH, installed_plist_drift
+        # The third copy of this. Two others said "old user-home log path"
+        # whichever condition had drifted; this one is printed in the start
+        # banner, so it said it more often than either. Report what drifted.
+        drift = PLIST_PATH.exists() and installed_plist_drift()
+        if drift:
+            print(f"  Warning:    tunneld plist is outdated — {drift}.")
+            print("              Run: ./quern tunneld install")
     except Exception:
         pass  # never let an opportunistic check block the banner
 

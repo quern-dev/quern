@@ -626,7 +626,16 @@ def main() -> None:
             print()
             print("Writes an environment report for attaching to a bug report.")
             print("With no FILE, prints to stdout.")
-            sys.exit(0 if rest == ["-h"] or rest == ["--help"] else 2)
+            if rest in (["-h"], ["--help"]):
+                sys.exit(0)
+            print(f"unrecognised option: {rest[0]}", file=sys.stderr)
+            sys.exit(2)
+        if len(rest) > 1:
+            # Silently writing the first and ignoring the rest is the wrong
+            # kind of forgiving for a command whose output someone is about to
+            # attach to a bug report.
+            print(f"Expected at most one FILE, got {len(rest)}.", file=sys.stderr)
+            sys.exit(2)
         sys.exit(run(rest[0] if rest else None))
 
     _maybe_reexec_in_venv()

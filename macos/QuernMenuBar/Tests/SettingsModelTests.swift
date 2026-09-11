@@ -102,6 +102,31 @@ enum SettingsModelTests {
             Harness.expect(SettingsModel.uptime(since: nil, now: Date()), "—", "no start time")
         }
 
+        Harness.test("a read that cannot answer reaches the row as unavailable") {
+            // Crosses the seam the other tests skip. `apply(version:)` was
+            // tested directly, so its only production caller was not -- and a
+            // `guard let version else { return }` reinstated inside
+            // refreshInstalledVersion passed every test while parking the row
+            // on "checking…" forever.
+            let model = SettingsModel()
+            model.readVersion = { done in done(nil, "could not find quern") }
+
+            model.refreshInstalledVersion()
+
+            Harness.expect(model.version, .unavailable, "reading after a failed read")
+            Harness.expect(row("Version", in: model.serverRows(now: Date())), "unavailable",
+                           "the row must not sit on checking…")
+        }
+
+        Harness.test("a read that answers reaches the row as the version") {
+            let model = SettingsModel()
+            model.readVersion = { done in done("0.16.1", "quern 0.16.1") }
+
+            model.refreshInstalledVersion()
+
+            Harness.expect(row("Version", in: model.serverRows(now: Date())), "0.16.1", "row")
+        }
+
         Harness.test("pending and unavailable are not the same state") {
             Harness.expect(SettingsModel.VersionReading.pending
                              != SettingsModel.VersionReading.unavailable,
