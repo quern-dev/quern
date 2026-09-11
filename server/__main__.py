@@ -606,6 +606,13 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _capture_env_usage() -> None:
+    print("Usage: quern capture-env [FILE]")
+    print()
+    print("Writes an environment report for attaching to a bug report.")
+    print("With no FILE, prints to stdout.")
+
+
 def main() -> None:
     # Before the re-exec, deliberately, and the ordering is the whole point:
     # this is the command people reach for when quern is broken, and
@@ -621,13 +628,13 @@ def main() -> None:
         # taken as a filename: `capture-env --help` wrote a file called
         # "--help" and exited 0.
         rest = sys.argv[2:]
+        if any(a in ("-h", "--help") for a in rest):
+            # Checked before the flag rejection below: `capture-env out.json
+            # --help` reported "unrecognised option: --help", which it is not.
+            _capture_env_usage()
+            sys.exit(0)
         if any(arg.startswith("-") for arg in rest):
-            print("Usage: quern capture-env [FILE]")
-            print()
-            print("Writes an environment report for attaching to a bug report.")
-            print("With no FILE, prints to stdout.")
-            if rest in (["-h"], ["--help"]):
-                sys.exit(0)
+            _capture_env_usage()
             bad = next(a for a in rest if a.startswith("-"))
             print(f"unrecognised option: {bad}", file=sys.stderr)
             sys.exit(2)

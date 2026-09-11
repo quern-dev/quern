@@ -143,13 +143,20 @@ def filter_path(entries: list[str]) -> tuple[list[dict], int]:
 def setup_venv_bin(project_root: Path) -> Path | None:
     """The bin directory `run_setup` would prepend to PATH.
 
-    Setup uses `sys.prefix`, so when it runs inside a venv that is what
-    shadows. Both roots are checked because each misses the other's case: keyed
-    only on `sys.prefix`, the documented fallback (`python3
-    scripts/capture-env.py`, under Xcode's interpreter) reports "nothing is
-    shadowed" on a machine that is; keyed only on the project venv, a developer
-    whose venv lives outside the checkout gets the same wrong answer -- the
-    configuration `shadowing_roots()` exists for.
+    Setup uses `sys.prefix`, so when this runs inside a venv that is the exact
+    answer and is used directly.
+
+    Outside one -- the documented fallback, `python3 scripts/capture-env.py`
+    under Xcode's interpreter -- there is no `sys.prefix` to read, and keying
+    on it alone reported "nothing is shadowed" on a machine that was. So it
+    predicts instead: `./quern setup` re-execs into `<project>/.venv` before
+    running, so that is the venv setup would end up in.
+
+    An either/or, not both, and the prediction is only a prediction. Someone
+    who keeps their venv outside the checkout *and* invokes setup in a way that
+    bypasses the `./quern` wrapper would get the checkout's answer. That is
+    narrow enough to name rather than guess at, and the capture records
+    `sys_prefix` alongside so a reader can see which case they are in.
     """
     if sys.prefix != sys.base_prefix:
         return Path(sys.prefix) / "bin"
@@ -164,11 +171,12 @@ def _which_with_venv_first(project_root: Path) -> str | None:
     is the value the checks actually see. Reproduced rather than described, so
     a capture taken from an ordinary shell still records the shadowing.
 
-    Mirrors setup's rule exactly, including the part that looks like an
+    Mirrors setup's prepend rule, including the part that looks like an
     oversight: it prepends only when the directory is not already on PATH. When
     it is on PATH but not first, setup leaves it and resolves whatever comes
     first -- so prepending unconditionally here invented a shadowing setup does
-    not experience.
+    not experience. Which directory gets prepended is `setup_venv_bin`'s
+    question, and outside a venv that is a prediction rather than a reading.
     """
     venv_bin = setup_venv_bin(project_root)
     path = os.environ.get("PATH", "")

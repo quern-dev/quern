@@ -95,11 +95,19 @@ class _AuditRecorder:
         if event in ("open", "os.listdir", "os.scandir"):
             self.entries.append(str(args[0]))
         elif event in ("subprocess.Popen", "os.system", "os.exec"):
-            # Each argument separately, not space-joined. Joined, a denylist
-            # test doing `Path(entry).name` saw only the last token, so a
-            # `subprocess.run("cat ~/.quern/api-key", shell=True)` slipped past
-            # the very test whose docstring names that vector.
-            self.entries.extend(str(a) for a in args)
+            # The executable and the argv only. The `subprocess.Popen` event
+            # carries (executable, args, cwd, env), and recording `env` meant
+            # any future subprocess launched with a QUERN_* path in its
+            # environment would fail the "nothing under ~/.quern" test, naming
+            # a defect that is not there.
+            #
+            # argv arrives as a list, so it is stringified whole -- an earlier
+            # comment here claimed a per-argument split that does not happen.
+            # The substring check in the denylist test is what catches a
+            # `shell=True` command string, not this.
+            self.entries.append(str(args[0]))
+            if len(args) > 1:
+                self.entries.append(str(args[1]))
 
     @contextlib.contextmanager
     def recording(self):
@@ -145,6 +153,31 @@ def test_it_emits_only_the_fields_it_is_allowed_to(captured):
     assert not unexpected, (
         f"capture-env.py grew {sorted(unexpected)}. That output goes into public "
         "issues — add it to ALLOWED_KEYS deliberately, having decided it is safe."
+    )
+
+
+def test_the_watcher_is_actually_watching(captured):
+    """A positive control, and the reason it exists is measured: making the
+    audit hook return immediately left all 18 tests green. Every other test
+    here is a negative -- "nothing forbidden was read" -- over a list that
+    nothing proved was being filled. A hook that records nothing passes them
+    all, and the README promises it fails."""
+    _, touched = captured
+    assert touched, "the audit hook recorded nothing at all"
+    assert any("pyproject.toml" in p or "/bin" in p for p in touched), (
+        "the capture reads the project root and scans PATH directories; "
+        f"seeing neither means the hook is not observing it: {touched[:5]}"
+    )
+
+
+def test_a_deliberate_forbidden_read_is_caught(captured):
+    """The other half of the control: prove the denylist fires when something
+    it names really is read, rather than only that it stays quiet."""
+    _, touched = captured
+    planted = str(Path.home() / ".quern" / "api-key")
+    seen = {Path(p).name for p in [*touched, planted]}
+    assert "api-key" in seen & FORBIDDEN, (
+        "the denylist cannot recognise a forbidden path even when handed one"
     )
 
 
@@ -320,6 +353,15 @@ class TestArgumentHandling:
         )
 
     @pytest.mark.parametrize("entry", ENTRY_POINTS, ids=["cli", "script"])
+    def test_help_after_a_filename_is_still_help(self, entry, tmp_path):
+        """`--help` is recognised. Rejecting it as unrecognised because it came
+        second was the fix for naming the wrong argument, overshooting."""
+        result = self._run(entry, ["out.json", "--help"], tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert "unrecognised" not in result.stderr
+        assert not list(tmp_path.iterdir())
+
+    @pytest.mark.parametrize("entry", ENTRY_POINTS, ids=["cli", "script"])
     def test_an_unknown_flag_names_itself(self, entry, tmp_path):
         result = self._run(entry, ["out.json", "--bogus"], tmp_path)
         assert result.returncode == 2
@@ -340,3 +382,104 @@ class TestArgumentHandling:
         result = self._run(entry, [str(out)], tmp_path)
         assert result.returncode == 0, result.stderr
         assert json.loads(out.read_text())["home"]
+
+
+class TestSetupVenvBin:
+    """Which directory the capture believes setup would prepend.
+
+    Rewritten in three consecutive rounds with no test able to distinguish the
+    versions: keyed on `sys.prefix` alone, on the project venv alone, and on
+    both. All three passed the suite.
+    """
+
+    def _fn(self):
+        from server.lifecycle.capture_env import setup_venv_bin
+
+        return setup_venv_bin
+
+    def test_inside_a_venv_it_reports_that_venv(self, monkeypatch, tmp_path):
+        """Setup keys on sys.prefix, so inside a venv this is exact — including
+        a venv that lives nowhere near the checkout."""
+        outside = tmp_path / "elsewhere" / "venvs" / "quern"
+        outside.mkdir(parents=True)
+        monkeypatch.setattr(sys, "prefix", str(outside))
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+        assert self._fn()(tmp_path / "checkout") == outside / "bin"
+
+    def test_outside_a_venv_it_predicts_the_checkouts_venv(self, monkeypatch, tmp_path):
+        """The documented fallback runs under Xcode's interpreter, where there
+        is no sys.prefix to read. `./quern setup` re-execs into <project>/.venv,
+        so that is the prediction."""
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        checkout = tmp_path / "checkout"
+        (checkout / ".venv" / "bin").mkdir(parents=True)
+
+        assert self._fn()(checkout) == checkout / ".venv" / "bin"
+
+    def test_outside_a_venv_with_no_checkout_venv_there_is_nothing_to_predict(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+        assert self._fn()(tmp_path / "checkout") is None
+
+    def test_the_active_venv_wins_over_the_checkouts(self, monkeypatch, tmp_path):
+        """The case that separates all three versions. A developer with a venv
+        outside the checkout *and* a stale one inside it: setup uses the active
+        one, so the capture must not report the other."""
+        active = tmp_path / "venvs" / "quern"
+        active.mkdir(parents=True)
+        checkout = tmp_path / "checkout"
+        (checkout / ".venv" / "bin").mkdir(parents=True)
+        monkeypatch.setattr(sys, "prefix", str(active))
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+        assert self._fn()(checkout) == active / "bin"
+
+
+class TestWhichAsSetupSeesIt:
+    def _fn(self):
+        from server.lifecycle.capture_env import _which_with_venv_first
+
+        return _which_with_venv_first
+
+    def test_a_venv_already_first_on_path_is_not_prepended_twice(
+        self, monkeypatch, tmp_path
+    ):
+        """Setup prepends only when the directory is not already on PATH.
+        Prepending unconditionally invented a shadowing setup does not have."""
+        venv_bin = tmp_path / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        for directory in (venv_bin, other):
+            tool = directory / "pymobiledevice3"
+            tool.write_text("")
+            tool.chmod(0o755)
+
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        # On PATH, but *after* the other directory — so setup leaves it alone
+        # and resolves the other one.
+        monkeypatch.setenv("PATH", f"{other}:{venv_bin}")
+
+        assert self._fn()(tmp_path) == str(other / "pymobiledevice3")
+
+    def test_a_venv_absent_from_path_is_prepended(self, monkeypatch, tmp_path):
+        venv_bin = tmp_path / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        for directory in (venv_bin, other):
+            tool = directory / "pymobiledevice3"
+            tool.write_text("")
+            tool.chmod(0o755)
+
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        monkeypatch.setenv("PATH", str(other))
+
+        assert self._fn()(tmp_path) == str(venv_bin / "pymobiledevice3")

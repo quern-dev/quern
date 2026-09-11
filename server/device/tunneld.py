@@ -551,26 +551,15 @@ def installed_plist_drift() -> str | None:
 def installed_plist_is_current() -> bool:
     """True iff the installed plist matches what we'd generate now.
 
-    Checks two things:
-      - StandardOutPath equals the current LOG_PATH (the migration from
-        ~/.quern/tunneld.log → /Library/Logs/com.quern.tunneld.log).
-      - ProgramArguments[0] equals the currently-discovered pymobiledevice3
-        binary, or — when no binary is discoverable now — at least exists on
-        disk. This catches drift from things like `sudo pipx install --global`
-        creating a new binary at /usr/local/bin/ while the plist still bakes
-        in the old per-user pipx path.
+    Defined as "drift found nothing", not as its own set of comparisons. It
+    used to check the log path and `ProgramArguments[0]` while
+    `installed_plist_drift()` checked the whole array -- so the two could
+    disagree, and every caller had to know which was stricter. One did not, and
+    the health API reported `healthy` for a plist the CLI called outdated.
+
+    Deriving it removes that possibility rather than documenting it.
     """
-    if installed_plist_log_path() != LOG_PATH:
-        return False
-    program = installed_plist_program()
-    if program is None:
-        return False
-    current = find_pymobiledevice3_binary()
-    if current is None:
-        # Can't discover a binary now — only flag if what's in the plist is
-        # broken on disk. Avoids false positives in odd states.
-        return program.exists()
-    return program == current
+    return installed_plist_drift() is None
 
 
 BOOT_OVERRIDE = "QUERN_ALLOW_EXTERNAL_TUNNELD"

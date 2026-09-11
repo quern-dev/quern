@@ -692,7 +692,11 @@ class TestHealthDoesNotBlockTheEventLoop:
     async def test_launchd_job_runs_on_a_worker_thread(self):
         with (
             patch("server.device.tunneld.is_tunneld_running", return_value=True),
-            patch("server.device.tunneld.installed_plist_is_current", return_value=True),
+            # Patching `installed_plist_is_current` here became a no-op when
+            # it was derived from drift, and the real drift check then read
+            # this machine's actual /Library/LaunchDaemons plist -- host state
+            # deciding a test about the event loop.
+            patch("server.device.tunneld.installed_plist_drift", return_value=None),
             patch(
                 "server.device.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/bin/pmd3"),

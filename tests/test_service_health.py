@@ -253,8 +253,13 @@ async def test_health_uses_the_same_check_the_cli_does(monkeypatch, tmp_path):
     monkeypatch.setattr(tunneld, "PLIST_PATH", tmp_path / "com.quern.tunneld.plist")
     (tmp_path / "com.quern.tunneld.plist").write_text("<plist/>")
 
-    assert tunneld.installed_plist_is_current() is True, "precondition: the weak check passes"
-    assert tunneld.installed_plist_drift() is not None, "precondition: the strict one does not"
+    # The two checks cannot disagree any more -- `installed_plist_is_current`
+    # is defined as "drift found nothing" -- so this asserts that rather than
+    # the gap it was originally written to expose.
+    assert tunneld.installed_plist_drift() is not None, "precondition: the plist is wrong"
+    assert tunneld.installed_plist_is_current() is False, (
+        "the two checks must not be able to disagree about the same plist"
+    )
 
     health = await tunneld.tunneld_health()
 
@@ -262,6 +267,35 @@ async def test_health_uses_the_same_check_the_cli_does(monkeypatch, tmp_path):
         "health reported healthy for a plist the CLI and the start banner both "
         "call outdated — a failed check reading as a passing one"
     )
+    assert "arguments" in health.detail, (
+        "trailing arguments are what is wrong here; a plist carrying the right "
+        "binary with different arguments launches something else entirely"
+    )
+
+
+async def test_a_running_daemon_from_an_old_binary_is_not_called_a_stale_plist(tunneld_env):
+    """Both faults at once, which is the realistic case and the one that pins
+    the ordering.
+
+    launchd's `program` *is* `ProgramArguments[0]`, so a program/binary mismatch
+    always means the plist drifted too. Checking the file first therefore hides
+    the running-daemon fact entirely -- and the older test did not catch that,
+    because it left `plist_drift` at None, asserting a machine that cannot
+    exist.
+    """
+    from server.device.tunneld import tunneld_health
+
+    tunneld_env["plist_drift"] = "binary is /old/pymobiledevice3, but quern now resolves …"
+    tunneld_env["job"] = {"state": "running", "pid": "5",
+                          "program": "/old/pymobiledevice3"}
+
+    health = await tunneld_health()
+
+    assert health.status == "binary_drift", (
+        "the file is stale *because* the daemon is running an old binary; "
+        "reporting only the file loses the actionable fact"
+    )
+    assert "/old/pymobiledevice3" in health.detail
 
 
 async def test_binary_drift_is_caught_while_serving(tunneld_env):

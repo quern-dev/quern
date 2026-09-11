@@ -32,23 +32,27 @@ except (ImportError, SyntaxError) as exc:  # pragma: no cover - exercised by han
     print("Try: python3.11 scripts/capture-env.py, or `quern capture-env`.", file=sys.stderr)
     raise SystemExit(1) from None
 
+def _usage() -> None:
+    print("Usage: python3 scripts/capture-env.py [FILE]")
+    print()
+    print("Writes an environment report for attaching to a bug report.")
+    print("With no FILE, prints to stdout.")
+
+
 def _main(argv: list[str]) -> int:
     # The same flag handling `quern capture-env` has. It was fixed only there,
     # leaving it live in the file the README points at for when quern is broken
     # -- so `--help` wrote a file called "--help" and exited 0.
-    if any(arg.startswith("-") for arg in argv):
-        print("Usage: python3 scripts/capture-env.py [FILE]")
-        print()
-        print("Writes an environment report for attaching to a bug report.")
-        print("With no FILE, prints to stdout.")
-        if argv not in (["-h"], ["--help"]):
-            # The first argument that is actually a flag. Reporting argv[0]
-            # named a perfectly good filename in `capture-env out.json --help`,
-            # sending the reader to the wrong place.
-            bad = next(a for a in argv if a.startswith("-"))
-            print(f"unrecognised option: {bad}", file=sys.stderr)
-            return 2
+    if any(a in ("-h", "--help") for a in argv):
+        _usage()
         return 0
+    if any(arg.startswith("-") for arg in argv):
+        _usage()
+        # The first argument that is actually a flag. Reporting argv[0] named a
+        # perfectly good filename in `capture-env out.json --bogus`.
+        bad = next(a for a in argv if a.startswith("-"))
+        print(f"unrecognised option: {bad}", file=sys.stderr)
+        return 2
     if len(argv) > 1:
         print(f"Expected at most one FILE, got {len(argv)}.", file=sys.stderr)
         return 2
