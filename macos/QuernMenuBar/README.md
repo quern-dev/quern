@@ -79,6 +79,8 @@ how to check that.
 | File | Responsibility |
 |------|----------------|
 | `Sources/main.swift` | Accessory-app bootstrap |
+| `Sources/LifecycleController.swift` | What is happening to the daemon, as distinct from how it is drawn |
+| `Sources/Scheduler.swift` | Where the app gets the time and schedules work |
 | `Sources/AppDelegate.swift` | Status item + menu construction + actions |
 | `Sources/StateReader.swift` | Reads `~/.quern/*.json`; poll + directory watch |
 | `Sources/QuernCLI.swift` | Resolves & runs the `quern` CLI |

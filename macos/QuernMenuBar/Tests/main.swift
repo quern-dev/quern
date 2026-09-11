@@ -6,4 +6,5 @@ import Foundation
 print("QuernMenuBar tests")
 print("")
 UpdaterTests.all()
+LifecycleControllerTests.all()
 exit(Harness.report())
