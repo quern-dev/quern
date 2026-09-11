@@ -1347,6 +1347,7 @@ class TestFetchMenubarApp:
         from server.lifecycle import setup as setup_mod
 
         monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         payload = json.dumps({"assets": []}).encode()
 
         class _Resp:
@@ -1368,6 +1369,7 @@ class TestFetchMenubarApp:
         from server.lifecycle import setup as setup_mod
 
         monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         monkeypatch.setattr(
             "urllib.request.urlopen",
             lambda *a, **k: (_ for _ in ()).throw(OSError("network is down")),
@@ -1396,6 +1398,7 @@ class TestFetchMenubarApp:
         from server.lifecycle import setup as setup_mod
 
         monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         payload = json.dumps({
             "assets": [{
                 "name": "quern-9.9.9.tar.gz",
@@ -1543,6 +1546,7 @@ class TestFetchMenubarApp:
         from server.lifecycle import setup as setup_mod
 
         monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         monkeypatch.setattr("server.get_version", lambda: "9.9.9")
         payload = json.dumps({
             "assets": [{
@@ -1596,6 +1600,7 @@ class TestFetchMenubarApp:
         from server.lifecycle import setup as setup_mod
 
         monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         monkeypatch.setattr("server.get_version", lambda: "9.9.9")
         payload = json.dumps({
             "assets": [{
@@ -1619,3 +1624,75 @@ class TestFetchMenubarApp:
         result = setup_mod.fetch_menubar_app(tmp_path)
         assert result.status == CheckStatus.ERROR
         assert "not on github.com" in (result.detail or "")
+
+
+class TestMenubarInstallLocation:
+    """The app was installed into the payload directory under ~/.local, which
+    Spotlight excludes, and `open` activated the running old build instead of
+    starting the new one — so an update could never deliver a new app to
+    anyone already running one."""
+
+    def test_the_app_is_installed_where_a_person_can_find_it(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", lambda cmd, timeout=30: (0, "", ""))
+
+        result = setup_mod.launch_menubar_app(root)
+
+        assert (apps / "Quern.app").exists(), "app was not installed to ~/Applications"
+        assert not (root / "Quern.app").exists(), "a second copy was left in the payload dir"
+        assert result.status == CheckStatus.OK
+
+    def test_a_running_instance_is_quit_before_the_new_one_opens(self, tmp_path, monkeypatch):
+        """`open` activates a running instance rather than starting the new
+        binary. Without a quit first, setup reports "Launched" while the old
+        build keeps running — true, and describing something that did not
+        happen."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app").mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        def record(cmd, timeout=30):
+            calls.append(cmd)
+            if cmd[0] == "pgrep":
+                return (1, "", "")   # nothing running after the quit
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", record)
+        setup_mod.launch_menubar_app(root)
+
+        quit_at = next(i for i, c in enumerate(calls) if c[0] == "osascript")
+        open_at = next(i for i, c in enumerate(calls) if c[0] == "open")
+        assert quit_at < open_at, "opened the app before asking the old one to quit"
+
+    def test_an_already_installed_app_is_not_refetched(self, tmp_path, monkeypatch):
+        """After the first setup the app lives only in ~/Applications.
+        Checking the payload directory alone would download it every run."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        root.mkdir()
+        apps = tmp_path / "Applications"
+        (apps / "Quern.app").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        _forbid_network(monkeypatch)
+
+        assert setup_mod.fetch_menubar_app(root) is None
+
+    def test_a_source_only_install_is_left_alone(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        assert setup_mod.launch_menubar_app(tmp_path / "install") is None

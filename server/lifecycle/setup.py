@@ -624,6 +624,25 @@ def build_preview_app() -> CheckResult:
 RELEASE_TEAM_ID = "3QUH73KW5Q"
 
 
+MENUBAR_APP_DIR = Path.home() / "Applications"
+"""Where the menu-bar app is installed for the user to find.
+
+Not the install root. The release asset delivers the app to
+``~/.local/share/quern``, but that is a dot-directory: Spotlight excludes it,
+Launchpad does not look there, and neither does a person. An app nobody can
+find is one nobody can restart -- which matters because quitting it is a menu
+item.
+
+~/Applications rather than /Applications so no admin prompt appears inside an
+otherwise unprivileged setup.
+"""
+
+
+def menubar_app_path() -> Path:
+    """The installed location of the menu-bar app."""
+    return MENUBAR_APP_DIR / "Quern.app"
+
+
 class _UntrustedBundle(RuntimeError):
     """The downloaded app is not the one we would have published.
 
@@ -721,8 +740,12 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
         return None
     if (project_root / ".git").exists():
         return None
+    # Both locations. The asset delivers to the install root and
+    # launch_menubar_app moves it to ~/Applications, so after the first setup
+    # the app is only in the second place -- checking the delivery location
+    # alone would re-download it on every run.
     app = project_root / "Quern.app"
-    if app.exists():
+    if app.exists() or menubar_app_path().exists():
         return None
 
     import json as _json
@@ -880,30 +903,81 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
 
 
 def launch_menubar_app(project_root: Path) -> CheckResult | None:
-    """Launch the bundled menu-bar app so it self-registers as a login item.
+    """Install the menu-bar app where it can be found, and (re)launch it.
 
-    Tarball releases built by ``scripts/release-menubar.sh`` include a signed
-    ``Quern.app`` at the install root. Opening it once lets the app register
-    itself for launch-at-login (via SMAppService). LaunchServices activates an
-    existing instance rather than spawning a duplicate, so this is safe to call
-    on every setup/update. Returns None for source-only installs (no app).
+    Two things this has to get right, both learned the hard way.
+
+    **Location.** The release asset delivers ``Quern.app`` to the install root,
+    which lives under ``~/.local`` -- a dot-directory Spotlight excludes. An
+    app installed there cannot be found by search, does not appear in
+    Launchpad, and is in neither place a person looks. Since quitting it is a
+    menu item, that makes it unrestartable in practice. It is moved to
+    ``~/Applications``.
+
+    **Relaunch.** ``open`` on a bundle activates a running instance rather than
+    starting the new binary, so after an update the old build simply stayed
+    running while setup reported "Launched" -- true, and describing something
+    that had not happened. A running instance is asked to quit first.
+
+    Returns None for source-only installs (no app in the payload).
     """
-    app = project_root / "Quern.app"
-    if not app.exists():
+    delivered = project_root / "Quern.app"
+    installed = menubar_app_path()
+
+    if not delivered.exists() and not installed.exists():
         return None
-    rc, _out, err = _run(["open", str(app)])
+
+    # Move the delivered copy into place, replacing any older install.
+    if delivered.exists():
+        try:
+            MENUBAR_APP_DIR.mkdir(parents=True, exist_ok=True)
+            staging = installed.with_name("Quern.app.incoming")
+            shutil.rmtree(staging, ignore_errors=True)
+            shutil.move(str(delivered), str(staging))
+            # Quit before replacing: a running app whose bundle is swapped
+            # underneath it keeps executing the old image from an inode that
+            # no longer has a name, which is a confusing state to debug.
+            _quit_menubar_app()
+            shutil.rmtree(installed, ignore_errors=True)
+            os.replace(str(staging), str(installed))
+        except OSError as e:
+            return CheckResult(
+                name="Menu-bar app",
+                status=CheckStatus.WARNING,
+                message=f"Could not install to {MENUBAR_APP_DIR}",
+                detail=f"{e}\n      Run it from {delivered} instead.",
+            )
+    else:
+        _quit_menubar_app()
+
+    rc, _out, err = _run(["open", str(installed)])
     if rc == 0:
         return CheckResult(
             name="Menu-bar app",
             status=CheckStatus.OK,
-            message="Launched (registers itself for launch-at-login)",
+            message=f"Running from {installed}",
         )
     return CheckResult(
         name="Menu-bar app",
         status=CheckStatus.WARNING,
         message="Could not launch Quern.app",
-        detail=err.strip() or f"Try: open {app}",
+        detail=err.strip() or f"Try: open {installed}",
     )
+
+
+def _quit_menubar_app() -> None:
+    """Ask a running menu-bar app to quit, so a new build can take over.
+
+    Best-effort and deliberately gentle: `osascript` asks the app to quit
+    rather than killing it, so it can tear down its status item cleanly. If
+    nothing is running, this is a no-op that costs a fraction of a second.
+    """
+    _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
+    for _ in range(20):
+        rc, out, _err = _run(["pgrep", "-f", "Quern.app/Contents/MacOS/QuernMenuBar"])
+        if rc != 0 or not out.strip():
+            return
+        time.sleep(0.25)
 
 
 def _install_skills(project_root: Path) -> CheckResult:
