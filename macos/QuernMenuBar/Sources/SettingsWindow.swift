@@ -13,6 +13,20 @@ final class SettingsModel: ObservableObject {
     @Published var loginEnabled = LoginItem.isEnabled()
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
+    /// Asked for when the window opens rather than read during `body`: the
+    /// answer comes from a subprocess now, and SwiftUI re-evaluates `body`
+    /// often enough that doing it there would spawn one per redraw.
+    @Published var installedVersion: String?
+
+    /// Keeps the last good answer on failure. A blank version field while the
+    /// CLI is briefly unrunnable mid-update would be a worse reading than a
+    /// slightly stale one.
+    func refreshInstalledVersion() {
+        Updater.installedVersion { [weak self] version in
+            guard let version else { return }
+            self?.installedVersion = version
+        }
+    }
 
     func apply(_ snap: QuernSnapshot) {
         snapshot = snap
@@ -65,7 +79,7 @@ struct SettingsView: View {
                 grid("Server", [
                     ("Status", s.running ? "Running" : "Stopped"),
                     ("Address", s.host != nil ? "\(s.host!):\(s.port ?? 0)" : "—"),
-                    ("Version", Updater.installedVersion() ?? u.currentVersion ?? "—"),
+                    ("Version", model.installedVersion ?? u.currentVersion ?? "—"),
                     ("Uptime", uptimeString(s.startedAt)),
                 ])
             }
@@ -230,6 +244,7 @@ final class SettingsWindowController {
             win.isReleasedWhenClosed = false
             window = win
         }
+        model.refreshInstalledVersion()
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil)

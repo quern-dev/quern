@@ -7,34 +7,74 @@
 import Foundation
 
 enum QuernCLI {
-    /// Install directory = the parent of Quern.app (…/quern/Quern.app → …/quern).
-    static var installDir: URL {
-        Bundle.main.bundleURL.deletingLastPathComponent()
-    }
+    /// Where the installer puts a release install. Not derived from this
+    /// bundle's location: the app is installed to ~/Applications (so Spotlight
+    /// and Launchpad find it), which is nowhere near the install tree. It used
+    /// to sit inside the install root, and the old `parent of Quern.app` rule
+    /// silently kept resolving -- to ~/Applications -- so every path built on
+    /// it pointed at a directory that will never contain what it wanted.
+    static let releaseInstallDir = FileManager.default
+        .homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/share/quern", isDirectory: true)
 
     /// Resolve the executable to run, most-preferred first:
     ///   1. ~/.local/bin/quern        (the wrapper `quern setup` installs)
-    ///   2. <install>/.venv/bin/quern-debug-server (PATH-independent fallback)
+    ///   2. ~/.local/share/quern/.venv/bin/quern-debug-server (release installs)
     ///   3. `quern` on PATH
+    ///
+    /// Returns nil when none of those exist, rather than handing back
+    /// `/usr/bin/env quern` and letting it fail with 127. A GUI app does not
+    /// inherit your shell's PATH, so "on PATH" here means only the few
+    /// directories `run` adds below -- a clone on your own PATH is not among
+    /// them. The 127 that results is indistinguishable from the command
+    /// existing and failing, and it is the wrong thing to show a user whose
+    /// actual problem is that setup has not run.
     static func resolve() -> (path: String, leadingArgs: [String])? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let wrapper = home.appendingPathComponent(".local/bin/quern").path
         if FileManager.default.isExecutableFile(atPath: wrapper) {
             return (wrapper, [])
         }
-        let venvBin = installDir.appendingPathComponent(".venv/bin/quern-debug-server").path
+        let venvBin = releaseInstallDir.appendingPathComponent(".venv/bin/quern-debug-server").path
         if FileManager.default.isExecutableFile(atPath: venvBin) {
             return (venvBin, [])
         }
-        // Last resort: rely on PATH via /usr/bin/env.
-        return ("/usr/bin/env", ["quern"])
+        if let onPath = which("quern") {
+            return (onPath, [])
+        }
+        return nil
+    }
+
+    /// First executable named `name` in the same PATH `run` gives the child.
+    private static func which(_ name: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        for dir in searchPath(home: home) {
+            let candidate = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// The PATH handed to the child, so it can find python/git/etc. even when
+    /// launched from a GUI context (which has a minimal PATH).
+    private static func searchPath(home: String) -> [String] {
+        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        return extra + current.split(separator: ":").map(String.init)
     }
 
     /// Run a quern subcommand off the main thread. `completion` receives the
     /// exit status and combined output, dispatched back to the main thread.
     static func run(_ args: [String], completion: ((Int32, String) -> Void)? = nil) {
         guard let resolved = resolve() else {
-            completion?(127, "Could not locate the quern executable.")
+            completion?(
+                127,
+                "Could not find the quern command.\n\n"
+                    + "The menu bar app looks for ~/.local/bin/quern, which `quern setup` "
+                    + "writes. Run setup once from your install, then try again."
+            )
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
@@ -42,13 +82,9 @@ enum QuernCLI {
             proc.executableURL = URL(fileURLWithPath: resolved.path)
             proc.arguments = resolved.leadingArgs + args
 
-            // Give the child a sane PATH so it can find python/git/etc. even
-            // when launched from a GUI context (which has a minimal PATH).
             var env = ProcessInfo.processInfo.environment
             let home = FileManager.default.homeDirectoryForCurrentUser.path
-            let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-            let current = env["PATH"] ?? ""
-            env["PATH"] = (extra + [current]).joined(separator: ":")
+            env["PATH"] = searchPath(home: home).joined(separator: ":")
             proc.environment = env
 
             let pipe = Pipe()

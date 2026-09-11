@@ -220,14 +220,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Actions
 
-    @objc private func startServer() { QuernCLI.start { [weak self] _, _ in self?.reader.refresh() } }
-    @objc private func stopServer() { QuernCLI.stop { [weak self] _, _ in self?.reader.refresh() } }
-    @objc private func restartServer() { QuernCLI.restart { [weak self] _, _ in self?.reader.refresh() } }
+    // These three discarded the exit status and only refreshed. A `quern` that
+    // could not be found, or a start that failed, then produced no visible
+    // effect whatsoever -- the menu reopened saying "Quern is stopped", which
+    // is exactly what it said before, so the click read as a dead menu item
+    // rather than as a failure. `quitAndStop` below already got this right.
+    @objc private func startServer() { runLifecycle("start", QuernCLI.start) }
+    @objc private func stopServer() { runLifecycle("stop", QuernCLI.stop) }
+    @objc private func restartServer() { runLifecycle("restart", QuernCLI.restart) }
+
+    private func runLifecycle(
+        _ verb: String,
+        _ action: (((Int32, String) -> Void)?) -> Void
+    ) {
+        action { [weak self] code, output in
+            guard let self else { return }
+            self.reader.refresh()
+            guard code != 0 else { return }
+            self.reportFailure("Could not \(verb) the server", detail: output)
+        }
+    }
 
     @objc private func restartToUpdate() {
-        updater.restartToUpdate { [weak self] status in
-            self?.updateStatusText = status
-        }
+        updater.restartToUpdate(
+            status: { [weak self] status in self?.updateStatusText = status },
+            failure: { [weak self] message, detail in
+                self?.reportFailure(message, detail: detail)
+            }
+        )
     }
 
     @objc private func openSettings() { settings.show() }

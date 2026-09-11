@@ -1,9 +1,17 @@
 // Drives the "Restart to Update" action.
 //
 // Flow: trigger `quern update` (which downloads + replaces the install tree,
-// including this Quern.app, and restarts the daemon), watch the install
-// dir's pyproject.toml version flip, then relaunch from the freshly-installed
-// bundle so the running menu-bar binary is replaced too.
+// including this Quern.app, and restarts the daemon), watch the version
+// reported by the CLI flip, then relaunch from the freshly-installed bundle so
+// the running menu-bar binary is replaced too.
+//
+// The version comes from `quern --version` rather than from a pyproject.toml
+// this app locates itself. It used to read one next to the bundle, which was
+// right while Quern.app lived inside the install tree and became permanently
+// wrong when it moved to ~/Applications: the read failed, the poll never saw a
+// change, and every update ran the full three minutes before reporting a
+// timeout. Asking the CLI has no path to get wrong, and it is the same answer
+// the server gives.
 
 import AppKit
 
@@ -13,41 +21,63 @@ final class Updater {
     private var onStatus: ((String) -> Void)?
 
     /// `status` receives short human-readable progress strings for the menu.
-    func restartToUpdate(status: @escaping (String) -> Void) {
+    /// `failure` is called instead when the update could not be started at all,
+    /// which is worth an alert rather than a line of menu text nobody reopens
+    /// the menu to read.
+    func restartToUpdate(
+        status: @escaping (String) -> Void,
+        failure: @escaping (String, String) -> Void
+    ) {
         onStatus = status
-        startVersion = Self.installedVersion()
-        status("Updating…")
+        status("Checking version…")
 
-        QuernCLI.update { [weak self] code, output in
+        Self.installedVersion { [weak self] version in
             guard let self else { return }
-            if code != 0 {
-                // `quern update` detaches a child and returns immediately, so a
-                // nonzero code here means it failed to even launch.
-                status("Update failed to start")
-                NSLog("quern update launch failed (\(code)): \(output)")
-                return
+            self.startVersion = version
+            status("Updating…")
+
+            QuernCLI.update { [weak self] code, output in
+                guard let self else { return }
+                if code != 0 {
+                    // `quern update` detaches a child and returns immediately,
+                    // so a nonzero code here means it failed to even launch.
+                    status("Update failed to start")
+                    NSLog("quern update launch failed (\(code)): \(output)")
+                    failure("Could not start the update", output)
+                    return
+                }
+                self.waitForNewVersionThenRelaunch()
             }
-            self.waitForNewVersionThenRelaunch()
         }
     }
 
     private func waitForNewVersionThenRelaunch() {
-        // The update runs in a detached child (~30–60s). Poll pyproject.toml in
-        // the install dir until the version changes, then relaunch.
+        // The update runs in a detached child (~30–60s). Ask the CLI for its
+        // version until it changes, then relaunch.
         var elapsed = 0.0
+        var inFlight = false
         let interval = 2.0
         let timeout = 180.0
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
             elapsed += interval
-            let current = Self.installedVersion()
-            if let current, current != self.startVersion {
-                t.invalidate()
-                self.relaunch(into: current)
-            } else if elapsed >= timeout {
-                t.invalidate()
-                self.onStatus?("Update timed out — check `quern update`")
+            // Each tick is a subprocess. Skip rather than queue when the last
+            // one has not answered -- mid-update the venv is being rebuilt and
+            // a call can hang, and piling them up would both spawn processes
+            // without bound and let a stale answer arrive after the timeout.
+            guard !inFlight else { return }
+            inFlight = true
+            Self.installedVersion { [weak self] current in
+                inFlight = false
+                guard let self, t.isValid else { return }
+                if let current, current != self.startVersion {
+                    t.invalidate()
+                    self.relaunch(into: current)
+                } else if elapsed >= timeout {
+                    t.invalidate()
+                    self.onStatus?("Update timed out — check `quern update`")
+                }
             }
         }
     }
@@ -89,18 +119,29 @@ final class Updater {
         }
     }
 
-    /// Parse `version = "x.y.z"` from the install dir's pyproject.toml — the
-    /// same single source of truth the server uses (server/__init__.py).
-    static func installedVersion() -> String? {
-        let pyproject = QuernCLI.installDir.appendingPathComponent("pyproject.toml")
-        guard let text = try? String(contentsOf: pyproject, encoding: .utf8) else { return nil }
-        for line in text.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("version") {
-                let parts = trimmed.components(separatedBy: "\"")
-                if parts.count >= 2 { return parts[1] }
+    /// The installed version, from `quern --version` ("quern 0.16.1").
+    ///
+    /// nil means "could not tell", never "unchanged": mid-update the CLI is
+    /// briefly unrunnable, and callers must keep waiting rather than treat a
+    /// failed read as an answer.
+    static func installedVersion(_ completion: @escaping (String?) -> Void) {
+        QuernCLI.run(["--version"]) { code, output in
+            guard code == 0 else {
+                completion(nil)
+                return
             }
+            let line = output
+                .split(separator: "\n")
+                .first { $0.contains("quern ") }
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespaces)
+            guard let version = line?.split(separator: " ").last.map(String.init),
+                  !version.isEmpty, version != "quern"
+            else {
+                completion(nil)
+                return
+            }
+            completion(version)
         }
-        return nil
     }
 }
