@@ -29,6 +29,10 @@ enum QuernCLI {
     /// them. The 127 that results is indistinguishable from the command
     /// existing and failing, and it is the wrong thing to show a user whose
     /// actual problem is that setup has not run.
+    /// Exit status used when nothing could be run at all, as distinct from a
+    /// command that ran and failed. Callers key their wording off this.
+    static let notFoundStatus: Int32 = 127
+
     static func resolve() -> (path: String, leadingArgs: [String])? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let wrapper = home.appendingPathComponent(".local/bin/quern").path
@@ -69,12 +73,24 @@ enum QuernCLI {
     /// exit status and combined output, dispatched back to the main thread.
     static func run(_ args: [String], completion: ((Int32, String) -> Void)? = nil) {
         guard let resolved = resolve() else {
-            completion?(
-                127,
-                "Could not find the quern command.\n\n"
-                    + "The menu bar app looks for ~/.local/bin/quern, which `quern setup` "
+            // Dispatched like every other completion. It used to be called
+            // synchronously here, which made this one path re-enter the
+            // caller before its own call returned -- harmless for today's
+            // callers, all on the main thread, and a trap for the next one.
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let wrapper = home.appendingPathComponent(".local/bin/quern").path
+            // Distinguish "not there" from "there but not runnable". A copy
+            // that lost its mode bit reads as missing otherwise, and the
+            // advice to run setup sends the reader looking for a file that is
+            // sitting in front of them.
+            let detail = FileManager.default.fileExists(atPath: wrapper)
+                ? "\(wrapper) exists but is not executable. Fix it with:\n\n"
+                    + "    chmod +x \(wrapper)"
+                : "The menu bar app looks for \(wrapper), which `quern setup` "
                     + "writes. Run setup once from your install, then try again."
-            )
+            DispatchQueue.main.async {
+                completion?(notFoundStatus, "Could not find the quern command.\n\n" + detail)
+            }
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {

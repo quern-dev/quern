@@ -102,11 +102,21 @@ def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
                 _print_status(state)
                 sys.exit(0)
 
+    # Nonzero, deliberately. This printed a warning and exited 0, which told
+    # every caller the opposite of what happened -- the exact shape
+    # CONTRIBUTING calls out. It is not hypothetical: the menu-bar app gates
+    # its error reporting on this status, so a server that never became
+    # healthy produced a dimmed icon, a "Quern is stopped" menu and no
+    # explanation anywhere, indistinguishable from never having tried.
+    #
+    # The child is left running on purpose. It may still be coming up, and
+    # killing it would throw away the logs naming the reason. The exit code
+    # says "this did not finish", not "nothing is running".
     elapsed_total = time.monotonic() - start
     print(f"Warning: Server started (pid {child_pid}) but health check timed out "
           f"after {elapsed_total:.1f}s", file=sys.stderr)
     print(f"Check logs: {LOG_FILE}", file=sys.stderr)
-    sys.exit(0)
+    sys.exit(1)
 
 
 def _print_status(state: dict) -> None:

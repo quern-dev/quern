@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.snapshot = snap
             if snap.server.running { self.launchStatusText = nil }
+            // Same reasoning, for the other status line: without this a failed
+            // update left its message in the menu for the life of the process,
+            // including long after the user had fixed the cause.
+            if !snap.update.updateAvailable { self.updateStatusText = nil }
             self.refreshStatusButton()
             self.settings.update(snap)
         }
@@ -55,7 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // already says the server is not running; this says why, to
             // whoever opens the menu to find out.
             NSLog("Start on launch failed (\(code)): \(output)")
-            self.launchStatusText = "Could not start the server — see Console"
+            // A missing CLI is worth naming in the menu. "See Console" is the
+            // right answer for a server that failed to come up and the wrong
+            // one for a setup step that was never run, and the two are not
+            // distinguishable from the outside.
+            self.launchStatusText = code == QuernCLI.notFoundStatus
+                ? "quern not found — run `quern setup`"
+                : "Could not start the server — see Console"
         }
     }
 

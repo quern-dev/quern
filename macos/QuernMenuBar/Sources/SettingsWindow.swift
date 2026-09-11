@@ -23,7 +23,7 @@ final class SettingsModel: ObservableObject {
     /// CLI is briefly unrunnable mid-update would be a worse reading than a
     /// slightly stale one.
     func refreshInstalledVersion() {
-        Updater.installedVersion { [weak self] version in
+        Updater.installedVersion { [weak self] version, _ in
             guard let version else { return }
             self?.installedVersion = version
         }

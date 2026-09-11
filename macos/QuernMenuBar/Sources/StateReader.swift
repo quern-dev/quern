@@ -133,11 +133,48 @@ final class StateReader {
             s.startedAt = Self.parseISO8601(started)
         }
         // state.json exists only while the daemon is up, but a stale file can
-        // linger after a crash — confirm the PID is actually alive.
+        // linger after a crash — confirm the PID is actually alive, and that
+        // it is still the *same* process.
         if let pid = s.pid, pid > 0 {
-            s.running = (kill(pid_t(pid), 0) == 0) || (errno == EPERM)
+            let alive = (kill(pid_t(pid), 0) == 0) || (errno == EPERM)
+            s.running = alive && Self.pidPlausiblyOurs(pid_t(pid), startedAt: s.startedAt)
         }
         return s
+    }
+
+    /// Whether `pid` can still be the process that wrote this state.
+    ///
+    /// `kill(pid, 0)` only says some process holds that number. After a hard
+    /// power-off the state file survives, and on the next boot the number
+    /// belongs to something unrelated — at which point the menu says "Quern is
+    /// running" with an uptime computed from a timestamp that describes a
+    /// different process entirely. That used to only mis-colour an icon. It now
+    /// decides whether the daemon gets started at all, so a false positive
+    /// means no server and nothing saying why.
+    ///
+    /// The test is that a process cannot have started *after* the state
+    /// describing it was written. Slack is one-directional and small: `pid`
+    /// starting before `started_at` is normal, since the server records the
+    /// time once it is up.
+    private static func pidPlausiblyOurs(_ pid: pid_t, startedAt: Date?) -> Bool {
+        // No recorded start time is "could not ask", not "failed" — fall back
+        // to liveness rather than declaring a running server stopped.
+        guard let startedAt, let launched = processStartTime(pid) else { return true }
+        return launched <= startedAt.addingTimeInterval(60)
+    }
+
+    /// Wall-clock start time of `pid`, or nil if it cannot be read.
+    private static func processStartTime(_ pid: pid_t) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let ok = mib.withUnsafeMutableBufferPointer { buf in
+            sysctl(buf.baseAddress, u_int(buf.count), &info, &size, nil, 0) == 0
+        }
+        // size == 0 means the pid vanished between the liveness check and here.
+        guard ok, size > 0 else { return nil }
+        let tv = info.kp_proc.p_starttime
+        return Date(timeIntervalSince1970: Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000)
     }
 
 
