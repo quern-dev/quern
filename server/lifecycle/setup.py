@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shutil
@@ -941,11 +942,27 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             shutil.rmtree(installed, ignore_errors=True)
             os.replace(str(staging), str(installed))
         except OSError as e:
+            # Put it back if we can. The move empties the payload directory
+            # before the final rename, so a failure after that point left the
+            # app at the staging name while this message pointed at a path
+            # that no longer existed.
+            location = next(
+                (c for c in (installed, staging, delivered) if c.exists()), None
+            )
+            if location == staging:
+                with contextlib.suppress(OSError):
+                    shutil.move(str(staging), str(delivered))
+                    location = delivered
+            where = (
+                f"The app is at {location}."
+                if location
+                else "The app could not be located; re-run `quern setup` to fetch it again."
+            )
             return CheckResult(
                 name="Menu-bar app",
                 status=CheckStatus.WARNING,
                 message=f"Could not install to {MENUBAR_APP_DIR}",
-                detail=f"{e}\n      Run it from {delivered} instead.",
+                detail=f"{e}\n      {where}",
             )
     else:
         _quit_menubar_app()

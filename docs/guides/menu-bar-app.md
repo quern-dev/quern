@@ -9,12 +9,37 @@ It is macOS only. Everything it does, the CLI already did.
 
 ## Getting it
 
-It arrives with Quern. `quern setup` installs it and `quern update` keeps it
-current, so there is nothing separate to download.
+If you installed Quern the normal way, it arrives with it. `quern setup`
+installs the app and `quern update` keeps it current, so there is nothing
+separate to download.
 
 If you installed before v0.15.0 and have never updated, you will not have it —
 the app ships inside the release asset rather than GitHub's generated source
 tarball. One `quern update` brings it in.
+
+### From a git clone
+
+A clone does not get the app, and this is deliberate: `quern setup` skips it
+on the assumption that anyone working from source would rather control their
+own build than have one installed over it.
+
+That left no instructions at all, which is worse. There are now:
+
+```sh
+scripts/install-menubar-app.sh            # the signed app from the matching release
+scripts/install-menubar-app.sh --build    # build from macos/QuernMenuBar instead
+```
+
+Both install to `~/Applications/Quern.app` and quit a running copy first.
+
+Take the default unless you are working on the app itself. A local build is
+unsigned, so its code-signing identity changes every time you rebuild, macOS
+treats each build as a different app, and launch-at-login and any permissions
+you grant will not persist. The released build is signed and notarized, so
+they do.
+
+Either way the app only reads `~/.quern/*.json`, so it reports on whichever
+server is running regardless of which install started it.
 
 It is installed to `~/Applications/Quern.app`, so Spotlight and Launchpad both
 find it. If you quit it and want it back:

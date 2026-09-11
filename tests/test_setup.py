@@ -1626,6 +1626,10 @@ class TestFetchMenubarApp:
         assert "not on github.com" in (result.detail or "")
 
 
+def _boom_oserror(*a, **kw):
+    raise OSError("simulated failure")
+
+
 class TestMenubarInstallLocation:
     """The app was installed into the payload directory under ~/.local, which
     Spotlight excludes, and `open` activated the running old build instead of
@@ -1690,6 +1694,46 @@ class TestMenubarInstallLocation:
         _forbid_network(monkeypatch)
 
         assert setup_mod.fetch_menubar_app(root) is None
+
+    def test_nothing_is_left_behind_in_the_payload_directory(self, tmp_path, monkeypatch):
+        """The delivered copy is moved, not copied, so an old app cannot sit
+        forgotten under ~/.local while a newer one runs from ~/Applications."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app" / "Contents").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", lambda cmd, timeout=30: (0, "", ""))
+        setup_mod.launch_menubar_app(root)
+
+        assert list(root.iterdir()) == [], "a copy was left in the payload directory"
+
+    def test_a_failed_install_says_where_the_app_actually_is(self, tmp_path, monkeypatch):
+        """The move empties the payload directory before the final rename, so
+        a failure after that point left the advice pointing at a path that no
+        longer existed."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app" / "Contents").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", lambda cmd, timeout=30: (0, "", ""))
+        monkeypatch.setattr(setup_mod.os, "replace", _boom_oserror)
+
+        result = setup_mod.launch_menubar_app(root)
+
+        assert result.status == CheckStatus.WARNING
+        named = result.detail.split("The app is at ")[-1].rstrip(".").strip()
+        assert Path(named).exists(), f"pointed at {named}, which does not exist"
+        # And it must be back where the next run will find it, not stranded
+        # under the temporary staging name -- which exists, so merely checking
+        # existence passes while the app is somewhere nobody would look.
+        assert Path(named).name == "Quern.app", f"left at {named}"
+        assert (root / "Quern.app").exists(), "not restored to the payload directory"
 
     def test_a_source_only_install_is_left_alone(self, tmp_path, monkeypatch):
         from server.lifecycle import setup as setup_mod
