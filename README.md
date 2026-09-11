@@ -232,6 +232,18 @@ both while one runs a 9.15.1 binary and the other an 11.3.1 one.
 tools, and says so when it finds some it cannot help with, rather than printing
 "nothing to do" above a tool it just flagged as behind.
 
+**Reporting an environment problem.** `python3 scripts/capture-env.py` writes the
+facts these checks read — where each `pymobiledevice3` lives and what it resolves to,
+the order of `PATH`, and what the tunneld daemon has baked in. Attach it to an issue
+and the configuration can be replayed as a test rather than guessed at from a
+description; `tests/fixtures/envs/` holds the ones that have already found bugs.
+
+It is read-only and deliberately narrow. It never opens `~/.quern/api-key`,
+`state.json`, the certificate state or the device pool, and `tests/test_capture_env.py`
+fails if it ever starts to — the output is meant for a public issue, so what it may
+contain is pinned rather than remembered. It does include your full `PATH`, because
+the *order* is the diagnostic, and that names the software you have installed.
+
 **Doctor does not need a running server.** Only the device-tool section does, and when
 that cannot be reached doctor names the reason and reports everything else anyway —
 the venv, the external tools, service health. That matters because a stale venv is a
