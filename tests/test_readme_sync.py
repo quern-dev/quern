@@ -432,3 +432,53 @@ def test_documented_flags_are_really_accepted():
         f"README.md documents flag(s) the CLI does not accept:\n"
         f"{_format(sorted(phantom))}"
     )
+
+
+def test_help_output_lists_every_dispatched_command():
+    """`quern --help` must name every command the CLI dispatches.
+
+    Commands handled in `server/__main__.py` never reach argparse, so the
+    parser does not know they exist and cannot list them. Six were missing,
+    including `update` -- one of the most used commands in the tool. Nothing
+    caught it, because the README check compares the README against dispatch
+    and never looks at the help output.
+    """
+    import io as _io
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "server", "--help"],
+        capture_output=True, text=True, timeout=60,
+        cwd=str(REPO_ROOT),
+    )
+    help_text = proc.stdout + proc.stderr
+    # A command must be *listed*, which means starting its own line in the
+    # help. Substring containment passed because `update` occurs inside
+    # set-channel's description; word boundaries passed for the same reason.
+    # Only the listing column actually answers "can a user find this".
+    listed = {
+        m.group(1)
+        for m in re.finditer(r"^\s+([a-z][a-z0-9-]*)(?:[,\s]|$)", help_text, re.M)
+    }
+    missing = [c for c in cli_commands() if c.lstrip("-") not in listed]
+    assert not missing, (
+        f"{len(missing)} command(s) the CLI dispatches are absent from "
+        f"`quern --help`:\n  - " + "\n  - ".join(sorted(missing))
+    )
+    assert _io
+
+
+def test_help_is_a_command_not_only_a_flag():
+    """`quern help` is what people type. It used to exit 2 with an
+    "invalid choice" error, because argparse only understands -h/--help."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "server", "help"],
+        capture_output=True, text=True, timeout=60,
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode == 0, f"`quern help` exited {proc.returncode}"
+    assert "usage: quern" in (proc.stdout + proc.stderr), "usage line names the wrong program"

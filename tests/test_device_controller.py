@@ -1611,3 +1611,95 @@ class TestTapElementAutoScroll:
             result = await ctrl.tap_element(identifier="button_log", scroll_to_find=False)
         assert result["status"] == "not_found"
         backend.scroll_into_view.assert_not_called()
+
+
+class TestActiveDeviceRefreshAtStartup:
+    """The sidecar has to be rewritten when the server starts, not when a
+    later resolve happens to take the right branch."""
+
+    async def test_a_restored_device_gains_its_name_at_startup(self):
+        """__init__ restores the UDID without running the setter, so the
+        sidecar keeps whatever the previous server wrote -- a bare UDID for
+        anything written before the name and type existed."""
+        from server.lifecycle.state import read_active_device, write_active_udid
+
+        write_active_udid("AAAA-1111")
+
+        ctrl = DeviceController()
+        assert read_active_device() == {"udid": "AAAA-1111"}, "precondition"
+
+        ctrl._device_name_cache = {"AAAA-1111": "iPhone 16 Pro"}
+        ctrl._device_type_cache = {"AAAA-1111": DeviceType.SIMULATOR}
+        ctrl.refresh_active_device()
+
+        assert read_active_device() == {
+            "udid": "AAAA-1111",
+            "name": "iPhone 16 Pro",
+            "type": "simulator",
+        }
+
+    async def test_an_empty_cache_does_not_erase_a_good_name(self):
+        """list_devices() swallows DeviceError per backend, so a failed simctl
+        or a deleted simulator produces exactly the same empty cache as
+        "nothing is connected". Refreshing on that replaced a good name with a
+        bare UDID -- the symptom this method exists to prevent, caused by it."""
+        from server.lifecycle.state import read_active_device, write_active_udid
+
+        write_active_udid("AAAA-1111", "iPhone 16 Pro", "simulator")
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {}
+        ctrl._device_type_cache = {}
+
+        ctrl.refresh_active_device()
+
+        assert read_active_device() == {
+            "udid": "AAAA-1111",
+            "name": "iPhone 16 Pro",
+            "type": "simulator",
+        }, "a cache miss erased the stored name"
+
+    async def test_a_type_only_cache_hit_still_refreshes(self):
+        """The two caches are filled by the same call but are not identical --
+        a device can be typed without being named."""
+        from server.lifecycle.state import read_active_device, write_active_udid
+
+        write_active_udid("AAAA-1111")
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {}
+        ctrl._device_type_cache = {"AAAA-1111": DeviceType.SIMULATOR}
+
+        ctrl.refresh_active_device()
+
+        assert read_active_device() == {"udid": "AAAA-1111", "type": "simulator"}
+
+    async def test_it_does_nothing_without_an_active_device(self):
+        from server.lifecycle.state import read_active_device
+
+        ctrl = DeviceController()
+        ctrl.refresh_active_device()
+        assert read_active_device() == {}
+
+    async def test_it_is_a_no_op_when_the_sidecar_already_agrees(self):
+        """The dedup guard has to hold here, or every start rewrites the file."""
+        from server.lifecycle import state
+
+        ctrl = DeviceController()
+        ctrl._device_name_cache = {"AAAA-1111": "iPhone 16 Pro"}
+        ctrl._device_type_cache = {"AAAA-1111": DeviceType.SIMULATOR}
+        ctrl._active_udid = "AAAA-1111"
+
+        writes = 0
+        real = state.write_active_udid
+
+        def counting(udid, name=None, kind=None):
+            nonlocal writes
+            writes += 1
+            return real(udid, name, kind)
+
+        with patch.object(
+            __import__("server.device.controller", fromlist=["x"]),
+            "write_active_udid", counting,
+        ):
+            ctrl.refresh_active_device()
+            ctrl.refresh_active_device()
+        assert writes == 0, "refresh rewrote a sidecar that already agreed"

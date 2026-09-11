@@ -352,8 +352,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             devices = await device_controller.list_devices()
             logger.info("Device warmup: discovered %d device(s)", len(devices))
+            # The caches are warm now, so the restored active device can be
+            # written back with its name and type. Doing it here rather than
+            # leaving it to a later resolve: the pool's sticky-active path
+            # returns the UDID without running the setter, so a session that
+            # never resolves by name or UDID would never refresh the sidecar.
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
+            return
+        try:
+            device_controller.refresh_active_device()
+        except OSError:
+            # Its own handler, at its own level. Folded into the warmup catch
+            # this was logged as "Device warmup failed" at debug -- invisible
+            # by default and pointing at device discovery rather than at an
+            # unwritable ~/.quern.
+            logger.warning(
+                "Could not refresh the active-device sidecar; the menu bar may "
+                "show a UDID instead of a name", exc_info=True,
+            )
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
@@ -1290,7 +1307,22 @@ def _cmd_disable_local_capture() -> None:
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
+        # Without this the usage line reads "__main__.py", because the `quern`
+        # wrapper execs `python3 -m server` and argparse takes argv[0].
+        prog="quern",
         description="Quern — capture device logs for AI agents",
+        epilog=(
+            "Other commands:\n"
+            "  help                          Show this message\n"
+            "  version, --version, -V        Print the installed version\n"
+            "  update [--tools]              Update to the latest release on your channel\n"
+            "  set-channel [name]            Show or set the update channel (stable / beta)\n"
+            "  set-auto-install-cert [on|off]\n"
+            "                                Show or set automatic capture-certificate install\n"
+            "  install-precommit-hook        Install the pre-commit checklist hook\n"
+            "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.set_defaults(command=None)
 

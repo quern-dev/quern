@@ -344,6 +344,7 @@ quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
 quern doctor                 # Read-only diagnostics: device tools, venv, tool versions, service health
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
+quern help                   # Show the command list
 quern version                # Print the installed version
 quern update                 # Update to the latest release on your channel and rebuild
 quern update --tools         # Also upgrade external tools quern installed (pipx, brew)

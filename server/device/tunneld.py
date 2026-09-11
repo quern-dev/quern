@@ -235,9 +235,20 @@ async def tunneld_health() -> TunneldHealth:
     """
     binary = find_pymobiledevice3_binary()
     if binary is None:
+        # An installed plist still has something to say here. When the binary
+        # it froze in has been removed, "pymobiledevice3 not found" and
+        # "the daemon points at a binary that no longer exists" are the same
+        # situation described from two ends, and only the second tells you the
+        # daemon is now broken as well as the CLI. Returning before the drift
+        # check reported the first and hid the second.
+        detail = "pymobiledevice3 binary not found, so tunneld cannot run"
+        if PLIST_PATH.exists():
+            drift = installed_plist_drift()
+            if drift:
+                detail = f"{detail} — {drift}"
         return TunneldHealth(
             status="no_binary",
-            detail="pymobiledevice3 binary not found, so tunneld cannot run",
+            detail=detail,
             remedy="pipx install pymobiledevice3",
         )
 
@@ -284,7 +295,10 @@ async def tunneld_health() -> TunneldHealth:
         return TunneldHealth(
             status="stale_plist", serving=True, launchd_state=state, pid=pid,
             program=program,
-            detail=f"serving, but the installed plist is outdated ({installed_plist_log_path()})",
+            detail=(
+                "serving, but the installed plist is outdated — "
+                f"{installed_plist_drift()}"
+            ),
             remedy="./quern tunneld install",
         )
 
@@ -355,6 +369,19 @@ def installed_plist_log_path() -> Path | None:
     return Path(out) if out else None
 
 
+TUNNELD_ARGS = ("remote", "tunneld")
+"""The arguments generate_plist() writes after the binary path."""
+
+
+def installed_plist_arguments() -> list[str] | None:
+    """Return the whole ProgramArguments array, or None."""
+    data = _read_installed_plist()
+    if data is None:
+        return None
+    args = data.get("ProgramArguments") or []
+    return [str(a) for a in args] or None
+
+
 def installed_plist_program() -> Path | None:
     """Return ProgramArguments[0] from the installed plist, or None."""
     data = _read_installed_plist()
@@ -362,6 +389,51 @@ def installed_plist_program() -> Path | None:
         return None
     args = data.get("ProgramArguments") or []
     return Path(args[0]) if args else None
+
+
+def installed_plist_drift() -> str | None:
+    """What differs between the installed plist and what we'd generate now.
+
+    Returns a human-readable description of the first mismatch, or None when
+    the plist is current. Separate from the boolean because the two conditions
+    have completely different remedies and the caller was reporting the log
+    path whichever one failed -- so a binary that had drifted read as a
+    stale log path, and reinstalling appeared not to fix it.
+    """
+    if _read_installed_plist() is None:
+        # Distinguish "could not read it" from "read it, and it says the wrong
+        # thing". Collapsing the two reported a confident, specific diagnosis
+        # of a plist that could not be parsed at all -- the same defect this
+        # function was written to fix, one level down.
+        return "the installed plist could not be read"
+
+    installed_log = installed_plist_log_path()
+    if installed_log != LOG_PATH:
+        return f"log path is {installed_log}, expected {LOG_PATH}"
+
+    args = installed_plist_arguments()
+    if not args:
+        return "no ProgramArguments recorded"
+
+    # The whole array, not just the binary. generate_plist() writes
+    # [binary, "remote", "tunneld"], and a plist carrying the right binary
+    # with different trailing arguments launches something other than the
+    # tunnel daemon while passing a check that only looked at args[0].
+    tail = tuple(args[1:])
+    if tail != TUNNELD_ARGS:
+        return (
+            f"arguments are {list(tail)}, expected {list(TUNNELD_ARGS)}"
+        )
+
+    program = Path(args[0])
+    current = find_pymobiledevice3_binary()
+    if current is None:
+        if not program.exists():
+            return f"recorded binary {program} no longer exists"
+        return None
+    if program != current:
+        return f"binary is {program}, but quern now resolves {current}"
+    return None
 
 
 def installed_plist_is_current() -> bool:

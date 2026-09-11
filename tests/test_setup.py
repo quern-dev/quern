@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from server.lifecycle.setup import (
     PYTHON_MAX,
@@ -1200,3 +1203,419 @@ class TestBuildPreviewApp:
 
         assert result.status == CheckStatus.WARNING
         assert "swiftc exploded" in (result.detail or "")
+
+
+class TestTunneldDriftReporting:
+    """The staleness check tests two conditions with different remedies, and
+    reported the log path whichever one failed."""
+
+    def test_a_drifted_binary_is_not_reported_as_a_log_path(self, monkeypatch):
+        """The symptom that prompted this: a machine reinstalled the daemon,
+        the log path became correct, and doctor went on printing the log path
+        as the problem -- so the reinstall looked like it had not worked."""
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/old/pmd3", "remote", "tunneld"],
+        )
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: Path("/new/pmd3"))
+
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None
+        assert "/old/pmd3" in drift and "/new/pmd3" in drift
+        assert "log path" not in drift
+
+    def test_a_stale_log_path_still_says_so(self, monkeypatch):
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(
+            tunneld, "installed_plist_log_path", lambda: Path("/Users/x/.quern/tunneld.log")
+        )
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None and "log path" in drift
+
+    @pytest.mark.asyncio
+    async def test_a_missing_binary_still_reports_plist_drift(self, monkeypatch, tmp_path):
+        """"pymobiledevice3 not found" and "the daemon points at a binary that
+        no longer exists" are the same situation from two ends, and only the
+        second says the daemon is broken too. Returning early reported the
+        first and hid the second."""
+
+        from server.device import tunneld
+
+        plist = tmp_path / "com.quern.tunneld.plist"
+        plist.write_text("")
+        monkeypatch.setattr(tunneld, "PLIST_PATH", plist)
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: None)
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/gone/pmd3", "remote", "tunneld"],
+        )
+
+        health = await tunneld.tunneld_health()
+        assert health.status == "no_binary"
+        assert "/gone/pmd3" in health.detail, "drift was not surfaced"
+
+    def test_wrong_trailing_arguments_are_drift(self, monkeypatch):
+        """generate_plist() writes [binary, "remote", "tunneld"]. A plist with
+        the right binary and different trailing arguments launches something
+        other than the tunnel daemon, and passed a check that read args[0]."""
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/usr/bin/pmd3", "remote", "something-else"],
+        )
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None and "arguments are" in drift
+
+    def test_a_current_plist_reports_no_drift(self, monkeypatch):
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/same/pmd3", "remote", "tunneld"],
+        )
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: Path("/same/pmd3"))
+        assert tunneld.installed_plist_drift() is None
+
+
+def _forbid_network(monkeypatch):
+    """Make any outbound request an immediate failure.
+
+    These tests pass today only because an early return fires first. Reorder
+    or remove that return and they would quietly start calling api.github.com
+    -- slow, nondeterministic, broken offline, and exactly what CONTRIBUTING
+    warns about.
+    """
+    def _boom(*a, **kw):
+        raise AssertionError("test reached the network")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+
+
+class TestFetchMenubarApp:
+    """v0.15.0 reached existing users without the menu-bar app, and those
+    machines cannot repair themselves: `quern update` sees the latest version
+    already installed and downloads nothing. Setup is the first code of ours
+    that runs on them."""
+
+    def test_a_git_checkout_is_left_alone(self, tmp_path, monkeypatch):
+        """A developer builds the app themselves; fetching a release build
+        over a working tree would be wrong."""
+        from server.lifecycle.setup import fetch_menubar_app
+
+        _forbid_network(monkeypatch)
+        (tmp_path / ".git").mkdir()
+        assert fetch_menubar_app(tmp_path) is None
+
+    def test_an_install_that_has_the_app_is_left_alone(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import fetch_menubar_app
+
+        _forbid_network(monkeypatch)
+        (tmp_path / "Quern.app").mkdir()
+        assert fetch_menubar_app(tmp_path) is None
+
+    def test_it_does_nothing_off_macos(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Linux")
+        assert setup_mod.fetch_menubar_app(tmp_path) is None
+
+    def test_a_release_without_the_asset_is_skipped_not_failed(self, tmp_path, monkeypatch):
+        """Releases cut before the asset existed have nothing to offer, and
+        saying so is more useful than a download error."""
+        import io as _io
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        payload = json.dumps({"assets": []}).encode()
+
+        class _Resp:
+            def read(self):
+                return payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.SKIPPED
+        assert _io  # keep the import meaningful for linters
+
+    def test_a_network_failure_warns_rather_than_ending_setup(self, tmp_path, monkeypatch):
+        """A missing menu-bar app is a missing convenience; failing setup over
+        it would be worse than the gap it fills."""
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("network is down")),
+        )
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.WARNING
+        assert "network is down" in (result.detail or "")
+        assert "releases/tag" in (result.detail or ""), "no manual route offered"
+
+    def test_extraction_goes_through_macos_tar(self, tmp_path, monkeypatch):
+        """Python's tarfile cannot extract this bundle correctly.
+
+        The archive carries AppleDouble metadata. macOS tar applies those as
+        extended attributes and removes them; tarfile writes them as literal
+        `._Contents` files inside the bundle, which breaks the code signature
+        seal and makes Gatekeeper reject the app with "a sealed resource is
+        missing or invalid". Measured: 21 entries where a correct bundle has
+        10, and the damaged copy still passes `stapler validate`, so nothing
+        short of `spctl` notices.
+
+        Asserting on the command is a proxy for a property no unit test can
+        check without a signed artifact and a network fetch.
+        """
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://github.com/quern-dev/quern/releases/download/v9.9.9/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self, body=payload):
+                self._body = body
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", "stopped before extraction")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod.fetch_menubar_app(tmp_path)
+
+        assert calls, "nothing was executed to extract the archive"
+        assert calls[0][0] == "/usr/bin/tar", f"extracted with {calls[0][0]}, not macOS tar"
+
+    def test_a_tampered_bundle_is_refused(self, tmp_path, monkeypatch):
+        """This is an executable fetched over the network and then launched,
+        so "the release asset said so" is not sufficient provenance."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "--verify" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "code object is not signed")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="signature is not valid"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
+
+    def test_a_bundle_signed_by_someone_else_is_refused(self, tmp_path, monkeypatch):
+        """A valid signature says nothing about whose it is."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "TeamIdentifier=EVIL123456\n")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="expected 3QUH73KW5Q"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
+
+    def test_gatekeeper_rejection_is_refused(self, tmp_path, monkeypatch):
+        """A bundle can be validly signed by us and still not notarized."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "spctl":
+                return subprocess.CompletedProcess(cmd, 3, "", "rejected")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="Gatekeeper rejects it"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
+
+    def test_our_own_signed_bundle_passes(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "9.9.9\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")  # must not raise
+
+    def test_the_download_is_bounded(self, tmp_path, monkeypatch):
+        """urlretrieve takes no timeout and defaults to none, so a stalled
+        transfer held setup open with no deadline."""
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        src = inspect.getsource(setup_mod.fetch_menubar_app)
+        assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
+        assert "timeout=" in src, "the transfer has no socket timeout"
+        assert "deadline" in src, "the transfer has no whole-operation deadline"
+
+    def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
+        """Signature, team and Gatekeeper are all satisfied by any genuine
+        Quern app we ever signed, so a replaced asset containing an older real
+        build would pass every one of them. That is a downgrade, not a
+        forgery, and the asset name alone does not rule it out."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "0.14.1\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="it is v0.14.1, but v0.15.0 was requested"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")
+
+    def test_the_matching_version_is_accepted(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "0.15.0\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise
+
+
+    def test_verification_runs_before_the_app_is_installed(self, tmp_path, monkeypatch):
+        """Every other test calls _verify_menubar_app directly. Deleting its
+        call site left the whole suite green while setup would download,
+        install and launch an unverified bundle -- and because urllib writes
+        no quarantine attribute, macOS gives it no first-launch assessment
+        either. This is the only trust gate in that path."""
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://github.com/quern-dev/quern/releases/download/v9.9.9/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self):
+                self._body = payload
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+
+        def fake_tar(cmd, **kw):
+            # Stand in for a successful extraction.
+            if cmd and "tar" in str(cmd[0]):
+                member = Path(kw.get("cwd") or cmd[cmd.index("-C") + 1])
+                (member / "quern-9.9.9" / "Quern.app").mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_tar)
+
+        called: list[str] = []
+
+        def refusing_verify(app, version):
+            called.append(str(app))
+            raise setup_mod._UntrustedBundle("substituted asset")
+
+        monkeypatch.setattr(setup_mod, "_verify_menubar_app", refusing_verify)
+
+        result = setup_mod.fetch_menubar_app(tmp_path)
+
+        assert called, "the bundle was installed without ever being verified"
+        assert not (tmp_path / "Quern.app").exists(), "a rejected bundle was installed"
+        assert result.status == CheckStatus.ERROR
+
+    def test_an_asset_url_off_github_is_refused(self, tmp_path, monkeypatch):
+        """The URL comes out of the API response. Anything not on github.com
+        means the response is not what we think it is, and following it would
+        fetch code from somewhere else entirely."""
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://evil.example/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self):
+                self._body = payload
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.ERROR
+        assert "not on github.com" in (result.detail or "")

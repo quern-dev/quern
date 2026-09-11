@@ -147,6 +147,44 @@ class DeviceController(DeviceControllerUI):
         self.__active_kind = kind
         write_active_udid(value, name, kind)
 
+    def refresh_active_device(self) -> None:
+        """Rewrite the active-device sidecar from the warmed caches.
+
+        `__init__` restores the persisted UDID straight into the backing field
+        rather than through the setter, deliberately -- restoring a device is
+        not a change worth writing. The consequence is that the sidecar keeps
+        whatever the previous server left there, which for anything written
+        before the name and type existed is a bare UDID.
+
+        Nothing else reliably refreshes it. `resolve_udid()` does, but the
+        tool everyone actually uses to pick a device goes through the pool,
+        and the pool's sticky-active path returns `controller._active_udid`
+        without assigning it -- so no setter runs, and the menu bar shows an
+        identifier for the whole session. Only an explicit resolve by UDID or
+        by name repaired it, which is a strange thing to have to know.
+
+        Called once at startup after `list_devices()` has filled the name and
+        type caches. The dedup guard in the setter makes it a no-op whenever
+        the sidecar already agrees.
+        """
+        udid = self._active_udid
+        if not udid:
+            return
+        # Only when the caches actually know this device. An empty cache is
+        # not evidence that the device has no name -- list_devices() swallows
+        # DeviceError per backend, so a simctl or adb failure yields exactly
+        # the same empty cache as "nothing is connected". Writing on that
+        # replaces a good name with a bare UDID, which is the symptom this
+        # method exists to prevent, caused by this method.
+        if udid not in self._device_name_cache and udid not in self._device_type_cache:
+            logger.debug(
+                "Not refreshing the active-device sidecar: %s is not in the "
+                "device caches, so any name it already holds is better than "
+                "what this would write", udid[:8],
+            )
+            return
+        self._active_udid = udid
+
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
         from server.device.tunneld import is_tunneld_running
