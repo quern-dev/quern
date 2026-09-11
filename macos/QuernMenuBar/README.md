@@ -49,11 +49,48 @@ capture stay off, and the proxy and its certificate stay behind their own
 consent gates. State comes from the
 unauthenticated `~/.quern/*.json` files, so no API key / HTTP is needed.
 
+## Tests
+
+```sh
+./macos/QuernMenuBar/run-tests.sh
+```
+
+Plain `swiftc`, compiling `Sources/` (minus its `main.swift`) against `Tests/`.
+It uses the same deployment target as `build.sh` and honours `STRICT` the same
+way, but not its optimisation flags — a test binary gains nothing from
+whole-module optimisation. Not SwiftPM: that wants `Sources/<Target>/`, which
+means splitting these sources into a library and an executable, and both
+`build.sh` and `release-menubar.sh` depend on the current layout. Restructuring
+the two scripts that produce a signed artifact is a poor trade for test
+discovery. CI runs this on the same macOS job that builds the app, with
+`STRICT=1`.
+
+What makes it possible is `Scheduler.swift`. Every timing defect found in
+review — a deadline that could not be reached, a deadline that counted ticks
+rather than seconds, a flag left set because a call never returned — needed
+minutes of real time to reproduce, so none was ever going to be covered by a
+test that waits. `Updater` and `LifecycleController` both take their clock,
+their CLI calls and their effects as dependencies; `TestScheduler` advances
+time on demand.
+
+The harness fails when a suite or a case is not reached, and when a test body
+asserts nothing. Both were real: commenting out a suite printed "0 passed" and
+exited 0, and a body that returned before its first expectation printed "ok".
+A test count that looks healthy is the worst possible way to report missing
+coverage, so `main.swift` states how many cases there should be.
+
+Rendering is not tested and should not pretend to be. The bug where
+`contentTintColor` silently did nothing to a menu-bar template image was found
+by screenshotting the real menu bar and measuring the pixels, which is still
+how to check that.
+
 ## Architecture
 
 | File | Responsibility |
 |------|----------------|
 | `Sources/main.swift` | Accessory-app bootstrap |
+| `Sources/LifecycleController.swift` | What is happening to the daemon, as distinct from how it is drawn |
+| `Sources/Scheduler.swift` | Where the app gets the time and schedules work |
 | `Sources/AppDelegate.swift` | Status item + menu construction + actions |
 | `Sources/StateReader.swift` | Reads `~/.quern/*.json`; poll + directory watch |
 | `Sources/QuernCLI.swift` | Resolves & runs the `quern` CLI |

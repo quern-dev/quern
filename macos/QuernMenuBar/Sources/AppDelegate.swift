@@ -11,23 +11,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let updater = Updater()
     private var snapshot = QuernSnapshot()
     private var updateStatusText: String?
-    private var lifecycleStatusText: String?
-    /// Set while a lifecycle subcommand is running. `quern start` blocks for up
-    /// to 30s, and the menu used to spend all of it saying "Quern is stopped"
-    /// with a Start item still offered -- so nothing acknowledged the click and
-    /// clicking again spawned a second `quern start`, which races the first for
-    /// the port.
-    private var lifecycleBusy = false
-    /// Set when a start has been given up on. Drives an actionable menu item:
-    /// telling someone to open the log without giving them a way to is the
-    /// same dead end as not telling them.
-    private var lifecycleFailed = false {
-        didSet {
-            guard lifecycleFailed != oldValue else { return }
-            refreshStatusButton()
-        }
-    }
     private var didAttemptLaunchStart = false
+
+    /// Everything about what is happening to the daemon. This class renders it
+    /// and owns none of it -- see LifecycleController for why that split
+    /// exists.
+    private lazy var lifecycle: LifecycleController = {
+        var deps = LifecycleController.Dependencies()
+        deps.refreshState = { [weak self] in self?.reader.refresh() }
+        deps.serverIsRunning = { [weak self] in
+            guard let self else { return false }
+            self.reader.refresh()
+            return self.reader.snapshot.server.running
+        }
+        let controller = LifecycleController(deps)
+        controller.onChange = { [weak self] in self?.refreshStatusButton() }
+        controller.onAlert = { [weak self] message, detail in
+            self?.reportFailure(message, detail: detail)
+        }
+        return controller
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureStatusButton()
@@ -39,10 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reader.onChange = { [weak self] snap in
             guard let self else { return }
             self.snapshot = snap
-            if snap.server.running {
-                self.lifecycleStatusText = nil
-                self.lifecycleFailed = false
-            }
+            if snap.server.running { self.lifecycle.noteServerRunning() }
             // Same reasoning, for the other status line: without this a failed
             // update left its message in the menu for the life of the process,
             // including long after the user had fixed the cause.
@@ -67,38 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         didAttemptLaunchStart = true
         guard StartOnLaunch.isEnabled, !reader.snapshot.server.running else { return }
 
-        lifecycleBusy = true
-        lifecycleStatusText = "Starting…"
-        QuernCLI.start { [weak self] code, output in
-            guard let self else { return }
-            self.reader.refresh()
-            guard code != 0 else {
-                self.lifecycleBusy = false
-                self.lifecycleStatusText = nil
-                return
-            }
-            // Deliberately not the alert the menu actions raise. This can fire
-            // at login, and a modal stealing focus while you are opening your
-            // laptop is worse than the failure it reports. The dimmed icon
-            // already says the server is not running; this says why, to
-            // whoever opens the menu to find out.
-            NSLog("Start on launch failed (\(code)): \(output)")
-            // A missing CLI is worth naming in the menu. "See Console" is the
-            // right answer for a server that failed to come up and the wrong
-            // one for a setup step that was never run, and the two are not
-            // distinguishable from the outside.
-            guard code != QuernCLI.notFoundStatus else {
-                self.lifecycleBusy = false
-                self.lifecycleStatusText = "quern not found — run `quern setup`"
-                return
-            }
-            self.lifecycleStatusText = "Starting…"
-            // Same grace as a clicked Start: the daemon may still be coming up.
-            self.confirmStartFailed { [weak self] in
-                self?.lifecycleFailed = true
-                self?.lifecycleStatusText = "Could not start the server"
-            }
-        }
+        // menuOnly, not an alert: this can fire at login, and a modal taking
+        // focus as you open your laptop is worse than the failure it reports.
+        lifecycle.run(.start, reporting: .menuOnly)
     }
 
     // MARK: - Status button
@@ -142,11 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // icon came out neutral dark, which with `appearsDisabled` off made a
         // failed start look exactly like a healthy server. Worse than the
         // ambiguity it was meant to fix.
-        button.appearsDisabled = !running && !lifecycleFailed
-        if lifecycleFailed, let img = button.image {
+        button.appearsDisabled = !running && !lifecycle.hasFailed
+        if lifecycle.hasFailed, let img = button.image {
             button.image = Self.tinted(img, .systemRed)
         }
-        if lifecycleFailed {
+        if lifecycle.hasFailed {
             button.toolTip = "Quern could not start — open the menu"
         } else if updateAvailable {
             let version = snapshot.update.latestVersion.map { " (v\($0))" } ?? ""
@@ -226,9 +197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let status = updateStatusText {
             menu.addItem(info(status))
         }
-        if !s.running, let status = lifecycleStatusText {
+        if !s.running, let status = lifecycle.statusText {
             menu.addItem(info(status))
-            if lifecycleFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
+            if lifecycle.hasFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
             }
         }
@@ -239,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // blocks for up to 30s, and a second one racing the first for the port
         // is a worse outcome than a menu with nothing to click for a moment.
         // The status line above says what is happening.
-        if lifecycleBusy {
+        if lifecycle.isBusy {
             menu.addItem(info("Working…"))
         } else if s.running {
             menu.addItem(action("Stop Server", #selector(stopServer)))
@@ -355,79 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // effect whatsoever -- the menu reopened saying "Quern is stopped", which
     // is exactly what it said before, so the click read as a dead menu item
     // rather than as a failure. `quitAndStop` below already got this right.
-    @objc private func startServer() { runLifecycle("start", QuernCLI.start) }
-    @objc private func stopServer() { runLifecycle("stop", QuernCLI.stop) }
-    @objc private func restartServer() { runLifecycle("restart", QuernCLI.restart) }
-
-    private func runLifecycle(
-        _ verb: String,
-        _ action: (((Int32, String) -> Void)?) -> Void
-    ) {
-        lifecycleBusy = true
-        lifecycleFailed = false
-        lifecycleStatusText = verb == "stop" ? "Stopping…" : "Starting…"
-        action { [weak self] code, output in
-            guard let self else { return }
-            self.reader.refresh()
-            guard code != 0 else {
-                self.lifecycleBusy = false
-                self.lifecycleStatusText = nil
-                return
-            }
-
-            // Nothing ran, so nothing is going to change on its own.
-            if code == QuernCLI.notFoundStatus {
-                self.lifecycleBusy = false
-                self.reportFailure("Could not \(verb) the server", detail: output)
-                return
-            }
-
-            // A nonzero `start` does not mean no server. Its parent gives up
-            // waiting after 30s and deliberately leaves the child running, so
-            // the daemon can come up seconds later -- and an alert saying it
-            // could not start, sitting in front of a menu that now says it is
-            // running, is worse than the delay. Give it a window and only
-            // report what is still true afterwards.
-            if verb == "stop" {
-                self.lifecycleBusy = false
-                self.reportFailure("Could not stop the server", detail: output)
-                return
-            }
-            // Deliberately still busy. Clearing the flag before the confirm
-            // window put an enabled "Start Server" in the same menu as
-            // "Starting…", so the second click it exists to prevent was
-            // offered by the very menu that was waiting on the first.
-            self.confirmStartFailed { [weak self] in
-                self?.lifecycleFailed = true
-                self?.lifecycleStatusText = "Could not start the server"
-                self?.reportFailure("Could not \(verb) the server", detail: output)
-            }
-        }
-    }
-
-    /// Run `giveUp` only once the server has had time to appear and has not.
-    ///
-    /// ~15s: `quern start` has already waited 30s of its own, so this covers
-    /// the tail of a slow startup rather than the whole of it. `giveUp` differs
-    /// by caller -- an alert for a click the user is waiting on, a menu line
-    /// for the automatic start at launch, where a modal would be taking focus
-    /// as they open their laptop.
-    private func confirmStartFailed(attemptsLeft: Int = 10, giveUp: @escaping () -> Void) {
-        reader.refresh()
-        if reader.snapshot.server.running {
-            lifecycleBusy = false
-            lifecycleStatusText = nil
-            return
-        }
-        guard attemptsLeft > 0 else {
-            lifecycleBusy = false
-            giveUp()
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.confirmStartFailed(attemptsLeft: attemptsLeft - 1, giveUp: giveUp)
-        }
-    }
+    @objc private func startServer() { lifecycle.run(.start, reporting: .alert) }
+    @objc private func stopServer() { lifecycle.run(.stop, reporting: .alert) }
+    @objc private func restartServer() { lifecycle.run(.restart, reporting: .alert) }
 
     @objc private func restartToUpdate() {
         updater.restartToUpdate(

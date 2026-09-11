@@ -16,8 +16,28 @@
 import AppKit
 
 final class Updater {
-    private var pollTimer: Timer?
+    /// What the update does with the outside world, so a test can stand in for
+    /// all of it. Defaults are the real thing, so nothing but a test passes any
+    /// of these.
+    ///
+    /// Closures rather than a protocol: there are four, they have nothing in
+    /// common, and a protocol would only give them a shared name they do not
+    /// need. `relaunch` is here because the alternative is an NSWorkspace call
+    /// that quits the app mid-test.
+    struct Dependencies {
+        var scheduler: Scheduler = SystemScheduler()
+        var readVersion: (@escaping (String?, String) -> Void) -> Void = Updater.installedVersion
+        var runUpdate: (@escaping (Int32, String) -> Void) -> Void = { QuernCLI.update($0) }
+        var relaunch: ((String) -> Void)?
+    }
+
+    private let deps: Dependencies
+    private var pollWork: ScheduledWork?
     private var onStatus: ((String) -> Void)?
+
+    init(_ deps: Dependencies = Dependencies()) {
+        self.deps = deps
+    }
     /// Guards against a second "Restart to Update" while one is in progress.
     ///
     /// The menu item stays enabled throughout -- it is gated on
@@ -42,7 +62,7 @@ final class Updater {
         onStatus = status
         status("Checking version…")
 
-        Self.installedVersion { [weak self] version, detail in
+        deps.readVersion { [weak self] version, detail in
             guard let self else { return }
             // No baseline means no way to recognise a change, and the failure
             // is not benign: every later reading compares unequal to nil, so
@@ -58,7 +78,7 @@ final class Updater {
             }
             status("Updating…")
 
-            QuernCLI.update { [weak self] code, output in
+            self.deps.runUpdate { [weak self] code, output in
                 guard let self else { return }
                 if code != 0 {
                     // `quern update` runs the whole update synchronously, so
@@ -95,16 +115,16 @@ final class Updater {
         var inFlight = false
         let interval = 2.0
         // A wall-clock deadline, not a tick count. Counting ticks assumes every
-        // tick happens, and `scheduledTimer` installs into `.default` mode only
-        // -- it does not fire while a menu is tracking or a modal is up. So a
-        // menu left open paused the countdown, and the deadline that exists to
-        // stop "Updating…" lasting forever could itself be stopped by looking
-        // at it. The timer is added to `.common` below for the same reason.
-        let deadline = Date().addingTimeInterval(180)
+        // tick happens, and the default run-loop mode does not fire while a
+        // menu is tracking or a modal is up. So a menu left open paused the
+        // countdown, and the deadline that exists to stop "Updating…" lasting
+        // forever could itself be stopped by looking at it. `SystemScheduler`
+        // uses `.common` for the same reason.
+        let deadline = deps.scheduler.now.addingTimeInterval(180)
 
-        pollTimer?.invalidate()
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] t in
-            guard let self else { t.invalidate(); return }
+        pollWork?.cancel()
+        pollWork = deps.scheduler.repeating(every: interval) { [weak self] t in
+            guard let self else { t.cancel(); return }
 
             // The deadline is checked here, in the timer body, and not inside
             // the completion below. It used to live there, which made it
@@ -115,8 +135,8 @@ final class Updater {
             // the life of the process, which is the state that tells the user
             // nothing is wrong. `QuernCLI.run` has no timeout of its own, so
             // there is no other way out.
-            if Date() >= deadline {
-                t.invalidate()
+            if self.deps.scheduler.now >= deadline {
+                t.cancel()
                 self.inProgress = false
                 self.onStatus?("Update finished, but the version did not change")
                 return
@@ -128,21 +148,22 @@ final class Updater {
             // without bound and let a stale answer arrive after the deadline.
             guard !inFlight else { return }
             inFlight = true
-            Self.installedVersion { [weak self] current, _ in
+            self.deps.readVersion { [weak self] current, _ in
                 inFlight = false
-                guard let self, t.isValid else { return }
+                guard let self, t.isActive else { return }
                 guard let current, current != baseline else { return }
-                t.invalidate()
+                t.cancel()
                 self.relaunch(into: current)
             }
         }
-        // `.common` covers event tracking and modal loops; `.default` alone
-        // does not, and both are reachable from this app's own menu and alerts.
-        RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
     }
 
     private func relaunch(into version: String, retriesLeft: Int = 1) {
+        if let hook = deps.relaunch {
+            inProgress = false
+            hook(version)
+            return
+        }
         let bundleURL = Bundle.main.bundleURL
         // The bundle was replaced on disk during the update; if it's briefly
         // missing (delete-then-move window) wait a beat and retry. The retry
@@ -157,7 +178,7 @@ final class Updater {
                 onStatus?("Update installed — restart Quern to finish")
                 return
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            deps.scheduler.after(1.5) { [weak self] in
                 self?.relaunch(into: version, retriesLeft: retriesLeft - 1)
             }
             return
