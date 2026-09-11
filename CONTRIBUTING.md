@@ -68,13 +68,34 @@ Use the `./quern` wrapper script:
 ./quern stop           # Stop daemon
 ```
 
-The wrapper itself is three lines — it just `exec`s `python3 -m server`. Selecting
-the project environment happens one level down, in `_maybe_reexec_in_venv`
-(`server/__main__.py`): if the current interpreter is not already in a virtualenv,
-the bootstrap `os.execv`s itself under `.venv/bin/python` before doing anything
-that needs project dependencies. So no activation step is required, and none of
-this depends on which `python3` is first on `PATH` — but the wrapper is not what
-arranges that, and it will not help a command that bypasses the bootstrap.
+The wrapper resolves its own directory, through symlinks, and runs
+`.venv/bin/python -m server` from there. It does that rather than calling
+`python3` because `-m` puts the *caller's* working directory on the import
+path, not the script's: a cwd-dependent wrapper works inside the clone and
+fails everywhere else, and the failure reads `No module named server` prefixed
+with whichever `python3` was first on `PATH`. That names the reader's
+interpreter and says nothing about the wrapper, so the report arrives pointing
+at the wrong thing. It cost a session to diagnose once.
+
+Before setup has run there is no venv, so the wrapper falls back to `python3`.
+Selecting the project environment then happens one level down, in
+`_maybe_reexec_in_venv` (`server/__main__.py`): if the current interpreter is
+not already in a virtualenv, the bootstrap `os.execv`s itself under
+`.venv/bin/python` before doing anything that needs project dependencies. That
+fallback is what makes `./quern setup` work on a fresh clone; it is not a
+general-purpose path, and it will not help a command that bypasses the
+bootstrap.
+
+Note that re-exec trusts `.venv/bin/python` to be a working venv. If it is not
+— a deleted `pyvenv.cfg` is enough, and Python then reports the *base*
+interpreter's path rather than the venv's — the re-exec lands in the same
+state and repeats. Recreate the venv rather than patching around it.
+
+`quern setup` also writes a `~/.local/bin/quern` with the project path baked
+in. Two copies can therefore be on `PATH` at once, and zsh caches the first one
+it resolves: `type -a` re-scans `PATH` and shows what *should* run, while the
+shell keeps running what it hashed earlier. `rehash` after setup, or read a
+stale wrapper as the answer.
 
 State lives at `~/.quern/state.json`, the API key at `~/.quern/api-key`, logs at
 `~/.quern/server.log`. The full command list is in [`README.md`](README.md), which

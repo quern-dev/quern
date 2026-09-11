@@ -1,3 +1,23 @@
 #!/usr/bin/env bash
 # Thin wrapper — forwards all args to the Python server bootstrap.
-exec python3 -m server "$@"
+#
+# Resolves its own location rather than trusting the working directory.
+# `python3 -m server` puts the *caller's* cwd on the import path, so a
+# cwd-dependent wrapper works from the clone and nowhere else, and the failure
+# names whichever python3 happened to be first on PATH -- which points the
+# reader at their interpreter instead of at this line.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+root="$(cd -P "$(dirname "$src")" && pwd)"
+
+# Prefer the project venv: it carries the editable install, so `-m server`
+# resolves from any cwd. Without one -- before setup has run -- fall back to
+# python3, which still works from the clone and is where setup is run from.
+python="$root/.venv/bin/python"
+[ -x "$python" ] || python="python3"
+
+exec "$python" -m server "$@"

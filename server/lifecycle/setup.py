@@ -465,6 +465,34 @@ def _build_mcp(project_root: Path) -> CheckResult:
     )
 
 
+def _other_quern_on_path(ours: Path) -> list[Path]:
+    """Other executables named `quern` on PATH, in PATH order.
+
+    A second copy is not itself a problem -- ours is normally found first. The
+    problem is that zsh caches the path it resolved for a command and does not
+    notice a new file appearing in a directory already on PATH. So the shell
+    that just ran setup keeps invoking the old copy, while `type -a` re-scans
+    and reports ours, which reads as though the right wrapper is running. The
+    cure is `rehash`, and it is only worth mentioning when a stale hash is
+    actually possible -- with no second copy, zsh re-scans on its own.
+    """
+    found: list[Path] = []
+    for entry in os.environ.get("PATH", "").split(":"):
+        if not entry:
+            continue
+        candidate = Path(entry) / "quern"
+        try:
+            if candidate == ours or not os.access(candidate, os.X_OK):
+                continue
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        if candidate not in found:
+            found.append(candidate)
+    return found
+
+
 def install_wrapper_script() -> CheckResult:
     """Install quern wrapper script to ~/.local/bin."""
     local_bin = Path.home() / ".local" / "bin"
@@ -539,6 +567,21 @@ exec "{venv_python}" -m server "$@"
                     "⚠ Add ~/.local/bin to PATH manually:\n"
                     "    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc\n"
                     "    source ~/.zshrc"
+                ),
+            )
+
+        shadowed = _other_quern_on_path(wrapper_path)
+        if shadowed:
+            listed = "\n".join(f"    {p}" for p in shadowed)
+            return CheckResult(
+                name="Wrapper script",
+                status=CheckStatus.WARNING,
+                message=f"Installed to {wrapper_path}",
+                detail=(
+                    "Another quern is on your PATH:\n"
+                    f"{listed}\n"
+                    "  Your shell may have cached it and will keep running it.\n"
+                    "  Run: rehash   (or open a new terminal)"
                 ),
             )
 

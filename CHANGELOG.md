@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/install-menubar-app.sh`** — installs the menu-bar app on a git-clone install, which `quern setup` deliberately skips. Defaults to the signed, notarized app from the release matching your checkout; `--build` compiles from source instead. Both install to `~/Applications` and quit a running copy first. The guide previously told clone users the app "arrives with Quern", which is true for every install except theirs.
 
 ### Fixed
+- **`./quern` works from any directory.** It ran `python3 -m server`, which puts the *caller's* working directory on the import path, so the script only worked from inside the clone. Everywhere else it failed with `No module named server` prefixed by whichever `python3` was first on PATH — naming the reader's interpreter and saying nothing about the wrapper. It now resolves its own location, through symlinks, and prefers the project venv.
+- **Setup warns when another `quern` is already on your PATH.** zsh caches the location it resolved for a command and does not notice a new file appearing in a directory already on PATH, so the shell that just ran setup keeps invoking the old copy. `type -a` re-scans and reports the new one, which reads like all-clear. Setup now names the other copies and says to run `rehash`.
 - **A failed menu-bar install now says where the app actually is** — the move empties the payload directory before the final rename, so a failure after that point left the app under a temporary name while the warning pointed at a path that no longer existed. It is restored and named correctly.
 
 ## [0.16.1] - 2026-09-11

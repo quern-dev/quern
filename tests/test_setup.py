@@ -1740,3 +1740,79 @@ class TestMenubarInstallLocation:
 
         monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         assert setup_mod.launch_menubar_app(tmp_path / "install") is None
+
+
+class TestOtherQuernOnPath:
+    """A second `quern` on PATH is what makes a stale shell hash possible."""
+
+    def _make(self, directory: Path, executable: bool = True) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "quern"
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755 if executable else 0o644)
+        return path
+
+    def test_reports_nothing_when_ours_is_the_only_copy(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        monkeypatch.setenv("PATH", f"{ours.parent}:{tmp_path / 'empty'}")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_reports_a_second_copy_in_path_order(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        clone = self._make(tmp_path / "Dev" / "quern")
+        other = self._make(tmp_path / "opt" / "bin")
+        monkeypatch.setenv("PATH", f"{ours.parent}:{clone.parent}:{other.parent}")
+
+        assert _other_quern_on_path(ours) == [clone, other]
+
+    def test_ignores_a_non_executable_file(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        stub = self._make(tmp_path / "Dev" / "quern", executable=False)
+        monkeypatch.setenv("PATH", f"{ours.parent}:{stub.parent}")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_ignores_a_directory_named_quern(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        (tmp_path / "Dev" / "quern").mkdir(parents=True)
+        monkeypatch.setenv("PATH", f"{ours.parent}:{tmp_path / 'Dev'}")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_survives_an_empty_path_entry(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        monkeypatch.setenv("PATH", f"{ours.parent}::")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_setup_warns_rather_than_reporting_a_clean_install(self, tmp_path, monkeypatch):
+        """The whole point: a shadowed wrapper must not read as all-clear."""
+        from server.lifecycle import setup as setup_mod
+
+        project = tmp_path / "clone"
+        (project / ".venv" / "bin").mkdir(parents=True)
+        (project / ".venv" / "bin" / "python").write_text("")
+        (project / "server").mkdir()
+
+        home = tmp_path / "home"
+        clone_copy = self._make(project)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(setup_mod, "_find_project_root", lambda: project)
+        monkeypatch.setenv("PATH", f"{home / '.local' / 'bin'}:{project}")
+
+        result = setup_mod.install_wrapper_script()
+
+        assert result.status is CheckStatus.WARNING
+        assert str(clone_copy) in result.detail
+        assert "rehash" in result.detail
