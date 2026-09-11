@@ -16,6 +16,16 @@ If you installed before v0.15.0 and have never updated, you will not have it —
 the app ships inside the release asset rather than GitHub's generated source
 tarball. One `quern update` brings it in.
 
+It is installed to `~/Applications/Quern.app`, so Spotlight and Launchpad both
+find it. If you quit it and want it back:
+
+```sh
+open ~/Applications/Quern.app
+```
+
+`quern setup` also starts it, and will quit a running copy first so an update
+actually takes effect.
+
 ## What the menu shows
 
 Clicking the icon gives you the daemon's state at a glance:

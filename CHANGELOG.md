@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-11
+
 ### Fixed
 - **An update never replaced a running menu-bar app** — setup launched it with `open`, which activates a running instance rather than starting the new binary. So after `quern update` the old build kept running while setup reported "Launched", which was true and described something that had not happened. A running instance is now asked to quit first.
 - **The menu-bar app is installed where you can find it** — it lived in the install payload directory under `~/.local`, a dot-directory Spotlight excludes. It did not appear in search or Launchpad, and was in neither place a person looks. Since quitting it is a menu item, that made it effectively unrestartable. It now installs to `~/Applications`.
@@ -389,7 +391,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.16.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.16.1...main
+[0.16.1]: https://github.com/quern-dev/quern/releases/tag/v0.16.1
 [0.16.0]: https://github.com/quern-dev/quern/releases/tag/v0.16.0
 [0.15.0]: https://github.com/quern-dev/quern/releases/tag/v0.15.0
 [0.15.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.15.0-beta.1

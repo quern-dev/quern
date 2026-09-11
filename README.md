@@ -137,7 +137,8 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 
 On macOS, Quern installs a menu-bar app so you can see whether the server is up
 without opening a terminal. It appears automatically after `quern setup`, and
-`quern update` keeps it current.
+`quern update` keeps it current. It lives at `~/Applications/Quern.app` — quit
+it from its own menu, and `open ~/Applications/Quern.app` to bring it back.
 
 It shows the daemon's state and uptime, the active device, the proxy's port,
 and an update notice when one is available. From its menu you can start, stop
