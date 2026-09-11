@@ -49,6 +49,31 @@ capture stay off, and the proxy and its certificate stay behind their own
 consent gates. State comes from the
 unauthenticated `~/.quern/*.json` files, so no API key / HTTP is needed.
 
+## Tests
+
+```sh
+./macos/QuernMenuBar/run-tests.sh
+```
+
+Plain `swiftc`, the same as `build.sh`, compiling `Sources/` (minus its
+`main.swift`) against `Tests/`. Not SwiftPM: that wants `Sources/<Target>/`,
+which means splitting these sources into a library and an executable, and both
+`build.sh` and `release-menubar.sh` depend on the current layout. Restructuring
+the two scripts that produce a signed artifact is a poor trade for test
+discovery. CI runs this on the same macOS job that builds the app.
+
+What makes it possible is `Scheduler.swift`. Every timing defect found in
+review — a deadline that could not be reached, a deadline that counted ticks
+rather than seconds, a flag left set because a call never returned — needed
+three minutes of real time to reproduce, so none of them was ever going to be
+covered by a test that waits. `Updater` takes its clock, its CLI calls and its
+relaunch as dependencies; `TestScheduler` advances time on demand.
+
+Rendering is not tested and should not pretend to be. The bug where
+`contentTintColor` silently did nothing to a menu-bar template image was found
+by screenshotting the real menu bar and measuring the pixels, which is still
+how to check that.
+
 ## Architecture
 
 | File | Responsibility |
