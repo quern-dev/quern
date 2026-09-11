@@ -8,11 +8,20 @@ manager with a **Restart to Update** action.
 
 - **Status** — running/stopped + uptime, read from `~/.quern/state.json`.
 - **Active device & proxy** — from `~/.quern/active-device.json` and `state.json`.
+  The sidecar carries the device's name and type as well as its UDID, so the
+  row reads `iPhone 16 Pro (Simulator)` rather than a 36-character identifier.
+  An absent type is shown unqualified rather than guessed.
 - **Start / Stop / Restart** — shells out to the installed `quern` CLI.
 - **Restart to Update** — appears only when `~/.quern/update-info.json` reports
   `update_available`; runs `quern update`, then relaunches into the new build.
-- **Settings** — full state, stable/beta channel picker, launch-at-login toggle,
-  docs link.
+- **Settings** — full state, the capture-certificate policy, stable/beta channel
+  picker, launch-at-login toggle, docs link. The certificate toggle writes
+  `auto_install_cert` via `quern set-auto-install-cert`; it is surfaced here
+  deliberately, because a standing policy to install a root certificate
+  authority should be visible and reversible rather than living only in a
+  config file. It reads a *literal* JSON boolean — `JSONSerialization` hands
+  back `NSNumber` for numbers too, and `as? Bool` accepts a numeric 1, which
+  would show the policy enabled while the server treated it as unset.
 - **Quit** — exits only the menu bar; ⌥ reveals "Quit and Stop Server".
 
 It is a **monitor + manual controller**, not the daemon's owner — it coexists
@@ -55,6 +64,20 @@ Releases are cut by a maintainer on a Mac with a Developer ID identity. The
 menu-bar app ships **inside the release tarball asset** and updates through
 Quern's existing updater (Option A — no Sparkle, no second update path).
 
+**The asset is not the only delivery path, and cannot be.** v0.15.0 reached
+every existing user without the app: their updater predated the asset
+preference, so it fetched GitHub's generated source tarball — and the code
+that prefers the asset shipped *inside* the asset, so it could not help
+itself. Any future capability delivered only through the asset has the same
+bootstrap problem.
+
+So `quern setup` fetches the app when a release install is missing it, which
+is the first code of ours that runs on an affected machine. It verifies before
+installing — a designated requirement anchored to Apple and pinned to this
+team, Gatekeeper acceptance, and the bundle's stamped version against the
+release requested — because that path downloads an executable and then
+launches it. A git checkout is left alone; developers build their own.
+
 One-time credential setup:
 
 ```sh
@@ -80,7 +103,7 @@ Per release, in two phases. The full procedure is in
 ```sh
 DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
 NOTARY_PROFILE="my-notary-profile" \
-  ../../scripts/release-menubar.sh --app-only 0.15.0     # no leading v
+  ../../scripts/release-menubar.sh --app-only 0.16.0     # no leading v
 ```
 
 This leaves a signed, notarized `Quern.app` in `dist/` and prints the publish
@@ -91,7 +114,7 @@ nothing: no tag has been cut and no Release exists yet.
 
 ```sh
 DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
-  ../../scripts/release-menubar.sh --publish v0.15.0
+  ../../scripts/release-menubar.sh --publish v0.16.0
 ```
 
 That assembles `dist/quern-<version>.tar.gz` (source tree at the tag + the
@@ -106,5 +129,5 @@ acceptance, and that the signing team matches `DEVELOPER_ID_APP` — which is
 why that variable is needed in both phases. A staged app can come from
 anywhere, including a previous release.
 
-The one-shot form, `release-menubar.sh v0.15.0`, still does everything in a
+The one-shot form, `release-menubar.sh v0.16.0`, still does everything in a
 single run, but it needs the tag and Release to already exist.
