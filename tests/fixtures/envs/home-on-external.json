@@ -1,0 +1,64 @@
+{
+  "captured_at": "2026-09-11T18:08:38.222147+00:00",
+  "home": "/Volumes/Home/jham",
+  "home_is_external": true,
+  "project_root": "/Volumes/Home/jham/Dev/quern",
+  "path": [
+    "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin",
+    "/Volumes/Home/jham/Library/Android/sdk/platform-tools",
+    "/Volumes/Home/jham/Library/Android/sdk/emulator",
+    "/Volumes/Home/jham/Library/Android/sdk/build-tools/36.1.0",
+    "/Volumes/Home/jham/.local/bin",
+    "/Users/jham/Dev/quern",
+    "/Users/jham/.meteor",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/System/Cryptexes/App/usr/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin",
+    "/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin",
+    "/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin",
+    "/pkg/env/global/bin",
+    "/Library/Apple/usr/bin",
+    "/Volumes/Home/jham/.local/state/fnm_multishells/1794_1787032486225/bin",
+    "/Volumes/Home/jham/.cargo/bin",
+    "/Applications/Ghostty.app/Contents/MacOS",
+    "/Users/jham/.lmstudio/bin",
+    "/Volumes/Home/jham/.claude/plugins/cache/thedotmack/claude-mem/13.12.4/bin",
+    "/Volumes/Home/jham/.claude/plugins/cache/claude-plugins-official/rust-analyzer-lsp/1.0.0/bin",
+    "/Volumes/Home/jham/.claude/plugins/cache/claude-plugins-official/swift-lsp/1.0.0/bin",
+    "/Volumes/Home/jham/.claude/plugins/cache/claude-plugins-official/clangd-lsp/1.0.0/bin",
+    "/Volumes/Home/jham/.claude/plugins/cache/claude-plugins-official/frontend-design/517b2fcd1b60/bin"
+  ],
+  "which_pymobiledevice3": "/usr/local/bin/pymobiledevice3",
+  "pymobiledevice3_installs": [
+    {
+      "kind": "pipx-global",
+      "path": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+      "resolves_to": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3"
+    },
+    {
+      "kind": "pipx-global-shim",
+      "path": "/usr/local/bin/pymobiledevice3",
+      "resolves_to": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3"
+    },
+    {
+      "kind": "project-venv-console-script",
+      "path": "/Volumes/Home/jham/Dev/quern/.venv/bin/pymobiledevice3",
+      "resolves_to": "/Volumes/Home/jham/Dev/quern/.venv/bin/pymobiledevice3"
+    }
+  ],
+  "tunneld_plist": {
+    "exists": true,
+    "program_arguments": [
+      "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+      "remote",
+      "tunneld"
+    ],
+    "standard_out_path": "/Library/Logs/com.quern.tunneld.log"
+  }
+}

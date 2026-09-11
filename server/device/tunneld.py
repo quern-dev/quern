@@ -24,6 +24,7 @@ import tempfile
 import textwrap
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,24 +63,73 @@ SUDOERS_PATH = Path("/etc/sudoers.d/quern-tunneld")
 _tunnel_udid_cache: dict[str, str] = {}
 
 
-def find_pymobiledevice3_binary() -> Path | None:
-    """Find the pymobiledevice3 binary.
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
-    Checks PATH first, then the common pipx install location.
-    Resolves symlinks to get the real binary path (needed for the plist).
+
+def find_pymobiledevice3_binary(
+    which: Callable[[str], str | None] | None = None,
+    project_root: Path | None = None,
+) -> Path | None:
+    """Find the pymobiledevice3 *CLI*, which is not the same file as the library.
+
+    quern depends on pymobiledevice3 as a Python library, so its own venv holds
+    a console script of that name. `quern setup` prepends that venv to PATH so
+    `which()` finds venv-installed tools -- and the console script then wins
+    over the pipx CLI for every lookup here.
+
+    That is not a cosmetic mix-up. This path is baked into the tunneld
+    LaunchDaemon, which runs at boot as root. The console script lives wherever
+    the checkout lives, so on a machine whose home is an external volume,
+    installing the daemon would record a path that is not mounted at boot --
+    the exact failure the whole home-on-external code path exists to prevent.
+    Two setup checks reported it as a problem with the user's pipx install, and
+    the repair they advised would have caused it.
+
+    So the project's own venv is excluded. Not venvs in general: a pipx install
+    *is* a venv, `pyvenv.cfg` and all, and rejecting those would leave nothing.
+
+    `which` and `project_root` are injected so the whole search can be replayed
+    from a captured machine -- see tests/fixtures/envs/.
     """
-    path = shutil.which("pymobiledevice3")
+    root = project_root if project_root is not None else _project_root()
+    # Resolved at call time, not bound as a default. `which=shutil.which` in the
+    # signature captures the function at import, so a test that patches
+    # `shutil.which` changes nothing and the lookup silently keeps using the
+    # real PATH. Caught by mutation: reverting this whole function to its old
+    # behaviour still passed every test that claimed to cover it.
+    lookup = which if which is not None else shutil.which
+
+    path = lookup("pymobiledevice3")
     if path:
-        return Path(path).resolve()
+        found = Path(path).resolve()
+        if root is None or not _is_inside(found, root):
+            return found
 
-    # Check common pipx location
-    pipx_path = (
-        Path.home() / ".local" / "pipx" / "venvs"
-        / "pymobiledevice3" / "bin" / "pymobiledevice3"
-    )
-    if pipx_path.exists():
-        return pipx_path.resolve()
+    # The pipx CLI, in either of its homes. Checked in this order because a
+    # global install is the one that survives an unmounted home volume, and is
+    # what setup steers people towards.
+    for candidate in (
+        Path("/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3"),
+        Path("/usr/local/bin/pymobiledevice3"),
+        Path.home() / ".local" / "pipx" / "venvs" / "pymobiledevice3" / "bin" / "pymobiledevice3",
+    ):
+        if candidate.exists():
+            return candidate.resolve()
 
+    return None
+
+
+def _project_root() -> Path | None:
+    """The quern checkout this module was imported from, or None."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
     return None
 
 
@@ -471,6 +521,19 @@ def install_daemon() -> int:
     if not binary:
         print("Error: pymobiledevice3 not found.")
         print("Install it: pipx install pymobiledevice3")
+        return 1
+
+    # This daemon starts at boot, as root, before a volume under /Volumes is
+    # guaranteed mounted. Writing a plist that names one produces a daemon that
+    # works until the next reboot and then does not, having reported success --
+    # so refuse rather than record it. Reachable: it is what the old lookup
+    # returned on a home-on-external machine, and the remedy setup printed
+    # would have installed it.
+    if str(binary).startswith("/Volumes/"):
+        print(f"Error: {binary} is on an external volume.")
+        print("  A boot-time daemon cannot reach it. Install the CLI where the")
+        print("  system can see it, then re-run:")
+        print("      sudo pipx install --global pymobiledevice3")
         return 1
 
     plist_content = generate_plist(binary)

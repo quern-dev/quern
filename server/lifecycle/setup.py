@@ -1818,11 +1818,9 @@ def check_pymobiledevice3() -> CheckResult:
 def check_tunneld() -> CheckResult:
     """Check if the tunneld LaunchDaemon is installed and running."""
     from server.device.tunneld import (
-        LOG_PATH,
         PLIST_PATH,
         TUNNELD_URL,
-        installed_plist_is_current,
-        installed_plist_log_path,
+        installed_plist_drift,
     )
 
     if not PLIST_PATH.exists():
@@ -1834,7 +1832,7 @@ def check_tunneld() -> CheckResult:
                    "Required for physical device screenshots.",
         )
 
-    plist_outdated = not installed_plist_is_current()
+    drift = installed_plist_drift()
 
     # Check if running
     running = False
@@ -1846,15 +1844,17 @@ def check_tunneld() -> CheckResult:
     except Exception:
         pass
 
-    if plist_outdated:
-        old = installed_plist_log_path()
+    if drift:
+        # The reason, not a guess at it. This reported the log path whichever
+        # condition had failed, so a drifted *binary* was described as a stale
+        # log path -- with both paths printed identical, because they were.
+        # `installed_plist_drift` was written to fix exactly that and this
+        # caller was never switched over to it.
         return CheckResult(
             name="tunneld",
             status=CheckStatus.WARNING,
-            message=f"Plist outdated (log path: {old})",
-            detail=f"Log path moved to {LOG_PATH}. The old location under the "
-                   "user home caused boot-time races for home-on-external-volume "
-                   "setups. Reinstall with: ./quern tunneld install",
+            message=f"Plist outdated — {drift}",
+            detail="Reinstall with: ./quern tunneld install",
         )
 
     if running:
