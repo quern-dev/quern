@@ -18,8 +18,11 @@ manager with a **Restart to Update** action.
   already running or you turn it off in Settings. On by default: you opened the
   Quern app, and a menu that greets you with "stopped" and a button to press is
   a step that did not need to exist. A failure here goes to the menu and the
-  Console rather than an alert, because this can fire at login and a modal
-  stealing focus as you open your laptop is worse than the failure it reports.
+  log rather than an alert, because this can fire at login and a modal stealing
+  focus as you open your laptop is worse than the failure it reports. Either
+  way the menu says what is happening while it happens, hides the lifecycle
+  items so a second `quern start` cannot race the first, and offers **Open
+  Server Log** once it has given up.
 - **Settings** — full state, the capture-certificate policy, stable/beta channel
   picker, launch-at-login and start-on-launch toggles, docs link. The certificate toggle writes
   `auto_install_cert` via `quern set-auto-install-cert`; it is surfaced here

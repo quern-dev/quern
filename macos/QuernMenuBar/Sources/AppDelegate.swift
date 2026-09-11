@@ -12,6 +12,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var snapshot = QuernSnapshot()
     private var updateStatusText: String?
     private var lifecycleStatusText: String?
+    /// Set while a lifecycle subcommand is running. `quern start` blocks for up
+    /// to 30s, and the menu used to spend all of it saying "Quern is stopped"
+    /// with a Start item still offered -- so nothing acknowledged the click and
+    /// clicking again spawned a second `quern start`, which races the first for
+    /// the port.
+    private var lifecycleBusy = false
+    /// Set when a start has been given up on. Drives an actionable menu item:
+    /// telling someone to open the log without giving them a way to is the
+    /// same dead end as not telling them.
+    private var lifecycleFailed = false
     private var didAttemptLaunchStart = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -24,7 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reader.onChange = { [weak self] snap in
             guard let self else { return }
             self.snapshot = snap
-            if snap.server.running { self.lifecycleStatusText = nil }
+            if snap.server.running {
+                self.lifecycleStatusText = nil
+                self.lifecycleFailed = false
+            }
             // Same reasoning, for the other status line: without this a failed
             // update left its message in the menu for the life of the process,
             // including long after the user had fixed the cause.
@@ -49,10 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         didAttemptLaunchStart = true
         guard StartOnLaunch.isEnabled, !reader.snapshot.server.running else { return }
 
+        lifecycleBusy = true
+        lifecycleStatusText = "Starting…"
         QuernCLI.start { [weak self] code, output in
             guard let self else { return }
+            self.lifecycleBusy = false
             self.reader.refresh()
-            guard code != 0 else { return }
+            guard code != 0 else {
+                self.lifecycleStatusText = nil
+                return
+            }
             // Deliberately not the alert the menu actions raise. This can fire
             // at login, and a modal stealing focus while you are opening your
             // laptop is worse than the failure it reports. The dimmed icon
@@ -67,10 +86,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.lifecycleStatusText = "quern not found — run `quern setup`"
                 return
             }
-            // Same grace as a clicked Start: the daemon may still be coming up.
             self.lifecycleStatusText = "Starting…"
+            // Same grace as a clicked Start: the daemon may still be coming up.
             self.confirmStartFailed { [weak self] in
-                self?.lifecycleStatusText = "Could not start the server — see Console"
+                self?.lifecycleFailed = true
+                self?.lifecycleStatusText = "Could not start the server"
             }
         }
     }
@@ -154,12 +174,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if !s.running, let status = lifecycleStatusText {
             menu.addItem(info(status))
+            if lifecycleFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
+                menu.addItem(action("Open Server Log", #selector(openServerLog)))
+            }
         }
 
         menu.addItem(.separator())
 
-        // Lifecycle (monitor + manual control — never owns the daemon).
-        if s.running {
+        // Lifecycle. Suppressed while one is already running: `quern start`
+        // blocks for up to 30s, and a second one racing the first for the port
+        // is a worse outcome than a menu with nothing to click for a moment.
+        // The status line above says what is happening.
+        if lifecycleBusy {
+            menu.addItem(info("Working…"))
+        } else if s.running {
             menu.addItem(action("Stop Server", #selector(stopServer)))
             menu.addItem(action("Restart Server", #selector(restartServer)))
         } else {
@@ -281,10 +309,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ verb: String,
         _ action: (((Int32, String) -> Void)?) -> Void
     ) {
+        lifecycleBusy = true
+        lifecycleFailed = false
+        lifecycleStatusText = verb == "stop" ? "Stopping…" : "Starting…"
         action { [weak self] code, output in
             guard let self else { return }
+            self.lifecycleBusy = false
             self.reader.refresh()
-            guard code != 0 else { return }
+            guard code != 0 else {
+                self.lifecycleStatusText = nil
+                return
+            }
 
             // Nothing ran, so nothing is going to change on its own.
             if code == QuernCLI.notFoundStatus {
@@ -302,9 +337,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.reportFailure("Could not stop the server", detail: output)
                 return
             }
-            self.lifecycleStatusText = "Starting…"
             self.confirmStartFailed { [weak self] in
-                self?.lifecycleStatusText = nil
+                self?.lifecycleFailed = true
+                self?.lifecycleStatusText = "Could not start the server"
                 self?.reportFailure("Could not \(verb) the server", detail: output)
             }
         }
@@ -340,6 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         )
     }
+
+    @objc private func openServerLog() { NSWorkspace.shared.open(Self.serverLog) }
 
     @objc private func openSettings() { settings.show() }
 
@@ -394,6 +431,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Surfaces a failed action. The menu bar has no window to put an error
     /// in, so this is a modal alert -- rare by construction, since it only
     /// fires when an explicit command the user chose did not do what it said.
+    /// The server's log. `quern start` names this path in its own warning, so
+    /// the alert offers to open it rather than leaving the reader to select a
+    /// path out of a modal they cannot copy from.
+    static var serverLog: URL { StateReader.quernDir.appendingPathComponent("server.log") }
+
     private func reportFailure(_ message: String, detail: String) {
         DispatchQueue.main.async {
             let alert = NSAlert()
@@ -403,7 +445,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.informativeText = trimmed.isEmpty
                 ? "Run `quern status` to see what state it is in."
                 : trimmed
-            alert.runModal()
+            alert.addButton(withTitle: "OK")
+            let hasLog = FileManager.default.fileExists(atPath: Self.serverLog.path)
+            if hasLog { alert.addButton(withTitle: "Open Log") }
+            if alert.runModal() == .alertSecondButtonReturn, hasLog {
+                NSWorkspace.shared.open(Self.serverLog)
+            }
         }
     }
 
