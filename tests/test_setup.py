@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from server.lifecycle.setup import (
     PYTHON_MAX,
     PYTHON_MIN,
@@ -1338,15 +1340,17 @@ class TestFetchMenubarApp:
         }).encode()
 
         class _Resp:
-            def read(self):
-                return payload
+            def __init__(self, body=payload):
+                self._body = body
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
             def __enter__(self):
                 return self
             def __exit__(self, *a):
                 return False
 
         monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
-        monkeypatch.setattr("urllib.request.urlretrieve", lambda *a, **k: None)
         monkeypatch.setattr("server.get_version", lambda: "9.9.9")
 
         calls: list[list[str]] = []
@@ -1360,3 +1364,68 @@ class TestFetchMenubarApp:
 
         assert calls, "nothing was executed to extract the archive"
         assert calls[0][0] == "/usr/bin/tar", f"extracted with {calls[0][0]}, not macOS tar"
+
+    def test_a_tampered_bundle_is_refused(self, tmp_path, monkeypatch):
+        """This is an executable fetched over the network and then launched,
+        so "the release asset said so" is not sufficient provenance."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "--verify" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "code object is not signed")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="signature is not valid"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app")
+
+    def test_a_bundle_signed_by_someone_else_is_refused(self, tmp_path, monkeypatch):
+        """A valid signature says nothing about whose it is."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "TeamIdentifier=EVIL123456\n")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="expected 3QUH73KW5Q"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app")
+
+    def test_gatekeeper_rejection_is_refused(self, tmp_path, monkeypatch):
+        """A bundle can be validly signed by us and still not notarized."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "spctl":
+                return subprocess.CompletedProcess(cmd, 3, "", "rejected")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="Gatekeeper rejects it"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app")
+
+    def test_our_own_signed_bundle_passes(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app")  # must not raise
+
+    def test_the_download_is_bounded(self, tmp_path, monkeypatch):
+        """urlretrieve takes no timeout and defaults to none, so a stalled
+        transfer held setup open with no deadline."""
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        src = inspect.getsource(setup_mod.fetch_menubar_app)
+        assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
+        assert "timeout=" in src, "the transfer has no socket timeout"
+        assert "deadline" in src, "the transfer has no whole-operation deadline"

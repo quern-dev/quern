@@ -619,6 +619,48 @@ def build_preview_app() -> CheckResult:
     )
 
 
+# The Developer ID team that signs Quern releases. A fetched app must carry
+# this, not merely a valid signature from anyone.
+RELEASE_TEAM_ID = "3QUH73KW5Q"
+
+
+def _verify_menubar_app(app: Path) -> None:
+    """Raise unless the bundle is signed by us, notarized and accepted.
+
+    Three checks, because each catches something the others do not: the
+    signature can be valid while belonging to someone else, the team can match
+    on a bundle that was never notarized, and a bundle can carry a stapled
+    ticket while its resources have been altered -- that last one is real, and
+    an earlier version of this function produced exactly it by extracting with
+    Python's tarfile.
+    """
+    checks = [
+        (["codesign", "--verify", "--deep", "--strict", str(app)], "signature is not valid"),
+        (["spctl", "-a", "-vvv", str(app)], "Gatekeeper rejects it"),
+    ]
+    for cmd, failure in checks:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"refusing to install the downloaded app: {failure} "
+                f"({proc.stderr.strip() or proc.stdout.strip()})"
+            )
+
+    proc = subprocess.run(  # noqa: S603
+        ["codesign", "-dv", str(app)], capture_output=True, text=True, timeout=60,
+    )
+    team = None
+    for line in (proc.stderr + proc.stdout).splitlines():
+        if line.startswith("TeamIdentifier="):
+            team = line.split("=", 1)[1].strip()
+            break
+    if team != RELEASE_TEAM_ID:
+        raise RuntimeError(
+            f"refusing to install the downloaded app: signed by team "
+            f"{team or '<none>'}, expected {RELEASE_TEAM_ID}"
+        )
+
+
 def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     """Fetch the menu-bar app when a release install is missing it.
 
@@ -687,7 +729,24 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
         print(f"    Menu-bar app missing — fetching it from the v{version} release...")
         with tempfile.TemporaryDirectory() as tmp:
             tarball = Path(tmp) / asset_name
-            urllib.request.urlretrieve(url, tarball)  # noqa: S310
+            # urlretrieve takes no timeout and defaults to none, so a stalled
+            # transfer hangs setup with no deadline at all. Stream it instead,
+            # with a socket timeout and a whole-operation deadline -- a partial
+            # download that never finishes is the failure mode here, not a slow
+            # one.
+            deadline = time.monotonic() + 180
+            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
+                with open(tarball, "wb") as out:
+                    while True:
+                        if time.monotonic() > deadline:
+                            raise RuntimeError(
+                                "download exceeded 180s; giving up rather than "
+                                "holding setup open"
+                            )
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
 
             # macOS tar, not Python's tarfile. The archive carries AppleDouble
             # metadata (`._Contents` and friends); macOS tar applies those as
@@ -713,6 +772,14 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             extracted = Path(tmp) / member
             if not extracted.is_dir():
                 raise RuntimeError(f"{asset_name} contains no Quern.app")
+
+            # Verify before installing. This is an executable fetched over the
+            # network and then launched, so "the release asset said so" is not
+            # sufficient provenance: a replaced asset would otherwise be
+            # installed and run. Checked against the identity that signs
+            # releases, not merely "validly signed by someone".
+            _verify_menubar_app(extracted)
+
             shutil.move(str(extracted), str(app))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
         # Never fatal. A missing menu-bar app is a missing convenience, and
