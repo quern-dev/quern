@@ -121,3 +121,24 @@ class TestPolicy:
         assert config.get_auto_install_cert() is True
         config.set_auto_install_cert(False)
         assert config.get_auto_install_cert() is False
+
+
+class TestRequestModel:
+    """`skip_cert_check` bypasses a safety check, so how it is parsed matters."""
+
+    def test_the_string_false_does_not_skip_the_check(self):
+        """Read off a raw dict, `bool("false")` is True -- a caller sending
+        the string would have silently bypassed the preflight."""
+        from server.models import ConfigureSystemProxyRequest
+
+        assert ConfigureSystemProxyRequest(skip_cert_check="false").skip_cert_check is False
+
+    def test_it_defaults_to_running_the_check(self):
+        from server.models import ConfigureSystemProxyRequest
+
+        assert ConfigureSystemProxyRequest().skip_cert_check is False
+
+    def test_an_explicit_true_skips_it(self):
+        from server.models import ConfigureSystemProxyRequest
+
+        assert ConfigureSystemProxyRequest(skip_cert_check=True).skip_cert_check is True

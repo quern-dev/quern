@@ -190,8 +190,19 @@ final class StateReader {
     /// Anything other than a real boolean reads as off. A malformed config
     /// should mean "ask me", never consent to installing a root CA.
     private static func readAutoInstallCert() -> Bool {
-        guard let d = json("config.json") else { return false }
-        return (d["auto_install_cert"] as? Bool) == true
+        guard let d = json("config.json"), let raw = d["auto_install_cert"] else {
+            return false
+        }
+        // A literal JSON `true`, not merely something truthy.
+        //
+        // JSONSerialization hands back NSNumber for both booleans and numbers,
+        // and `as? Bool` accepts a numeric 1 -- measured: `{"x": 1}` reads as
+        // true. The server requires a real boolean (`is True` in
+        // server/config.py), so without this check a config holding 1 would
+        // show the policy enabled here while the server refused capture,
+        // which is a worse failure than either behaviour alone.
+        guard CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID() else { return false }
+        return (raw as? Bool) == true
     }
 
     private static func readChannel() -> String {

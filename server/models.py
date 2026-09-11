@@ -468,6 +468,20 @@ class InterfaceInfo(BaseModel):
     ssid: str | None = None  # Wi-Fi SSID when the interface is associated, else None
 
 
+class ConfigureSystemProxyRequest(BaseModel):
+    """Body for ``POST /proxy/configure-system``."""
+
+    interface: str | None = None
+    """Network service to configure. Auto-detected when omitted."""
+    skip_cert_check: bool = False
+    """Configure the proxy even when a booted simulator does not trust the
+    mitmproxy CA. Correct when deliberately exercising TLS-failure paths;
+    otherwise the request is refused with 428 and the devices are named.
+
+    Typed rather than read off a raw dict: ``bool("false")`` is True, so a
+    caller sending the string would have silently skipped the check."""
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 

@@ -22,6 +22,7 @@ from server.models import (
     CaptureStartResponse,
     CaptureStopRequest,
     CaptureStopResponse,
+    ConfigureSystemProxyRequest,
     DeviceCertState,
     FlowEvent,
     FlowQueryParams,
@@ -406,7 +407,9 @@ async def stop_proxy(request: Request) -> dict:
 
 
 @router.post("/configure-system", response_model=SystemProxyInfo)
-async def configure_system(request: Request, body: dict | None = None) -> SystemProxyInfo:
+async def configure_system(
+    request: Request, body: ConfigureSystemProxyRequest | None = None,
+) -> SystemProxyInfo:
     """Manually configure macOS system proxy to route through mitmproxy."""
     import asyncio
 
@@ -420,8 +423,8 @@ async def configure_system(request: Request, body: dict | None = None) -> System
     if state and state.get("system_proxy_configured"):
         raise HTTPException(status_code=409, detail="System proxy already configured by Quern")
 
-    interface_override = body.get("interface") if body else None
-    skip_cert_check = bool(body.get("skip_cert_check")) if body else False
+    interface_override = body.interface if body else None
+    skip_cert_check = body.skip_cert_check if body else False
 
     # Preflight: capture through a device that does not trust the CA fails
     # every HTTPS request, and the symptom -- a blank screen, an app with no

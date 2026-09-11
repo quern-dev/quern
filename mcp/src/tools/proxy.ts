@@ -697,15 +697,27 @@ Ask the user which they want before acting -- installing a root certificate auth
         .string()
         .optional()
         .describe("Network interface name (e.g. 'Wi-Fi'). Auto-detected if omitted."),
+      skip_cert_check: z
+        .boolean()
+        .optional()
+        .describe(
+          "Configure the proxy even when a booted simulator does not trust the " +
+          "mitmproxy CA. Only pass this when the user has said so: capturing in " +
+          "that state fails every HTTPS request from that device with nothing " +
+          "pointing at the proxy. Correct when deliberately exercising " +
+          "TLS-failure paths."
+        ),
     }),
-  }, async ({ interface: iface }) => {
+  }, async ({ interface: iface, skip_cert_check: skipCertCheck }) => {
     try {
-      const body = iface ? { interface: iface } : undefined;
+      const body: Record<string, unknown> = {};
+      if (iface) body.interface = iface;
+      if (skipCertCheck) body.skip_cert_check = true;
       const data = await apiRequest(
         "POST",
         "/api/v1/proxy/configure-system",
         undefined,
-        body
+        Object.keys(body).length ? body : undefined
       );
 
       return {
