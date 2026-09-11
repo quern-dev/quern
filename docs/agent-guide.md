@@ -115,11 +115,15 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). Use `set_local_capture` to change the process list at runtime without restarting the server.
 - **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
 
+**`configure_system_proxy` can refuse, and that refusal is not an error to retry.** It returns **428** when a booted simulator does not trust the mitmproxy CA, because capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and three ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, or pass `skip_cert_check` to proceed anyway.
+
+Ask the user which they want. Installing a certificate authority persists across sessions and outlives the capture window, so it needs their say-so — the same way `update_quern` does. `skip_cert_check` is the right answer when they are deliberately exercising TLS-failure paths.
+
 **Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
 1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database. Defaults to **booted simulators only**; pass `state="all"` or `device_type="device"` to check shutdown sims or physical devices
 2. Returns per-device `status`: `installed`, `not_installed`, `never_booted`, or `error`
 3. Returns `erased_devices` — UDIDs where a previously installed cert is now missing (probable device erase)
-4. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
+4. If the cert is missing, install it with `install_proxy_cert` — **after asking the user**. Do not shell out to `xcrun simctl keychain add-root-cert` directly: that installs a root certificate authority with no record in Quern's cert state, so `proxy_status` and the capture preflight both go on believing the device is untrusted, and nothing tracks it for removal.
 
 **Physical device proxy capture**: Physical devices need their Wi-Fi proxy configured manually in Settings. The full setup flow is: install cert → trust cert → configure Wi-Fi proxy → call `record_device_proxy_config`. After that, filter flows by the device's `client_ip`.
 
@@ -488,7 +492,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **"Proxy not running"** — Check with `proxy_status` and call `start_proxy` if needed.
 
-**"No flows captured"** — Check `proxy_status`. If `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. If local capture is not enabled, the device may not be configured to route through the proxy. Check `proxy_setup_guide` for device configuration steps. Also check for certificate pinning in the app.
+**"No flows captured"** — Check `proxy_status` first; a `capture_without_cert` warning there means a booted simulator does not trust the CA, which fails HTTPS silently. Otherwise: If `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. If local capture is not enabled, the device may not be configured to route through the proxy. Check `proxy_setup_guide` for device configuration steps. Also check for certificate pinning in the app.
 
 **"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
 

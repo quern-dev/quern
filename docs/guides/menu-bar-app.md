@@ -53,10 +53,21 @@ This item is hidden if the screen-mirror app could not be built, which happens
 when Xcode Command Line Tools are missing. `quern setup` will tell you, and
 offer to open the installer.
 
-**Settings.** The update channel picker — stable or beta, the same setting as
-`quern set-channel` — and a launch-at-login toggle. It also shows the server's
-address, version and uptime, and the full UDID of the active device, which the
-menu deliberately leaves out to keep itself narrow.
+**Settings.** Three things you would otherwise reach for the CLI to change.
+
+*Network capture* carries "Install the capture certificate automatically". Off
+by default: capturing HTTPS needs each device to trust Quern's certificate
+authority, and installing one is a bigger commitment than turning capture on,
+so Quern asks the first time. Turn this on to answer once instead. The same
+setting is `quern set-auto-install-cert`, and it is shown here so a standing
+policy is visible and reversible rather than buried in a config file.
+
+*Updates* carries the channel picker, stable or beta, the same setting as
+`quern set-channel`.
+
+There is also a launch-at-login toggle, and a read-only view of the server's
+address, version and uptime, plus the full UDID of the active device — which
+the menu deliberately leaves out to keep itself narrow.
 
 ## Quitting
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-11
+
 ### Added
 - **Quern checks certificate trust before enabling capture** — configuring the system proxy against a simulator that does not trust the mitmproxy CA fails every HTTPS request from it, and the symptom points nowhere near the proxy: a blank screen, or an app with no network. Both halves of that state were already Quern's — it configures the proxy and it installs the CA — and only the correlation was missing. `configure_system_proxy` now refuses in that state and names the devices, rather than creating it and leaving it to be discovered. `proxy_status` reports the same condition as a `capture_without_cert` warning for the cases the check cannot reach.
 - **`quern set-auto-install-cert`** — answers the question once instead of every time. Off by default, because installing a MITM root certificate authority is a larger and longer-lived commitment than the proxy toggle that prompts it: it persists across sessions and outlives the capture window. The setting appears in the menu-bar app's Settings pane and in `proxy_status`, deliberately — a silent, persistent CA-install policy would be worse than the failure it prevents. Pass `skip_cert_check` to configure the proxy anyway, which is the right answer when deliberately exercising TLS-failure paths.
@@ -383,7 +385,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.15.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.16.0...main
+[0.16.0]: https://github.com/quern-dev/quern/releases/tag/v0.16.0
 [0.15.0]: https://github.com/quern-dev/quern/releases/tag/v0.15.0
 [0.15.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.15.0-beta.1
 [0.14.1]: https://github.com/quern-dev/quern/releases/tag/v0.14.1

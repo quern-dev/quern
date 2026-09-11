@@ -117,6 +117,21 @@ The proxy follows an **opt-in capture** model:
 
 Never auto-configure the system proxy. Never leave it configured when not actively testing.
 
+**The same rule governs the CA.** Installing a MITM root certificate authority
+is a *larger* commitment than a system-proxy toggle, not a smaller one: it
+persists across sessions, outlives the capture window that motivated it, and
+the user has to know it happened in order to undo it. So
+`configure_system_proxy` refuses with 428 when a booted simulator does not
+trust the CA, names the devices, and offers three ways out rather than one --
+offering only "install the certificate" railroads every user into trusting a
+CA, which is the outcome the refusal exists to make deliberate.
+
+`auto_install_cert` in `~/.quern/config.json` answers the question once. It is
+surfaced in `proxy_status` and in the menu-bar app's Settings pane on purpose:
+a silent, persistent CA-install policy would be worse than the failure it
+prevents. Anything other than a literal boolean reads as unset, on both sides
+-- a typo should mean "ask me", never consent.
+
 ## Where the API is documented
 
 Deliberately not restated here. [`docs/api-reference.md`](docs/api-reference.md)

@@ -286,7 +286,7 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 - **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
 - **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
 - **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
-- **Certificate management** — check, install, and verify mitmproxy CA certificates
+- **Certificate management** — check, install, and verify mitmproxy CA certificates. Quern asks before installing one: capturing through a device that does not trust the CA fails every HTTPS request with nothing pointing at the proxy, so enabling capture refuses in that state rather than creating it. `quern set-auto-install-cert on` answers the question once
 - **LLM summaries** — traffic digests grouped by host with error highlights
 
 **Proxy setup for simulators:**
