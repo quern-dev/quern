@@ -788,15 +788,31 @@ def test_fix_is_silent_when_every_tool_is_current(monkeypatch, capsys):
     assert "--fix does not upgrade" not in capsys.readouterr().out
 
 
-def test_doctor_passes_the_fix_flag_through():
+def test_doctor_passes_the_fix_flag_through(monkeypatch):
     """Pin the wiring: the flag reached `_report_python_deps` and not this
-    section, which is how the inconsistency arose in the first place."""
-    import inspect
+    section, which is how the inconsistency arose in the first place.
+
+    Asserted by calling doctor rather than by reading its source. The earlier
+    version matched a literal call expression, which made every refactor of
+    `_cmd_doctor` look like a regression while a genuinely dropped flag inside
+    an unchanged-looking line would have passed.
+    """
+    import argparse
+
+    import pytest
 
     from server import main
 
-    source = inspect.getsource(main._cmd_doctor)
-    assert '_report_external_tools(getattr(args, "fix", False))' in source
+    seen: dict[str, bool] = {}
+    monkeypatch.setattr(main, "_report_python_deps", lambda fix: seen.update(deps=fix))
+    monkeypatch.setattr(main, "_report_external_tools", lambda fix: seen.update(external=fix))
+    monkeypatch.setattr(main, "_report_service_health", lambda fix: seen.update(health=fix))
+    monkeypatch.setattr(main, "read_state", lambda: None)
+
+    with pytest.raises(SystemExit):
+        main._cmd_doctor(argparse.Namespace(fix=True))
+
+    assert seen == {"deps": True, "external": True, "health": True}
 
 
 # --------------------------------------------------------------------------

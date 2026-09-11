@@ -1042,47 +1042,61 @@ def _cmd_status(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
-def _cmd_doctor(args: argparse.Namespace) -> None:
-    """Report device-tool availability (read-only diagnostics)."""
+def _fetch_device_tools() -> tuple[dict | None, str]:
+    """Device-tool availability from the running server, or None and the reason.
+
+    ``None`` means "could not ask" and is deliberately distinct from ``{}``,
+    which means "asked, and the server has no device controller". Collapsing
+    the two would report a check that never ran as one that came back empty.
+
+    This is the only part of doctor that needs a server at all.
+    """
     state = read_state()
     if not state:
-        print("No server running. Start it with: quern start")
-        sys.exit(1)
+        return None, "no server running (start it with `quern start`)"
 
     port = state.get("server_port", 9100)
     if not is_server_healthy(port):
-        print("Server is not responding on /health")
-        sys.exit(1)
+        return None, f"server on port {port} is not responding on /health"
 
     data = fetch_tools(port)
     if data is None:
-        print("Could not fetch tool status from /tools")
-        sys.exit(1)
+        return None, f"server on port {port} did not answer /tools"
 
-    tools = data.get("tools", {})
-    if not tools:
-        print("No device tools reported (device controller unavailable).")
-        # Still report dependencies — an installation without a device
-        # controller is exactly one where a missing dependency is plausible,
-        # so this is the worst possible place to skip the check.
-        #
-        # The same argument covers the external tools: a missing device
-        # controller often *is* a missing or stale external tool, so this branch
-        # is where their versions matter most. Skipping it here also made the
-        # README's description of `quern doctor` false on exactly the machines
-        # someone runs it on.
-        _report_python_deps(getattr(args, "fix", False))
-        _report_external_tools(getattr(args, "fix", False))
-        sys.exit(0)
+    return data.get("tools", {}), ""
 
+
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    """Read-only diagnostics: device tools, venv, tool versions, service health.
+
+    Only the device-tool section needs a running server. Everything else reads
+    the filesystem or probes a separate daemon, so it used to be withheld for no
+    reason: doctor exited at the first check it could not make and printed
+    nothing else. That put its most useful output -- whether the venv matches
+    pyproject.toml -- behind the very condition that most often sends someone
+    looking for it, since a stale venv is a good way to stop the server coming
+    up at all. A command named `doctor` should work when the patient is sick.
+
+    The exit status still reflects the gap. A skipped check is not a passed one,
+    and a script reading 0 would take it for a clean bill of health.
+    """
+    fix = getattr(args, "fix", False)
+
+    tools, reason = _fetch_device_tools()
     print("Device tools:")
-    for name, ok in sorted(tools.items()):
-        print(f"  {'✓' if ok else '✗'} {name}")
+    if tools is None:
+        print(f"  ? not checked — {reason}")
+    elif not tools:
+        print("  ? none reported — the server has no device controller")
+    else:
+        for name, ok in sorted(tools.items()):
+            print(f"  {'✓' if ok else '✗'} {name}")
 
-    _report_python_deps(getattr(args, "fix", False))
-    _report_external_tools(getattr(args, "fix", False))
-    _report_service_health(getattr(args, "fix", False))
-    sys.exit(0)
+    _report_python_deps(fix)
+    _report_external_tools(fix)
+    _report_service_health(fix)
+
+    sys.exit(0 if tools is not None else 1)
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
