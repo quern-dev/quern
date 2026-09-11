@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// exists.
     private lazy var lifecycle: LifecycleController = {
         var deps = LifecycleController.Dependencies()
+        deps.refreshState = { [weak self] in self?.reader.refresh() }
         deps.serverIsRunning = { [weak self] in
             guard let self else { return false }
             self.reader.refresh()

@@ -40,6 +40,10 @@ final class TestScheduler: Scheduler {
     }
 
     func after(_ delay: TimeInterval, _ body: @escaping () -> Void) {
+        // A zero delay would let a body that reschedules itself spin `advance`
+        // forever. Nothing in Sources does, but a test that hung with no output
+        // would be a poor way to find that out.
+        precondition(delay > 0, "a zero delay would make advance(by:) non-terminating")
         onceWork.append(Once(due: now.addingTimeInterval(delay), body: body))
     }
 
@@ -56,8 +60,11 @@ final class TestScheduler: Scheduler {
             now = due
             fireDue()
         }
+        // No fireDue() here: the loop above only exits once nothing is due at
+        // or before `target`, so anything this could fire has already fired.
+        // Verified by deleting it -- the suite stayed green either way, which
+        // is what dead code looks like.
         now = target
-        fireDue()
     }
 
     private func nextDue() -> Date? {

@@ -12,6 +12,7 @@ enum LifecycleControllerTests {
         var running = false
         var alerts: [(String, String)] = []
         var changes = 0
+        var refreshes = 0
         var invoked: [String] = []
         var controller: LifecycleController!
 
@@ -23,6 +24,7 @@ enum LifecycleControllerTests {
             var deps = LifecycleController.Dependencies()
             deps.scheduler = clock
             deps.log = { _ in }
+            deps.refreshState = { [unowned self] in self.refreshes += 1 }
             var looks = 0
             deps.serverIsRunning = { [unowned self] in
                 looks += 1
@@ -52,6 +54,13 @@ enum LifecycleControllerTests {
             Harness.expect(rig.controller.isBusy, false, "busy after success")
             Harness.expect(rig.controller.statusText == nil, "status should be cleared")
             Harness.expect(rig.controller.hasFailed, false, "failed after success")
+            // onChange is the only thing that repaints the icon. Without this
+            // assertion every `changed()` call could be deleted and the suite
+            // stayed green -- measured.
+            Harness.expect(rig.changes >= 2, "expected a change on start and on finish, "
+                + "got \(rig.changes)")
+            Harness.expect(rig.refreshes >= 1, "on-disk state must be re-read when a "
+                + "lifecycle action returns")
         }
 
         Harness.test("the menu is told something is happening before the CLI returns") {
@@ -86,6 +95,7 @@ enum LifecycleControllerTests {
             Harness.expect(rig.alerts.isEmpty, "the server came up; nothing failed")
             Harness.expect(rig.controller.hasFailed, false, "must not mark failed")
             Harness.expect(rig.controller.isBusy, false, "must not stay busy")
+            Harness.expect(rig.changes >= 2, "the icon must be repainted when the wait ends")
             Harness.expect(rig.controller.statusText == nil, "status should be cleared")
         }
 
@@ -114,6 +124,10 @@ enum LifecycleControllerTests {
             rig.controller.run(.start, reporting: .alert)
             Harness.expect(rig.controller.isBusy, false, "must not wait for a CLI that is absent")
             Harness.expect(rig.controller.statusText, "quern not found — run `quern setup`", "status")
+            // Nothing ran, so there is nothing in the server log about it and
+            // no reason to turn the icon red. hasFailed drives both.
+            Harness.expect(rig.controller.hasFailed, false,
+                           "a command that never ran must not offer the server log")
         }
 
         Harness.test("a failed stop is not waited on") {
@@ -121,7 +135,11 @@ enum LifecycleControllerTests {
             rig.controller.run(.stop, reporting: .alert)
             Harness.expect(rig.controller.isBusy, false, "nothing to wait for")
             Harness.expect(rig.alerts.count, 1, "reported immediately")
-            Harness.expect(rig.controller.statusText, "Could not stop the server", "status")
+            // The daemon is still up, so the icon must not go red: the status
+            // line is only rendered when it is down, which left the tooltip
+            // pointing at a menu with nothing in it.
+            Harness.expect(rig.controller.hasFailed, false,
+                           "a failed stop must not redden the icon of a running server")
         }
 
         Harness.test("a second action while one is running is ignored") {
@@ -131,14 +149,27 @@ enum LifecycleControllerTests {
             Harness.expect(rig.invoked, ["start"], "a second CLI call was made")
         }
 
+        Harness.test("a restart that never brings the daemon back is reported") {
+            // The only action with no failure coverage before, and the one
+            // where "the server is up" and "the action worked" can differ.
+            let rig = Rig(result: (1, "restart failed"))
+            rig.controller.run(.restart, reporting: .alert)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.invoked, ["restart"], "the restart CLI call")
+            Harness.expect(rig.alerts.count, 1, "alerts raised")
+            Harness.expect(rig.controller.hasFailed, true, "a start that did not happen is a failure")
+        }
+
         Harness.test("the daemon coming up elsewhere clears a stale failure") {
             let rig = Rig(result: (1, "health check timed out"))
             rig.controller.run(.start, reporting: .menuOnly)
             rig.clock.advance(by: 60)
             Harness.expect(rig.controller.hasFailed, true, "precondition")
+            let before = rig.changes
             rig.controller.noteServerRunning()
             Harness.expect(rig.controller.hasFailed, false, "stale failure survived")
             Harness.expect(rig.controller.statusText == nil, "stale status survived")
+            Harness.expect(rig.changes >= before + 1, "clearing a stale failure must repaint")
         }
     }
 }

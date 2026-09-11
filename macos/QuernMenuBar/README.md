@@ -55,19 +55,29 @@ unauthenticated `~/.quern/*.json` files, so no API key / HTTP is needed.
 ./macos/QuernMenuBar/run-tests.sh
 ```
 
-Plain `swiftc`, the same as `build.sh`, compiling `Sources/` (minus its
-`main.swift`) against `Tests/`. Not SwiftPM: that wants `Sources/<Target>/`,
-which means splitting these sources into a library and an executable, and both
+Plain `swiftc`, compiling `Sources/` (minus its `main.swift`) against `Tests/`.
+It uses the same deployment target as `build.sh` and honours `STRICT` the same
+way, but not its optimisation flags — a test binary gains nothing from
+whole-module optimisation. Not SwiftPM: that wants `Sources/<Target>/`, which
+means splitting these sources into a library and an executable, and both
 `build.sh` and `release-menubar.sh` depend on the current layout. Restructuring
 the two scripts that produce a signed artifact is a poor trade for test
-discovery. CI runs this on the same macOS job that builds the app.
+discovery. CI runs this on the same macOS job that builds the app, with
+`STRICT=1`.
 
 What makes it possible is `Scheduler.swift`. Every timing defect found in
 review — a deadline that could not be reached, a deadline that counted ticks
 rather than seconds, a flag left set because a call never returned — needed
-three minutes of real time to reproduce, so none of them was ever going to be
-covered by a test that waits. `Updater` takes its clock, its CLI calls and its
-relaunch as dependencies; `TestScheduler` advances time on demand.
+minutes of real time to reproduce, so none was ever going to be covered by a
+test that waits. `Updater` and `LifecycleController` both take their clock,
+their CLI calls and their effects as dependencies; `TestScheduler` advances
+time on demand.
+
+The harness fails when a suite or a case is not reached, and when a test body
+asserts nothing. Both were real: commenting out a suite printed "0 passed" and
+exited 0, and a body that returned before its first expectation printed "ok".
+A test count that looks healthy is the worst possible way to report missing
+coverage, so `main.swift` states how many cases there should be.
 
 Rendering is not tested and should not pretend to be. The bug where
 `contentTintColor` silently did nothing to a menu-bar template image was found

@@ -52,6 +52,8 @@ jobs:
         # Same runner, same toolchain, no extra infrastructure. Compiles the
         # app's sources against Tests/ with plain swiftc -- see run-tests.sh for
         # why this is not SwiftPM.
+        env:
+          STRICT: "1"
         run: ./macos/QuernMenuBar/run-tests.sh "$RUNNER_TEMP/menubar-tests"
 
       - name: Verify the bundle is well formed

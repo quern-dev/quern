@@ -12,7 +12,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="${1:-$(mktemp -d)}/quern-menubar-tests"
+DEST="${1:-}"
+if [[ -z "$DEST" ]]; then
+  DEST="$(mktemp -d)"
+  trap 'rm -rf "$DEST"' EXIT
+fi
+OUT="$DEST/quern-menubar-tests"
 
 command -v swiftc >/dev/null || {
   echo "error: swiftc not found. Install Xcode Command Line Tools:" >&2
@@ -34,7 +39,13 @@ TESTS=("$SCRIPT_DIR"/Tests/*.swift)
 # binary, so a universal one would buy nothing.
 ARCH="$(uname -m)"
 mkdir -p "$(dirname "$OUT")"
-swiftc -warnings-as-errors \
+# Gated the way build.sh gates it, and for its reason: a warning mid-edit
+# should not block an iteration. CI sets STRICT=1.
+STRICT="${STRICT:-0}"
+STRICT_FLAGS=()
+[[ "$STRICT" == "1" ]] && STRICT_FLAGS+=(-warnings-as-errors)
+
+swiftc "${STRICT_FLAGS[@]+"${STRICT_FLAGS[@]}"}" \
   -target "${ARCH}-apple-macos13.0" \
   -o "$OUT" "${SOURCES[@]}" "${TESTS[@]}"
 "$OUT"
