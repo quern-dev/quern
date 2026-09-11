@@ -17,7 +17,6 @@ import AppKit
 
 final class Updater {
     private var pollTimer: Timer?
-    private var startVersion: String?
     private var onStatus: ((String) -> Void)?
 
     /// `status` receives short human-readable progress strings for the menu.
@@ -33,7 +32,21 @@ final class Updater {
 
         Self.installedVersion { [weak self] version in
             guard let self else { return }
-            self.startVersion = version
+            // No baseline means no way to recognise a change, and the failure
+            // is not benign: every later reading compares unequal to nil, so
+            // the first poll to succeed would look like the update finishing
+            // and relaunch into the very bundle the update is replacing. If
+            // the CLI cannot answer now it is not going to run `update`
+            // either, so there is nothing lost by stopping here.
+            guard let baseline = version else {
+                status("Could not read the installed version")
+                failure(
+                    "Could not start the update",
+                    "Quern could not report its installed version, so there would be "
+                        + "nothing to compare against. Check that `quern --version` works."
+                )
+                return
+            }
             status("Updating…")
 
             QuernCLI.update { [weak self] code, output in
@@ -46,12 +59,15 @@ final class Updater {
                     failure("Could not start the update", output)
                     return
                 }
-                self.waitForNewVersionThenRelaunch()
+                self.waitForNewVersionThenRelaunch(baseline: baseline)
             }
         }
     }
 
-    private func waitForNewVersionThenRelaunch() {
+    /// `baseline` is non-optional deliberately: the comparison below is only
+    /// meaningful against a version we actually read, so the caller has to
+    /// have one rather than this having to defend against not having one.
+    private func waitForNewVersionThenRelaunch(baseline: String) {
         // The update runs in a detached child (~30–60s). Ask the CLI for its
         // version until it changes, then relaunch.
         var elapsed = 0.0
@@ -71,7 +87,7 @@ final class Updater {
             Self.installedVersion { [weak self] current in
                 inFlight = false
                 guard let self, t.isValid else { return }
-                if let current, current != self.startVersion {
+                if let current, current != baseline {
                     t.invalidate()
                     self.relaunch(into: current)
                 } else if elapsed >= timeout {
