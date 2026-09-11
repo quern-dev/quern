@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let updater = Updater()
     private var snapshot = QuernSnapshot()
     private var updateStatusText: String?
+    private var launchStatusText: String?
+    private var didAttemptLaunchStart = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureStatusButton()
@@ -22,12 +24,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reader.onChange = { [weak self] snap in
             guard let self else { return }
             self.snapshot = snap
+            if snap.server.running { self.launchStatusText = nil }
             self.refreshStatusButton()
             self.settings.update(snap)
         }
         reader.start()
 
         registerLoginItemOnFirstLaunch()
+        startServerOnLaunchIfWanted()
+    }
+
+    /// Start the daemon once, at launch, unless it is already up or the user
+    /// has turned this off.
+    ///
+    /// `reader.start()` refreshes synchronously, so the snapshot consulted
+    /// here is current rather than the empty initial one -- which would read
+    /// as "stopped" and start a second daemon on top of a healthy first.
+    private func startServerOnLaunchIfWanted() {
+        guard !didAttemptLaunchStart else { return }
+        didAttemptLaunchStart = true
+        guard StartOnLaunch.isEnabled, !reader.snapshot.server.running else { return }
+
+        QuernCLI.start { [weak self] code, output in
+            guard let self else { return }
+            self.reader.refresh()
+            guard code != 0 else { return }
+            // Deliberately not the alert the menu actions raise. This can fire
+            // at login, and a modal stealing focus while you are opening your
+            // laptop is worse than the failure it reports. The dimmed icon
+            // already says the server is not running; this says why, to
+            // whoever opens the menu to find out.
+            NSLog("Start on launch failed (\(code)): \(output)")
+            self.launchStatusText = "Could not start the server — see Console"
+        }
     }
 
     // MARK: - Status button
@@ -105,6 +134,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(info("Proxy: \(proxyDescription(s))"))
         }
         if let status = updateStatusText {
+            menu.addItem(info(status))
+        }
+        if !s.running, let status = launchStatusText {
             menu.addItem(info(status))
         }
 

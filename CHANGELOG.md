@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Launching the menu-bar app starts the server.** It used to open onto "Quern is stopped" with a button to press, which was a step that did not need to exist. It leaves a running server alone. Settings carries a "Start the server when Quern launches" toggle, on by default, because the app also registers itself as a login item — so this means the daemon runs from login onward, and that is worth being able to decline. Starting the server opens its HTTP listener and a crash-report watcher; log capture, the proxy and the certificate all stay behind their own gates. Quitting the menu bar still does not stop the server.
 - **`scripts/install-menubar-app.sh`** — installs the menu-bar app on a git-clone install, which `quern setup` deliberately skips. Defaults to the signed, notarized app from the release matching your checkout; `--build` compiles from source instead. Both install to `~/Applications` and quit a running copy first. The guide previously told clone users the app "arrives with Quern", which is true for every install except theirs.
 
 ### Fixed

@@ -11,6 +11,7 @@ import ServiceManagement
 final class SettingsModel: ObservableObject {
     @Published var snapshot = QuernSnapshot()
     @Published var loginEnabled = LoginItem.isEnabled()
+    @Published var startOnLaunch = StartOnLaunch.isEnabled
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
     /// Asked for when the window opens rather than read during `body`: the
@@ -32,6 +33,33 @@ final class SettingsModel: ObservableObject {
         snapshot = snap
         if let c = snap.update.channel { channel = c }
         autoInstallCert = snap.proxy.autoInstallCert
+    }
+}
+
+/// Whether launching the app should start the daemon.
+///
+/// Lives in UserDefaults rather than ~/.quern/config.json because the server
+/// has no use for it -- it describes what this app does, like the login-item
+/// registration next to it, not how Quern behaves. Defaults to on: you opened
+/// the Quern app, and a menu that greets you with "stopped" and a button to
+/// press is a step that did not need to exist.
+///
+/// It is a setting rather than unconditional behaviour because the app also
+/// registers itself as a login item, so "on launch" includes every login. That
+/// is a daemon running because you installed a menu bar app, which is worth
+/// being able to decline. Starting the server opens the HTTP listener and a
+/// crash-report watcher; syslog and OSLog capture stay off, and the proxy and
+/// its certificate stay behind their own consent gates.
+enum StartOnLaunch {
+    static let key = "quern.startServerOnLaunch"
+
+    static func registerDefault() {
+        UserDefaults.standard.register(defaults: [key: true])
+    }
+
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: key) }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 }
 
@@ -183,6 +211,11 @@ struct SettingsView: View {
                         // Revert the toggle if the OS refused.
                         model.loginEnabled = LoginItem.isEnabled()
                     }
+                }
+
+            Toggle("Start the server when Quern launches", isOn: $model.startOnLaunch)
+                .onChange(of: model.startOnLaunch) { newValue in
+                    StartOnLaunch.isEnabled = newValue
                 }
 
             HStack {

@@ -100,9 +100,23 @@ policy is visible and reversible rather than buried in a config file.
 *Updates* carries the channel picker, stable or beta, the same setting as
 `quern set-channel`.
 
-There is also a launch-at-login toggle, and a read-only view of the server's
+There are also two launch toggles, and a read-only view of the server's
 address, version and uptime, plus the full UDID of the active device — which
 the menu deliberately leaves out to keep itself narrow.
+
+*Launch at login* starts the menu bar app when you log in. *Start the server
+when Quern launches* is on by default: opening the Quern app and being told the
+server is stopped, with a button to press, is a step that did not need to
+exist. If the server is already running the app leaves it alone.
+
+Those two together mean the daemon runs from login onward, which is why the
+second one can be turned off. Starting the server opens its HTTP listener and
+watches for crash reports. It does not begin capturing device or system logs,
+and it does not touch the proxy or install any certificate — those stay behind
+their own prompts.
+
+Quitting the menu bar app does not stop the server. Hold ⌥ over Quit when you
+want both.
 
 ## Quitting
 
