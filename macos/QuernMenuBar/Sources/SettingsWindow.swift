@@ -14,19 +14,88 @@ final class SettingsModel: ObservableObject {
     @Published var startOnLaunch = StartOnLaunch.isEnabled
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
-    /// Asked for when the window opens rather than read during `body`: the
-    /// answer comes from a subprocess now, and SwiftUI re-evaluates `body`
-    /// often enough that doing it there would spawn one per redraw.
-    @Published var installedVersion: String?
+    /// What the version row knows, which is not the same as what it can show.
+    ///
+    /// Three states, because two were not enough. The row used to fall back to
+    /// `current_version` from update-info.json whenever the live read failed --
+    /// a value only the *server* ever rewrites, and only when it runs an update
+    /// check. On a machine where the CLI could not be found it therefore showed
+    /// a version from days earlier, under a heading that says "Server", with
+    /// nothing marking it as a cache. It read 0.15.0 for an 0.16.1 install and
+    /// was believed, which is the whole problem with a stale value that looks
+    /// live.
+    enum VersionReading: Equatable {
+        /// Not asked yet. The read is a subprocess, so there is a real moment
+        /// before the answer arrives, and it should not look like an answer.
+        case pending
+        case live(String)
+        /// Asked, could not tell. Distinct from pending, and from any cache.
+        case unavailable
 
-    /// Keeps the last good answer on failure. A blank version field while the
-    /// CLI is briefly unrunnable mid-update would be a worse reading than a
-    /// slightly stale one.
+        var display: String {
+            switch self {
+            case .pending: return "checking…"
+            case .live(let version): return version
+            case .unavailable: return "unavailable"
+            }
+        }
+    }
+
+    /// Asked for when the window opens rather than read during `body`: the
+    /// answer comes from a subprocess, and SwiftUI re-evaluates `body` often
+    /// enough that doing it there would spawn one per redraw.
+    @Published var version: VersionReading = .pending
+
+    /// Keeps the last *live* answer through a transient failure -- the CLI is
+    /// briefly unrunnable mid-update, and blanking the field then would be a
+    /// worse reading than a slightly old one. That is only true of a value this
+    /// app read itself; it is not a licence to show someone else's cache.
     func refreshInstalledVersion() {
         Updater.installedVersion { [weak self] version, _ in
-            guard let version else { return }
-            self?.installedVersion = version
+            self?.apply(version: version)
         }
+    }
+
+    /// The Server section, as label/value pairs.
+    ///
+    /// Built here rather than inline in `body` so a test can read it. The
+    /// defect this file is about was a fallback written into the view -- and a
+    /// test of the model alone still passed with it reinstated, measured. The
+    /// rule it enforces is that nothing but a live reading may appear in the
+    /// version row: update-info.json answers a different question at a
+    /// different time, and showing it under "Server" was believed.
+    func serverRows(now: Date) -> [(String, String)] {
+        let s = snapshot.server
+        return [
+            ("Status", s.running ? "Running" : "Stopped"),
+            ("Address", s.host != nil ? "\(s.host!):\(s.port ?? 0)" : "—"),
+            ("Version", version.display),
+            ("Uptime", Self.uptime(since: s.startedAt, now: now)),
+        ]
+    }
+
+    static func uptime(since: Date?, now: Date) -> String {
+        guard let since else { return "—" }
+        let secs = Int(now.timeIntervalSince(since))
+        if secs < 60 { return "\(secs)s" }
+        if secs < 3600 { return "\(secs / 60)m" }
+        if secs < 86400 { return "\(secs / 3600)h \((secs % 3600) / 60)m" }
+        return "\(secs / 86400)d \((secs % 86400) / 3600)h"
+    }
+
+    /// The decision, separated from the subprocess that feeds it.
+    ///
+    /// A test that re-implements this rather than calling it proves nothing --
+    /// which is what the first version of SettingsModelTests did.
+    func apply(version: String?) {
+        if let version {
+            self.version = .live(version)
+            return
+        }
+        if case .live = self.version {
+            return  // hold the last live reading through a transient failure
+        }
+        self.version = .unavailable
     }
 
     func apply(_ snap: QuernSnapshot) {
@@ -104,12 +173,7 @@ struct SettingsView: View {
             Text("Quern").font(.title2).bold()
 
             GroupBox("Server") {
-                grid("Server", [
-                    ("Status", s.running ? "Running" : "Stopped"),
-                    ("Address", s.host != nil ? "\(s.host!):\(s.port ?? 0)" : "—"),
-                    ("Version", model.installedVersion ?? u.currentVersion ?? "—"),
-                    ("Uptime", uptimeString(s.startedAt)),
-                ])
+                grid("Server", model.serverRows(now: Date()))
             }
 
             GroupBox("Proxy") {
@@ -253,14 +317,6 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func uptimeString(_ since: Date?) -> String {
-        guard let since else { return "—" }
-        let secs = Int(Date().timeIntervalSince(since))
-        if secs < 60 { return "\(secs)s" }
-        if secs < 3600 { return "\(secs / 60)m" }
-        if secs < 86400 { return "\(secs / 3600)h \((secs % 3600) / 60)m" }
-        return "\(secs / 86400)d \((secs % 86400) / 3600)h"
-    }
 }
 
 /// Owns the settings NSWindow and keeps it alive while shown.

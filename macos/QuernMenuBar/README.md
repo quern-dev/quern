@@ -36,6 +36,12 @@ manager with a **Restart to Update** action.
   config file. It reads a *literal* JSON boolean — `JSONSerialization` hands
   back `NSNumber` for numbers too, and `as? Bool` accepts a numeric 1, which
   would show the policy enabled while the server treated it as unset.
+- **Server version** — read live from the CLI, and reported as `checking…` or
+  `unavailable` when it cannot be. It used to fall back to `current_version` in
+  `update-info.json`, which only the server rewrites and only on an update
+  check: on a machine where the CLI could not be found, that showed a version
+  from days earlier under a heading saying "Server". It read 0.15.0 for an
+  0.16.1 install and was believed.
 - **Quit** — exits only the menu bar; ⌥ reveals "Quit and Stop Server".
 
 It starts the daemon but does not own it: quitting the menu bar leaves the
