@@ -21,7 +21,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Set when a start has been given up on. Drives an actionable menu item:
     /// telling someone to open the log without giving them a way to is the
     /// same dead end as not telling them.
-    private var lifecycleFailed = false
+    private var lifecycleFailed = false {
+        didSet {
+            guard lifecycleFailed != oldValue else { return }
+            refreshStatusButton()
+        }
+    }
     private var didAttemptLaunchStart = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -119,13 +124,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // State instead comes from the standard status-item idiom: dimmed when
         // the daemon is down. It reads correctly in both appearances, which a
         // colour swap does not.
-        button.appearsDisabled = !running
-        if updateAvailable {
+        // Three states, not two. Dimming distinguishes stopped from running,
+        // but it cannot distinguish "stopped because nobody started it" from
+        // "stopped because starting it failed" -- and those look identical in
+        // the menu bar, which is the only part most people see. A start we
+        // gave up on tints the icon instead.
+        //
+        // A tint rather than a different glyph, deliberately: the silhouette
+        // stays constant for the reason in `statusImage` below, and red on the
+        // same shape reads as "this one has a problem" without needing to be
+        // recognised as a new symbol.
+        //
+        // The colour is baked into a non-template copy rather than set with
+        // `contentTintColor`, which does nothing here -- the menu bar renders
+        // template images in its own appearance and ignores it. Measured: the
+        // icon came out neutral dark, which with `appearsDisabled` off made a
+        // failed start look exactly like a healthy server. Worse than the
+        // ambiguity it was meant to fix.
+        button.appearsDisabled = !running && !lifecycleFailed
+        if lifecycleFailed, let img = button.image {
+            button.image = Self.tinted(img, .systemRed)
+        }
+        if lifecycleFailed {
+            button.toolTip = "Quern could not start — open the menu"
+        } else if updateAvailable {
             let version = snapshot.update.latestVersion.map { " (v\($0))" } ?? ""
             button.toolTip = "Quern — update available\(version)"
         } else {
             button.toolTip = running ? "Quern is running" : "Quern is stopped"
         }
+    }
+
+    /// A non-template copy of `image` painted in `color`.
+    ///
+    /// Non-template is the point: it is what stops the menu bar substituting
+    /// its own colour. The shape is preserved by compositing over the original,
+    /// so this stays the same silhouette rather than becoming a new glyph.
+    private static func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
+        let out = NSImage(size: image.size)
+        out.lockFocus()
+        let rect = NSRect(origin: .zero, size: image.size)
+        image.draw(in: rect)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        out.unlockFocus()
+        out.isTemplate = false
+        return out
     }
 
     /// Prefer the bundled template icon; fall back to an SF Symbol so the app
@@ -135,7 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// way the symbol fallback does. That is deliberate: a menu bar full of
     /// glyphs is easier to scan when each app keeps a constant silhouette, and
     /// the states it dropped are all still shown -- running and stopped by the
-    /// dimming above, an available update by its own menu item.
+    /// dimming above, a start that failed by the red tint, an available update
+    /// by its own menu item. All three keep the same shape.
     private static func statusImage(running: Bool, updateAvailable: Bool) -> NSImage? {
         if let url = Bundle.main.url(forResource: "StatusIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {

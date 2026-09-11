@@ -6,7 +6,11 @@ manager with a **Restart to Update** action.
 
 ## What it does
 
-- **Status** — running/stopped + uptime, read from `~/.quern/state.json`.
+- **Status** — running/stopped + uptime, read from `~/.quern/state.json`. The
+  icon dims when the daemon is down and turns red when a start was tried and
+  given up on: "nobody started it" and "starting it failed" are otherwise
+  identical in the menu bar, which is the only part most people look at. The
+  silhouette is the same in all three states.
 - **Active device & proxy** — from `~/.quern/active-device.json` and `state.json`.
   The sidecar carries the device's name and type as well as its UDID, so the
   row reads `iPhone 16 Pro (Simulator)` rather than a 36-character identifier.
