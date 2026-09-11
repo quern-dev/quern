@@ -14,9 +14,11 @@ reading, or emits anything credential-shaped.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -74,6 +76,51 @@ def _load():
     return capture_env
 
 
+class _AuditRecorder:
+    """One audit hook for the session, switched on only while capturing.
+
+    `sys.addaudithook` cannot be removed, so a function-scoped fixture that
+    installs one leaves a live hook per test -- measured at five hooks and
+    33,000 retained strings, appending for the rest of the run. One hook, a
+    flag, and a context manager is the same coverage without the leak.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[str] | None = None
+        sys.addaudithook(self._hook)
+
+    def _hook(self, event: str, args: tuple) -> None:
+        if self.entries is None:
+            return
+        if event in ("open", "os.listdir", "os.scandir"):
+            self.entries.append(str(args[0]))
+        elif event in ("subprocess.Popen", "os.system", "os.exec"):
+            # Each argument separately, not space-joined. Joined, a denylist
+            # test doing `Path(entry).name` saw only the last token, so a
+            # `subprocess.run("cat ~/.quern/api-key", shell=True)` slipped past
+            # the very test whose docstring names that vector.
+            self.entries.extend(str(a) for a in args)
+
+    @contextlib.contextmanager
+    def recording(self):
+        self.entries = []
+        try:
+            yield self.entries
+        finally:
+            # The list stays valid for the caller; only the hook stops writing.
+            self.entries = None
+
+
+_RECORDER: _AuditRecorder | None = None
+
+
+def _audit_recorder() -> _AuditRecorder:
+    global _RECORDER
+    if _RECORDER is None:
+        _RECORDER = _AuditRecorder()
+    return _RECORDER
+
+
 @pytest.fixture
 def captured():
     """Capture, recording every file the script opens, at the interpreter level.
@@ -86,22 +133,10 @@ def captured():
     `os.listdir`, `subprocess.Popen` and `os.system` at one layer, below every
     wrapper, so a new way to read a file does not need a new watcher.
     """
-    import sys as real_sys
-
-    touched: list[str] = []
-
-    def hook(event: str, args: tuple) -> None:
-        if event in ("open", "os.listdir", "os.scandir"):
-            touched.append(str(args[0]))
-        elif event in ("subprocess.Popen", "os.system", "os.exec"):
-            touched.append(" ".join(str(a) for a in args))
-
-    real_sys.addaudithook(hook)
-    data = _load().capture(ROOT)
-    # Audit hooks cannot be removed, so record only while capturing.
-    touched_snapshot = list(touched)
-    touched.clear()
-    return data, touched_snapshot
+    recorder = _audit_recorder()
+    with recorder.recording() as touched:
+        data = _load().capture(ROOT)
+    return data, touched
 
 
 def test_it_emits_only_the_fields_it_is_allowed_to(captured):
@@ -116,6 +151,10 @@ def test_it_emits_only_the_fields_it_is_allowed_to(captured):
 def test_it_never_reads_a_file_that_holds_a_credential(captured):
     _, touched = captured
     seen = {Path(p).name for p in touched if "/.quern" in p.replace("\\", "/")}
+    # Subprocess arguments arrive as separate entries, so a shell string like
+    # `cat ~/.quern/api-key` is matched as a whole entry too.
+    seen |= {name for name in FORBIDDEN
+             for p in touched if f"/.quern/{name}" in p.replace("\\", "/")}
     leaked = seen & FORBIDDEN
     assert not leaked, f"capture-env read {sorted(leaked)} from ~/.quern"
 
@@ -256,3 +295,48 @@ def test_the_two_pipx_candidate_lists_agree():
     assert not missing, (
         f"the lookup checks {sorted(missing)} but the capture never records them"
     )
+
+
+class TestArgumentHandling:
+    """Neither entry point had any coverage of this, and both got it wrong:
+    `--help` wrote a file called `--help`, and the error named argv[0] rather
+    than the offending flag."""
+
+    ENTRY_POINTS = [
+        [sys.executable, "-m", "server", "capture-env"],
+        [sys.executable, str(SCRIPT)],
+    ]
+
+    def _run(self, entry, args, cwd):
+        return subprocess.run(entry + args, capture_output=True, text=True, cwd=cwd)
+
+    @pytest.mark.parametrize("entry", ENTRY_POINTS, ids=["cli", "script"])
+    def test_help_prints_usage_and_writes_nothing(self, entry, tmp_path):
+        result = self._run(entry, ["--help"], tmp_path)
+        assert result.returncode == 0
+        assert "Usage:" in result.stdout
+        assert not list(tmp_path.iterdir()), (
+            f"--help was taken as a filename: {[p.name for p in tmp_path.iterdir()]}"
+        )
+
+    @pytest.mark.parametrize("entry", ENTRY_POINTS, ids=["cli", "script"])
+    def test_an_unknown_flag_names_itself(self, entry, tmp_path):
+        result = self._run(entry, ["out.json", "--bogus"], tmp_path)
+        assert result.returncode == 2
+        assert "--bogus" in result.stderr, (
+            f"named the wrong argument: {result.stderr.strip()!r}"
+        )
+        assert "out.json" not in result.stderr, "out.json is a valid filename"
+
+    @pytest.mark.parametrize("entry", ENTRY_POINTS, ids=["cli", "script"])
+    def test_two_destinations_is_an_error_not_a_silent_choice(self, entry, tmp_path):
+        result = self._run(entry, ["a.json", "b.json"], tmp_path)
+        assert result.returncode == 2
+        assert not list(tmp_path.iterdir()), "wrote one and ignored the other"
+
+    @pytest.mark.parametrize("entry", ENTRY_POINTS, ids=["cli", "script"])
+    def test_a_destination_is_written(self, entry, tmp_path):
+        out = tmp_path / "env.json"
+        result = self._run(entry, [str(out)], tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(out.read_text())["home"]

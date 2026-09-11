@@ -46,10 +46,6 @@ final class SettingsModel: ObservableObject {
     /// enough that doing it there would spawn one per redraw.
     @Published var version: VersionReading = .pending
 
-    /// Keeps the last *live* answer through a transient failure -- the CLI is
-    /// briefly unrunnable mid-update, and blanking the field then would be a
-    /// worse reading than a slightly old one. That is only true of a value this
-    /// app read itself; it is not a licence to show someone else's cache.
     /// How the version is read. Injected for the same reason `Updater` injects
     /// its own: without a seam here the only production caller of
     /// `apply(version:)` was untested, and reinstating a `guard let version
@@ -92,6 +88,11 @@ final class SettingsModel: ObservableObject {
     }
 
     /// The decision, separated from the subprocess that feeds it.
+    ///
+    /// Keeps the last *live* answer through a transient failure -- the CLI is
+    /// briefly unrunnable mid-update, and blanking the field then would be a
+    /// worse reading than a slightly old one. That is only true of a value this
+    /// app read itself; it is not a licence to show someone else's cache.
     ///
     /// A test that re-implements this rather than calling it proves nothing --
     /// which is what the first version of SettingsModelTests did.

@@ -127,6 +127,27 @@ enum SettingsModelTests {
             Harness.expect(row("Version", in: model.serverRows(now: Date())), "0.16.1", "row")
         }
 
+        Harness.test("a transient failure holds the last live reading, through the seam") {
+            // The other seam tests only reach `apply`'s trivial branches, so a
+            // refresh that bypassed `apply` entirely --
+            //   self?.version = version.map(VersionReading.live) ?? .unavailable
+            // -- passed all 29 while destroying the one behaviour the
+            // three-state enum exists for.
+            let model = SettingsModel()
+            var answers: [String?] = ["0.16.1", nil]
+            model.readVersion = { done in
+                let next = answers.isEmpty ? nil : answers.removeFirst()
+                done(next, "")
+            }
+
+            model.refreshInstalledVersion()
+            model.refreshInstalledVersion()
+
+            Harness.expect(model.version, .live("0.16.1"),
+                           "a failure after a good reading must not blank the row")
+            Harness.expect(row("Version", in: model.serverRows(now: Date())), "0.16.1", "row")
+        }
+
         Harness.test("pending and unavailable are not the same state") {
             Harness.expect(SettingsModel.VersionReading.pending
                              != SettingsModel.VersionReading.unavailable,

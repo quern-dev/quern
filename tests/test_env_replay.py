@@ -167,15 +167,28 @@ class TestTheExclusionCoversBothShadowingRoots:
             "sys.prefix -- which is how run_setup identifies it"
         )
 
-    def test_the_checkout_is_excluded_too(self, monkeypatch):
+    def test_the_checkout_is_excluded_too(self, monkeypatch, tmp_path):
+        """A real symlinked directory, not an imaginary path.
+
+        The first version used a path that does not exist, where non-strict
+        `.resolve()` is the identity -- so the assertion held with or without
+        it. The same tautology the symlink test above was rewritten to avoid.
+        """
         import sys as real_sys
+
+        real = tmp_path / "real-checkout"
+        real.mkdir()
+        link = tmp_path / "link-checkout"
+        link.symlink_to(real)
 
         monkeypatch.setattr(real_sys, "prefix", "/usr")
         monkeypatch.setattr(real_sys, "base_prefix", "/usr")
-        checkout = Path("/Volumes/Home/someone/Dev/quern")
-        monkeypatch.setattr(tunneld, "_project_root", lambda: checkout)
+        monkeypatch.setattr(tunneld, "_project_root", lambda: link)
 
-        assert tunneld.shadowing_roots() == [checkout]
+        assert tunneld.shadowing_roots() == [real], (
+            "the root is compared against a resolved candidate, so it has to "
+            "be resolved too"
+        )
 
     def test_a_venv_reached_through_a_symlink_is_still_excluded(self, monkeypatch, tmp_path):
         """The root is compared against a resolved candidate, so it has to be

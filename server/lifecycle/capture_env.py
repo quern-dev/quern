@@ -140,24 +140,40 @@ def filter_path(entries: list[str]) -> tuple[list[dict], int]:
     return kept, len(entries) - len(kept)
 
 
+def setup_venv_bin(project_root: Path) -> Path | None:
+    """The bin directory `run_setup` would prepend to PATH.
+
+    Setup uses `sys.prefix`, so when it runs inside a venv that is what
+    shadows. Both roots are checked because each misses the other's case: keyed
+    only on `sys.prefix`, the documented fallback (`python3
+    scripts/capture-env.py`, under Xcode's interpreter) reports "nothing is
+    shadowed" on a machine that is; keyed only on the project venv, a developer
+    whose venv lives outside the checkout gets the same wrong answer -- the
+    configuration `shadowing_roots()` exists for.
+    """
+    if sys.prefix != sys.base_prefix:
+        return Path(sys.prefix) / "bin"
+    candidate = project_root / ".venv" / "bin"
+    return candidate if candidate.is_dir() else None
+
+
 def _which_with_venv_first(project_root: Path) -> str | None:
-    """What `which` returns once `run_setup` has prepended the project venv.
+    """What `which` returns once `run_setup` has prepended the venv.
 
     Setup does that before any check runs, so this -- not the plain lookup --
     is the value the checks actually see. Reproduced rather than described, so
     a capture taken from an ordinary shell still records the shadowing.
 
-    Keyed on the project's venv, not on `sys.prefix`. Under the documented
-    fallback (`python3 scripts/capture-env.py`) the interpreter is Xcode's, so
-    `sys.prefix` is the base and this reported "nothing is shadowed" on a
-    machine that was -- producing exactly the report the field exists to
-    prevent. And the prepend is unconditional: returning early when the venv
-    bin was merely *somewhere* on PATH gave the answer for whatever came first.
+    Mirrors setup's rule exactly, including the part that looks like an
+    oversight: it prepends only when the directory is not already on PATH. When
+    it is on PATH but not first, setup leaves it and resolves whatever comes
+    first -- so prepending unconditionally here invented a shadowing setup does
+    not experience.
     """
-    venv_bin = project_root / ".venv" / "bin"
-    if not venv_bin.is_dir():
-        return shutil.which("pymobiledevice3")
+    venv_bin = setup_venv_bin(project_root)
     path = os.environ.get("PATH", "")
+    if venv_bin is None or str(venv_bin) in path.split(":"):
+        return shutil.which("pymobiledevice3")
     return shutil.which("pymobiledevice3", path=f"{venv_bin}:{path}")
 
 

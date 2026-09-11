@@ -628,7 +628,8 @@ def main() -> None:
             print("With no FILE, prints to stdout.")
             if rest in (["-h"], ["--help"]):
                 sys.exit(0)
-            print(f"unrecognised option: {rest[0]}", file=sys.stderr)
+            bad = next(a for a in rest if a.startswith("-"))
+            print(f"unrecognised option: {bad}", file=sys.stderr)
             sys.exit(2)
         if len(rest) > 1:
             # Silently writing the first and ignoring the rest is the wrong

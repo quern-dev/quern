@@ -42,7 +42,11 @@ def _main(argv: list[str]) -> int:
         print("Writes an environment report for attaching to a bug report.")
         print("With no FILE, prints to stdout.")
         if argv not in (["-h"], ["--help"]):
-            print(f"unrecognised option: {argv[0]}", file=sys.stderr)
+            # The first argument that is actually a flag. Reporting argv[0]
+            # named a perfectly good filename in `capture-env out.json --help`,
+            # sending the reader to the wrong place.
+            bad = next(a for a in argv if a.startswith("-"))
+            print(f"unrecognised option: {bad}", file=sys.stderr)
             return 2
         return 0
     if len(argv) > 1:

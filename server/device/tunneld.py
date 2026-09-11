@@ -391,32 +391,39 @@ async def tunneld_health() -> TunneldHealth:
             remedy="./quern tunneld install",
         )
 
-    if not installed_plist_is_current():
-        # `is_current` stays the gate. It and `drift` do not ask quite the same
-        # question -- drift compares the whole ProgramArguments array -- and
-        # switching the gate to drift collapsed this into the `binary_drift`
-        # case below, which is a different fault: this one is "the plist file is
-        # wrong", that one is "the plist is fine but the running daemon is from
-        # an older one". The only real problem was reporting `None` when drift
-        # found nothing is_current objected to, so that case gets words.
-        reason = installed_plist_drift() or "it does not match what quern would write now"
-        return TunneldHealth(
-            status="stale_plist", serving=True, launchd_state=state, pid=pid,
-            program=program,
-            detail=f"serving, but the installed plist is outdated — {reason}",
-            remedy="./quern tunneld install",
-        )
-
-    # The daemon runs whatever the plist froze in, which is not necessarily the
-    # binary quern would resolve today -- a second pipx install, or a per-user
-    # one shadowing the shared path, drifts silently and is invisible from the
-    # HTTP side because the old one keeps serving perfectly well.
+    # Order matters, and both orderings have been wrong once.
+    #
+    # These are two different faults. `binary_drift` is about the *running*
+    # daemon: launchd is serving from whatever the plist froze in, which need
+    # not be what quern resolves today. `stale_plist` is about the *file*: it
+    # does not match what quern would write now. A plist can be stale while the
+    # running binary is fine, and vice versa.
+    #
+    # Checking the file first and gating it on `drift()` hid `binary_drift`
+    # entirely, because drift objects to the same mismatch. Checking the file
+    # first and gating it on `is_current()` -- the revert -- restored
+    # `binary_drift` but reported `healthy` for every drift only `drift()` can
+    # see, including the trailing-arguments check, which exists because a plist
+    # carrying the right binary with different arguments launches something
+    # other than the tunnel daemon. That is the health API contradicting the
+    # CLI and the start banner about the same plist.
+    #
+    # So: the running daemon first, then the file, gated on the stricter check.
     if program and Path(program) != binary:
         return TunneldHealth(
             status="binary_drift", serving=True, launchd_state=state, pid=pid,
             program=program,
             detail=f"serving from {program}, but quern resolves {binary}",
             remedy="./quern tunneld install  (re-freezes the plist onto the resolved binary)",
+        )
+
+    drift = installed_plist_drift()
+    if drift:
+        return TunneldHealth(
+            status="stale_plist", serving=True, launchd_state=state, pid=pid,
+            program=program,
+            detail=f"serving, but the installed plist is outdated — {drift}",
+            remedy="./quern tunneld install",
         )
 
     return TunneldHealth(
