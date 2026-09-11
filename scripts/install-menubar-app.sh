@@ -20,20 +20,29 @@
 #
 # Either way it installs to ~/Applications/Quern.app, the same place a release
 # install uses, and quits a running copy first so the new one actually starts.
+#
+# The app starts the daemon when it launches, so this is the whole setup: run
+# it once and the CLI is optional from then on. That depends on ~/.local/bin/
+# quern, which `quern setup` writes and the app cannot write for itself, so
+# this refuses to install without it. --skip-wrapper-check overrides that.
 set -euo pipefail
 
 MODE="release"
-case "${1:-}" in
-  --build)   MODE="build" ;;
-  --release) MODE="release" ;;
-  "")        ;;
-  -h|--help)
-    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
-    exit 0 ;;
-  *)
-    echo "unknown option: $1  (try --help)" >&2
-    exit 2 ;;
-esac
+SKIP_WRAPPER_CHECK="0"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --build)              MODE="build" ;;
+    --release)            MODE="release" ;;
+    --skip-wrapper-check) SKIP_WRAPPER_CHECK="1" ;;
+    -h|--help)
+      sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *)
+      echo "unknown option: $1  (try --help)" >&2
+      exit 2 ;;
+  esac
+  shift
+done
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "error: the menu-bar app is macOS only" >&2
@@ -47,6 +56,35 @@ TEAM_ID="3QUH73KW5Q"
 
 VERSION="$(grep -m1 '^version' "$REPO_ROOT/pyproject.toml" | cut -d'"' -f2)"
 [[ -n "$VERSION" ]] || { echo "error: could not read the version from pyproject.toml" >&2; exit 1; }
+
+# The app drives the daemon through this wrapper and only this path. A GUI app
+# does not inherit your shell's PATH, so a `quern` that works in your terminal
+# is invisible to it. Without the wrapper the app installs perfectly, launches,
+# and then cannot start anything -- a clean install failing at the first thing
+# it tries, with the cause nowhere near the symptom.
+#
+# Checked here rather than after installing so nobody spends a release download
+# on it, and fatal rather than a warning: the install would succeed while the
+# thing you ran it for would not work, and a zero exit saying "Done" is how
+# that gets missed. --skip-wrapper-check is the override.
+WRAPPER="$HOME/.local/bin/quern"
+if [[ "$SKIP_WRAPPER_CHECK" != "1" ]]; then
+  if [[ -e "$WRAPPER" && ! -x "$WRAPPER" ]]; then
+    echo "error: $WRAPPER is not executable." >&2
+    echo "       chmod +x $WRAPPER" >&2
+    exit 1
+  fi
+  if [[ ! -e "$WRAPPER" ]]; then
+    echo "error: $WRAPPER is missing, so the app would have nothing to drive." >&2
+    echo "       Run setup once to write it:" >&2
+    echo >&2
+    echo "           cd \"$REPO_ROOT\" && ./quern setup" >&2
+    echo >&2
+    echo "       Then run this script again, or pass --skip-wrapper-check to" >&2
+    echo "       install the app anyway." >&2
+    exit 1
+  fi
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -118,4 +156,13 @@ mv "$STAGING" "$DEST"
 open "$DEST"
 echo
 echo "Done. Running from $DEST"
+if [[ -x "$WRAPPER" ]]; then
+  echo "It starts the server itself, so you should not need the CLI from here."
+  echo "Settings has a toggle if you would rather it did not."
+else
+  # Only reachable via --skip-wrapper-check. Saying the app starts the server
+  # here would be the one claim we know to be false for this exact install.
+  echo "Without $WRAPPER it cannot start or control the server."
+  echo "Run './quern setup' when you want that."
+fi
 echo "Quit it from its menu bar icon; 'open $DEST' brings it back."

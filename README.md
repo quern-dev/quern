@@ -232,6 +232,13 @@ both while one runs a 9.15.1 binary and the other an 11.3.1 one.
 tools, and says so when it finds some it cannot help with, rather than printing
 "nothing to do" above a tool it just flagged as behind.
 
+**Doctor does not need a running server.** Only the device-tool section does, and when
+that cannot be reached doctor names the reason and reports everything else anyway —
+the venv, the external tools, service health. That matters because a stale venv is a
+good way to stop the server coming up, so the check most likely to explain the failure
+used to be withheld by the failure. The exit status still reflects the gap: a section
+that could not be checked is not one that passed.
+
 Doctor also reports **service health**, which is a different question from whether a
 tool is installed:
 

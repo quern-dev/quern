@@ -11,13 +11,55 @@ import ServiceManagement
 final class SettingsModel: ObservableObject {
     @Published var snapshot = QuernSnapshot()
     @Published var loginEnabled = LoginItem.isEnabled()
+    @Published var startOnLaunch = StartOnLaunch.isEnabled
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
+    /// Asked for when the window opens rather than read during `body`: the
+    /// answer comes from a subprocess now, and SwiftUI re-evaluates `body`
+    /// often enough that doing it there would spawn one per redraw.
+    @Published var installedVersion: String?
+
+    /// Keeps the last good answer on failure. A blank version field while the
+    /// CLI is briefly unrunnable mid-update would be a worse reading than a
+    /// slightly stale one.
+    func refreshInstalledVersion() {
+        Updater.installedVersion { [weak self] version, _ in
+            guard let version else { return }
+            self?.installedVersion = version
+        }
+    }
 
     func apply(_ snap: QuernSnapshot) {
         snapshot = snap
         if let c = snap.update.channel { channel = c }
         autoInstallCert = snap.proxy.autoInstallCert
+    }
+}
+
+/// Whether launching the app should start the daemon.
+///
+/// Lives in UserDefaults rather than ~/.quern/config.json because the server
+/// has no use for it -- it describes what this app does, like the login-item
+/// registration next to it, not how Quern behaves. Defaults to on: you opened
+/// the Quern app, and a menu that greets you with "stopped" and a button to
+/// press is a step that did not need to exist.
+///
+/// It is a setting rather than unconditional behaviour because the app also
+/// registers itself as a login item, so "on launch" includes every login. That
+/// is a daemon running because you installed a menu bar app, which is worth
+/// being able to decline. Starting the server opens the HTTP listener and a
+/// crash-report watcher; syslog and OSLog capture stay off, and the proxy and
+/// its certificate stay behind their own consent gates.
+enum StartOnLaunch {
+    static let key = "quern.startServerOnLaunch"
+
+    static func registerDefault() {
+        UserDefaults.standard.register(defaults: [key: true])
+    }
+
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: key) }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 }
 
@@ -65,7 +107,7 @@ struct SettingsView: View {
                 grid("Server", [
                     ("Status", s.running ? "Running" : "Stopped"),
                     ("Address", s.host != nil ? "\(s.host!):\(s.port ?? 0)" : "—"),
-                    ("Version", Updater.installedVersion() ?? u.currentVersion ?? "—"),
+                    ("Version", model.installedVersion ?? u.currentVersion ?? "—"),
                     ("Uptime", uptimeString(s.startedAt)),
                 ])
             }
@@ -171,6 +213,11 @@ struct SettingsView: View {
                     }
                 }
 
+            Toggle("Start the server when Quern launches", isOn: $model.startOnLaunch)
+                .onChange(of: model.startOnLaunch) { newValue in
+                    StartOnLaunch.isEnabled = newValue
+                }
+
             HStack {
                 Button("Documentation") {
                     NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
@@ -230,6 +277,7 @@ final class SettingsWindowController {
             win.isReleasedWhenClosed = false
             window = win
         }
+        model.refreshInstalledVersion()
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil)

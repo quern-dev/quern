@@ -321,25 +321,66 @@ def _brew_install(formula: str) -> bool:
         return False
 
 
+#: Questions setup could not ask, in the order it would have asked them.
+#: Reset by `run_setup`; reported by it at the end.
+_UNASKED: list[str] = []
+
+
+def _can_prompt() -> bool:
+    """Whether there is anyone to answer a question.
+
+    A GUI-launched process has no controlling terminal, so `/dev/tty` cannot be
+    opened. That is reachable in practice, not in theory: the menu-bar app's
+    "Restart to Update" runs `quern update`, which runs setup.
+    """
+    if sys.stdin.isatty():
+        return True
+    try:
+        open("/dev/tty").close()
+    except OSError:
+        return False
+    return True
+
+
 def _prompt_yn(question: str, default: bool = True) -> bool:
     """Prompt the user for yes/no confirmation.
 
     When stdin is not a TTY (e.g. ``curl | bash``), reopens /dev/tty so
     interactive prompts still work.
+
+    With no terminal at all this declines *and records that it did*. Declining
+    is the safe answer -- several of these install things, and answering the
+    default would have setup say yes on the user's behalf -- but doing it
+    silently meant a menu-bar update ran a visibly different setup from a
+    terminal one, and said so nowhere. The question is printed and kept, so the
+    output shows what was asked and `run_setup` can say how many went
+    unanswered.
     """
     suffix = " [Y/n] " if default else " [y/N] "
-    try:
-        if sys.stdin.isatty():
+    if sys.stdin.isatty():
+        try:
             answer = input(question + suffix).strip().lower()
-        else:
-            # stdin is a pipe (curl | bash) — read from the real terminal
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+    else:
+        # stdin is a pipe (curl | bash) — read from the real terminal. One
+        # open attempt, and its failure is the test for whether anyone is
+        # there: asking separately meant opening /dev/tty twice per question.
+        try:
             tty = open("/dev/tty")
+        except OSError:
+            _UNASKED.append(question)
+            print(f"{question}{suffix}— no terminal to ask on, assuming no")
+            return False
+        try:
             print(question + suffix, end="", flush=True)
             answer = tty.readline().strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return False
+        finally:
             tty.close()
-    except (EOFError, KeyboardInterrupt, OSError):
-        print()
-        return False
     if not answer:
         return default
     return answer in ("y", "yes")
@@ -2042,6 +2083,12 @@ def run_setup() -> int:
     print("  Checking your environment...")
     print()
 
+    _UNASKED.clear()
+    if not _can_prompt():
+        print("  No terminal attached, so nothing can be asked. Setup will do")
+        print("  what it can and decline the rest rather than answer for you.")
+        print()
+
     report = SetupReport()
     project_root = _find_project_root()
 
@@ -2598,6 +2645,18 @@ def run_setup() -> int:
     # ── Summary ──
 
     report.print_summary()
+
+    if _UNASKED:
+        # Named, not counted. "3 questions were skipped" tells the reader they
+        # missed something without telling them what, which is the same dead
+        # end as saying nothing.
+        print("  Setup had no terminal, so these were declined without asking:")
+        for question in _UNASKED:
+            print(f"    • {question}")
+        print()
+        print("  Re-run `quern setup` in a terminal to answer them.")
+        print()
+
     return 1 if report.has_errors else 0
 
 

@@ -6,7 +6,11 @@ manager with a **Restart to Update** action.
 
 ## What it does
 
-- **Status** — running/stopped + uptime, read from `~/.quern/state.json`.
+- **Status** — running/stopped + uptime, read from `~/.quern/state.json`. The
+  icon dims when the daemon is down and turns red when a start was tried and
+  given up on: "nobody started it" and "starting it failed" are otherwise
+  identical in the menu bar, which is the only part most people look at. The
+  silhouette is the same in all three states.
 - **Active device & proxy** — from `~/.quern/active-device.json` and `state.json`.
   The sidecar carries the device's name and type as well as its UDID, so the
   row reads `iPhone 16 Pro (Simulator)` rather than a 36-character identifier.
@@ -14,8 +18,18 @@ manager with a **Restart to Update** action.
 - **Start / Stop / Restart** — shells out to the installed `quern` CLI.
 - **Restart to Update** — appears only when `~/.quern/update-info.json` reports
   `update_available`; runs `quern update`, then relaunches into the new build.
+- **Start on launch** — launching the app starts the daemon, unless it is
+  already running or you turn it off in Settings. On by default: you opened the
+  Quern app, and a menu that greets you with "stopped" and a button to press is
+  a step that did not need to exist. A failure here goes to the menu and the
+  log rather than an alert, because this can fire at login and a modal stealing
+  focus as you open your laptop is worse than the failure it reports. Either
+  way the menu says what is happening while it happens, hides the lifecycle
+  items until the outcome is known — including the fifteen seconds it keeps
+  waiting after a nonzero exit, since `quern start` leaves its child running —
+  and offers **Open Server Log** once it has given up.
 - **Settings** — full state, the capture-certificate policy, stable/beta channel
-  picker, launch-at-login toggle, docs link. The certificate toggle writes
+  picker, launch-at-login and start-on-launch toggles, docs link. The certificate toggle writes
   `auto_install_cert` via `quern set-auto-install-cert`; it is surfaced here
   deliberately, because a standing policy to install a root certificate
   authority should be visible and reversible rather than living only in a
@@ -24,8 +38,15 @@ manager with a **Restart to Update** action.
   would show the policy enabled while the server treated it as unset.
 - **Quit** — exits only the menu bar; ⌥ reveals "Quit and Stop Server".
 
-It is a **monitor + manual controller**, not the daemon's owner — it coexists
-with `quern start` and the MCP `ensure_server` tool. State comes from the
+It starts the daemon but does not own it: quitting the menu bar leaves the
+server running (⌥ reveals "Quit and Stop Server" for when you mean both), and
+it coexists with `quern start` and the MCP `ensure_server` tool. Start-on-launch
+is a setting rather than unconditional behaviour because the app also registers
+itself as a login item, so "on launch" includes every login — a daemon running
+because you installed a menu bar app is worth being able to decline. Starting
+the server opens the HTTP listener and a crash-report watcher; syslog and OSLog
+capture stay off, and the proxy and its certificate stay behind their own
+consent gates. State comes from the
 unauthenticated `~/.quern/*.json` files, so no API key / HTTP is needed.
 
 ## Architecture

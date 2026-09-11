@@ -30,7 +30,16 @@ scripts/install-menubar-app.sh            # the signed app from the matching rel
 scripts/install-menubar-app.sh --build    # build from macos/QuernMenuBar instead
 ```
 
-Both install to `~/Applications/Quern.app` and quit a running copy first.
+Both install to `~/Applications/Quern.app` and quit a running copy first, then
+launch it. The app starts the server itself, so that one command is the whole
+setup — from there you can drive Quern from the menu bar and leave the CLI
+alone.
+
+One prerequisite, and the script checks it for you: `quern setup` must have run
+at least once, because that is what writes `~/.local/bin/quern`. The app drives
+the daemon through that wrapper. A GUI app does not inherit your shell's PATH,
+so a `quern` that works in your terminal is not enough — it looks for that
+exact file. If it is missing the script says so and tells you what to run.
 
 Take the default unless you are working on the app itself. A local build is
 unsigned, so its code-signing identity changes every time you rebuild, macOS
@@ -39,7 +48,8 @@ you grant will not persist. The released build is signed and notarized, so
 they do.
 
 Either way the app only reads `~/.quern/*.json`, so it reports on whichever
-server is running regardless of which install started it.
+server is running regardless of which install started it, and it will not start
+a second one on top of a server that is already up.
 
 It is installed to `~/Applications/Quern.app`, so Spotlight and Launchpad both
 find it. If you quit it and want it back:
@@ -100,9 +110,23 @@ policy is visible and reversible rather than buried in a config file.
 *Updates* carries the channel picker, stable or beta, the same setting as
 `quern set-channel`.
 
-There is also a launch-at-login toggle, and a read-only view of the server's
+There are also two launch toggles, and a read-only view of the server's
 address, version and uptime, plus the full UDID of the active device — which
 the menu deliberately leaves out to keep itself narrow.
+
+*Launch at login* starts the menu bar app when you log in. *Start the server
+when Quern launches* is on by default: opening the Quern app and being told the
+server is stopped, with a button to press, is a step that did not need to
+exist. If the server is already running the app leaves it alone.
+
+Those two together mean the daemon runs from login onward, which is why the
+second one can be turned off. Starting the server opens its HTTP listener and
+watches for crash reports. It does not begin capturing device or system logs,
+and it does not touch the proxy or install any certificate — those stay behind
+their own prompts.
+
+Quitting the menu bar app does not stop the server. Hold ⌥ over Quit when you
+want both.
 
 ## Quitting
 
