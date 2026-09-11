@@ -1409,6 +1409,9 @@ def cli() -> None:
     )
 
     # setup
+    # Declared here so `quern help` lists it and test_readme_sync sees it, but
+    # never dispatched from this file: server/__main__.py handles it before the
+    # venv re-exec, which is the point of the command.
     capture_parser = subparsers.add_parser(
         "capture-env",
         help="Write an environment report to attach to a bug report",
@@ -1478,9 +1481,6 @@ def cli() -> None:
         _cmd_enable_local_capture(args.processes)
     elif args.command == "disable-local-capture":
         _cmd_disable_local_capture()
-    elif args.command == "capture-env":
-        from server.lifecycle.capture_env import run
-        sys.exit(run(getattr(args, "output", None)))
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())

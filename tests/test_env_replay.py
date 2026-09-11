@@ -107,6 +107,17 @@ def test_the_capture_still_describes_the_situation_it_was_taken_for(home_on_exte
     assert "project-venv-console-script" in kinds, "the shadowing copy"
     assert "pipx-global" in kinds, "the real CLI"
     assert str(env.venv_script).startswith("/Volumes/"), "the shadowing copy is on the volume"
+    # The failing condition, as data rather than as an assumption in this file.
+    # A capture taken from an ordinary shell shows `which` resolving correctly,
+    # because setup's venv prepend happens inside setup's own process -- so the
+    # capture records what a check would see as well as what the shell sees.
+    assert env.data["which_pymobiledevice3_as_setup_sees_it"] == str(env.venv_script), (
+        "the capture must record the shadowing, or a user hitting this bug "
+        "attaches a report showing everything resolving correctly"
+    )
+    assert env.data["which_pymobiledevice3"] != str(env.venv_script), (
+        "and it must record the plain lookup too, which is what made it confusing"
+    )
 
 
 class TestTheLookupFindsTheCLI:
@@ -169,9 +180,69 @@ class TestTheDriftIsReportedHonestly:
         assert "log path" not in drift, "the log path is correct; saying otherwise misleads"
 
 
+class TestSetupReportsWhatDrifted:
+    """The branch's second fix had no coverage at all: replacing `check_tunneld`
+    with its old hardcoded-log-path body left the whole suite green. The tests
+    below it exercised `installed_plist_drift`, which was already correct."""
+
+    def _plist(self, monkeypatch, tmp_path, program: str, log: str):
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {
+            "ProgramArguments": [program, "remote", "tunneld"],
+            "StandardOutPath": log,
+        })
+        # A real file rather than a blanket `Path.exists` patch, which leaked
+        # into an autouse teardown fixture and made it unlink a file that was
+        # never there.
+        installed = tmp_path / "com.quern.tunneld.plist"
+        installed.write_text("")
+        monkeypatch.setattr(tunneld, "PLIST_PATH", installed)
+        # check_tunneld probes the daemon over HTTP before it reports drift.
+        # Left alone that is a real request to this machine's live tunneld, so
+        # the test would depend on whether the developer happens to have one.
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("no daemon in a test")),
+        )
+
+    def test_a_drifted_binary_is_named_in_the_message(
+        self, home_on_external, monkeypatch, tmp_path
+    ):
+        from server.lifecycle.setup import check_tunneld
+
+        env = home_on_external
+        env.install(monkeypatch, venv_on_path=True)
+        self._plist(monkeypatch, tmp_path, "/somewhere/else/pymobiledevice3",
+                    env.data["tunneld_plist"]["standard_out_path"])
+
+        result = check_tunneld()
+
+        assert "binary" in result.message, (
+            f"the binary drifted; the message says: {result.message}"
+        )
+        assert "log path" not in result.message, (
+            "this printed the installed and expected log paths identically, "
+            "because both were correct"
+        )
+
+    def test_a_drifted_log_path_is_still_named_correctly(
+        self, home_on_external, monkeypatch, tmp_path
+    ):
+        from server.lifecycle.setup import check_tunneld
+
+        env = home_on_external
+        env.install(monkeypatch, venv_on_path=True)
+        self._plist(monkeypatch, tmp_path,
+                    "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+                    "/Volumes/Home/someone/.quern/tunneld.log")
+
+        result = check_tunneld()
+
+        assert "log path" in result.message
+
+
 class TestTheInstallRefusesToBreakItself:
     def test_a_binary_on_an_external_volume_is_never_written_into_the_daemon(
-        self, home_on_external, monkeypatch, capsys
+        self, home_on_external, monkeypatch, capsys, tmp_path
     ):
         """The daemon starts at boot, before /Volumes is guaranteed mounted.
         Recording one there produces a daemon that works until the next reboot
@@ -182,9 +253,18 @@ class TestTheInstallRefusesToBreakItself:
         )
         wrote: list = []
         monkeypatch.setattr(tunneld, "generate_plist", lambda b: wrote.append(b) or "")
+        # Sudo and the real plist path are stubbed because the mutation this
+        # test exists for -- deleting the guard -- otherwise boots out the
+        # developer's own tunneld and overwrites /Library/LaunchDaemons, from
+        # `pytest -q`. A guard whose mutation test is unsafe to run is a guard
+        # nobody will verify.
+        sudo_calls: list = []
+        monkeypatch.setattr(tunneld, "_run_sudo", lambda *a, **k: sudo_calls.append(a) or 0)
+        monkeypatch.setattr(tunneld, "PLIST_PATH", tmp_path / "com.quern.tunneld.plist")
 
         rc = tunneld.install_daemon()
 
         assert rc != 0, "installing an unreachable daemon must not report success"
         assert not wrote, "no plist should have been generated"
+        assert not sudo_calls, "nothing should have been done as root"
         assert "external volume" in capsys.readouterr().out

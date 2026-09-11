@@ -607,6 +607,28 @@ def _cmd_mcp_install() -> int:
 
 
 def main() -> None:
+    # Before the re-exec, deliberately, and the ordering is the whole point:
+    # this is the command people reach for when quern is broken, and
+    # `_maybe_reexec_in_venv` is one of the things that can be broken. A venv
+    # missing its pyvenv.cfg leaves `.venv/bin/python` executable but not
+    # recognised as a venv, so that function execs itself forever -- and the
+    # diagnostic would spin instead of producing a report, on exactly the
+    # install it exists for. It was below this line, with a comment claiming it
+    # was above.
+    if len(sys.argv) >= 2 and sys.argv[1] == "capture-env":
+        from server.lifecycle.capture_env import run
+        # Anything after the subcommand is a destination, so a flag would be
+        # taken as a filename: `capture-env --help` wrote a file called
+        # "--help" and exited 0.
+        rest = sys.argv[2:]
+        if any(arg.startswith("-") for arg in rest):
+            print("Usage: quern capture-env [FILE]")
+            print()
+            print("Writes an environment report for attaching to a bug report.")
+            print("With no FILE, prints to stdout.")
+            sys.exit(0 if rest == ["-h"] or rest == ["--help"] else 2)
+        sys.exit(run(rest[0] if rest else None))
+
     _maybe_reexec_in_venv()
 
     # Version flag — handle before anything else
@@ -614,13 +636,6 @@ def main() -> None:
         from server import get_version
         print(f"quern {get_version()}")
         sys.exit(0)
-
-    # Before the re-exec would matter and before anything heavy: this is the
-    # command people reach for when quern is broken, so it must not depend on
-    # the parts that might be. stdlib only, no venv required.
-    if len(sys.argv) >= 2 and sys.argv[1] == "capture-env":
-        from server.lifecycle.capture_env import run
-        sys.exit(run(sys.argv[2] if len(sys.argv) > 2 else None))
 
     # Lightweight commands — handle without heavy imports
     if len(sys.argv) >= 2 and sys.argv[1] == "setup":

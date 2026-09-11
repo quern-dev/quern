@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-09-11T18:41:47.761584+00:00",
+  "captured_at": "2026-09-11T19:19:17.945608+00:00",
   "home": "/Volumes/Home/jham",
   "home_is_external": true,
   "project_root": "/Volumes/Home/jham/Dev/quern",
@@ -127,7 +127,11 @@
   ],
   "path_entries_total": 29,
   "path_entries_omitted": 13,
+  "sys_prefix": "/Volumes/Home/jham/Dev/quern/.venv",
+  "sys_base_prefix": "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12",
+  "virtual_env": null,
   "which_pymobiledevice3": "/usr/local/bin/pymobiledevice3",
+  "which_pymobiledevice3_as_setup_sees_it": "/Volumes/Home/jham/Dev/quern/.venv/bin/pymobiledevice3",
   "pymobiledevice3_installs": [
     {
       "kind": "pipx-global",

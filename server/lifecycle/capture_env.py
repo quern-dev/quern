@@ -38,6 +38,13 @@ TUNNELD_PLIST = Path("/Library/LaunchDaemons/com.quern.tunneld.plist")
 CANDIDATES = {
     "pipx-user": "{home}/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
     "pipx-user-shim": "{home}/.local/bin/pymobiledevice3",
+    # pipx 1.5 moved the default PIPX_HOME on macOS. Both layouts are live on
+    # real machines, and a capture that looks in fewer places than the lookup
+    # does describes a machine the lookup does not see.
+    "pipx-user-appsupport": (
+        "{home}/Library/Application Support/pipx/venvs/pymobiledevice3"
+        "/bin/pymobiledevice3"
+    ),
     "pipx-global": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
     "pipx-global-shim": "/usr/local/bin/pymobiledevice3",
 }
@@ -47,11 +54,17 @@ CANDIDATES = {
 #: a bug report needs and more than most people would choose to publish.
 PATH_CATEGORIES = {
     "quern": ("quern", "/.local/bin", "/.local/share"),
-    "python": ("python", "pyenv", "pipx", "venv", "conda"),
-    "node": ("fnm", "nvm", "node", "volta", "npm", "yarn", "corepack"),
+    "python": ("pyenv", "pipx", "conda"),
+    "node": ("fnm", "nvm", "volta", "corepack"),
     "android": ("android", "platform-tools", "build-tools"),
     "apple": ("xcode", "commandlinetools", "cryptexes", "/library/apple"),
 }
+# Dropped from the lists above on purpose: "venv", "node", "python". They match
+# as substrings, so `/Users/x/Clients/AcmeBank/.venv/bin` and
+# `…/SomeClientApp/node_modules/.bin` -- both ordinary under direnv or nvm --
+# were published in full into a file meant for a public issue. Any such
+# directory that actually matters holds a tool, and the clause below keeps it on
+# that basis instead.
 
 #: Matched whole, not as substrings. "/bin" appears inside most of a PATH.
 SYSTEM_DIRS = frozenset({
@@ -75,7 +88,11 @@ TOOLS = frozenset({
 def _resolve(path: Path) -> str | None:
     try:
         return str(path.resolve())
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError is a symlink loop on Python 3.9 -- the one interpreter
+        # this file is written to run under. 3.11 raises OSError instead, so
+        # catching only that is the narrow-subclass mistake on exactly the
+        # version that matters.
         return None
 
 
@@ -123,6 +140,22 @@ def filter_path(entries: list[str]) -> tuple[list[dict], int]:
     return kept, len(entries) - len(kept)
 
 
+def _which_with_venv_first() -> str | None:
+    """What `which` returns once `run_setup` has prepended the venv.
+
+    Setup does this before any check runs, so this -- not the plain lookup --
+    is the value the checks actually see. Reproduced rather than described, so
+    a capture taken from an ordinary shell still records the shadowing.
+    """
+    if sys.prefix == sys.base_prefix:
+        return shutil.which("pymobiledevice3")
+    venv_bin = str(Path(sys.prefix) / "bin")
+    path = os.environ.get("PATH", "")
+    if venv_bin in path.split(":"):
+        return shutil.which("pymobiledevice3")
+    return shutil.which("pymobiledevice3", path=venv_bin + ":" + path)
+
+
 def _plist() -> dict:
     if not TUNNELD_PLIST.exists():
         return {"exists": False}
@@ -135,7 +168,15 @@ def _plist() -> dict:
         return {"exists": True, "unreadable": str(exc)}
     if out.returncode != 0:
         return {"exists": True, "unreadable": out.stderr.strip()}
-    data = json.loads(out.stdout)
+    try:
+        data = json.loads(out.stdout)
+    except ValueError as exc:
+        # plutil exiting 0 with something that is not JSON. Outside the try
+        # above, this was a traceback from the command whose entire job is to
+        # produce a readable report when things are wrong.
+        return {"exists": True, "unreadable": f"not JSON: {exc}"}
+    # Named fields, not the whole plist. Returning `data` would publish whatever
+    # a future plist happens to carry, and tests/test_capture_env.py pins these.
     return {
         "exists": True,
         "program_arguments": data.get("ProgramArguments"),
@@ -162,6 +203,12 @@ def capture(project_root: Path) -> dict:
     entries = os.environ.get("PATH", "").split(":")
     kept, omitted = filter_path([e for e in entries if e])
 
+    # The interpreter's own venv, which is the missing half of the picture.
+    # `run_setup` prepends `sys.prefix/bin` to PATH before any check runs, so a
+    # capture taken from a shell records a PATH in which nothing is shadowed --
+    # and a user hitting that exact bug would attach a report showing everything
+    # resolving correctly. Without these two fields the failing state is an
+    # assumption in the replay rather than data from the machine.
     return {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "home": str(home),
@@ -170,23 +217,46 @@ def capture(project_root: Path) -> dict:
         "path": kept,
         "path_entries_total": len([e for e in entries if e]),
         "path_entries_omitted": omitted,
+        "sys_prefix": sys.prefix,
+        "sys_base_prefix": sys.base_prefix,
+        "virtual_env": os.environ.get("VIRTUAL_ENV"),
         "which_pymobiledevice3": shutil.which("pymobiledevice3"),
+        "which_pymobiledevice3_as_setup_sees_it": _which_with_venv_first(),
         "pymobiledevice3_installs": installs,
         "tunneld_plist": _plist(),
     }
 
 
 def find_project_root() -> Path:
+    """The checkout this module lives in.
+
+    Walks up from this file, not from the working directory. Falling back to
+    `cwd()` reported a fabricated root as fact and then looked for the shadowing
+    console script in the wrong place -- omitting the very thing the capture
+    exists to record -- whenever it was run from elsewhere.
+    """
     here = Path(__file__).resolve()
     for parent in here.parents:
         if (parent / "pyproject.toml").exists():
             return parent
-    return Path.cwd()
+    return here.parent.parent.parent
 
 
 def run(destination: str | None = None) -> int:
-    """Write the capture to `destination`, or print it. Returns an exit code."""
-    text = json.dumps(capture(find_project_root()), indent=2) + "\n"
+    """Write the capture to `destination`, or print it. Returns an exit code.
+
+    Broad catch, deliberately. This is the command someone runs when their
+    install is misbehaving, so an unlucky read on a machine that is already
+    wrong must not turn the whole report into a stack trace -- which is the
+    outcome the wrapper script's own error path calls the least useful possible
+    output.
+    """
+    try:
+        text = json.dumps(capture(find_project_root()), indent=2) + "\n"
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must still report
+        print(f"Error: could not complete the capture: {exc!r}", file=sys.stderr)
+        print("Please include this message in your report.", file=sys.stderr)
+        return 1
     if destination:
         try:
             Path(destination).write_text(text, encoding="utf-8")

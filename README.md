@@ -243,11 +243,16 @@ It is read-only and deliberately narrow. It never opens `~/.quern/api-key`,
 fails if it ever starts to — the output is meant for a public issue, so what it may
 contain is pinned rather than remembered.
 
-`PATH` is filtered to the entries that matter: anything recognisably Python, Node,
-Android, Xcode, Homebrew or quern, plus any directory that actually holds a tool
-quern uses. Each survivor keeps its original index, so the order that decides which
-copy of a tool wins is still reconstructible without publishing the rest of your
-`PATH` — which would otherwise name every piece of software on the machine.
+`PATH` is filtered to the entries that matter: anything recognisably a toolchain
+quern cares about, plus any directory that actually holds a tool it uses. That second
+clause is what keeps the filter honest — a whitelist alone would hide an unexpected
+directory a tool is genuinely resolved from, which is the one surprise worth
+reporting. Each survivor keeps its original index, so the order that decides which
+copy wins is still reconstructible without publishing the rest of your `PATH`.
+
+It is a filter, not a redactor. A kept entry is published in full, so a directory
+matching on a toolchain name carries whatever else is in its path. Read it before
+attaching it if that matters to you.
 
 If quern is broken enough that the command will not run, `python3
 scripts/capture-env.py` does the same thing. It is stdlib-only and works on the

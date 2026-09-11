@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -44,10 +46,14 @@ ALLOWED_KEYS = {
     "home",
     "home_is_external",
     "project_root",
+    "sys_prefix",
+    "sys_base_prefix",
+    "virtual_env",
     "path",
     "path_entries_total",
     "path_entries_omitted",
     "which_pymobiledevice3",
+    "which_pymobiledevice3_as_setup_sees_it",
     "pymobiledevice3_installs",
     "tunneld_plist",
 }
@@ -76,6 +82,8 @@ def captured(monkeypatch):
     opened: list[str] = []
     real_open = builtins.open
     real_read_text = Path.read_text
+    real_run = subprocess.run
+    real_listdir = os.listdir
 
     def watched_open(file, *a, **kw):
         opened.append(str(file))
@@ -85,8 +93,22 @@ def captured(monkeypatch):
         opened.append(str(self))
         return real_read_text(self, *a, **kw)
 
+    # The module reads files through `subprocess` (plutil) and `os.listdir`, not
+    # through `open`. Watching only `open` meant a `subprocess.run(["cat",
+    # "~/.quern/api-key"])` added to the module passed the whole suite —
+    # measured. The denylist was aimed at the wrong layer.
+    def watched_run(cmd, *a, **kw):
+        opened.extend(str(part) for part in cmd) if isinstance(cmd, (list, tuple)) else None
+        return real_run(cmd, *a, **kw)
+
+    def watched_listdir(path="."):
+        opened.append(str(path))
+        return real_listdir(path)
+
     monkeypatch.setattr(builtins, "open", watched_open)
     monkeypatch.setattr(Path, "read_text", watched_read_text)
+    monkeypatch.setattr(subprocess, "run", watched_run)
+    monkeypatch.setattr(os, "listdir", watched_listdir)
     data = _load().capture(ROOT)
     monkeypatch.undo()
     return data, opened
@@ -102,10 +124,19 @@ def test_it_emits_only_the_fields_it_is_allowed_to(captured):
 
 
 def test_it_never_reads_a_file_that_holds_a_credential(captured):
-    _, opened = captured
-    touched = {Path(p).name for p in opened if "/.quern/" in p.replace("\\", "/")}
-    leaked = touched & FORBIDDEN
-    assert not leaked, f"capture-env.py read {sorted(leaked)} from ~/.quern"
+    _, touched = captured
+    seen = {Path(p).name for p in touched if "/.quern" in p.replace("\\", "/")}
+    leaked = seen & FORBIDDEN
+    assert not leaked, f"capture-env read {sorted(leaked)} from ~/.quern"
+
+
+def test_it_does_not_go_near_the_quern_directory_at_all(captured):
+    """Stronger than the denylist, and the reason it is worth having: a named
+    list only catches the files someone thought of. Nothing in ~/.quern is
+    needed to describe the environment."""
+    _, touched = captured
+    inside = [p for p in touched if "/.quern/" in p.replace("\\", "/")]
+    assert not inside, f"capture-env touched {inside}"
 
 
 def test_the_output_carries_nothing_credential_shaped(captured):
@@ -130,6 +161,10 @@ def test_a_captured_fixture_is_replayable(captured):
         assert set(install) == {"kind", "path", "resolves_to"}
     plist = data["tunneld_plist"]
     assert "exists" in plist
+    # Pinned like the other nested shapes. This was the one hole in the "a new
+    # field fails the build" promise: returning the parsed plist wholesale would
+    # have published whatever it happened to carry, with a green suite.
+    assert set(plist) <= {"exists", "unreadable", "program_arguments", "standard_out_path"}
 
 
 def test_it_still_parses_on_the_oldest_python_it_must_run_on():
@@ -161,17 +196,34 @@ def test_it_still_parses_on_the_oldest_python_it_must_run_on():
         )
         return
 
-    pytest.skip(f"no Python <= {OLDEST_PYTHON} available to check the floor")
+    # A silent skip means the floor reads as verified on any runner without an
+    # old interpreter. macOS always has one at /usr/bin/python3; say so loudly
+    # if that ever stops being true rather than passing by default.
+    pytest.skip(
+        f"no Python <= {OLDEST_PYTHON} found — the floor is UNVERIFIED on this "
+        "machine, not confirmed"
+    )
 
 
-def test_the_path_filter_keeps_a_directory_that_holds_a_tool():
-    """The safety clause. A whitelist alone would hide an unexpected directory
-    that a tool is genuinely resolved from — the one surprise worth reporting."""
-    from server.lifecycle.capture_env import filter_path
+def test_the_path_filter_keeps_a_directory_that_holds_a_tool(tmp_path):
+    """The safety clause, which the README and CHANGELOG both single out.
 
-    kept, omitted = filter_path(["/nowhere/interesting", "/usr/bin"])
-    dirs = {entry["dir"] for entry in kept}
-    assert "/usr/bin" in dirs
+    It has to be a directory that matches *no* category, or the test passes on
+    the category and proves nothing — which is what the first version did, using
+    /usr/bin, a member of SYSTEM_DIRS.
+    """
+    from server.lifecycle.capture_env import _categorise, filter_path
+
+    odd = tmp_path / "toolbox"
+    odd.mkdir()
+    (odd / "adb").write_text("")
+    assert _categorise(str(odd)) is None, "this directory must match no category"
+
+    kept, omitted = filter_path(["/nowhere/interesting", str(odd)])
+
+    assert [e["dir"] for e in kept] == [str(odd)]
+    assert kept[0]["category"] == "holds-a-tool"
+    assert kept[0]["tools"] == ["adb"]
     assert omitted == 1
 
 
@@ -195,3 +247,23 @@ def test_the_path_filter_drops_unrelated_software():
     ])
     assert kept == []
     assert omitted == 3
+
+
+def test_the_two_pipx_candidate_lists_agree():
+    """`capture_env.CANDIDATES` and `tunneld.pipx_candidates()` answer the same
+    question in two files, and nothing made them agree — they already differed
+    over the `~/.local/bin` shim. A capture that looks in fewer places than the
+    lookup does describes a machine the lookup does not see."""
+    from pathlib import Path
+
+    from server.device.tunneld import pipx_candidates
+    from server.lifecycle.capture_env import CANDIDATES
+
+    home = str(Path.home())
+    captured = {template.format(home=home) for template in CANDIDATES.values()}
+    looked_up = {str(p) for p in pipx_candidates()}
+
+    missing = looked_up - captured
+    assert not missing, (
+        f"the lookup checks {sorted(missing)} but the capture never records them"
+    )

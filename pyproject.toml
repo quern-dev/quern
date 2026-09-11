@@ -91,13 +91,19 @@ ignore = ["UP042"]
 # Test fixtures with embedded data (pbxproj, simctl JSON) can't be wrapped
 "tests/test_wda.py" = ["E501"]
 "tests/test_setup.py" = ["E501"]
-# UP017 rewrites `timezone.utc` to `datetime.UTC`, which is 3.11 -- correct
-# everywhere else here, and wrong in exactly these two files. They are the
-# diagnostic you run when quern is broken, so they must import under whatever
-# `python3` is around: Xcode's Command Line Tools ship 3.9.6 and still do.
-# tests/test_capture_env.py pins that floor by running them there.
-"server/lifecycle/capture_env.py" = ["UP017"]
-"scripts/capture-env.py" = ["UP017"]
+# These two are the diagnostic you run when quern is broken, so they must
+# import under whatever `python3` is around: Xcode's Command Line Tools ship
+# 3.9.6 and still do. ruff is told the project targets 3.11, so pyupgrade would
+# rewrite them into code that cannot parse there.
+#
+# Listed rather than blanket-disabling UP, so E/F/I and the rest of pyupgrade
+# still apply. UP017 is `datetime.UTC` (3.11) and was the one that actually
+# broke this. UP040 (`type X = ...`) is a *syntax* error on 3.9 and UP041
+# (`TimeoutError`) is 3.11, so both are named before they are hit rather than
+# after -- tests/test_capture_env.py catches it either way, but only when an
+# old enough interpreter is present to run the check.
+"server/lifecycle/capture_env.py" = ["UP017", "UP040", "UP041"]
+"scripts/capture-env.py" = ["UP017", "UP040", "UP041"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
