@@ -29,9 +29,18 @@ enum QuernCLI {
     /// them. The 127 that results is indistinguishable from the command
     /// existing and failing, and it is the wrong thing to show a user whose
     /// actual problem is that setup has not run.
-    /// Exit status used when nothing could be run at all, as distinct from a
-    /// command that ran and failed. Callers key their wording off this.
-    static let notFoundStatus: Int32 = 127
+    /// Status used when nothing could be run at all, as distinct from a command
+    /// that ran and failed. Callers key their wording off it.
+    ///
+    /// Outside the 0-255 range a process can actually exit with, deliberately.
+    /// It was 127, which a wrapper genuinely returns when its own `exec` fails
+    /// -- a deleted `.venv/bin/python`, a moved project root -- and that is a
+    /// wrapper sitting right there and executable, not a missing one. Telling
+    /// that user to run setup sends them looking for a file in front of them.
+    static let notFoundStatus: Int32 = -2
+
+    /// Status used when the command was still running at its deadline.
+    static let timedOutStatus: Int32 = -3
 
     static func resolve() -> (path: String, leadingArgs: [String])? {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -71,7 +80,19 @@ enum QuernCLI {
 
     /// Run a quern subcommand off the main thread. `completion` receives the
     /// exit status and combined output, dispatched back to the main thread.
-    static func run(_ args: [String], completion: ((Int32, String) -> Void)? = nil) {
+    ///
+    /// `timeout` is not optional in practice even though it has a default: the
+    /// read below blocks until the child closes its pipe, so without a deadline
+    /// a child that never exits means a completion that never fires. That is
+    /// not hypothetical -- `quern update` shells out to git, which can block on
+    /// a credential prompt it will never receive, since a GUI app has no
+    /// terminal. Callers that set a flag before calling and clear it in the
+    /// completion would leave it set for the life of the process.
+    static func run(
+        _ args: [String],
+        timeout: TimeInterval = 120,
+        completion: ((Int32, String) -> Void)? = nil
+    ) {
         guard let resolved = resolve() else {
             // Dispatched like every other completion. It used to be called
             // synchronously here, which made this one path re-enter the
@@ -109,12 +130,29 @@ enum QuernCLI {
 
             var status: Int32 = -1
             var output = ""
+            var timedOut = false
             do {
                 try proc.run()
+                // Terminating the child closes the pipe, which is what releases
+                // the blocking read below.
+                let watchdog = DispatchWorkItem {
+                    guard proc.isRunning else { return }
+                    timedOut = true
+                    proc.terminate()
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 proc.waitUntilExit()
-                status = proc.terminationStatus
+                watchdog.cancel()
                 output = String(data: data, encoding: .utf8) ?? ""
+                if timedOut {
+                    status = timedOutStatus
+                    let mins = Int(timeout / 60)
+                    output += "\n\nquern \(args.first ?? "") did not finish within "
+                        + (mins >= 1 ? "\(mins) min" : "\(Int(timeout))s") + " and was stopped."
+                } else {
+                    status = proc.terminationStatus
+                }
             } catch {
                 output = "Failed to launch quern: \(error.localizedDescription)"
             }
@@ -126,10 +164,24 @@ enum QuernCLI {
 
     // Convenience actions ---------------------------------------------------
 
-    static func start(_ completion: ((Int32, String) -> Void)? = nil) { run(["start"], completion: completion) }
-    static func stop(_ completion: ((Int32, String) -> Void)? = nil) { run(["stop"], completion: completion) }
-    static func restart(_ completion: ((Int32, String) -> Void)? = nil) { run(["restart"], completion: completion) }
-    static func update(_ completion: ((Int32, String) -> Void)? = nil) { run(["update"], completion: completion) }
+    // Deadlines sized to what each command legitimately takes. `start` waits 30s
+    // for its own health check, `restart` stops first, and `update` does a pull
+    // and a pip install.
+    static func start(_ completion: ((Int32, String) -> Void)? = nil) {
+        run(["start"], timeout: 120, completion: completion)
+    }
+
+    static func stop(_ completion: ((Int32, String) -> Void)? = nil) {
+        run(["stop"], timeout: 60, completion: completion)
+    }
+
+    static func restart(_ completion: ((Int32, String) -> Void)? = nil) {
+        run(["restart"], timeout: 180, completion: completion)
+    }
+
+    static func update(_ completion: ((Int32, String) -> Void)? = nil) {
+        run(["update"], timeout: 600, completion: completion)
+    }
     static func setChannel(_ channel: String, completion: ((Int32, String) -> Void)? = nil) {
         run(["set-channel", channel], completion: completion)
     }

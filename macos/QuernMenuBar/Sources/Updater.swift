@@ -86,15 +86,25 @@ final class Updater {
         // we get here, since `quern update` is synchronous. Poll anyway: the
         // restart it performs is not instant, and a version read taken during
         // it can fail.
-        var elapsed = 0.0
+        //
+        // Running out of time is therefore not "the update timed out" -- the
+        // update already exited 0. The likeliest cause is that the version
+        // genuinely did not move, which happens on a git install whenever
+        // commits land without a bump in pyproject.toml. Saying it timed out
+        // reported a failure for something that worked.
         var inFlight = false
         let interval = 2.0
-        let timeout = 180.0
+        // A wall-clock deadline, not a tick count. Counting ticks assumes every
+        // tick happens, and `scheduledTimer` installs into `.default` mode only
+        // -- it does not fire while a menu is tracking or a modal is up. So a
+        // menu left open paused the countdown, and the deadline that exists to
+        // stop "Updating…" lasting forever could itself be stopped by looking
+        // at it. The timer is added to `.common` below for the same reason.
+        let deadline = Date().addingTimeInterval(180)
 
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] t in
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
-            elapsed += interval
 
             // The deadline is checked here, in the timer body, and not inside
             // the completion below. It used to live there, which made it
@@ -105,10 +115,10 @@ final class Updater {
             // the life of the process, which is the state that tells the user
             // nothing is wrong. `QuernCLI.run` has no timeout of its own, so
             // there is no other way out.
-            if elapsed >= timeout {
+            if Date() >= deadline {
                 t.invalidate()
                 self.inProgress = false
-                self.onStatus?("Update timed out — check `quern update`")
+                self.onStatus?("Update finished, but the version did not change")
                 return
             }
 
@@ -126,6 +136,10 @@ final class Updater {
                 self.relaunch(into: current)
             }
         }
+        // `.common` covers event tracking and modal loops; `.default` alone
+        // does not, and both are reachable from this app's own menu and alerts.
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
     }
 
     private func relaunch(into version: String, retriesLeft: Int = 1) {
@@ -173,7 +187,9 @@ final class Updater {
     /// briefly unrunnable, and callers must keep waiting rather than treat a
     /// failed read as an answer.
     static func installedVersion(_ completion: @escaping (String?, String) -> Void) {
-        QuernCLI.run(["--version"]) { code, output in
+        // Short: this runs on a 2s poll during an update, and a version read
+        // that has not answered in half a minute is not going to.
+        QuernCLI.run(["--version"], timeout: 30) { code, output in
             guard code == 0 else {
                 // `output` carries the CLI's own reason -- including the one
                 // that names the missing wrapper. Flattening it to nil here

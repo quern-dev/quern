@@ -1063,7 +1063,14 @@ def _fetch_device_tools() -> tuple[dict | None, str]:
     if data is None:
         return None, f"server on port {port} did not answer /tools"
 
-    return data.get("tools", {}), ""
+    tools = data.get("tools")
+    if not isinstance(tools, dict):
+        # An explicit null is not the same as a missing key, and `.get(k, {})`
+        # only defaults on the latter. Without this, a null answer produced a
+        # dangling "not checked — " with no reason, blaming an unreachable
+        # server for one that replied.
+        return None, f"server on port {port} answered /tools without a tool list"
+    return tools, ""
 
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
@@ -1077,8 +1084,17 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     looking for it, since a stale venv is a good way to stop the server coming
     up at all. A command named `doctor` should work when the patient is sick.
 
-    The exit status still reflects the gap. A skipped check is not a passed one,
-    and a script reading 0 would take it for a clean bill of health.
+    Two different exit contracts, because `--fix` is an action and plain doctor
+    is a report:
+
+    * Without `--fix`, nonzero means a check could not be *made* -- an
+      unreachable server, a probe that threw. A check that ran and found
+      something wrong still exits 0: a stale venv is doctor working, not doctor
+      failing, and the finding is in the output where it belongs.
+    * With `--fix`, the status is the repair's. `quern doctor --fix && quern
+      start` is the sequence this exists for, and it ran only when the server
+      was already down -- so an exit code that folded in "device tools could
+      not be checked" refused to continue after a repair that worked.
     """
     fix = getattr(args, "fix", False)
 
@@ -1092,18 +1108,24 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         for name, ok in sorted(tools.items()):
             print(f"  {'✓' if ok else '✗'} {name}")
 
-    _report_python_deps(fix)
+    repaired = _report_python_deps(fix)
     _report_external_tools(fix)
-    _report_service_health(fix)
+    services_complete = _report_service_health(fix)
 
-    sys.exit(0 if tools is not None else 1)
+    if fix:
+        sys.exit(1 if repaired is False else 0)
+    sys.exit(0 if tools is not None and services_complete else 1)
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
 
 
-def _report_service_health(fix: bool = False) -> None:
+def _report_service_health(fix: bool = False) -> bool:
     """Whether tunneld and local capture are actually working, not just present.
+
+    Returns whether both probes completed. A probe that threw is doctor failing
+    to look, not a clean result, and it reaches the exit code for the same
+    reason an unreachable device-tool section does.
 
     Both fail in the same shape: the thing quern checks stays green while the
     thing that matters stops working. `check_tools()` reports tunneld from an
@@ -1120,6 +1142,7 @@ def _report_service_health(fix: bool = False) -> None:
 
     print()
     print("Service health:")
+    complete = True
 
     try:
         from server.device.tunneld import tunneld_health
@@ -1127,6 +1150,7 @@ def _report_service_health(fix: bool = False) -> None:
         health = asyncio.run(tunneld_health())
     except Exception as exc:
         print(f"  ? tunneld — could not be checked ({exc})")
+        complete = False
     else:
         marker = _HEALTH_MARKERS.get(health.status, "\u2717")
         print(f"  {marker} tunneld — {health.detail}")
@@ -1141,7 +1165,7 @@ def _report_service_health(fix: bool = False) -> None:
         ext = extension_health()
     except Exception as exc:
         print(f"  ? local capture extension — could not be checked ({exc})")
-        return
+        return False
 
     marker = _HEALTH_MARKERS.get(ext.status, "\u2717")
     print(f"  {marker} local capture extension — {ext.detail}")
@@ -1149,11 +1173,11 @@ def _report_service_health(fix: bool = False) -> None:
     if not ext.fixable:
         if ext.remedy:
             print(f"      {ext.remedy}")
-        return
+        return complete
 
     if not fix:
         print(f"      {ext.remedy}")
-        return
+        return complete
 
     from server.proxy.extension import reinstall
 
@@ -1162,6 +1186,7 @@ def _report_service_health(fix: bool = False) -> None:
     # success here would be reporting a repair that has not happened yet.
     outcome = "\u2192" if ok else "\u2717"
     print(f"      {outcome} {message}")
+    return complete
 
 
 def _report_external_tools(fix: bool = False) -> None:
@@ -1215,8 +1240,12 @@ def _report_external_tools(fix: bool = False) -> None:
         print("  Run them yourself, or: quern update --tools")
 
 
-def _report_python_deps(fix: bool) -> None:
+def _report_python_deps(fix: bool) -> bool | None:
     """Report whether the venv matches pyproject.toml, and optionally repair it.
+
+    Returns the repair outcome: True repaired, False repair failed, None no
+    repair attempted. `doctor --fix` reports that rather than the diagnostics,
+    because it is an action and the caller wants to know whether it worked.
 
     Read-only by default — `doctor` is documented as read-only diagnostics, and
     a tool you reach for when things are broken should not change state while
@@ -1235,25 +1264,30 @@ def _report_python_deps(fix: bool) -> None:
 
     if not state["applicable"]:
         print(f"  - not applicable ({state['reason']})")
-        return
+        return None
 
     if state["in_sync"]:
         print("  ✓ in sync with pyproject.toml")
         if fix:
             print("    --fix: nothing to do")
-        return
+        return None
 
     print(f"  ✗ out of sync — {state['reason']}")
     if not fix:
         print("    Repair with: quern doctor --fix")
         print("    (starting the server also reconciles this automatically)")
-        return
+        return None
 
     if _ensure_python_deps(quiet=False, force=True):
         print("  ✓ repaired")
-    else:
-        print("  ✗ repair failed — see the error above")
-        sys.exit(1)
+        return True
+
+    print("  ✗ repair failed — see the error above")
+    # Returned, not exited. Exiting here skipped the external-tool and
+    # service-health sections, so the one run where the most has gone wrong
+    # printed the least -- and a failed venv repair is a good reason to want
+    # to know what else is stale.
+    return False
 
 
 def _cmd_enable_local_capture(process_names: list[str]) -> None:

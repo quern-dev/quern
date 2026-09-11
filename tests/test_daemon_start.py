@@ -78,9 +78,11 @@ class TestParentWaitAndExit:
         assert "exited unexpectedly" in err
         assert "health check timed out" not in err
 
-    def test_healthy_but_unreadable_state_does_not_report_success(self, capsys):
-        """read_state returning None means the check could not be completed.
-        Reporting a clean start on that basis would be a false all-clear."""
+    def test_healthy_but_unreadable_state_names_its_own_fault(self, capsys):
+        """A server answering /health with no state file is not the same failure
+        as one that never answered, and the message must not say it is: every
+        consumer finds the server through that file, so "health check timed out"
+        sends the reader looking for a server that is in fact running."""
         with (
             patch("server.lifecycle.daemon.time.sleep"),
             patch("server.lifecycle.daemon.time.monotonic", side_effect=_clock()),
@@ -90,4 +92,8 @@ class TestParentWaitAndExit:
         ):
             with pytest.raises(SystemExit) as exc:
                 _parent_wait_and_exit(42, 9100)
+
         assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "wrote no state file" in err
+        assert "health check timed out" not in err

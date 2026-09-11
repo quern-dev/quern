@@ -71,9 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lifecycleStatusText = "Starting…"
         QuernCLI.start { [weak self] code, output in
             guard let self else { return }
-            self.lifecycleBusy = false
             self.reader.refresh()
             guard code != 0 else {
+                self.lifecycleBusy = false
                 self.lifecycleStatusText = nil
                 return
             }
@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // one for a setup step that was never run, and the two are not
             // distinguishable from the outside.
             guard code != QuernCLI.notFoundStatus else {
+                self.lifecycleBusy = false
                 self.lifecycleStatusText = "quern not found — run `quern setup`"
                 return
             }
@@ -161,13 +162,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// its own colour. The shape is preserved by compositing over the original,
     /// so this stays the same silhouette rather than becoming a new glyph.
     private static func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
-        let out = NSImage(size: image.size)
-        out.lockFocus()
-        let rect = NSRect(origin: .zero, size: image.size)
-        image.draw(in: rect)
-        color.set()
-        rect.fill(using: .sourceAtop)
-        out.unlockFocus()
+        // A drawing handler rather than lockFocus/unlockFocus: the latter
+        // rasterises once at whatever the main display's scale happens to be,
+        // so the icon renders soft after a move between a Retina and a 1x
+        // screen. This re-renders per target.
+        let out = NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        // Non-template is the point: it is what stops the menu bar substituting
+        // its own colour. The cost is that the icon is no longer inverted to
+        // white when the item is highlighted -- it stays red under the
+        // selection fill. Accepted: red under a highlight still reads as the
+        // problem it is, and the alternative is having no error state at all.
         out.isTemplate = false
         return out
     }
@@ -359,15 +368,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lifecycleStatusText = verb == "stop" ? "Stopping…" : "Starting…"
         action { [weak self] code, output in
             guard let self else { return }
-            self.lifecycleBusy = false
             self.reader.refresh()
             guard code != 0 else {
+                self.lifecycleBusy = false
                 self.lifecycleStatusText = nil
                 return
             }
 
             // Nothing ran, so nothing is going to change on its own.
             if code == QuernCLI.notFoundStatus {
+                self.lifecycleBusy = false
                 self.reportFailure("Could not \(verb) the server", detail: output)
                 return
             }
@@ -379,9 +389,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // running, is worse than the delay. Give it a window and only
             // report what is still true afterwards.
             if verb == "stop" {
+                self.lifecycleBusy = false
                 self.reportFailure("Could not stop the server", detail: output)
                 return
             }
+            // Deliberately still busy. Clearing the flag before the confirm
+            // window put an enabled "Start Server" in the same menu as
+            // "Starting…", so the second click it exists to prevent was
+            // offered by the very menu that was waiting on the first.
             self.confirmStartFailed { [weak self] in
                 self?.lifecycleFailed = true
                 self?.lifecycleStatusText = "Could not start the server"
@@ -400,10 +415,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func confirmStartFailed(attemptsLeft: Int = 10, giveUp: @escaping () -> Void) {
         reader.refresh()
         if reader.snapshot.server.running {
+            lifecycleBusy = false
             lifecycleStatusText = nil
             return
         }
         guard attemptsLeft > 0 else {
+            lifecycleBusy = false
             giveUp()
             return
         }

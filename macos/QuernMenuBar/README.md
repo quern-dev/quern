@@ -25,8 +25,9 @@ manager with a **Restart to Update** action.
   log rather than an alert, because this can fire at login and a modal stealing
   focus as you open your laptop is worse than the failure it reports. Either
   way the menu says what is happening while it happens, hides the lifecycle
-  items so a second `quern start` cannot race the first, and offers **Open
-  Server Log** once it has given up.
+  items until the outcome is known — including the fifteen seconds it keeps
+  waiting after a nonzero exit, since `quern start` leaves its child running —
+  and offers **Open Server Log** once it has given up.
 - **Settings** — full state, the capture-certificate policy, stable/beta channel
   picker, launch-at-login and start-on-launch toggles, docs link. The certificate toggle writes
   `auto_install_cert` via `quern set-auto-install-cert`; it is surfaced here

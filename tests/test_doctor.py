@@ -20,7 +20,13 @@ def stub_sections(monkeypatch):
     """Stand in for the three server-independent sections, which shell out."""
     monkeypatch.setattr("server.main._report_python_deps", lambda fix: print("PYDEPS"))
     monkeypatch.setattr("server.main._report_external_tools", lambda fix: print("EXTERNAL"))
-    monkeypatch.setattr("server.main._report_service_health", lambda fix: print("SERVICES"))
+    # True = both probes completed, which is what the real one returns when it
+    # could look. Sections signal "could not check", not "found nothing wrong".
+    def services(fix):
+        print("SERVICES")
+        return True
+
+    monkeypatch.setattr("server.main._report_service_health", services)
 
 
 def _run(args_fix: bool = False) -> int:
@@ -108,3 +114,77 @@ class TestDoctorWithAServer:
         ):
             _run()
         assert "SERVICES" in capsys.readouterr().out
+
+
+class TestDoctorExitContract:
+    """Two contracts, because `--fix` is an action and plain doctor is a report."""
+
+    def _server(self, monkeypatch, tools=None):
+        monkeypatch.setattr("server.main.read_state", lambda: {"server_port": 9100})
+        monkeypatch.setattr("server.main.is_server_healthy", lambda port: True)
+        monkeypatch.setattr(
+            "server.main.fetch_tools", lambda port: {"tools": tools if tools is not None else {}}
+        )
+
+    def test_a_check_that_ran_and_found_a_problem_still_exits_clean(
+        self, stub_sections, monkeypatch, capsys
+    ):
+        """A stale venv is doctor working, not doctor failing. The finding is in
+        the output; the status says whether doctor could look."""
+        self._server(monkeypatch, {"adb": False})
+        assert _run() == 0
+
+    def test_a_service_probe_that_threw_reaches_the_exit_code(self, monkeypatch, capsys):
+        """The counterpart: "could not be checked" is doctor failing to look,
+        and it must not read the same as a clean pass."""
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: None)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: False)
+        self._server(monkeypatch, {"adb": True})
+        assert _run() != 0
+
+    def test_fix_reports_the_repair_not_the_diagnostics(self, monkeypatch, capsys):
+        """`quern doctor --fix && quern start` is the sequence this exists for,
+        and it is run precisely when the server is down — so an unreachable
+        device-tool section must not veto a repair that worked."""
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+        monkeypatch.setattr("server.main.read_state", lambda: None)
+        assert _run(args_fix=True) == 0
+
+    def test_fix_fails_when_the_repair_fails(self, monkeypatch, capsys):
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: False)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+        self._server(monkeypatch, {"adb": True})
+        assert _run(args_fix=True) != 0
+
+    def test_a_failed_repair_still_reports_the_other_sections(self, monkeypatch, capsys):
+        """It used to sys.exit(1) inside the deps section, so the run where most
+        had gone wrong printed the least."""
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: False)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: print("EXTERNAL"))
+        def services(fix):
+            print("SERVICES")
+            return True
+
+        monkeypatch.setattr("server.main._report_service_health", services)
+        self._server(monkeypatch, {"adb": True})
+        _run(args_fix=True)
+        out = capsys.readouterr().out
+        assert "EXTERNAL" in out and "SERVICES" in out
+
+    def test_a_null_tool_list_is_not_reported_as_an_unreachable_server(
+        self, stub_sections, monkeypatch, capsys
+    ):
+        """`.get(k, {})` defaults only on a missing key, so an explicit null
+        produced a dangling "not checked — " with no reason at all."""
+        monkeypatch.setattr("server.main.read_state", lambda: {"server_port": 9100})
+        monkeypatch.setattr("server.main.is_server_healthy", lambda port: True)
+        monkeypatch.setattr("server.main.fetch_tools", lambda port: {"tools": None})
+        code = _run()
+        out = capsys.readouterr().out
+        assert "without a tool list" in out
+        assert "not checked — \n" not in out
+        assert code != 0
