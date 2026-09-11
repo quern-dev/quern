@@ -369,6 +369,19 @@ def installed_plist_log_path() -> Path | None:
     return Path(out) if out else None
 
 
+TUNNELD_ARGS = ("remote", "tunneld")
+"""The arguments generate_plist() writes after the binary path."""
+
+
+def installed_plist_arguments() -> list[str] | None:
+    """Return the whole ProgramArguments array, or None."""
+    data = _read_installed_plist()
+    if data is None:
+        return None
+    args = data.get("ProgramArguments") or []
+    return [str(a) for a in args] or None
+
+
 def installed_plist_program() -> Path | None:
     """Return ProgramArguments[0] from the installed plist, or None."""
     data = _read_installed_plist()
@@ -391,10 +404,21 @@ def installed_plist_drift() -> str | None:
     if installed_log != LOG_PATH:
         return f"log path is {installed_log}, expected {LOG_PATH}"
 
-    program = installed_plist_program()
-    if program is None:
+    args = installed_plist_arguments()
+    if not args:
         return "no ProgramArguments recorded"
 
+    # The whole array, not just the binary. generate_plist() writes
+    # [binary, "remote", "tunneld"], and a plist carrying the right binary
+    # with different trailing arguments launches something other than the
+    # tunnel daemon while passing a check that only looked at args[0].
+    tail = tuple(args[1:])
+    if tail != TUNNELD_ARGS:
+        return (
+            f"arguments are {list(tail)}, expected {list(TUNNELD_ARGS)}"
+        )
+
+    program = Path(args[0])
     current = find_pymobiledevice3_binary()
     if current is None:
         if not program.exists():

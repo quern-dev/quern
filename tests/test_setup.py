@@ -1218,7 +1218,10 @@ class TestTunneldDriftReporting:
         from server.device import tunneld
 
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
-        monkeypatch.setattr(tunneld, "installed_plist_program", lambda: Path("/old/pmd3"))
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/old/pmd3", "remote", "tunneld"],
+        )
         monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: Path("/new/pmd3"))
 
         drift = tunneld.installed_plist_drift()
@@ -1243,7 +1246,6 @@ class TestTunneldDriftReporting:
         no longer exists" are the same situation from two ends, and only the
         second says the daemon is broken too. Returning early reported the
         first and hid the second."""
-        from pathlib import Path
 
         from server.device import tunneld
 
@@ -1252,11 +1254,28 @@ class TestTunneldDriftReporting:
         monkeypatch.setattr(tunneld, "PLIST_PATH", plist)
         monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: None)
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
-        monkeypatch.setattr(tunneld, "installed_plist_program", lambda: Path("/gone/pmd3"))
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/gone/pmd3", "remote", "tunneld"],
+        )
 
         health = await tunneld.tunneld_health()
         assert health.status == "no_binary"
         assert "/gone/pmd3" in health.detail, "drift was not surfaced"
+
+    def test_wrong_trailing_arguments_are_drift(self, monkeypatch):
+        """generate_plist() writes [binary, "remote", "tunneld"]. A plist with
+        the right binary and different trailing arguments launches something
+        other than the tunnel daemon, and passed a check that read args[0]."""
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/usr/bin/pmd3", "remote", "something-else"],
+        )
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None and "arguments are" in drift
 
     def test_a_current_plist_reports_no_drift(self, monkeypatch):
         from pathlib import Path
@@ -1264,7 +1283,10 @@ class TestTunneldDriftReporting:
         from server.device import tunneld
 
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
-        monkeypatch.setattr(tunneld, "installed_plist_program", lambda: Path("/same/pmd3"))
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/same/pmd3", "remote", "tunneld"],
+        )
         monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: Path("/same/pmd3"))
         assert tunneld.installed_plist_drift() is None
 
@@ -1398,7 +1420,7 @@ class TestFetchMenubarApp:
 
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         with pytest.raises(RuntimeError, match="signature is not valid"):
-            setup_mod._verify_menubar_app(tmp_path / "Quern.app")
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
 
     def test_a_bundle_signed_by_someone_else_is_refused(self, tmp_path, monkeypatch):
         """A valid signature says nothing about whose it is."""
@@ -1411,7 +1433,7 @@ class TestFetchMenubarApp:
 
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         with pytest.raises(RuntimeError, match="expected 3QUH73KW5Q"):
-            setup_mod._verify_menubar_app(tmp_path / "Quern.app")
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
 
     def test_gatekeeper_rejection_is_refused(self, tmp_path, monkeypatch):
         """A bundle can be validly signed by us and still not notarized."""
@@ -1424,7 +1446,7 @@ class TestFetchMenubarApp:
 
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         with pytest.raises(RuntimeError, match="Gatekeeper rejects it"):
-            setup_mod._verify_menubar_app(tmp_path / "Quern.app")
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
 
     def test_our_own_signed_bundle_passes(self, tmp_path, monkeypatch):
         from server.lifecycle import setup as setup_mod
@@ -1434,10 +1456,12 @@ class TestFetchMenubarApp:
                 return subprocess.CompletedProcess(
                     cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
                 )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "9.9.9\n", "")
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
-        setup_mod._verify_menubar_app(tmp_path / "Quern.app")  # must not raise
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")  # must not raise
 
     def test_the_download_is_bounded(self, tmp_path, monkeypatch):
         """urlretrieve takes no timeout and defaults to none, so a stalled
@@ -1450,3 +1474,38 @@ class TestFetchMenubarApp:
         assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
         assert "timeout=" in src, "the transfer has no socket timeout"
         assert "deadline" in src, "the transfer has no whole-operation deadline"
+
+    def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
+        """Signature, team and Gatekeeper are all satisfied by any genuine
+        Quern app we ever signed, so a replaced asset containing an older real
+        build would pass every one of them. That is a downgrade, not a
+        forgery, and the asset name alone does not rule it out."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "0.14.1\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="it is v0.14.1, but v0.15.0 was requested"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")
+
+    def test_the_matching_version_is_accepted(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "0.15.0\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise

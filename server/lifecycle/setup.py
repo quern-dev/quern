@@ -624,8 +624,8 @@ def build_preview_app() -> CheckResult:
 RELEASE_TEAM_ID = "3QUH73KW5Q"
 
 
-def _verify_menubar_app(app: Path) -> None:
-    """Raise unless the bundle is signed by us, notarized and accepted.
+def _verify_menubar_app(app: Path, expected_version: str) -> None:
+    """Raise unless the bundle is signed by us, notarized, accepted and current.
 
     Three checks, because each catches something the others do not: the
     signature can be valid while belonging to someone else, the team can match
@@ -658,6 +658,25 @@ def _verify_menubar_app(app: Path) -> None:
         raise RuntimeError(
             f"refusing to install the downloaded app: signed by team "
             f"{team or '<none>'}, expected {RELEASE_TEAM_ID}"
+        )
+
+    # Bind the bundle to the release that was asked for. Everything above is
+    # satisfied by *any* genuine Quern app we ever signed, so a replaced asset
+    # containing an older real build would pass all of it -- a downgrade, not
+    # a forgery. The asset name identifies the release; this checks that its
+    # contents agree.
+    proc = subprocess.run(  # noqa: S603
+        [
+            "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString",
+            str(app / "Contents" / "Info.plist"),
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    stamped = proc.stdout.strip()
+    if proc.returncode != 0 or stamped != expected_version:
+        raise RuntimeError(
+            f"refusing to install the downloaded app: it is v{stamped or '<unknown>'}, "
+            f"but v{expected_version} was requested"
         )
 
 
@@ -778,7 +797,7 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             # sufficient provenance: a replaced asset would otherwise be
             # installed and run. Checked against the identity that signs
             # releases, not merely "validly signed by someone".
-            _verify_menubar_app(extracted)
+            _verify_menubar_app(extracted, version)
 
             shutil.move(str(extracted), str(app))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
