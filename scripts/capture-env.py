@@ -1,118 +1,36 @@
 #!/usr/bin/env python3
-"""Record the facts about this machine that Quern's environment checks read.
+"""Thin wrapper around `quern capture-env`.
 
-Not a disk snapshot. A disk snapshot of a machine whose home is on an external
-volume is both enormous and unusable in CI; what the checks actually consult is
-a handful of paths, what they resolve to, and the order of PATH. Those fit in a
-few hundred bytes and can be rebuilt in a temporary directory, which is what
-`tests/fixtures/envs/` replays.
-
-The point is to turn "works on my machine" into a file. A configuration that
-produced a wrong answer once can then be a permanent test, on every machine,
-without anyone owning the hardware that found it.
-
-Read-only. Writes nothing outside the file you name.
+The command is the interface; this exists because the command needs `quern` to
+run, and the situation you want a diagnostic for is one where it might not.
+Imports the package directly with stdlib only, so it works on a checkout whose
+venv is broken or missing entirely -- which is the case that produced the first
+fixture in tests/fixtures/envs/.
 
     python3 scripts/capture-env.py                      # to stdout
-    python3 scripts/capture-env.py tests/fixtures/envs/mine.json
+    python3 scripts/capture-env.py env.json             # to a file
 """
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
-import subprocess
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
-TUNNELD_PLIST = Path("/Library/LaunchDaemons/com.quern.tunneld.plist")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-#: Where a pymobiledevice3 can legitimately live. Each is a different install
-#: with a different lifetime, and the checks conflating them is what this was
-#: written to reproduce.
-CANDIDATES = {
-    "pipx-user": "{home}/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
-    "pipx-user-shim": "{home}/.local/bin/pymobiledevice3",
-    "pipx-global": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
-    "pipx-global-shim": "/usr/local/bin/pymobiledevice3",
-}
-
-
-def _resolve(path: Path) -> str | None:
-    try:
-        return str(path.resolve())
-    except OSError:
-        return None
-
-
-def _home_is_external(home: Path) -> bool:
-    return str(home).startswith("/Volumes/")
-
-
-def _plist() -> dict:
-    if not TUNNELD_PLIST.exists():
-        return {"exists": False}
-    try:
-        out = subprocess.run(
-            ["plutil", "-convert", "json", "-o", "-", str(TUNNELD_PLIST)],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"exists": True, "unreadable": str(exc)}
-    if out.returncode != 0:
-        return {"exists": True, "unreadable": out.stderr.strip()}
-    data = json.loads(out.stdout)
-    return {
-        "exists": True,
-        "program_arguments": data.get("ProgramArguments"),
-        "standard_out_path": data.get("StandardOutPath"),
-    }
-
-
-def capture(project_root: Path) -> dict:
-    home = Path.home()
-    venv_script = project_root / ".venv" / "bin" / "pymobiledevice3"
-
-    installs = []
-    for kind, template in CANDIDATES.items():
-        path = Path(template.format(home=home))
-        if path.exists():
-            installs.append({"kind": kind, "path": str(path), "resolves_to": _resolve(path)})
-    if venv_script.exists():
-        installs.append({
-            "kind": "project-venv-console-script",
-            "path": str(venv_script),
-            "resolves_to": _resolve(venv_script),
-        })
-
-    return {
-        "captured_at": datetime.now(UTC).isoformat(),
-        "home": str(home),
-        "home_is_external": _home_is_external(home),
-        "project_root": str(project_root),
-        # Order matters and is the whole story in at least one bug: setup
-        # prepends the project venv, so a console script there wins over the
-        # pipx CLI for anything using shutil.which.
-        "path": os.environ.get("PATH", "").split(":"),
-        "which_pymobiledevice3": shutil.which("pymobiledevice3"),
-        "pymobiledevice3_installs": installs,
-        "tunneld_plist": _plist(),
-    }
-
-
-def main() -> int:
-    project_root = Path(__file__).resolve().parent.parent
-    data = capture(project_root)
-    text = json.dumps(data, indent=2) + "\n"
-    if len(sys.argv) > 1:
-        Path(sys.argv[1]).write_text(text, encoding="utf-8")
-        print(f"wrote {sys.argv[1]}")
-    else:
-        print(text, end="")
-    return 0
-
+# Apple's Command Line Tools have shipped Python 3.9.6 as /usr/bin/python3 since
+# Xcode 14, and still do -- so 3.9 is the floor this has to clear, well below
+# the 3.11 quern itself requires. Older Xcodes shipped 3.8.9, but a macOS that
+# old is outside Xcode's own support window, so nobody is on it.
+#
+# If that floor is ever wrong, say so plainly. A traceback about `datetime.UTC`
+# on the one machine this exists for is the least useful possible output.
+try:
+    from server.lifecycle.capture_env import run  # noqa: E402
+except (ImportError, SyntaxError) as exc:  # pragma: no cover - exercised by hand
+    print(f"This needs a newer Python than {sys.version.split()[0]}: {exc}", file=sys.stderr)
+    print("Try: python3.11 scripts/capture-env.py, or `quern capture-env`.", file=sys.stderr)
+    raise SystemExit(1) from None
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(sys.argv[1] if len(sys.argv) > 1 else None))

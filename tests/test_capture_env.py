@@ -15,7 +15,6 @@ reading, or emits anything credential-shaped.
 from __future__ import annotations
 
 import builtins
-import importlib.util
 import json
 import re
 from pathlib import Path
@@ -24,6 +23,18 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "capture-env.py"
+MODULE = ROOT / "server" / "lifecycle" / "capture_env.py"
+
+#: The oldest Python the fallback has to run on.
+#:
+#: Apple's Command Line Tools have shipped 3.9.6 as /usr/bin/python3 since Xcode
+#: 14 and still do on current macOS, so 3.9 is the real floor -- not the 3.11
+#: quern itself requires. Older Xcodes shipped 3.8.9, but a macOS that old is
+#: outside Xcode's own support window, so it is not a floor anyone can be on.
+#:
+#: Found by running it, not by reasoning: the module reached for `datetime.UTC`,
+#: which is 3.11, and the fallback died on the one kind of machine it exists for.
+OLDEST_PYTHON = (3, 9)
 
 #: Every top-level key the capture is allowed to emit. Adding one is a decision
 #: about what a stranger will paste into a public issue, so it should not be
@@ -34,6 +45,8 @@ ALLOWED_KEYS = {
     "home_is_external",
     "project_root",
     "path",
+    "path_entries_total",
+    "path_entries_omitted",
     "which_pymobiledevice3",
     "pymobiledevice3_installs",
     "tunneld_plist",
@@ -52,10 +65,9 @@ FORBIDDEN = {
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("capture_env", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    from server.lifecycle import capture_env
+
+    return capture_env
 
 
 @pytest.fixture
@@ -112,7 +124,74 @@ def test_a_captured_fixture_is_replayable(captured):
     capture missing what that needs is a file nobody can act on."""
     data, _ = captured
     assert isinstance(data["path"], list) and data["path"], "PATH order is the diagnostic"
+    for entry in data["path"]:
+        assert set(entry) == {"index", "dir", "category", "tools"}
     for install in data["pymobiledevice3_installs"]:
         assert set(install) == {"kind", "path", "resolves_to"}
     plist = data["tunneld_plist"]
     assert "exists" in plist
+
+
+def test_it_still_parses_on_the_oldest_python_it_must_run_on():
+    """A syntax or stdlib feature newer than the floor makes the fallback fail
+    on exactly the machine it exists for, and nothing else would catch it: the
+    suite runs on 3.11+."""
+    import subprocess
+
+    candidates = ["/usr/bin/python3", f"python{OLDEST_PYTHON[0]}.{OLDEST_PYTHON[1]}"]
+    for candidate in candidates:
+        probe = subprocess.run(
+            [candidate, "-c", "import sys; print(sys.version_info[:2])"],
+            capture_output=True, text=True,
+        )
+        if probe.returncode != 0:
+            continue
+        version = eval(probe.stdout.strip())  # noqa: S307 - our own output
+        if version > OLDEST_PYTHON:
+            continue
+        result = subprocess.run(
+            [candidate, "-c",
+             f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
+             "import server.lifecycle.capture_env"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"capture_env does not import on Python {version}, which is what "
+            f"scripts/capture-env.py falls back to:\n{result.stderr}"
+        )
+        return
+
+    pytest.skip(f"no Python <= {OLDEST_PYTHON} available to check the floor")
+
+
+def test_the_path_filter_keeps_a_directory_that_holds_a_tool():
+    """The safety clause. A whitelist alone would hide an unexpected directory
+    that a tool is genuinely resolved from — the one surprise worth reporting."""
+    from server.lifecycle.capture_env import filter_path
+
+    kept, omitted = filter_path(["/nowhere/interesting", "/usr/bin"])
+    dirs = {entry["dir"] for entry in kept}
+    assert "/usr/bin" in dirs
+    assert omitted == 1
+
+
+def test_the_path_filter_preserves_position():
+    """Order decides which copy of a tool wins, so a survivor has to carry where
+    it was — otherwise the capture cannot be replayed."""
+    from server.lifecycle.capture_env import filter_path
+
+    kept, _ = filter_path(["/nowhere", "/also/nowhere", "/usr/bin"])
+    assert [e["index"] for e in kept] == [2]
+
+
+def test_the_path_filter_drops_unrelated_software():
+    """The reason it exists: a full PATH names everything installed."""
+    from server.lifecycle.capture_env import filter_path
+
+    kept, omitted = filter_path([
+        "/Users/someone/.meteor",
+        "/Users/someone/.lmstudio/bin",
+        "/Users/someone/.cargo/bin",
+    ])
+    assert kept == []
+    assert omitted == 3

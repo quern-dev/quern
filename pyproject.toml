@@ -91,6 +91,13 @@ ignore = ["UP042"]
 # Test fixtures with embedded data (pbxproj, simctl JSON) can't be wrapped
 "tests/test_wda.py" = ["E501"]
 "tests/test_setup.py" = ["E501"]
+# UP017 rewrites `timezone.utc` to `datetime.UTC`, which is 3.11 -- correct
+# everywhere else here, and wrong in exactly these two files. They are the
+# diagnostic you run when quern is broken, so they must import under whatever
+# `python3` is around: Xcode's Command Line Tools ship 3.9.6 and still do.
+# tests/test_capture_env.py pins that floor by running them there.
+"server/lifecycle/capture_env.py" = ["UP017"]
+"scripts/capture-env.py" = ["UP017"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

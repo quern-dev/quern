@@ -45,14 +45,23 @@ class CapturedEnv:
     def venv_script(self) -> Path:
         return self.project_root / ".venv" / "bin" / "pymobiledevice3"
 
+    @property
+    def path(self) -> list[str]:
+        """The captured PATH directories, in their original order.
+
+        The capture keeps only the entries that matter and records each one's
+        index, so an omitted entry cannot silently change what resolves first.
+        """
+        return [entry["dir"] for entry in sorted(self.data["path"], key=lambda e: e["index"])]
+
     def path_as_setup_sees_it(self) -> list[str]:
         """PATH with the project venv prepended, which is what `run_setup` does
         before any check runs -- and the reason the console script wins."""
-        return [str(self.project_root / ".venv" / "bin"), *self.data["path"]]
+        return [str(self.project_root / ".venv" / "bin"), *self.path]
 
     def install(self, monkeypatch: pytest.MonkeyPatch, *, venv_on_path: bool) -> None:
         """Make the real lookups see this machine and nothing of the host's."""
-        entries = self.path_as_setup_sees_it() if venv_on_path else self.data["path"]
+        entries = self.path_as_setup_sees_it() if venv_on_path else self.path
         known = set(self.installs)
 
         def fake_which(name: str) -> str | None:

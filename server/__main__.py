@@ -615,6 +615,13 @@ def main() -> None:
         print(f"quern {get_version()}")
         sys.exit(0)
 
+    # Before the re-exec would matter and before anything heavy: this is the
+    # command people reach for when quern is broken, so it must not depend on
+    # the parts that might be. stdlib only, no venv required.
+    if len(sys.argv) >= 2 and sys.argv[1] == "capture-env":
+        from server.lifecycle.capture_env import run
+        sys.exit(run(sys.argv[2] if len(sys.argv) > 2 else None))
+
     # Lightweight commands — handle without heavy imports
     if len(sys.argv) >= 2 and sys.argv[1] == "setup":
         from server.lifecycle.setup import run_setup
