@@ -82,6 +82,41 @@ Two reserved branches on `origin`:
 Both branches are descendants of `main` at all times. Neither contains commits
 that aren't already in `main`.
 
+### Before any of it: the documentation pass
+
+Every release so far has shipped at least one doc that contradicted the code,
+and they were found by accident rather than by looking. The 0.16.0 cut found
+four, one of which told users the opposite of what the release did. Work this
+list before the version bump, because the release tarball is archived from the
+tag and whatever is stale at that moment ships.
+
+For each item, ask "did this release change what this file asserts?" — not
+"did this release touch this file".
+
+- [ ] **`README.md`** — the feature bullets, the CLI command block, and the
+      `~/.quern/` state table. `tests/test_readme_sync.py` catches a *missing*
+      command; it cannot catch a description that is now wrong.
+- [ ] **`CONTRIBUTING.md`** — the design-decision and behaviour sections. A
+      release that establishes a rule should say so here, or the next person
+      re-derives it.
+- [ ] **`docs/agent-guide.md`** — what an agent should reach for and what a new
+      refusal means. Agents retry unexplained errors, so a new non-retryable
+      failure has to be described as one. Check too that no step tells an agent
+      to shell out around a Quern tool.
+- [ ] **`docs/api-reference.md`** — new endpoints, new request fields, new
+      status codes.
+- [ ] **`docs/guides/*.md`** — the ones whose subject the release changed. These
+      sync to quern.dev, so a stale guide is a stale public page.
+- [ ] **`macos/QuernMenuBar/README.md`** — build and release steps for the app.
+- [ ] **`CHANGELOG.md`** — rename `Unreleased`, date it, add the link ref.
+- [ ] **Run the sync** — `python3 scripts/sync-docs.py --repo <quern>` in the
+      quern.dev checkout, and commit what it changes. A guide corrected in this
+      repo and never synced leaves the site serving the old text; that happened
+      once for a week.
+- [ ] **Pick the version deliberately.** New commands, new config fields, or a
+      call that now refuses where it used to succeed are a minor bump, not a
+      patch — regardless of how the work was framed while doing it.
+
 ### Cutting a stable release
 
 ```sh
