@@ -1217,6 +1217,7 @@ class TestTunneldDriftReporting:
 
         from server.device import tunneld
 
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
         monkeypatch.setattr(
             tunneld, "installed_plist_arguments",
@@ -1234,6 +1235,7 @@ class TestTunneldDriftReporting:
 
         from server.device import tunneld
 
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(
             tunneld, "installed_plist_log_path", lambda: Path("/Users/x/.quern/tunneld.log")
         )
@@ -1270,6 +1272,7 @@ class TestTunneldDriftReporting:
         other than the tunnel daemon, and passed a check that read args[0]."""
         from server.device import tunneld
 
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
         monkeypatch.setattr(
             tunneld, "installed_plist_arguments",
@@ -1283,6 +1286,7 @@ class TestTunneldDriftReporting:
 
         from server.device import tunneld
 
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
         monkeypatch.setattr(
             tunneld, "installed_plist_arguments",
