@@ -1237,6 +1237,27 @@ class TestTunneldDriftReporting:
         drift = tunneld.installed_plist_drift()
         assert drift is not None and "log path" in drift
 
+    @pytest.mark.asyncio
+    async def test_a_missing_binary_still_reports_plist_drift(self, monkeypatch, tmp_path):
+        """"pymobiledevice3 not found" and "the daemon points at a binary that
+        no longer exists" are the same situation from two ends, and only the
+        second says the daemon is broken too. Returning early reported the
+        first and hid the second."""
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        plist = tmp_path / "com.quern.tunneld.plist"
+        plist.write_text("")
+        monkeypatch.setattr(tunneld, "PLIST_PATH", plist)
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: None)
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(tunneld, "installed_plist_program", lambda: Path("/gone/pmd3"))
+
+        health = await tunneld.tunneld_health()
+        assert health.status == "no_binary"
+        assert "/gone/pmd3" in health.detail, "drift was not surfaced"
+
     def test_a_current_plist_reports_no_drift(self, monkeypatch):
         from pathlib import Path
 

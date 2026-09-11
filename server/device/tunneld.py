@@ -235,9 +235,20 @@ async def tunneld_health() -> TunneldHealth:
     """
     binary = find_pymobiledevice3_binary()
     if binary is None:
+        # An installed plist still has something to say here. When the binary
+        # it froze in has been removed, "pymobiledevice3 not found" and
+        # "the daemon points at a binary that no longer exists" are the same
+        # situation described from two ends, and only the second tells you the
+        # daemon is now broken as well as the CLI. Returning before the drift
+        # check reported the first and hid the second.
+        detail = "pymobiledevice3 binary not found, so tunneld cannot run"
+        if PLIST_PATH.exists():
+            drift = installed_plist_drift()
+            if drift:
+                detail = f"{detail} — {drift}"
         return TunneldHealth(
             status="no_binary",
-            detail="pymobiledevice3 binary not found, so tunneld cannot run",
+            detail=detail,
             remedy="pipx install pymobiledevice3",
         )
 
