@@ -81,4 +81,8 @@ enum QuernCLI {
     static func setChannel(_ channel: String, completion: ((Int32, String) -> Void)? = nil) {
         run(["set-channel", channel], completion: completion)
     }
+
+    static func setAutoInstallCert(_ enabled: Bool, completion: ((Int32, String) -> Void)? = nil) {
+        run(["set-auto-install-cert", enabled ? "on" : "off"], completion: completion)
+    }
 }

@@ -12,10 +12,12 @@ final class SettingsModel: ObservableObject {
     @Published var snapshot = QuernSnapshot()
     @Published var loginEnabled = LoginItem.isEnabled()
     @Published var channel: String = "stable"
+    @Published var autoInstallCert: Bool = false
 
     func apply(_ snap: QuernSnapshot) {
         snapshot = snap
         if let c = snap.update.channel { channel = c }
+        autoInstallCert = snap.proxy.autoInstallCert
     }
 }
 
@@ -80,6 +82,35 @@ struct SettingsView: View {
                     ("Name", d.name ?? "—"),
                     ("UDID", d.udid ?? "—"),
                 ])
+            }
+
+            GroupBox("Network capture") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(isOn: $model.autoInstallCert) {
+                        Text("Install the capture certificate automatically")
+                    }
+                    .onChange(of: model.autoInstallCert) { newValue in
+                        // Same guard as the channel picker below: apply()
+                        // assigns this on every fresh snapshot, and writing
+                        // back on that path would shell out on each refresh.
+                        guard newValue != model.snapshot.proxy.autoInstallCert else { return }
+                        QuernCLI.setAutoInstallCert(newValue)
+                    }
+                    .accessibilityLabel("Install the capture certificate automatically")
+
+                    // Says what it costs, not just what it does. This installs
+                    // a root certificate authority, which is a longer-lived
+                    // commitment than enabling capture, and the whole reason
+                    // the setting is surfaced here rather than left in a file.
+                    Text(model.autoInstallCert
+                         ? "Quern will install its certificate on a device when capture needs it."
+                         : "Quern will ask before installing its certificate on a device.")
+                        .foregroundColor(.secondary)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             GroupBox("Updates") {

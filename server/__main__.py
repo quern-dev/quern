@@ -424,6 +424,47 @@ def _cmd_grant_full_perms() -> int:
     return 0
 
 
+def _cmd_set_auto_install_cert(args: list[str]) -> int:
+    """Read or set the automatic CA-install policy.
+
+    Usage:
+        quern set-auto-install-cert on|off
+        quern set-auto-install-cert          # print the current setting
+
+    Capturing HTTPS from a device that does not trust the mitmproxy CA fails
+    every request, and the symptom points nowhere near the proxy. Quern
+    normally refuses to configure the proxy in that state and asks. Turning
+    this on answers the question once, in advance.
+
+    It is off by default because installing a MITM root CA is a larger and
+    longer-lived commitment than the proxy toggle that prompts it.
+    """
+    from server.config import get_auto_install_cert, set_auto_install_cert
+
+    if not args:
+        state = "on" if get_auto_install_cert() else "off"
+        print(f"Automatic certificate install: {state}")
+        if state == "off":
+            print("Quern will ask before installing the mitmproxy CA on a device.")
+        else:
+            print("Quern will install the mitmproxy CA when capture needs it.")
+        return 0
+
+    target = args[0].lower()
+    if target in ("on", "true", "yes", "1"):
+        set_auto_install_cert(True)
+        print("Automatic certificate install: on")
+        print("Quern will install the mitmproxy CA when capture needs it.")
+        return 0
+    if target in ("off", "false", "no", "0"):
+        set_auto_install_cert(False)
+        print("Automatic certificate install: off")
+        return 0
+
+    print(f"Unknown value {args[0]!r}. Use 'on' or 'off'.", file=sys.stderr)
+    return 2
+
+
 def _cmd_set_channel(args: list[str]) -> int:
     """Persist the update channel preference (``stable`` or ``beta``).
 
@@ -598,6 +639,9 @@ def main() -> None:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
         sys.exit(_cmd_set_channel(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-auto-install-cert":
+        sys.exit(_cmd_set_auto_install_cert(sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
         from server.device.tunneld import cli_tunneld
