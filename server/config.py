@@ -4,13 +4,26 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("quern-debug-server.config")
 
-CONFIG_DIR = Path.home() / ".quern"
+# Honours QUERN_STATE_DIR, so redirecting it redirects *everything* under
+# ~/.quern -- the api key, config.json, the device pool, crash reports, the
+# tool snapshot, the installed-by-setup manifest, all of it.
+#
+# It used to redirect two files. `server/lifecycle/state.py` read the variable
+# itself and applied it to state.json and active-device.json only, while every
+# other path was built from `Path.home()` here. The test suite's own comment
+# said "QUERN_STATE_DIR redirects ~/.quern", which was the sandbox everyone
+# believed in: a test calling `regenerate_api_key()` would have rewritten the
+# developer's real key and left every MCP client on the machine authenticating
+# with a stale one, silently.
+_state_dir = os.environ.get("QUERN_STATE_DIR")
+CONFIG_DIR = Path(_state_dir) if _state_dir else Path.home() / ".quern"
 API_KEY_FILE = CONFIG_DIR / "api-key"
 USER_CONFIG_FILE = CONFIG_DIR / "config.json"
 

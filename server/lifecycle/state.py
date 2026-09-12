@@ -10,28 +10,23 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
-import os
 import socket
 import urllib.request
-from pathlib import Path
 from typing import Any, TypedDict
 
 from server.config import CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
-# Allow tests to override the state file path via env var to avoid
-# clobbering a running server's state.json.
-_state_dir = os.environ.get("QUERN_STATE_DIR")
-STATE_FILE = Path(_state_dir) / "state.json" if _state_dir else CONFIG_DIR / "state.json"
+# CONFIG_DIR honours QUERN_STATE_DIR, so these follow it too. They used to read
+# the variable themselves, which redirected these two files and nothing else --
+# see the note on CONFIG_DIR in server/config.py.
+STATE_FILE = CONFIG_DIR / "state.json"
 
 # Active device persistence is intentionally separate from STATE_FILE.
 # state.json is server-runtime data and gets deleted on `quern stop`; the
 # active device is user preference and must survive stop/start cycles.
-ACTIVE_DEVICE_FILE = (
-    Path(_state_dir) / "active-device.json" if _state_dir
-    else CONFIG_DIR / "active-device.json"
-)
+ACTIVE_DEVICE_FILE = CONFIG_DIR / "active-device.json"
 
 
 class ServerState(TypedDict, total=False):

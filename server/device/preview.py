@@ -16,9 +16,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.config import CONFIG_DIR
+
 logger = logging.getLogger("quern-debug-server.preview")
 
-QUERN_BIN_DIR = Path.home() / ".quern" / "bin"
+QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "ios-preview"
 APP_BUNDLE_NAME = "Quern Preview.app"
 _SOURCE_CANDIDATES = [

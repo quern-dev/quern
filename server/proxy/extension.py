@@ -27,6 +27,8 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from server.config import CONFIG_DIR
+
 BUNDLE_ID = "org.mitmproxy.macos-redirector.network-extension"
 APP_TAR_NAME = "Mitmproxy Redirector.app.tar"
 _EXTENSION_PLIST = (
@@ -174,7 +176,7 @@ def extension_health() -> ExtensionHealth:
 # directory: macOS keeps referring to the app bundle that registered an
 # extension, and unpacking to somewhere that gets cleaned up leaves the
 # activated extension pointing at nothing.
-INSTALL_DIR = Path.home() / ".quern" / "mitmproxy-redirector"
+INSTALL_DIR = CONFIG_DIR / "mitmproxy-redirector"
 
 
 def reinstall() -> tuple[bool, str]:

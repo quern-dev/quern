@@ -9,12 +9,13 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.u2")
 
 # Path to our forked Quern Driver APK (AdbKeyboard IME only, no launcher icon)
-_QUERN_DRIVER_APK = Path.home() / ".quern" / "bin" / "quern-driver.apk"
+_QUERN_DRIVER_APK = CONFIG_DIR / "bin" / "quern-driver.apk"
 
 # Android class → iOS-style type mapping
 _CLASS_MAP: dict[str, str] = {
