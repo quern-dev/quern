@@ -20,7 +20,6 @@ import asyncio
 import fcntl
 import json
 import logging
-import socket
 import ssl
 import subprocess
 import time
@@ -143,95 +142,95 @@ def _is_ahead_of(latest_sha: str | None) -> bool:
         return False
 
 
-#: What went wrong, and what the reader can do about it.
+#: What the reader is told, and what the log keeps.
 #:
-#: An error with no instruction is a dead end. "Could not check for updates"
-#: told the reader nothing they could act on, and neither does a bare
-#: `URLError` -- so each failure is matched to the thing that actually fixes it.
-#: The remedies genuinely differ: a name-resolution failure is the reader's
-#: network, an HTTP 503 is quern.dev's problem and waiting is the only move, and
-#: a certificate error on a machine running quern is very likely quern's own
-#: proxy still intercepting traffic.
+#: Two audiences, so two levels. On screen there are three outcomes, the same
+#: three every other updater has: an update is available, you are up to date,
+#: or the check could not be made. The third gets one short reason and one
+#: instruction, and that is all -- eight different wordings for "the network
+#: did not work" is a taxonomy of our exception handling, not information.
+#:
+#: The full exception text still goes to ~/.quern/server.log on every failure,
+#: because when the short answer is not enough the raw error is the only thing
+#: that is, and it costs a line to keep.
+#:
+#: Three remedies, because there are three things a person can actually do:
+#: fix their connection, wait for someone else to fix theirs, or report it.
+_CHECK_CONNECTION = "Check your internet connection, then try again."
+_WAIT = "Nothing to fix here — the update service is having trouble. Try again later."
+_REPORT = "Try again. If it keeps happening, run `quern capture-env` and open an issue."
+
+
 class CheckFailure(NamedTuple):
-    detail: str
-    """What happened, in the words of the thing that failed."""
+    summary: str
+    """One short line naming the kind of failure. Shown."""
 
     remedy: str
-    """What to do about it."""
+    """What to do about it. Shown."""
+
+    detail: str
+    """The raw error, in the words of the thing that failed. Logged, not shown."""
 
     def lines(self) -> list[str]:
-        return [self.detail, self.remedy]
+        """The surfaced form: a reason and an instruction, never the raw error."""
+        return [f"Could not check for updates: {self.summary}", self.remedy]
 
 
 def describe_failure(exc: BaseException) -> CheckFailure:
-    """Match an exception to an instruction."""
+    """Sort an exception into one of three things the reader can do."""
     endpoint = ENDPOINT.split("//", 1)[-1].split("/", 1)[0]
+    detail = f"{type(exc).__name__}: {exc}"
+    # urllib wraps the real cause in a URLError whose str() is
+    # "<urlopen error ...>" -- the wrapper's own name, with the type of the
+    # thing that actually failed nowhere in it. The log is the only place the
+    # exception survives now, so it keeps the cause.
+    reason = getattr(exc, "reason", None)
+    if reason is not None and not isinstance(reason, str):
+        detail += f" (cause: {type(reason).__name__}: {reason})"
 
+    # Ordered most-specific first. HTTPError is a URLError is an OSError, so
+    # the reverse order would swallow the two specific cases whole.
     if isinstance(exc, urllib.error.HTTPError):
+        return CheckFailure(f"{endpoint} answered {exc.code}.", _WAIT, detail)
+
+    # Certificate verification specifically, not the whole ssl.SSLError family.
+    # A handshake reset is a network failure and wants the network remedy; only
+    # a rejected certificate means something is reading the traffic.
+    #
+    # quern used to be the usual cause of this, because configuring the system
+    # proxy made it intercept its own update check. It no longer can -- see
+    # ALWAYS_BYPASS in server/proxy/addon.py -- so reaching here now means
+    # something else on the network is doing it.
+    cert_error = exc if isinstance(exc, ssl.SSLCertVerificationError) else None
+    if cert_error is None and isinstance(
+        getattr(exc, "reason", None), ssl.SSLCertVerificationError
+    ):
+        cert_error = exc.reason  # type: ignore[attr-defined]
+    if cert_error is not None:
         return CheckFailure(
-            f"{endpoint} answered {exc.code} ({exc.reason}).",
-            "Nothing to fix locally — the update service is having trouble. "
-            "Try again later.",
+            "something on this network is intercepting HTTPS.",
+            _REPORT,
+            f"{type(cert_error).__name__}: {cert_error}",
         )
 
-    ssl_error = exc if isinstance(exc, ssl.SSLError) else getattr(exc, "reason", None)
-    if isinstance(ssl_error, ssl.SSLError):
-        # `ssl_error`, not `exc`. urllib wraps the cause in a URLError whose
-        # str() is "<urlopen error (...)>" -- the wrapper's own name and a
-        # parenthesised tuple, with the sentence that says *which* check failed
-        # buried inside it. The inner error reads as prose.
-        #
-        # The one failure with a quern-specific cause. quern's proxy intercepts
-        # HTTPS, so a machine left with the system proxy configured cannot
-        # verify a certificate for anything, this included.
-        return CheckFailure(
-            f"Could not verify the TLS certificate for {endpoint}: {ssl_error}.",
-            "Something is intercepting HTTPS. If quern's proxy is still "
-            "configured, turn it off with `quern stop` or the menu bar's "
-            "Stop Server. Otherwise a corporate network or antivirus is "
-            "likely inspecting traffic.",
-        )
+    # Every network failure, in one bucket, keyed on the OS error family rather
+    # than on a list of the ones we have seen. urlopen wraps connection-phase
+    # errors in URLError, but a connection dropped while reading the response
+    # arrives raw from http.client -- and both mean the same thing to a reader.
+    if isinstance(exc, OSError):
+        return CheckFailure(f"could not reach {endpoint}.", _CHECK_CONNECTION, detail)
 
-    reason = getattr(exc, "reason", exc)
-    if isinstance(reason, socket.gaierror):
-        return CheckFailure(
-            f"Could not resolve {endpoint}: {reason}.",
-            "Check your internet connection, then try again.",
-        )
-    if isinstance(reason, TimeoutError | socket.timeout):
-        return CheckFailure(
-            f"{endpoint} did not answer within {TIMEOUT}s.",
-            "Check your internet connection. If it is fine, the update "
-            "service may be slow — try again in a minute.",
-        )
-    if isinstance(reason, ConnectionRefusedError):
-        return CheckFailure(
-            f"{endpoint} refused the connection: {reason}.",
-            "A firewall or proxy is likely blocking it. Check your network "
-            "settings, then try again.",
-        )
-    if isinstance(exc, urllib.error.URLError):
-        return CheckFailure(
-            f"Could not reach {endpoint}: {reason}.",
-            "Check your internet connection, then try again.",
-        )
     if isinstance(exc, ValueError):
         # json.JSONDecodeError is a ValueError.
-        return CheckFailure(
-            f"{endpoint} sent a response quern could not read: {exc}.",
-            "Nothing to fix locally. Try again later, and report it if it "
-            "keeps happening.",
-        )
+        return CheckFailure(f"{endpoint} sent something unreadable.", _WAIT, detail)
 
-    return CheckFailure(
-        f"{type(exc).__name__}: {exc}",
-        "Try again, and report it with `quern capture-env` if it persists.",
-    )
+    return CheckFailure("the check did not complete.", _REPORT, detail)
 
 
 def check_for_updates(
     force: bool = False,
     on_error: Callable[[CheckFailure], None] | None = None,
+    on_declined: Callable[[], None] | None = None,
 ) -> str | None:
     """Return a message if updates are available, None otherwise.
 
@@ -251,6 +250,13 @@ def check_for_updates(
         # Respect opt-out
         config = read_user_config()
         if config.get("update_check") is False:
+            # Declined, not failed. The caller must be able to tell those
+            # apart: reporting an error at someone who deliberately turned
+            # checking off sends them to the issue tracker over a setting they
+            # chose, and falling through to the cache answers with whatever the
+            # last check before the opt-out happened to find.
+            if on_declined is not None:
+                on_declined()
             return None
 
         # Check rate limit
@@ -355,11 +361,22 @@ def check_for_updates(
         return message
 
     except Exception as exc:
-        # Silent by default: this runs on every server start and a failed
-        # update check is not worth a line of startup noise. `on_error` is how
-        # a caller who *asked* gets told why -- see `_cmd_check_updates`.
+        failure = describe_failure(exc)
+        # The raw error goes to the log every time, including the background
+        # check nobody asked for. It is one line, and it is the only place the
+        # exception survives now that the screen shows a summary -- so "show me
+        # what actually happened" has an answer.
+        logger.warning("Update check failed: %s", failure.detail)
+        # Quiet on screen by default: this runs on every server start, where a
+        # failed update check is not worth startup noise. `on_error` is how a
+        # caller who *asked* gets told -- see `_cmd_check_updates`.
         if on_error is not None:
-            on_error(describe_failure(exc))
+            try:
+                on_error(failure)
+            except Exception:
+                # The docstring promises this never raises into a server start
+                # path. A caller's reporting bug must not become quern's.
+                logger.exception("Update check error handler raised")
         return None
 
 

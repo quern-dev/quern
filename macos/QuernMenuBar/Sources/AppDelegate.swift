@@ -37,6 +37,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Holds "Checking…" on screen long enough to be seen. See MinimumDisplay.
     private let checkIndicator = MinimumDisplay()
 
+    /// Puts the status item back to whatever is still happening.
+    ///
+    /// `activityText` is one slot with three writers -- the lifecycle, the
+    /// update check, and the updater -- and none of them used to consult the
+    /// others. Writing nil unconditionally at the end of a check blanked
+    /// "Starting…" for the rest of a daemon start, which is the "ran for
+    /// minutes with nothing on screen" failure the field exists to prevent.
+    private func restoreActivityText() {
+        activityText = lifecycle.isBusy ? lifecycle.statusText : nil
+    }
+
     /// Everything about what is happening to the daemon. This class renders it
     /// and owns none of it -- see LifecycleController for why that split
     /// exists.
@@ -54,7 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Same reasoning as the updater: "Starting…" in a closed menu is
             // not feedback. LifecycleController already knows whether it is
             // busy, so this only has to render it.
-            self.activityText = self.lifecycle.isBusy ? self.lifecycle.statusText : nil
+            // Not while a check is on screen: a lifecycle step finishing
+            // mid-check would clear "Checking…" early, and MinimumDisplay puts
+            // a floor under the completion, not under an unrelated writer.
+            if !self.checkingForUpdates {
+                self.activityText = self.lifecycle.isBusy ? self.lifecycle.statusText : nil
+            }
             self.refreshStatusButton()
         }
         controller.onAlert = { [weak self] message, detail in
@@ -397,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.checkIndicator.end { [weak self] in
                 guard let self else { return }
                 self.checkingForUpdates = false
-                self.activityText = nil
+                self.restoreActivityText()
                 // The reader refreshes on its own three-second poll, but
                 // waiting for that after an action the user explicitly took
                 // reads as nothing having happened.
@@ -414,7 +430,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     return
                 }
-                self.reportFailure("Could not check for updates", detail: output)
+                // Named, not collapsed. A missing wrapper, a watchdog kill
+                // and a CLI error are three different problems with three
+                // different answers, and one alert saying "could not check"
+                // for all of them is the dead end this work exists to remove.
+                // LifecycleController.run already discriminates these; this
+                // path did not.
+                switch code {
+                case QuernCLI.notFoundStatus:
+                    self.reportFailure("Could not find the quern command",
+                                       detail: output)
+                case QuernCLI.timedOutStatus:
+                    self.reportFailure(
+                        "The update check did not finish",
+                        detail: output + "\n\nThis usually means the network "
+                            + "is not answering. Try again, or run "
+                            + "`quern check-updates` in a terminal to see why."
+                    )
+                default:
+                    self.reportFailure("Could not check for updates", detail: output)
+                }
             }
         }
     }

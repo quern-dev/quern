@@ -187,12 +187,23 @@ enum QuernCLI {
     }
 
     static func checkForUpdates(_ completion: ((Int32, String) -> Void)? = nil) {
-        // Fifteen seconds, sized from what the work actually costs: one HTTP
-        // request the server caps at 5s, plus process start-up. Measured at
-        // about half a second in practice. Deliberately *above* that 5s cap
-        // rather than at it -- if the two raced, a slow network would kill the
-        // process instead of letting the request time out and report why.
-        run(["check-updates"], timeout: 15, completion: completion)
+        // A backstop, not the user-facing timeout. That one lives in the
+        // server -- a 5s cap on the HTTP request -- and it is the one that
+        // produces a real message, because it knows what failed. This watchdog
+        // only kills the process, and a killed process has nothing to say.
+        //
+        // So it has to sit above the worst case the check can legitimately
+        // take, and 15s did not. The 5s is `urlopen`'s timeout, which is
+        // per socket operation rather than a total, and `create_connection`
+        // applies it to each resolved address in turn -- quern.dev has two.
+        // On a git install the check also shells out to git three times, at
+        // 5s, 10s and 10s. Measured end to end at about half a second in the
+        // normal case; the legitimate worst case is north of forty seconds.
+        //
+        // At 15s a slow network killed the process *before* the inner request
+        // could time out and say why, throwing away the reason the user is
+        // being shown. 45s means the inner timeout wins every race it should.
+        run(["check-updates"], timeout: 45, completion: completion)
     }
 
     static func update(_ completion: ((Int32, String) -> Void)? = nil) {

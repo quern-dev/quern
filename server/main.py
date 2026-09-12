@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -1073,6 +1074,44 @@ def _fetch_device_tools() -> tuple[dict | None, str]:
     return tools, ""
 
 
+@contextlib.contextmanager
+def _update_check_logged_to_file():
+    """Send the update check's own log lines to server.log, not the terminal.
+
+    The daemon gets this for free: `daemonize()` redirects its stderr into
+    server.log, so a `logger.warning` lands there. A CLI command has no such
+    redirection and no handler, so logging falls back to stderr -- which would
+    print the raw exception on screen directly underneath the one-line summary
+    that exists to replace it, and would make "the full error is in
+    server.log" a false promise in the same breath.
+    """
+    log = logging.getLogger("quern-debug-server.update-check")
+    from server.lifecycle.daemon import LOG_FILE
+
+    handler = None
+    previous = log.propagate
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(LOG_FILE)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        log.addHandler(handler)
+        log.propagate = False
+    except OSError:
+        # An unwritable log directory must not stop the check. The summary and
+        # the remedy still reach the reader; only the detail is lost, and the
+        # pointer to it is the same sentence either way.
+        pass
+    try:
+        yield
+    finally:
+        log.propagate = previous
+        if handler is not None:
+            log.removeHandler(handler)
+            handler.close()
+
+
 def _cmd_check_updates() -> int:
     """Ask now, rather than waiting for the daily check.
 
@@ -1088,21 +1127,34 @@ def _cmd_check_updates() -> int:
     )
 
     failures: list[CheckFailure] = []
-    message = check_for_updates(force=True, on_error=failures.append)
+    declined: list[bool] = []
+    with _update_check_logged_to_file():
+        message = check_for_updates(
+            force=True,
+            on_error=failures.append,
+            on_declined=lambda: declined.append(True),
+        )
+
+    if declined:
+        # Not a failure, and not an answer either. Saying "up to date" here
+        # would be a check we never made; saying "could not check" would send
+        # someone to the issue tracker over their own setting.
+        print("Update checking is turned off in ~/.quern/config.json.")
+        print('Set "update_check": true there to turn it back on.')
+        return 1
 
     if failures:
         # Before the cache is consulted, deliberately. read_update_info()
         # returns whatever the last *successful* check left behind, so asking
         # it first lets a stale "update available" answer a question the
-        # network never got to. The reader asked what is out there now; the
-        # honest answer is that we could not find out, and why.
-        #
-        # The remedies genuinely differ, which is the point of discriminating
-        # at all: a DNS failure is the reader's own network, a 503 is nobody's
-        # to fix but the service's, and a certificate error on a machine
-        # running quern is usually quern's own proxy still intercepting.
+        # network never got to.
         for line in failures[0].lines():
             print(line, file=sys.stderr)
+        # Where the raw error went. The screen gets a summary now, so this is
+        # the pointer to the thing that actually happened.
+        from server.lifecycle.daemon import LOG_FILE
+        print(f"The full error is in {LOG_FILE}", file=sys.stderr)
+
         return 1
 
     info = read_update_info() or {}
@@ -1112,13 +1164,13 @@ def _cmd_check_updates() -> int:
         return 0
 
     if not info:
-        # Distinct from "checked, nothing new" and from an error we caught: the
-        # check ran, raised nothing, and still left no result. Saying "up to
-        # date" on the strength of a lookup that produced nothing would be the
-        # wrong reassurance.
-        print("The update check produced no result.", file=sys.stderr)
-        print("Try again, and report it with `quern capture-env` if it "
-              "keeps happening.", file=sys.stderr)
+        # Distinct from "checked, nothing new", from a check we declined to
+        # make, and from one that raised: this one ran, raised nothing, and
+        # still left no result. "Up to date" would be the wrong reassurance.
+        print("Could not check for updates: the check produced no result.",
+              file=sys.stderr)
+        print("Try again. If it keeps happening, run `quern capture-env` and "
+              "open an issue.", file=sys.stderr)
         return 1
 
     current = info.get("current_version") or "unknown"

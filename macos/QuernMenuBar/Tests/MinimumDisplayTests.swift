@@ -86,6 +86,23 @@ enum MinimumDisplayTests {
             Harness.expect(calls, 1, "completion calls")
         }
 
+        Harness.test("the default duration is the shipped floor") {
+            // The gap a review found: every other case passes an explicit
+            // duration, so the default argument -- the only construction
+            // anywhere in Sources -- was never exercised. Changing it to zero
+            // left all 41 tests green while shipping the exact flicker this
+            // file exists to remove.
+            let clock = TestScheduler()
+            let display = MinimumDisplay(scheduler: clock)
+            var finished = false
+            display.begin()
+            clock.advance(by: MinimumDisplay.standard / 2)
+            display.end { finished = true }
+            Harness.expect(finished, false, "default floor held")
+            clock.advance(by: MinimumDisplay.standard)
+            Harness.expect(finished, true, "default floor released")
+        }
+
         Harness.test("the shipped floor is long enough to be seen") {
             // A real check measures 0.47-0.94s, so a floor at or below the fast
             // end would leave the flicker this exists to remove. Asserted

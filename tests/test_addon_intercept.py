@@ -503,3 +503,68 @@ def test_done_resumes_all_held(addon, output):
     # Should also emit stopped status
     status = output.of_type("status")
     assert any(e.get("event") == "stopped" for e in status)
+
+
+# ---------------------------------------------------------------------------
+# quern never intercepts its own update traffic
+# ---------------------------------------------------------------------------
+
+
+class TestAlwaysBypass:
+    """quern's own hosts pass through, whatever the user's bypass list says.
+
+    Configuring the system proxy made quern man-in-the-middle its own update
+    check, so the certificate stopped verifying and the update check failed on
+    exactly the machines running quern. quern caused that, so quern fixes it
+    rather than printing advice about it.
+    """
+
+    def test_querns_own_host_is_bypassed_with_an_empty_list(self):
+        addon = IOSDebugAddon()
+        assert addon._bypass_patterns == [], "precondition: nothing configured"
+        assert addon._is_bypassed("quern.dev") is True
+
+    def test_subdomains_are_bypassed_too(self):
+        addon = IOSDebugAddon()
+        assert addon._is_bypassed("api.quern.dev") is True
+
+    def test_clearing_the_bypass_list_does_not_expose_it(self):
+        # The reason this is not just a seeded default. `clear_bypass` empties
+        # the user's list, so a seed there would be silently removable -- the
+        # same failure with one more step in front of it.
+        addon = IOSDebugAddon()
+        addon._handle_set_bypass({"patterns": ["example.com"]})
+        addon._handle_clear_bypass()
+        assert addon._bypass_patterns == []
+        assert addon._is_bypassed("quern.dev") is True
+
+    def test_removing_it_explicitly_does_not_expose_it_either(self):
+        addon = IOSDebugAddon()
+        addon._handle_remove_bypass({"patterns": ["quern.dev"]})
+        assert addon._is_bypassed("quern.dev") is True
+
+    def test_everything_else_is_still_intercepted(self):
+        # The bypass is targeted. If it were not, the proxy would have quietly
+        # stopped doing the one thing it exists for.
+        addon = IOSDebugAddon()
+        for host in ("example.com", "api.github.com", "quern.dev.evil.com"):
+            assert addon._is_bypassed(host) is False, host
+
+    def test_tls_is_never_terminated_for_querns_own_host(self):
+        # The layer that matters. Skipping interception at the request hook
+        # would be too late: mitmproxy would already have replaced the
+        # certificate, which is the thing that failed verification.
+        addon = IOSDebugAddon()
+        data = MagicMock()
+        data.context.client.sni = "quern.dev"
+        data.ignore_connection = False
+        addon.tls_clienthello(data)
+        assert data.ignore_connection is True
+
+    def test_tls_is_still_terminated_for_everything_else(self):
+        addon = IOSDebugAddon()
+        data = MagicMock()
+        data.context.client.sni = "example.com"
+        data.ignore_connection = False
+        addon.tls_clienthello(data)
+        assert data.ignore_connection is False

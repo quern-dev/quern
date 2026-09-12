@@ -73,7 +73,15 @@ def _pipx_is_global(site: ToolSite) -> bool:
     if not site.path:
         return False
     try:
-        Path(site.path).resolve().relative_to(Path.home())
+        # Both sides resolved. Resolving only the left one compares paths from
+        # two different namespaces: any symlink above home -- and symlinking
+        # /Users/<name> to an external volume is exactly how the machines this
+        # targets are set up -- makes the resolved site path escape the
+        # unresolved home, relative_to raises, and a per-user install is called
+        # global. quern then offers `sudo pipx upgrade --global`, which asks
+        # for a password and then fails "Package is not installed": the bug
+        # this function exists to prevent, in mirror image.
+        Path(site.path).resolve().relative_to(Path.home().resolve())
     except ValueError:
         return True
     except OSError:

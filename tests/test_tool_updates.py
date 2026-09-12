@@ -1314,3 +1314,34 @@ def test_a_sudo_upgrade_runs_when_there_is_a_terminal(
     ]
     assert ok is True
     assert "may be asked for your password" in capsys.readouterr().out
+
+
+def test_a_per_user_install_is_not_called_global_when_home_is_a_symlink(
+    tmp_path, monkeypatch
+):
+    """The case the other tests structurally cannot see.
+
+    Every other test builds its paths from `Path.home()` itself, so both sides
+    of the comparison agree by construction and `resolve()` is the identity.
+    That is the recorded shape of a test passing against the bug it claims to
+    cover, so this one reaches home through a symlink -- which is how a machine
+    with its home on an external volume is actually set up, i.e. the exact
+    population the global-pipx feature was written for.
+    """
+    from server.device.tool_updates import _pipx_is_global
+
+    real = tmp_path / "real_home"
+    (real / ".local" / "pipx" / "venvs" / "fb-idb" / "bin").mkdir(parents=True)
+    link = tmp_path / "home"
+    link.symlink_to(real)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: link))
+
+    site = ToolSite(
+        name="idb",
+        role="primary",
+        source="pipx",
+        path=str(link / ".local/pipx/venvs/fb-idb/bin/idb"),
+        version="1.0.0",
+    )
+    assert link.resolve() != link, "the symlink is the point of this test"
+    assert _pipx_is_global(site) is False
