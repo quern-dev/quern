@@ -17,8 +17,10 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.lifecycle.invocation import run_it_yourself
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
@@ -569,6 +571,54 @@ def _report_tool_updates(apply: bool = False) -> bool:
     return not failures
 
 
+#: Where `quern update` records what it did.
+#:
+#: The exit code cannot carry this. "Already up to date" has to stay 0 or every
+#: script that treats nonzero as failure breaks, so success and did-nothing
+#: arrive at a caller looking identical -- and the menu bar, seeing 0, waited
+#: thirty seconds for a version to change that was never going to, then
+#: reported that an update had finished when none was attempted.
+#:
+#: A file rather than a flag on stdout: it outlives the run, so "what happened
+#: last time I updated?" has an answer at all. Nothing else did -- the menu bar
+#: logged the CLI's output only on failure, so a successful or no-op update
+#: left no record anywhere.
+RESULT_FILE = CONFIG_DIR / "last-update.json"
+
+#: The outcomes. `no_op` is the one the exit code could not express.
+UPDATED = "updated"
+NO_OP = "no_op"
+FAILED = "failed"
+
+
+def _clear_result() -> None:
+    """Drop any previous result, so a stale one cannot answer for this run."""
+    try:
+        RESULT_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _installed_version() -> str | None:
+    """The version on disk now that the update has finished, or None."""
+    root = _find_project_root()
+    return _read_local_version(root) if root is not None else None
+
+
+def _write_result(outcome: str, detail: str, version: str | None = None) -> None:
+    """Record the outcome. Best-effort: a failed write must not fail the update."""
+    try:
+        RESULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RESULT_FILE.write_text(json.dumps({
+            "outcome": outcome,
+            "detail": detail,
+            "version": version,
+            "finished_at": datetime.now(UTC).isoformat(),
+        }, indent=2))
+    except OSError:
+        pass
+
+
 def run_update(apply_tools: bool = False) -> int:
     """Pull latest changes and rebuild.
 
@@ -578,9 +628,15 @@ def run_update(apply_tools: bool = False) -> int:
 
     Returns 0 on success, 1 on failure.
     """
+    # Cleared first, on every path. A stale result from the last run is worse
+    # than none: the menu bar would read a previous "updated" as this run's
+    # answer and relaunch into a version nothing just installed.
+    _clear_result()
+
     project_root = _find_project_root()
     if project_root is None:
         print("Error: could not find project root")
+        _write_result(FAILED, "could not find project root")
         return 1
 
     if _is_git_install(project_root):
@@ -589,10 +645,15 @@ def run_update(apply_tools: bool = False) -> int:
         rc = _update_via_tarball(project_root)
 
     if rc == 1:
+        _write_result(FAILED, "the update could not be applied")
         return 1  # Error
     if rc == 2:
-        # Nothing to rebuild, but external tools age independently of quern.
-        return 0 if _report_tool_updates(apply_tools) else 1
+        # Nothing was pulled, so there is nothing to rebuild and nothing for a
+        # caller to wait for. External tools age independently of quern, so
+        # they are still reported.
+        tools_ok = _report_tool_updates(apply_tools)
+        _write_result(NO_OP, "already up to date", version=_installed_version())
+        return 0 if tools_ok else 1
 
     failures = _rebuild_and_restart(project_root)
 
@@ -608,6 +669,8 @@ def run_update(apply_tools: bool = False) -> int:
         # naming the step matters: "dependencies could not be installed" after
         # a failed restart sends the reader to the wrong place.
         print(f"Update incomplete: {', '.join(failures)} failed.")
+        _write_result(FAILED, f"{', '.join(failures)} failed")
         return 1
 
+    _write_result(UPDATED, "update applied", version=_installed_version())
     return 0 if tools_ok else 1

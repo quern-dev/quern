@@ -52,6 +52,8 @@ final class Updater {
         var readVersion: (@escaping (String?, String) -> Void) -> Void = Updater.installedVersion
         var runUpdate: (@escaping (Int32, String) -> Void) -> Void = { QuernCLI.update($0) }
         var relaunch: ((String) -> Void)?
+        /// What the update recorded about itself. See UpdateResult.
+        var readResult: () -> UpdateResult? = { UpdateResult.read() }
     }
 
     private let deps: Dependencies
@@ -101,8 +103,20 @@ final class Updater {
             }
             status(.working("Updating…"))
 
+            // Before the CLI starts, so a record left by an earlier run cannot
+            // be read as this one's answer. That is not hypothetical: the CLI
+            // that upgrades *to* the first version writing the record is the
+            // old one, which writes nothing.
+            let startedAt = self.deps.scheduler.now
+
             self.deps.runUpdate { [weak self] code, output in
                 guard let self else { return }
+                // Every run, not only the failures. This output was the only
+                // account of what the update actually did -- which branch it
+                // was on, what it skipped, which external tools are behind --
+                // and throwing it away on success left no record anywhere of a
+                // successful or no-op update.
+                NSLog("quern update exited \(code):\n\(output)")
                 if code != 0 {
                     // `quern update` runs the whole update synchronously, so
                     // this completion does not arrive for a minute or more and
@@ -114,6 +128,20 @@ final class Updater {
                     status(.finished("Update failed"))
                     NSLog("quern update failed (\(code)): \(output)")
                     failure("The update did not complete", output)
+                    return
+                }
+                // Exit 0 does not mean something happened. "Already up to
+                // date" has to exit 0 too, or every script treating nonzero as
+                // failure breaks -- so the code alone cannot tell an update
+                // from a no-op, and reading it as an update meant polling
+                // thirty seconds for a version that was never going to move,
+                // then reporting that an update had finished when none was
+                // attempted. The CLI writes down which it was.
+                let recorded = self.deps.readResult()
+                if recorded?.describes(runStartedAt: startedAt) == true,
+                   recorded?.isNoOp == true {
+                    self.inProgress = false
+                    status(.finished("Already up to date"))
                     return
                 }
                 self.waitForNewVersionThenRelaunch(baseline: baseline)

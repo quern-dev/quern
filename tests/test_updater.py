@@ -7,6 +7,7 @@ step must be skipped when the user isn't actually on that branch.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -515,3 +516,139 @@ class TestAskingForAPassword:
 
         monkeypatch.setattr("builtins.open", no_tty)
         assert updater._can_ask_for_a_password() is False
+
+
+class TestTheUpdateRecord:
+    """`quern update` writes down what it did, because the exit code cannot.
+
+    "Already up to date" has to exit 0 -- the same as a real update -- or every
+    script treating nonzero as failure breaks. So a caller seeing 0 could not
+    tell an update from a no-op, and the menu bar, assuming it had updated,
+    polled thirty seconds for a version that was never going to move and then
+    announced that an update had finished.
+    """
+
+    @pytest.fixture
+    def sandbox(self, tmp_path, monkeypatch):
+        from server.lifecycle import updater
+        monkeypatch.setattr(updater, "RESULT_FILE", tmp_path / "last-update.json")
+        return updater
+
+    def _read(self, updater):
+        return json.loads(updater.RESULT_FILE.read_text())
+
+    def test_nothing_to_do_is_recorded_as_such(self, sandbox, monkeypatch):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        assert updater.run_update() == 0, "a no-op must still exit 0"
+        assert self._read(updater)["outcome"] == updater.NO_OP
+
+    def test_a_real_update_is_recorded_as_an_update(self, sandbox, monkeypatch):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _r: [])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+
+        assert updater.run_update() == 0
+        record = self._read(updater)
+        assert record["outcome"] == updater.UPDATED
+        assert record["version"] == "0.17.0"
+
+    def test_a_failure_is_recorded_as_a_failure(self, sandbox, monkeypatch):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 1)
+
+        assert updater.run_update() == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_a_partial_rebuild_is_a_failure_not_an_update(self, sandbox, monkeypatch):
+        # The source moved but part of the rebuild did not. Recording this as
+        # "updated" would have the menu bar relaunch into an install that is
+        # half-built.
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _r: ["restart"])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+
+        assert updater.run_update() == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_the_previous_run_is_cleared_even_if_this_one_crashes(
+        self, sandbox, monkeypatch
+    ):
+        """A stale record is worse than none.
+
+        Every ordinary path overwrites it, so clearing up front only matters
+        when a run ends without writing at all -- an exception escaping
+        mid-update. Then the previous run's record is still sitting there, and
+        the menu bar reading a "no_op" from it would skip the relaunch after an
+        update that genuinely happened. Asserting the ordinary paths instead
+        would pass with the clear removed entirely, which is what the first
+        version of this test did.
+        """
+        updater = sandbox
+        updater.RESULT_FILE.write_text(json.dumps({"outcome": "no_op"}))
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+
+        def explode(_root):
+            raise RuntimeError("the update died half way")
+
+        monkeypatch.setattr(updater, "_update_via_git", explode)
+
+        with pytest.raises(RuntimeError):
+            updater.run_update()
+
+        assert not updater.RESULT_FILE.exists(), (
+            "last run's record survived a run that wrote none"
+        )
+
+    def test_the_record_carries_a_timestamp_the_reader_can_parse(
+        self, sandbox, monkeypatch
+    ):
+        # The menu bar compares this against when it started the run, so a
+        # missing or unreadable one disables the whole mechanism.
+        from datetime import datetime
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        updater.run_update()
+        stamp = self._read(updater)["finished_at"]
+        assert datetime.fromisoformat(stamp).tzinfo is not None, "must be aware"
+
+    def test_an_unwritable_record_does_not_fail_the_update(
+        self, sandbox, monkeypatch
+    ):
+        # Best-effort. Losing the record costs the caller its shortcut, and it
+        # falls back to the version poll; failing the update would cost the
+        # user the update.
+        updater = sandbox
+
+        def unwritable(*_a, **_k):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(Path, "write_text", unwritable)
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        assert updater.run_update() == 0
