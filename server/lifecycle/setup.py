@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.device._xcode import xcode_available
 
 # ── Result types ──────────────────────────────────────────────────────────
@@ -212,7 +213,7 @@ def _get_version(cmd: list[str]) -> str | None:
     return None
 
 
-INSTALL_MANIFEST = Path.home() / ".quern" / "installed-by-setup.json"
+INSTALL_MANIFEST = CONFIG_DIR / "installed-by-setup.json"
 
 
 def _read_manifest() -> dict:
@@ -1215,7 +1216,7 @@ def _install_precommit_hook(project_root: Path) -> CheckResult:
     # resolves the checklist path relative to its own location ($0/..),
     # so the layout is: ~/.quern/bin/agent-precommit-checklist.sh and
     # ~/.quern/agent-precommit-checklist.md.
-    quern_dir = Path.home() / ".quern"
+    quern_dir = CONFIG_DIR
     bin_dir = quern_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     dest_script = bin_dir / "agent-precommit-checklist.sh"
@@ -1652,7 +1653,7 @@ def check_idb() -> CheckResult:
 
 def check_idb_companion() -> CheckResult:
     """Check for idb_companion, preferring the patched build in ~/.quern/bin/."""
-    quern_companion = Path.home() / ".quern" / "bin" / "idb_companion"
+    quern_companion = CONFIG_DIR / "bin" / "idb_companion"
     if quern_companion.is_file():
         return CheckResult(
             name="idb_companion",
@@ -1685,7 +1686,7 @@ def _install_patched_companion() -> bool:
     """Download and install the patched idb_companion to ~/.quern/bin/."""
     import urllib.request
 
-    dest = Path.home() / ".quern" / "bin"
+    dest = CONFIG_DIR / "bin"
     dest.mkdir(parents=True, exist_ok=True)
     tarball = dest / "idb-companion.tar.gz"
 
@@ -2675,7 +2676,7 @@ def run_setup() -> int:
 # ── Tool inventory ───────────────────────────────────────────────────────
 
 
-TOOL_SNAPSHOT = Path.home() / ".quern" / "tool-sites.json"
+TOOL_SNAPSHOT = CONFIG_DIR / "tool-sites.json"
 
 
 def _collect_sites_sync() -> list[dict]:

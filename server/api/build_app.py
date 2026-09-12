@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from server.config import CONFIG_DIR
 from server.models import BuildResult, DeviceError, DeviceType
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -250,7 +251,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         if controller._device_type(u) == DeviceType.SIMULATOR
     ]
 
-    derived = Path.home() / ".quern" / "builds" / body.scheme
+    derived = CONFIG_DIR / "builds" / body.scheme
     derived.mkdir(parents=True, exist_ok=True)
 
     # 5. Build each needed architecture concurrently

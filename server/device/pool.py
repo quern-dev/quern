@@ -10,15 +10,14 @@ import re
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 
-from server.config import get_default_device_family
+from server.config import CONFIG_DIR, get_default_device_family
 from server.device.controller import DeviceController
 from server.models import DeviceError, DevicePoolEntry, DevicePoolState, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.device-pool")
 
-POOL_FILE = Path.home() / ".quern" / "device-pool.json"
+POOL_FILE = CONFIG_DIR / "device-pool.json"
 REFRESH_CACHE_TTL_SECONDS = 2  # Avoid redundant simctl calls
 
 

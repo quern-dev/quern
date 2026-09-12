@@ -10,6 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.device import probing
 from server.models import DeviceError
 
@@ -19,7 +20,7 @@ logger = logging.getLogger("quern-debug-server.idb")
 class IdbBackend:
     """Manages UI inspection and interaction via idb subprocess calls."""
 
-    _QUERN_COMPANION = Path.home() / ".quern" / "bin" / "idb_companion"
+    _QUERN_COMPANION = CONFIG_DIR / "bin" / "idb_companion"
 
     def __init__(self) -> None:
         self._binary: str | None = None

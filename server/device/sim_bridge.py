@@ -21,12 +21,13 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.device import ax_recovery, probing
 from server.models import SimBridgeSaturatedError
 
 logger = logging.getLogger("quern-debug-server.sim-bridge")
 
-QUERN_BIN_DIR = Path.home() / ".quern" / "bin"
+QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "sim-bridge"
 _SOURCE_CANDIDATES = [
     Path(__file__).resolve().parent.parent.parent / "tools" / "sim-bridge.swift",
