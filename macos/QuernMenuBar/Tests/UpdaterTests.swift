@@ -16,6 +16,7 @@ enum UpdaterTests {
 
         final class Record {
             var statuses: [String] = []
+            var progress: [UpdateProgress] = []
             var failures: [(String, String)] = []
             var relaunchedInto: String?
             var versionCalls = 0
@@ -63,7 +64,7 @@ enum UpdaterTests {
         let updater = Updater(deps)
         record.updater = updater
         updater.restartToUpdate(
-            status: { record.statuses.append($0) },
+            status: { record.progress.append($0); record.statuses.append($0.text) },
             failure: { record.failures.append(($0, $1)) }
         )
         return (updater, clock, record)
@@ -105,6 +106,20 @@ enum UpdaterTests {
             Harness.expect(r.relaunchedInto == nil, "relaunched off a nil baseline")
         }
 
+        Harness.test("the deadline is short, because the update has already finished") {
+            // `quern update` is synchronous, so the poll is only waiting for a
+            // version read to start working again after the daemon restart.
+            // Sizing it for a background update left "Updating…" on screen for
+            // three minutes after the work was done.
+            let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.16.1", "0.16.1"])
+            clock.advance(by: 25)
+            Harness.expect(r.progress.last?.isWorking == true,
+                           "25s in, it should still be waiting")
+            clock.advance(by: 10)
+            Harness.expect(r.progress.last?.isWorking == false,
+                           "by 35s it should have given up and said so")
+        }
+
         Harness.test("a hung version check still reaches the deadline") {
             // The in-flight guard used to skip the tick that held the only
             // deadline check, so a call that never answered meant "Updating…"
@@ -131,7 +146,7 @@ enum UpdaterTests {
             // Without the skip every 2s tick spawns another subprocess for the
             // whole 180s, against a venv being rebuilt -- 90 of them.
             let (_, clock, r) = run(baseline: "0.16.1", thenVersions: [], versionHangs: true)
-            clock.advance(by: 40)
+            clock.advance(by: 20)
             Harness.expect(r.versionCalls, 2,
                            "expected the baseline read plus one outstanding poll, "
                                + "got \(r.versionCalls)")
@@ -139,7 +154,7 @@ enum UpdaterTests {
 
         Harness.test("an unchanged version is not reported as a timeout") {
             let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.16.1", "0.16.1"])
-            clock.advance(by: 200)
+            clock.advance(by: 60)
             Harness.expect(r.relaunchedInto == nil, "nothing changed, so nothing to relaunch into")
             Harness.expect(r.statuses.last?.contains("timed out") == false,
                            "`quern update` exited 0; calling that a timeout reports a "
@@ -156,6 +171,32 @@ enum UpdaterTests {
             expectRetryable(u, r, "a failed update")
         }
 
+        Harness.test("progress is reported as working until there is an answer") {
+            // The menu closes the instant you click an item, so a status that
+            // only reaches a menu line is invisible for the whole run. The
+            // status item shows `working`, and stops the moment there is an
+            // answer so the menu bar is not permanently wider.
+            let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.16.1", "0.16.1"])
+            Harness.expect(r.progress.first?.isWorking == true,
+                           "the first thing reported must be that work started")
+            clock.advance(by: 60)
+            Harness.expect(r.progress.last?.isWorking == false,
+                           "running out of time is an answer, not work in progress")
+        }
+
+        Harness.test("a failure is an answer, not continuing work") {
+            let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.17.0"],
+                                    updateResult: (1, "git pull failed"))
+            clock.advance(by: 10)
+            Harness.expect(r.progress.last?.isWorking == false,
+                           "a failed update must not leave the icon saying it is working")
+        }
+
+        Harness.test("an unreadable baseline stops reporting work immediately") {
+            let (_, _, r) = run(baseline: nil, thenVersions: [])
+            Harness.expect(r.progress.last?.isWorking == false, "reading")
+        }
+
         Harness.test("a second click while one is running is ignored") {
             let clock = TestScheduler()
             let record = Rig.Record()
@@ -170,7 +211,8 @@ enum UpdaterTests {
 
             let updater = Updater(deps)
             record.updater = updater
-            let go = { updater.restartToUpdate(status: { record.statuses.append($0) },
+            let go = { updater.restartToUpdate(status: {
+                record.progress.append($0); record.statuses.append($0.text) },
                                                failure: { record.failures.append(($0, $1)) }) }
             go()
             let afterFirst = record.versionCalls

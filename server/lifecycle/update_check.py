@@ -139,12 +139,20 @@ def _is_ahead_of(latest_sha: str | None) -> bool:
         return False
 
 
-def check_for_updates() -> str | None:
+def check_for_updates(force: bool = False) -> str | None:
     """Return a message if updates are available, None otherwise.
 
     Rate-limited to once per CHECK_INTERVAL seconds. Never blocks server
     startup — returns None on any error. Respects "update_check": false
     in ~/.quern/config.json.
+
+    `force` skips the rate limit but not the opt-out. The limit exists so a
+    running server does not hit the network every few minutes; it is the wrong
+    answer for someone who has just asked. Without a way past it, a release
+    landing this afternoon would not be offered until tomorrow, and the menu
+    bar -- which only knows what the cache last recorded -- had no way to ask.
+    The opt-out is a different thing: a user who turned checking off did not
+    ask, whoever is calling.
     """
     try:
         # Respect opt-out
@@ -153,7 +161,7 @@ def check_for_updates() -> str | None:
             return None
 
         # Check rate limit
-        if LAST_CHECK_FILE.exists():
+        if not force and LAST_CHECK_FILE.exists():
             last_check = LAST_CHECK_FILE.stat().st_mtime
             if time.time() - last_check < CHECK_INTERVAL:
                 return None

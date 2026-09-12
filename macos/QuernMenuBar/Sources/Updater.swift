@@ -15,6 +15,29 @@
 
 import AppKit
 
+/// Where an update has got to.
+///
+/// Split into working and finished because the two belong in different places.
+/// A menu line is only read when someone opens the menu, and the menu closes
+/// the instant you click an item -- so an update reported only there ran for
+/// three minutes with nothing on screen at all. Work in progress has to reach
+/// the status item itself; a final answer can wait for the menu.
+enum UpdateProgress: Equatable {
+    case working(String)
+    case finished(String)
+
+    var text: String {
+        switch self {
+        case .working(let t), .finished(let t): return t
+        }
+    }
+
+    var isWorking: Bool {
+        if case .working = self { return true }
+        return false
+    }
+}
+
 final class Updater {
     /// What the update does with the outside world, so a test can stand in for
     /// all of it. Defaults are the real thing, so nothing but a test passes any
@@ -33,7 +56,7 @@ final class Updater {
 
     private let deps: Dependencies
     private var pollWork: ScheduledWork?
-    private var onStatus: ((String) -> Void)?
+    private var onStatus: ((UpdateProgress) -> Void)?
 
     init(_ deps: Dependencies = Dependencies()) {
         self.deps = deps
@@ -54,13 +77,13 @@ final class Updater {
     /// which is worth an alert rather than a line of menu text nobody reopens
     /// the menu to read.
     func restartToUpdate(
-        status: @escaping (String) -> Void,
+        status: @escaping (UpdateProgress) -> Void,
         failure: @escaping (String, String) -> Void
     ) {
         guard !inProgress else { return }
         inProgress = true
         onStatus = status
-        status("Checking version…")
+        status(.working("Checking version…"))
 
         deps.readVersion { [weak self] version, detail in
             guard let self else { return }
@@ -72,11 +95,11 @@ final class Updater {
             // either, so there is nothing lost by stopping here.
             guard let baseline = version else {
                 self.inProgress = false
-                status("Could not read the installed version")
+                status(.finished("Could not read the installed version"))
                 failure("Could not start the update", detail)
                 return
             }
-            status("Updating…")
+            status(.working("Updating…"))
 
             self.deps.runUpdate { [weak self] code, output in
                 guard let self else { return }
@@ -88,7 +111,7 @@ final class Updater {
                     // child. `output` is the CLI's own reason; pass it through
                     // rather than paraphrasing it.
                     self.inProgress = false
-                    status("Update failed")
+                    status(.finished("Update failed"))
                     NSLog("quern update failed (\(code)): \(output)")
                     failure("The update did not complete", output)
                     return
@@ -120,7 +143,17 @@ final class Updater {
         // countdown, and the deadline that exists to stop "Updating…" lasting
         // forever could itself be stopped by looking at it. `SystemScheduler`
         // uses `.common` for the same reason.
-        let deadline = deps.scheduler.now.addingTimeInterval(180)
+        //
+        // Thirty seconds, not the three minutes this started with. That figure
+        // was sized for an update running in the background, which it does not:
+        // `quern update` is synchronous, so by the time this poll begins the
+        // pull, the reinstall and the daemon restart have all finished. What
+        // remains is a version read that can fail while the restart settles --
+        // seconds of work. Three minutes was therefore three minutes of
+        // "Updating…" on screen for an update that had already finished and
+        // simply not moved the version, which is the common case on a git
+        // checkout ahead of its release branch.
+        let deadline = deps.scheduler.now.addingTimeInterval(30)
 
         pollWork?.cancel()
         pollWork = deps.scheduler.repeating(every: interval) { [weak self] t in
@@ -138,7 +171,7 @@ final class Updater {
             if self.deps.scheduler.now >= deadline {
                 t.cancel()
                 self.inProgress = false
-                self.onStatus?("Update finished, but the version did not change")
+                self.onStatus?(.finished("Update finished, but the version did not change"))
                 return
             }
 
@@ -175,7 +208,7 @@ final class Updater {
         guard FileManager.default.fileExists(atPath: bundleURL.path) else {
             guard retriesLeft > 0 else {
                 inProgress = false
-                onStatus?("Update installed — restart Quern to finish")
+                onStatus?(.finished("Update installed — restart Quern to finish"))
                 return
             }
             deps.scheduler.after(1.5) { [weak self] in
@@ -183,7 +216,7 @@ final class Updater {
             }
             return
         }
-        onStatus?("Restarting to v\(version)…")
+        onStatus?(.working("Restarting to v\(version)…"))
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
         NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { [weak self] _, error in
@@ -194,7 +227,7 @@ final class Updater {
                 // never happened.
                 DispatchQueue.main.async {
                     self?.inProgress = false
-                    self?.onStatus?("Update installed — restart Quern to finish")
+                    self?.onStatus?(.finished("Update installed — restart Quern to finish"))
                 }
                 return
             }

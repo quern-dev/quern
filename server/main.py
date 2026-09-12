@@ -1073,6 +1073,35 @@ def _fetch_device_tools() -> tuple[dict | None, str]:
     return tools, ""
 
 
+def _cmd_check_updates() -> int:
+    """Ask now, rather than waiting for the daily check.
+
+    The cached answer in update-info.json is refreshed at most once a day, so
+    a release landing this afternoon is not offered until tomorrow. The CLI has
+    never had this problem -- `quern update` checks when you run it -- but
+    anything reading the cache does, the menu bar included.
+    """
+    from server.lifecycle.update_check import check_for_updates, read_update_info
+
+    message = check_for_updates(force=True)
+    info = read_update_info() or {}
+
+    if info.get("update_available"):
+        print(message or f"Update available: v{info.get('latest_version')}")
+        return 0
+
+    if not info:
+        # Distinct from "checked, nothing new". The check could not complete --
+        # offline, a channel with no releases -- and saying "up to date" on the
+        # strength of a lookup that never ran is the wrong reassurance.
+        print("Could not check for updates. See ~/.quern/server.log")
+        return 1
+
+    current = info.get("current_version") or "unknown"
+    print(f"Up to date (v{current}, channel '{info.get('channel', 'stable')}').")
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Read-only diagnostics: device tools, venv, tool versions, service health.
 
@@ -1422,6 +1451,10 @@ def cli() -> None:
         "output", nargs="?",
         help="File to write (default: print to stdout)",
     )
+    subparsers.add_parser(
+        "check-updates",
+        help="Check for a new release now, ignoring the once-a-day rate limit",
+    )
     subparsers.add_parser("setup", help="Check environment and install dependencies")
 
     # uninstall
@@ -1486,6 +1519,8 @@ def cli() -> None:
     elif args.command == "capture-env":
         from server.lifecycle.capture_env import run
         sys.exit(run(getattr(args, "output", None)))
+    elif args.command == "check-updates":
+        sys.exit(_cmd_check_updates())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())

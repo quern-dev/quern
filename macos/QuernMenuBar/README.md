@@ -18,6 +18,13 @@ manager with a **Restart to Update** action.
 - **Start / Stop / Restart** — shells out to the installed `quern` CLI.
 - **Restart to Update** — appears only when `~/.quern/update-info.json` reports
   `update_available`; runs `quern update`, then relaunches into the new build.
+- **Check for Updates…** — shown instead, when nothing is staged. That cache is
+  refreshed at most once a day, so without this a release landing in the
+  afternoon would not be offered until tomorrow and there was no way to ask.
+  Runs `quern check-updates`, which skips the rate limit but not the
+  `update_check: false` opt-out — someone who turned checking off did not ask.
+  A check that finds nothing says so, because a menu identical before and after
+  is indistinguishable from a dead item.
 - **Start on launch** — launching the app starts the daemon, unless it is
   already running or you turn it off in Settings. On by default: you opened the
   Quern app, and a menu that greets you with "stopped" and a button to press is

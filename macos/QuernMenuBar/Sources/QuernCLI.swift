@@ -186,6 +186,12 @@ enum QuernCLI {
         run(["restart"], timeout: 180, completion: completion)
     }
 
+    static func checkForUpdates(_ completion: ((Int32, String) -> Void)? = nil) {
+        // Short: it is one network request, and someone is watching the menu
+        // bar while it runs.
+        run(["check-updates"], timeout: 60, completion: completion)
+    }
+
     static func update(_ completion: ((Int32, String) -> Void)? = nil) {
         run(["update"], timeout: 600, completion: completion)
     }

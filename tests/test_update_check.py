@@ -470,3 +470,60 @@ def test_the_guard_never_fetches(monkeypatch, tmp_path):
     monkeypatch.setattr(uc.subprocess, "run", run)
     uc._is_ahead_of(SHA)
     assert not any("fetch" in c for c in seen), f"guard fetched: {seen}"
+
+
+class TestForcingACheck:
+    """The cache is refreshed at most once a day, so a release landing this
+    afternoon is not offered until tomorrow. The CLI never had that problem --
+    `quern update` checks when you run it -- but the menu bar reads the cache
+    and had no way to ask."""
+
+    def _patched(self, monkeypatch, tmp_path, *, checked_recently: bool):
+        from server.lifecycle import update_check
+
+        last = tmp_path / "last-check"
+        last.touch()
+        if not checked_recently:
+            old = time.time() - update_check.CHECK_INTERVAL - 60
+            import os
+
+            os.utime(last, (old, old))
+        monkeypatch.setattr(update_check, "LAST_CHECK_FILE", last)
+        monkeypatch.setattr(update_check, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(update_check, "UPDATE_INFO_FILE", tmp_path / "update-info.json")
+        monkeypatch.setattr(update_check, "read_user_config", dict)
+        return update_check
+
+    def test_the_rate_limit_holds_for_an_ordinary_check(self, monkeypatch, tmp_path):
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=True)
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+
+        update_check.check_for_updates()
+
+        assert not looked, "an ordinary check must not hit the network every few minutes"
+
+    def test_force_goes_past_the_rate_limit(self, monkeypatch, tmp_path):
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=True)
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+        monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+        update_check.check_for_updates(force=True)
+
+        assert looked, "someone who just asked should not be told tomorrow"
+
+    def test_force_does_not_override_the_opt_out(self, monkeypatch, tmp_path):
+        """A different thing entirely. Someone who turned checking off did not
+        ask, whoever is calling."""
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
+        monkeypatch.setattr(update_check, "read_user_config",
+                            lambda: {"update_check": False})
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+
+        assert update_check.check_for_updates(force=True) is None
+        assert not looked

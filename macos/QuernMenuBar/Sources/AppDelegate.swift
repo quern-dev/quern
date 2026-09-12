@@ -11,6 +11,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let updater = Updater()
     private var snapshot = QuernSnapshot()
     private var updateStatusText: String?
+    private var checkingForUpdates = false
+    /// The answer to a check that found nothing.
+    ///
+    /// Only meaningful in that case: when a check *does* find something the
+    /// menu grows a "Restart to Update" item, which is the answer. Without
+    /// this, a check that found nothing left the menu byte-for-byte identical
+    /// to before it ran, which is indistinguishable from a dead menu item.
+    private var lastCheckResult: String?
+    /// Shown beside the icon while something is running.
+    ///
+    /// The menu is the wrong place for work in progress: it closes the instant
+    /// you click an item, so an update reported only there ran for three
+    /// minutes with nothing on screen. The status item is the one part of this
+    /// app that is always visible, so that is where "something is happening"
+    /// belongs. Cleared the moment there is an answer, so the menu bar is not
+    /// permanently wider.
+    private var activityText: String? {
+        didSet {
+            guard activityText != oldValue else { return }
+            refreshStatusButton()
+        }
+    }
     private var didAttemptLaunchStart = false
 
     /// Everything about what is happening to the daemon. This class renders it
@@ -25,7 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.reader.snapshot.server.running
         }
         let controller = LifecycleController(deps)
-        controller.onChange = { [weak self] in self?.refreshStatusButton() }
+        controller.onChange = { [weak self] in
+            guard let self else { return }
+            // Same reasoning as the updater: "Starting…" in a closed menu is
+            // not feedback. LifecycleController already knows whether it is
+            // busy, so this only has to render it.
+            self.activityText = self.lifecycle.isBusy ? self.lifecycle.statusText : nil
+            self.refreshStatusButton()
+        }
         controller.onAlert = { [weak self] message, detail in
             self?.reportFailure(message, detail: detail)
         }
@@ -46,7 +75,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Same reasoning, for the other status line: without this a failed
             // update left its message in the menu for the life of the process,
             // including long after the user had fixed the cause.
+            // Two messages, two lifetimes, so two fields. An update outcome
+            // stops mattering once the update has landed; a "nothing new"
+            // answer stops mattering once something new turns up. Sharing one
+            // field meant one of them was always cleared at the wrong moment.
             if !snap.update.updateAvailable { self.updateStatusText = nil }
+            if snap.update.updateAvailable { self.lastCheckResult = nil }
             self.refreshStatusButton()
             self.settings.update(snap)
         }
@@ -87,6 +121,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let running = snapshot.server.running
         let updateAvailable = snapshot.update.updateAvailable
         button.image = Self.statusImage(running: running, updateAvailable: updateAvailable)
+        // Text beside the icon, not instead of it: the silhouette is how the
+        // item is found in a crowded menu bar.
+        button.title = activityText.map { " \($0)" } ?? ""
+        button.imagePosition = activityText == nil ? .imageOnly : .imageLeading
         // Always a template. The bundled icon is pure black with alpha, so
         // rendering it untemplated would paint solid black -- fine on a light
         // menu bar, invisible on a dark one. The SF Symbol fallback has the
@@ -223,6 +261,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if u.updateAvailable {
             let title = u.latestVersion.map { "Restart to Update — v\($0)" } ?? "Restart to Update"
             menu.addItem(action(title, #selector(restartToUpdate)))
+        } else if !checkingForUpdates {
+            // Always offered when there is nothing staged. The item above is
+            // driven by a cached answer the server refreshes at most once a
+            // day, so a release landing this afternoon would not be offered
+            // until tomorrow and there was no way to ask. The CLI never had
+            // that problem -- `quern update` checks when you run it.
+            menu.addItem(action("Check for Updates…", #selector(checkForUpdates)))
+        }
+        if checkingForUpdates {
+            menu.addItem(info("Checking for updates…"))
+        } else if let result = lastCheckResult {
+            menu.addItem(info(result))
         }
 
         menu.addItem(.separator())
@@ -330,9 +380,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func stopServer() { lifecycle.run(.stop, reporting: .alert) }
     @objc private func restartServer() { lifecycle.run(.restart, reporting: .alert) }
 
+    @objc private func checkForUpdates() {
+        guard !checkingForUpdates else { return }
+        checkingForUpdates = true
+        lastCheckResult = nil
+        activityText = "Checking…"
+        QuernCLI.checkForUpdates { [weak self] code, output in
+            guard let self else { return }
+            self.checkingForUpdates = false
+            self.activityText = nil
+            // The reader refreshes on its own three-second poll, but waiting
+            // for that after an action the user explicitly took reads as
+            // nothing having happened.
+            self.reader.refresh()
+            guard code != 0 else {
+                // A successful check that found nothing still deserves an
+                // answer -- the menu would otherwise look identical before and
+                // after, which is indistinguishable from a dead menu item.
+                if !self.snapshot.update.updateAvailable {
+                    self.lastCheckResult = output
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .components(separatedBy: "\n").first
+                }
+                return
+            }
+            self.reportFailure("Could not check for updates", detail: output)
+        }
+    }
+
     @objc private func restartToUpdate() {
         updater.restartToUpdate(
-            status: { [weak self] status in self?.updateStatusText = status },
+            status: { [weak self] progress in
+                self?.updateStatusText = progress.text
+                self?.activityText = progress.isWorking ? progress.text : nil
+            },
             failure: { [weak self] message, detail in
                 self?.reportFailure(message, detail: detail)
             }
