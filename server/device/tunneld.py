@@ -391,24 +391,24 @@ async def tunneld_health() -> TunneldHealth:
             remedy="./quern tunneld install",
         )
 
-    # Order matters, and both orderings have been wrong once.
+    # Order matters, and it is not a tie-break between independent faults.
     #
-    # These are two different faults. `binary_drift` is about the *running*
-    # daemon: launchd is serving from whatever the plist froze in, which need
-    # not be what quern resolves today. `stale_plist` is about the *file*: it
-    # does not match what quern would write now. A plist can be stale while the
-    # running binary is fine, and vice versa.
+    # launchd's `program` *is* `ProgramArguments[0]`, so a program that differs
+    # from the resolved binary means the plist drifted as well -- always. The
+    # two conditions arrive together, and whichever is checked first is the one
+    # reported. `binary_drift` goes first because it carries the more
+    # actionable fact: the daemon currently serving is the old one, which the
+    # HTTP probe cannot see because it answers perfectly well.
     #
-    # Checking the file first and gating it on `drift()` hid `binary_drift`
-    # entirely, because drift objects to the same mismatch. Checking the file
-    # first and gating it on `is_current()` -- the revert -- restored
-    # `binary_drift` but reported `healthy` for every drift only `drift()` can
-    # see, including the trailing-arguments check, which exists because a plist
-    # carrying the right binary with different arguments launches something
-    # other than the tunnel daemon. That is the health API contradicting the
-    # CLI and the start banner about the same plist.
+    # The reverse is not symmetrical. A plist can drift with the running daemon
+    # fine -- the file rewritten but not reloaded, or trailing arguments that
+    # would launch something other than the tunnel daemon on next boot -- and
+    # that case reaches `stale_plist` below on its own.
     #
-    # So: the running daemon first, then the file, gated on the stricter check.
+    # What made this hard to get right was two checks that could disagree about
+    # the same plist. That is gone: `installed_plist_is_current` is now derived
+    # from `installed_plist_drift`, so there is one answer and the ordering is
+    # the only decision left here.
     if program and Path(program) != binary:
         return TunneldHealth(
             status="binary_drift", serving=True, launchd_state=state, pid=pid,
