@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`quern update --tools` can upgrade a globally-installed pipx tool.** It always emitted `pipx upgrade <name>`, which only ever looks in the per-user `PIPX_HOME` — so on a tool installed with `pipx install --global` it failed with *"Package is not installed. Expected to find ~/.local/pipx/venvs/…"*, naming a path the user never chose for a tool that is plainly installed and working. Not an edge case: setup steers machines whose home is an external volume towards a global install, because the tunneld LaunchDaemon starts at boot and cannot reach a volume that mounts at login. A pipx venv outside the user's home is now recognised as global and upgraded with `sudo pipx upgrade --global`. When there is no terminal to prompt for a password on — `quern update` is reachable from the menu bar — it prints the command instead of hanging on sudo, and counts that as a failure rather than reporting success.
+
 ### Added
 - **`quern capture-env`** — writes the facts Quern's environment checks read (where each `pymobiledevice3` lives, what it resolves to, PATH order, what the tunneld daemon has baked in) as a JSON file that `tests/test_env_replay.py` replays in-process. Not a disk snapshot: what the checks consult fits in a few hundred bytes and can be rebuilt anywhere, which turns "works on my machine" into a test that runs on every machine. The first fixture is the home-on-external configuration that produced the two bugs above.
 

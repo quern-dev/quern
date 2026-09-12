@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -475,6 +476,21 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     return failures
 
 
+def _can_ask_for_a_password() -> bool:
+    """Whether there is a terminal sudo could prompt on.
+
+    Same test `setup._prompt_yn` makes, and for the same reason: a GUI-launched
+    process has no controlling terminal, so /dev/tty cannot be opened.
+    """
+    if sys.stdin.isatty():
+        return True
+    try:
+        open("/dev/tty").close()
+    except OSError:
+        return False
+    return True
+
+
 def _report_tool_updates(apply: bool = False) -> bool:
     """Show external tools that have moved on, and optionally move them.
 
@@ -520,7 +536,17 @@ def _report_tool_updates(apply: bool = False) -> bool:
 
     failures: list[str] = []
     for update in todo:
+        if update.needs_root and not _can_ask_for_a_password():
+            # sudo with nowhere to prompt either hangs or fails with a message
+            # about a terminal, neither of which tells the reader what to do.
+            # `quern update` is reachable from the menu bar, which has no tty.
+            print(f"\n{update.name} needs sudo and there is no terminal to ask on.")
+            print(f"  Run it yourself: {' '.join(update.command)}")
+            failures.append(update.name)
+            continue
         print(f"\nUpgrading {update.name}...")
+        if update.needs_root:
+            print("  This needs sudo; you may be asked for your password.")
         try:
             result = subprocess.run(update.command, timeout=600)
         except (OSError, subprocess.SubprocessError) as exc:

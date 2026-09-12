@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from server.device.tool_versions import ToolSite, _run, upgrade_note
 
@@ -60,6 +61,29 @@ CLI_FLOORS: dict[tuple[str, str], str] = {}
 ACTION_ORDER = ("upgrade_required", "upgrade_available", "current", "unmanaged", "unknown")
 
 
+def _pipx_is_global(site: ToolSite) -> bool:
+    """Whether this pipx venv belongs to root rather than to the user.
+
+    Decided by location, not by a known list of directories. pipx's global home
+    is `/opt/pipx` by default and `PIPX_GLOBAL_HOME` can move it, while the
+    per-user one has moved once already -- `~/.local/pipx` before pipx 1.5,
+    `~/Library/Application Support/pipx` after. What does not move is that a
+    per-user install lives under the user's home and a global one does not.
+    """
+    if not site.path:
+        return False
+    try:
+        Path(site.path).resolve().relative_to(Path.home())
+    except ValueError:
+        return True
+    except OSError:
+        # Cannot tell. The per-user command is the one that needs no password,
+        # so it is the safer guess: it fails loudly rather than prompting for
+        # credentials on the strength of something we could not read.
+        return False
+    return False
+
+
 @dataclass
 class ToolUpdate:
     """What should happen to one install site, and why."""
@@ -83,6 +107,14 @@ class ToolUpdate:
 
     note: str | None = None
     """Provenance context -- what else an upgrade would touch."""
+
+    needs_root: bool = False
+    """Whether `command` has to run as root.
+
+    Kept as a flag rather than inferred from `command[0] == "sudo"`, because
+    the caller's decision is "can I ask for a password here?", and that is not
+    a question about the shape of the argv.
+    """
 
     @property
     def actionable(self) -> bool:
@@ -257,7 +289,21 @@ async def _plan_one(
     if site.source == "pipx":
         base.latest = await pypi(package)
         checked = base.latest is not None
-        base.command = ["pipx", "upgrade", package]
+        if _pipx_is_global(site):
+            # `pipx upgrade` only ever looks in the per-user PIPX_HOME, so on a
+            # globally-installed tool it fails with "Package is not installed.
+            # Expected to find ~/.local/pipx/venvs/<name>" -- naming a path the
+            # user never chose, for a tool that is plainly installed.
+            #
+            # Global installs are not unusual here: setup steers machines whose
+            # home is an external volume towards `sudo pipx install --global`,
+            # because the tunneld LaunchDaemon starts at boot and cannot reach a
+            # volume that mounts at login.
+            base.command = ["sudo", "pipx", "upgrade", "--global", package]
+            base.needs_root = True
+            base.note = "installed globally, so upgrading it needs sudo"
+        else:
+            base.command = ["pipx", "upgrade", package]
     elif site.source == "brew":
         if brew_latest is None:
             checked = False

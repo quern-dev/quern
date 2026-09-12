@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -43,7 +44,12 @@ def _site(name="pymobiledevice3", role="cli", source="pipx", version="9.15.1", *
     return ToolSite(
         name=name, role=role, source=source, version=version,
         package=kw.pop("package", name), brew_cask=kw.pop("brew_cask", False),
-        available=kw.pop("available", True), path=kw.pop("path", f"/opt/{source}/bin/{name}"),
+        # Under the user's home by default. The old default, `/opt/<source>/…`,
+        # is where pipx puts a *global* install, so every pipx test here was
+        # unknowingly describing one -- and asserting the per-user upgrade
+        # command for it. Tests that mean a global install now say so.
+        available=kw.pop("available", True),
+        path=kw.pop("path", f"{Path.home()}/.local/{source}/bin/{name}"),
         **kw,
     )
 
@@ -1153,3 +1159,139 @@ def test_an_mcp_build_timeout_is_recorded(rebuild):
         assert rebuild["_run"]() == ["MCP build"]
     finally:
         entry._ensure_mcp_built = original
+
+
+# --------------------------------------------------------------------------
+# A global pipx install is upgraded with a different command
+# --------------------------------------------------------------------------
+#
+# `pipx upgrade <name>` only ever looks in the per-user PIPX_HOME. Run against
+# a globally-installed tool it fails with "Package is not installed. Expected
+# to find ~/.local/pipx/venvs/<name>, but it does not exist" -- naming a path
+# the user never chose, for a tool that is plainly installed and working.
+#
+# Not an edge case here: setup steers machines whose home is an external volume
+# towards `sudo pipx install --global`, because the tunneld LaunchDaemon starts
+# at boot and cannot reach a volume that mounts at login.
+
+
+async def test_a_global_pipx_install_is_upgraded_with_sudo():
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1",
+                 path="/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.command == ["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"]
+    assert update.needs_root is True
+
+
+async def test_a_per_user_pipx_install_needs_no_password():
+    async def pypi(_name):
+        return "11.12.4"
+
+    home = str(Path.home())
+    site = _site(source="pipx", version="9.15.1",
+                 path=f"{home}/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.command == ["pipx", "upgrade", "pymobiledevice3"]
+    assert update.needs_root is False
+
+
+async def test_the_newer_per_user_pipx_layout_is_also_per_user():
+    """pipx 1.5 moved PIPX_HOME on macOS to ~/Library/Application Support/pipx.
+    Deciding by location rather than by a list of known directories is what
+    makes that a non-event."""
+    async def pypi(_name):
+        return "11.12.4"
+
+    home = str(Path.home())
+    site = _site(
+        source="pipx", version="9.15.1",
+        path=f"{home}/Library/Application Support/pipx/venvs/pymobiledevice3"
+             "/bin/pymobiledevice3",
+    )
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+
+
+async def test_an_unreadable_path_guesses_the_command_that_needs_no_password():
+    """Cannot tell means do not ask for credentials. The per-user command fails
+    loudly; the sudo one prompts for a password on the strength of something we
+    could not read."""
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1", path=None)
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+
+
+@pytest.fixture
+def globally_installed_tool(monkeypatch):
+    """A tool installed with `pipx install --global`, needing sudo to upgrade."""
+    from server.device import tool_updates
+
+    async def fake_sites():
+        return []
+
+    async def fake_plan(sites, **kw):
+        return [
+            tool_updates.ToolUpdate(
+                name="pymobiledevice3", role="cli", action="upgrade_available",
+                current="9.15.1", latest="11.12.4",
+                command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+                needs_root=True,
+                reason="newer release available (11.12.4)",
+            ),
+        ]
+
+    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        "server.lifecycle.updater.subprocess.run",
+        lambda cmd, **kw: ran.append(cmd) or SimpleNamespace(returncode=0),
+    )
+    return ran
+
+
+def test_a_sudo_upgrade_is_not_attempted_with_nowhere_to_ask(
+    globally_installed_tool, monkeypatch, capsys
+):
+    """`quern update` is reachable from the menu bar, which has no controlling
+    terminal. sudo there either hangs or fails with a message about a tty,
+    neither of which tells the reader what to do."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+
+    ok = updater._report_tool_updates(apply=True)
+
+    assert not globally_installed_tool, "sudo must not run with no terminal to prompt on"
+    assert ok is False, "a skipped upgrade is a failure and must reach the exit code"
+    out = capsys.readouterr().out
+    assert "sudo pipx upgrade --global pymobiledevice3" in out, (
+        "the command must be printed so the user can run it themselves"
+    )
+
+
+def test_a_sudo_upgrade_runs_when_there_is_a_terminal(
+    globally_installed_tool, monkeypatch, capsys
+):
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: True)
+
+    ok = updater._report_tool_updates(apply=True)
+
+    assert globally_installed_tool == [
+        ["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"]
+    ]
+    assert ok is True
+    assert "may be asked for your password" in capsys.readouterr().out
