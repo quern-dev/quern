@@ -606,7 +606,46 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _capture_env_usage() -> None:
+    print("Usage: quern capture-env [FILE]")
+    print()
+    print("Writes an environment report for attaching to a bug report.")
+    print("With no FILE, prints to stdout.")
+
+
 def main() -> None:
+    # Before the re-exec, deliberately, and the ordering is the whole point:
+    # this is the command people reach for when quern is broken, and
+    # `_maybe_reexec_in_venv` is one of the things that can be broken. A venv
+    # missing its pyvenv.cfg leaves `.venv/bin/python` executable but not
+    # recognised as a venv, so that function execs itself forever -- and the
+    # diagnostic would spin instead of producing a report, on exactly the
+    # install it exists for. It was below this line, with a comment claiming it
+    # was above.
+    if len(sys.argv) >= 2 and sys.argv[1] == "capture-env":
+        from server.lifecycle.capture_env import run
+        # Anything after the subcommand is a destination, so a flag would be
+        # taken as a filename: `capture-env --help` wrote a file called
+        # "--help" and exited 0.
+        rest = sys.argv[2:]
+        if any(a in ("-h", "--help") for a in rest):
+            # Checked before the flag rejection below: `capture-env out.json
+            # --help` reported "unrecognised option: --help", which it is not.
+            _capture_env_usage()
+            sys.exit(0)
+        if any(arg.startswith("-") for arg in rest):
+            _capture_env_usage()
+            bad = next(a for a in rest if a.startswith("-"))
+            print(f"unrecognised option: {bad}", file=sys.stderr)
+            sys.exit(2)
+        if len(rest) > 1:
+            # Silently writing the first and ignoring the rest is the wrong
+            # kind of forgiving for a command whose output someone is about to
+            # attach to a bug report.
+            print(f"Expected at most one FILE, got {len(rest)}.", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(run(rest[0] if rest else None))
+
     _maybe_reexec_in_venv()
 
     # Version flag — handle before anything else

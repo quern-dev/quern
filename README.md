@@ -232,6 +232,37 @@ both while one runs a 9.15.1 binary and the other an 11.3.1 one.
 tools, and says so when it finds some it cannot help with, rather than printing
 "nothing to do" above a tool it just flagged as behind.
 
+**Reporting an environment problem.** `quern capture-env` writes the
+facts these checks read — where each `pymobiledevice3` lives and what it resolves to,
+the order of `PATH`, and what the tunneld daemon has baked in. Attach it to an issue
+and the configuration can be replayed as a test rather than guessed at from a
+description; `tests/fixtures/envs/` holds the ones that have already found bugs.
+
+It is read-only and deliberately narrow. It never opens `~/.quern/api-key`,
+`state.json`, the certificate state or the device pool. The output is meant for a
+public issue, so what it may contain is pinned by a test rather than remembered:
+`tests/test_capture_env.py` watches every read through an interpreter audit hook,
+below any particular way of opening a file, and fails if the capture ever reaches
+for one of those.
+
+`PATH` is filtered to the entries that matter: anything recognisably a toolchain
+quern cares about, plus any directory that actually holds a tool it uses. That second
+clause is what keeps the filter honest — a whitelist alone would hide an unexpected
+directory a tool is genuinely resolved from, which is the one surprise worth
+reporting. Each survivor keeps its original index, so the order that decides which
+copy wins is still reconstructible without publishing the rest of your `PATH`.
+
+It is a filter, not a redactor. A kept entry is published in full, so a directory
+matching on a toolchain name carries whatever else is in its path. Read it before
+attaching it if that matters to you.
+
+If quern is broken enough that the command will not run, `python3
+scripts/capture-env.py` does the same thing. Both record what `which` resolves
+once setup has prepended its venv, as well as the plain answer. Those differ, and
+the first is the one the checks act on. It is stdlib-only and works on the
+Python that ships with Xcode's Command Line Tools, so it does not need the venv
+that may be the problem.
+
 **Doctor does not need a running server.** Only the device-tool section does, and when
 that cannot be reached doctor names the reason and reports everything else anyway —
 the venv, the external tools, service health. That matters because a stale venv is a
@@ -352,6 +383,7 @@ quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
 quern doctor                 # Read-only diagnostics: device tools, venv, tool versions, service health
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
+quern capture-env            # Write an environment report to attach to a bug report
 quern help                   # Show the command list
 quern version                # Print the installed version
 quern update                 # Update to the latest release on your channel and rebuild

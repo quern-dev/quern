@@ -20,10 +20,12 @@ import os
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,24 +64,122 @@ SUDOERS_PATH = Path("/etc/sudoers.d/quern-tunneld")
 _tunnel_udid_cache: dict[str, str] = {}
 
 
-def find_pymobiledevice3_binary() -> Path | None:
-    """Find the pymobiledevice3 binary.
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
-    Checks PATH first, then the common pipx install location.
-    Resolves symlinks to get the real binary path (needed for the plist).
+
+def shadowing_roots() -> list[Path]:
+    """Directories whose `pymobiledevice3` is the library, not the CLI.
+
+    Two of them, and they are not the same thing:
+
+    * The running interpreter's virtualenv. `run_setup` prepends
+      ``Path(sys.prefix)/"bin"`` to PATH so `which()` finds venv-installed
+      tools, and it identifies that directory by `sys.prefix` -- not by where
+      the checkout happens to be. A venv kept outside the project (``~/venvs``,
+      a `VIRTUAL_ENV` pointing elsewhere) reproduces the original bug in full if
+      only the checkout is excluded, which is what the first version of this did.
+    * The checkout, which covers the common ``<project>/.venv`` case even when
+      the caller is not running inside it.
+
+    Not venvs in general: a pipx install *is* a venv, `pyvenv.cfg` and all, and
+    rejecting those would leave nothing to find.
     """
-    path = shutil.which("pymobiledevice3")
+    roots: list[Path] = []
+    if sys.prefix != sys.base_prefix:
+        # Resolved, because the candidate it is compared against is. A venv at
+        # /tmp/v resolves to /private/tmp/v on macOS, so an unresolved root
+        # never matched and the shadowing script came straight back.
+        roots.append(Path(sys.prefix).resolve())
+    project = _project_root()
+    if project is not None:
+        roots.append(project.resolve())
+    return roots
+
+
+def find_pymobiledevice3_binary(
+    which: Callable[[str], str | None] | None = None,
+    excluded_roots: list[Path] | None = None,
+) -> Path | None:
+    """Find the pymobiledevice3 *CLI*, which is not the same file as the library.
+
+    quern depends on pymobiledevice3 as a Python library, so a venv running it
+    holds a console script of that name, and `quern setup` puts that venv first
+    on PATH. The console script then wins every lookup here.
+
+    That is not a cosmetic mix-up. This path is baked into the tunneld
+    LaunchDaemon, which starts at boot as root. The console script lives wherever
+    the venv lives, so on a machine whose home is an external volume, installing
+    the daemon would record a path that is not mounted at boot -- the exact
+    failure the whole home-on-external code path exists to prevent. Two setup
+    checks reported it as a problem with the user's pipx install, and the repair
+    they advised would have caused it.
+
+    Both arguments are injected so the search can be replayed from a captured
+    machine (see tests/fixtures/envs/) and so "no roots to exclude" is a state a
+    test can actually ask for -- it was previously indistinguishable from
+    "work it out yourself".
+    """
+    roots = shadowing_roots() if excluded_roots is None else excluded_roots
+    # Resolved at call time, not bound as a default. `which=shutil.which` in the
+    # signature captures the function at import, so a test that patches
+    # `shutil.which` changes nothing and the lookup silently keeps using the
+    # real PATH. Caught by mutation: reverting this whole function to its old
+    # behaviour still passed every test that claimed to cover it.
+    lookup = which if which is not None else shutil.which
+
+    path = lookup("pymobiledevice3")
     if path:
-        return Path(path).resolve()
+        found = Path(path).resolve()
+        if not any(_is_inside(found, root) for root in roots):
+            return found
 
-    # Check common pipx location
-    pipx_path = (
-        Path.home() / ".local" / "pipx" / "venvs"
-        / "pymobiledevice3" / "bin" / "pymobiledevice3"
-    )
-    if pipx_path.exists():
-        return pipx_path.resolve()
+    # The pipx CLI, wherever pipx put it. Only consulted when PATH yielded
+    # nothing usable, so this is a fallback rather than a preference -- if PATH
+    # resolves a real CLI, that one wins, whatever this order says.
+    for candidate in pipx_candidates():
+        if not candidate.exists():
+            continue
+        resolved = candidate.resolve()
+        # The same exclusion the PATH branch applies. Without it the fallback
+        # was a way back in: `~/.local/bin/pymobiledevice3` is a shim whose
+        # target is unconstrained, so it could resolve into the very venv the
+        # branch above had just rejected.
+        if any(_is_inside(resolved, root) for root in roots):
+            continue
+        return resolved
 
+    return None
+
+
+def pipx_candidates() -> list[Path]:
+    """Every place pipx puts a `pymobiledevice3`, newest layout first.
+
+    pipx 1.5 moved the default `PIPX_HOME` on macOS to
+    ``~/Library/Application Support/pipx``; before that it was ``~/.local/pipx``.
+    Both are live on real machines, and a lookup that knows only one reports a
+    tool as missing when it is installed.
+    """
+    home = Path.home()
+    return [
+        Path("/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3"),
+        Path("/usr/local/bin/pymobiledevice3"),
+        home / "Library/Application Support/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+        home / ".local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+        home / ".local/bin/pymobiledevice3",
+    ]
+
+
+def _project_root() -> Path | None:
+    """The quern checkout this module was imported from, or None."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
     return None
 
 
@@ -291,27 +391,39 @@ async def tunneld_health() -> TunneldHealth:
             remedy="./quern tunneld install",
         )
 
-    if not installed_plist_is_current():
-        return TunneldHealth(
-            status="stale_plist", serving=True, launchd_state=state, pid=pid,
-            program=program,
-            detail=(
-                "serving, but the installed plist is outdated — "
-                f"{installed_plist_drift()}"
-            ),
-            remedy="./quern tunneld install",
-        )
-
-    # The daemon runs whatever the plist froze in, which is not necessarily the
-    # binary quern would resolve today -- a second pipx install, or a per-user
-    # one shadowing the shared path, drifts silently and is invisible from the
-    # HTTP side because the old one keeps serving perfectly well.
+    # Order matters, and it is not a tie-break between independent faults.
+    #
+    # launchd's `program` *is* `ProgramArguments[0]`, so a program that differs
+    # from the resolved binary means the plist drifted as well -- always. The
+    # two conditions arrive together, and whichever is checked first is the one
+    # reported. `binary_drift` goes first because it carries the more
+    # actionable fact: the daemon currently serving is the old one, which the
+    # HTTP probe cannot see because it answers perfectly well.
+    #
+    # The reverse is not symmetrical. A plist can drift with the running daemon
+    # fine -- the file rewritten but not reloaded, or trailing arguments that
+    # would launch something other than the tunnel daemon on next boot -- and
+    # that case reaches `stale_plist` below on its own.
+    #
+    # What made this hard to get right was two checks that could disagree about
+    # the same plist. That is gone: `installed_plist_is_current` is now derived
+    # from `installed_plist_drift`, so there is one answer and the ordering is
+    # the only decision left here.
     if program and Path(program) != binary:
         return TunneldHealth(
             status="binary_drift", serving=True, launchd_state=state, pid=pid,
             program=program,
             detail=f"serving from {program}, but quern resolves {binary}",
             remedy="./quern tunneld install  (re-freezes the plist onto the resolved binary)",
+        )
+
+    drift = installed_plist_drift()
+    if drift:
+        return TunneldHealth(
+            status="stale_plist", serving=True, launchd_state=state, pid=pid,
+            program=program,
+            detail=f"serving, but the installed plist is outdated — {drift}",
+            remedy="./quern tunneld install",
         )
 
     return TunneldHealth(
@@ -439,26 +551,39 @@ def installed_plist_drift() -> str | None:
 def installed_plist_is_current() -> bool:
     """True iff the installed plist matches what we'd generate now.
 
-    Checks two things:
-      - StandardOutPath equals the current LOG_PATH (the migration from
-        ~/.quern/tunneld.log → /Library/Logs/com.quern.tunneld.log).
-      - ProgramArguments[0] equals the currently-discovered pymobiledevice3
-        binary, or — when no binary is discoverable now — at least exists on
-        disk. This catches drift from things like `sudo pipx install --global`
-        creating a new binary at /usr/local/bin/ while the plist still bakes
-        in the old per-user pipx path.
+    Defined as "drift found nothing", not as its own set of comparisons. It
+    used to check the log path and `ProgramArguments[0]` while
+    `installed_plist_drift()` checked the whole array -- so the two could
+    disagree, and every caller had to know which was stricter. One did not, and
+    the health API reported `healthy` for a plist the CLI called outdated.
+
+    Deriving it removes that possibility rather than documenting it.
     """
-    if installed_plist_log_path() != LOG_PATH:
-        return False
-    program = installed_plist_program()
-    if program is None:
-        return False
-    current = find_pymobiledevice3_binary()
-    if current is None:
-        # Can't discover a binary now — only flag if what's in the plist is
-        # broken on disk. Avoids false positives in odd states.
-        return program.exists()
-    return program == current
+    return installed_plist_drift() is None
+
+
+BOOT_OVERRIDE = "QUERN_ALLOW_EXTERNAL_TUNNELD"
+
+#: Mount points whose contents are not guaranteed before login. A prefix test,
+#: and the limits are worth stating: it is a test for *where the path is*, not
+#: for whether the filesystem is really available at boot, which macOS does not
+#: answer cheaply. Comparing device ids against `/` looks like the real test and
+#: is not -- on modern macOS the system and data volumes already differ, so
+#: nearly every user path would be refused. So this stays a named-location check
+#: with an override, rather than a precise answer that is quietly wrong.
+BOOT_UNREACHABLE_PREFIXES = ("/Volumes/", "/Network/")
+
+
+def boot_unreachable_reason(path: Path) -> str | None:
+    """Why `path` may not exist at boot, or None if it looks fine."""
+    if os.environ.get(BOOT_OVERRIDE) == "1":
+        return None
+    text = str(path)
+    for prefix in BOOT_UNREACHABLE_PREFIXES:
+        if text.startswith(prefix):
+            kind = "an external volume" if prefix == "/Volumes/" else "a network mount"
+            return f"is on {kind}, which may not be mounted at boot"
+    return None
 
 
 def install_daemon() -> int:
@@ -471,6 +596,21 @@ def install_daemon() -> int:
     if not binary:
         print("Error: pymobiledevice3 not found.")
         print("Install it: pipx install pymobiledevice3")
+        return 1
+
+    # This daemon starts at boot, as root, before a mounted-at-login volume is
+    # available. Writing a plist that names one produces a daemon that works
+    # until the next reboot and then does not, having reported success -- so
+    # refuse rather than record it. Reachable: it is what the old lookup
+    # returned on a home-on-external machine, and the remedy setup printed
+    # would have installed it.
+    unreachable = boot_unreachable_reason(binary)
+    if unreachable:
+        print(f"Error: {binary} {unreachable}.")
+        print("  A boot-time daemon cannot reach it. Install the CLI where the")
+        print("  system can see it, then re-run:")
+        print("      sudo pipx install --global pymobiledevice3")
+        print(f"  If it really is available at boot, set {BOOT_OVERRIDE}=1.")
         return 1
 
     plist_content = generate_plist(binary)
@@ -788,10 +928,19 @@ def _print_status() -> int:
     print("  " + "─" * 40)
     print(f"  Binary:    {binary or 'not found'}")
     print(f"  Plist:     {'installed' if plist_installed else 'not installed'}")
-    if plist_installed and not installed_plist_is_current():
-        old = installed_plist_log_path()
-        print(f"  Plist log: {old} (outdated — expected {LOG_PATH})")
-        print("             Reinstall to migrate: ./quern tunneld install")
+    if plist_installed:
+        # The same reason the check in setup reports, not a guess at it. This
+        # said "log path" whichever condition had drifted, so `tunneld status`
+        # contradicted a setup run that had just named the binary -- and printed
+        # `None` for a plist it could not read at all.
+        drift = installed_plist_drift()
+        if drift:
+            print(f"  Plist:     outdated — {drift}")
+            # Under the drift, not beside it. Left one level out, this told
+            # every healthy install to reinstall -- a passing check reading as
+            # a failed one, advising the exact command the guard below refuses
+            # on a home-on-external machine.
+            print("             Reinstall to migrate: ./quern tunneld install")
 
     running, devices = _tunneld_devices()
 

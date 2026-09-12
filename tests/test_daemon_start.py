@@ -97,3 +97,52 @@ class TestParentWaitAndExit:
         err = capsys.readouterr().err
         assert "wrote no state file" in err
         assert "health check timed out" not in err
+
+
+class TestTheStartBannerReportsRealDrift:
+    """The third copy of the hardcoded drift message lived here, and is printed
+    more often than either of the two already fixed — it is in the `quern start`
+    banner. It said "old user-home log path" whichever condition had drifted."""
+
+    def _banner(self, monkeypatch, capsys, tmp_path, drift):
+        from server.lifecycle import daemon
+
+        installed = tmp_path / "com.quern.tunneld.plist"
+        installed.write_text("")
+        monkeypatch.setattr("server.device.tunneld.PLIST_PATH", installed)
+        monkeypatch.setattr("server.device.tunneld.installed_plist_drift", lambda: drift)
+        state = {"pid": 1, "server_port": 9100, "started_at": None,
+                 "proxy_status": "stopped", "proxy_port": 9101}
+        daemon._print_status(state)
+        return capsys.readouterr().out
+
+    def test_a_drifted_plist_names_what_drifted(self, monkeypatch, capsys, tmp_path):
+        out = self._banner(monkeypatch, capsys, tmp_path,
+                           "binary is /old/pmd3, but quern resolves /new/pmd3")
+        assert "/old/pmd3" in out
+        assert "old user-home log path" not in out
+
+    def test_a_machine_with_no_tunneld_is_not_told_its_plist_is_outdated(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """Without the existence guard, `installed_plist_drift()` answers "the
+        installed plist could not be read" for a plist that was never installed
+        -- so every `quern start` on a fresh machine would warn and advise
+        `tunneld install`. The same shape as telling every healthy install to
+        reinstall."""
+        from server.lifecycle import daemon
+
+        monkeypatch.setattr("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist")
+        monkeypatch.setattr(
+            "server.device.tunneld.installed_plist_drift",
+            lambda: "the installed plist could not be read",
+        )
+        state = {"pid": 1, "server_port": 9100, "started_at": None,
+                 "proxy_status": "stopped", "proxy_port": 9101}
+        daemon._print_status(state)
+
+        assert "outdated" not in capsys.readouterr().out
+
+    def test_a_current_plist_says_nothing(self, monkeypatch, capsys, tmp_path):
+        out = self._banner(monkeypatch, capsys, tmp_path, None)
+        assert "outdated" not in out

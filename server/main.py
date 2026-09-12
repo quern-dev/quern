@@ -1409,6 +1409,19 @@ def cli() -> None:
     )
 
     # setup
+    # Declared so `quern help` lists it and test_readme_sync sees it. Normally
+    # unreachable -- server/__main__.py handles it before the venv re-exec,
+    # which is the point of the command -- but reachable via `python -m
+    # server.main`, and a declared command that silently does nothing is worse
+    # than one that is not declared. It is dispatched below.
+    capture_parser = subparsers.add_parser(
+        "capture-env",
+        help="Write an environment report to attach to a bug report",
+    )
+    capture_parser.add_argument(
+        "output", nargs="?",
+        help="File to write (default: print to stdout)",
+    )
     subparsers.add_parser("setup", help="Check environment and install dependencies")
 
     # uninstall
@@ -1470,6 +1483,9 @@ def cli() -> None:
         _cmd_enable_local_capture(args.processes)
     elif args.command == "disable-local-capture":
         _cmd_disable_local_capture()
+    elif args.command == "capture-env":
+        from server.lifecycle.capture_env import run
+        sys.exit(run(getattr(args, "output", None)))
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())
