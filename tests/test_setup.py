@@ -1016,6 +1016,22 @@ class TestPromptYn:
 
 
 class TestRunUninstall:
+    @pytest.fixture(autouse=True)
+    def _wrapper_in_a_sandbox(self, tmp_path, monkeypatch):
+        """Redirect the wrapper `run_uninstall` removes.
+
+        It was not redirected, so these three tests deleted the developer's own
+        `~/.local/bin/quern` on every run -- and on a machine where that is the
+        only way `quern` resolves, that is the CLI gone until setup is re-run.
+        Patching the module constant rather than `Path.home` keeps the redirect
+        in one place and next to the other sandboxing these tests already do.
+        """
+        wrapper = tmp_path / "sandbox-bin" / "quern"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\n")
+        monkeypatch.setattr("server.lifecycle.setup.WRAPPER_PATH", wrapper)
+        return wrapper
+
     def test_abort_on_decline(self, tmp_path):
         """Declining the confirmation aborts cleanly."""
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
@@ -1840,6 +1856,11 @@ class TestOtherQuernOnPath:
         home = tmp_path / "home"
         clone_copy = self._make(project)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        # WRAPPER_PATH is resolved at import, so patching `Path.home` no longer
+        # redirects it -- this test wrote to the developer's real
+        # ~/.local/bin/quern until the guard in conftest caught it. The constant
+        # exists precisely so the redirect is one line and in one place.
+        monkeypatch.setattr(setup_mod, "WRAPPER_PATH", home / ".local" / "bin" / "quern")
         monkeypatch.setattr(setup_mod, "_find_project_root", lambda: project)
         monkeypatch.setenv("PATH", f"{home / '.local' / 'bin'}:{project}")
 

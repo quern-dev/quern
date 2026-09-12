@@ -534,10 +534,22 @@ def _other_quern_on_path(ours: Path) -> list[Path]:
     return found
 
 
+#: Where the `quern` wrapper lives.
+#:
+#: A module constant rather than `Path.home() / ...` computed at each use, so
+#: tests can redirect it the way they already redirect INSTALL_MANIFEST. They
+#: could not: `run_uninstall` built the path inline, the uninstall tests patched
+#: six other things and not `Path.home`, and so every full test run deleted the
+#: developer's own wrapper. On a machine where `~/.local/bin/quern` is the only
+#: way `quern` resolves, that breaks the CLI until setup is run again -- which
+#: presented as the command working intermittently for months.
+WRAPPER_PATH = Path.home() / ".local" / "bin" / "quern"
+
+
 def install_wrapper_script() -> CheckResult:
     """Install quern wrapper script to ~/.local/bin."""
-    local_bin = Path.home() / ".local" / "bin"
-    wrapper_path = local_bin / "quern"
+    local_bin = WRAPPER_PATH.parent
+    wrapper_path = WRAPPER_PATH
 
     # Find project root (works regardless of folder name)
     project_root = _find_project_root()
@@ -2936,7 +2948,7 @@ def run_uninstall() -> int:
 
     # ── Remove wrapper script ──
 
-    wrapper = Path.home() / ".local" / "bin" / "quern"
+    wrapper = WRAPPER_PATH
     if wrapper.exists():
         print()
         print(f"  Removing wrapper script ({wrapper})...")

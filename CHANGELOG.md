@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The test suite no longer deletes your `quern` command.** `run_uninstall` removes `~/.local/bin/quern`, and the uninstall tests patched six things but not `Path.home` — so every full run of the suite deleted the developer's own wrapper. On a machine where that is the only way `quern` resolves, the CLI then fails until setup is re-run, which presents as the command working intermittently and is about the least diagnosable symptom available. The path is now a module constant those tests redirect, and an autouse fixture fails any test that creates, changes or deletes anything quern installs — including other tools' configuration, which the MCP registration legitimately rewrites in production and no test has any business touching.
+
 ### Added
 - **`quern capture-env`** — writes the facts Quern's environment checks read (where each `pymobiledevice3` lives, what it resolves to, PATH order, what the tunneld daemon has baked in) as a JSON file that `tests/test_env_replay.py` replays in-process. Not a disk snapshot: what the checks consult fits in a few hundred bytes and can be rebuilt anywhere, which turns "works on my machine" into a test that runs on every machine. The first fixture is the home-on-external configuration that produced the two bugs above.
 
