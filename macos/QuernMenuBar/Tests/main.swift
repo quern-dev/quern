@@ -9,6 +9,7 @@ UpdaterTests.all()
 LifecycleControllerTests.all()
 SettingsModelTests.all()
 MinimumDisplayTests.all()
+FlagTests.all()
 // The count is deliberate. See Harness.report(expected:) -- without it, a suite
 // that runs nothing exits 0.
-exit(Harness.report(expected: 42))
+exit(Harness.report(expected: 44))

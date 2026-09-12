@@ -864,3 +864,42 @@ def test_command_does_not_call_a_silent_no_result_up_to_date(
     assert code == 1
     assert "Up to date" not in captured.out
     assert "no result" in captured.err
+
+
+# --- The command is actually reachable --------------------------------------
+
+
+def test_check_updates_is_wired_into_the_cli_dispatch(monkeypatch, capsys):
+    """Deleting the dispatch arm used to leave the whole suite green.
+
+    Everything else here calls `_cmd_check_updates` directly, and the only
+    other thing that mentioned the command was the README sync check, which
+    reads the subparser registration. So `quern check-updates` could have
+    stopped running the check entirely -- falling through to exit 0, doing
+    nothing, looking exactly like "up to date" -- and nothing would have said
+    so. That is the branch's whole user-facing deliverable.
+    """
+    import server.main as main
+
+    called = []
+    monkeypatch.setattr(main, "_cmd_check_updates", lambda: called.append(True) or 0)
+    monkeypatch.setattr("sys.argv", ["quern", "check-updates"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main.cli()
+
+    assert called, "`quern check-updates` did not reach the check"
+    assert exit_info.value.code == 0
+
+
+def test_the_commands_exit_code_reaches_the_shell(monkeypatch):
+    # A failed check that exits 0 tells a script the opposite of what happened.
+    import server.main as main
+
+    monkeypatch.setattr(main, "_cmd_check_updates", lambda: 1)
+    monkeypatch.setattr("sys.argv", ["quern", "check-updates"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main.cli()
+
+    assert exit_info.value.code == 1

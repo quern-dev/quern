@@ -468,3 +468,50 @@ def test_asset_ignores_near_miss_names():
     ]
 
     assert _select_asset_url(assets, "0.15.0") is None
+
+
+class TestAskingForAPassword:
+    """`_can_ask_for_a_password`, including the half that had no coverage.
+
+    Every existing test reached it with `isatty()` true or replaced the function
+    wholesale, so the /dev/tty fallback was never exercised -- and that fallback
+    *is* the menu-bar path: a GUI-launched process has no controlling terminal.
+    The case the feature was written for was the untested one.
+    """
+
+    def test_a_terminal_on_stdin_is_enough(self, monkeypatch):
+        from server.lifecycle import updater
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        assert updater._can_ask_for_a_password() is True
+
+    def test_a_controlling_terminal_counts_even_without_one_on_stdin(
+        self, monkeypatch
+    ):
+        # `quern update --tools | tee log` has no tty on stdin while the user
+        # sits right in front of one, so stdin alone would refuse to prompt
+        # someone who could answer.
+        from server.lifecycle import updater
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        opened = []
+
+        def fake_open(path, *args, **kwargs):
+            opened.append(path)
+            import io as _io
+            return _io.StringIO()
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert updater._can_ask_for_a_password() is True
+        assert "/dev/tty" in opened
+
+    def test_no_terminal_anywhere_means_do_not_prompt(self, monkeypatch):
+        # The menu-bar case. sudo with nowhere to prompt either hangs or fails
+        # with a message about a terminal, and neither tells the reader what to
+        # do about it.
+        from server.lifecycle import updater
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        def no_tty(path, *args, **kwargs):
+            raise OSError(6, "Device not configured")
+
+        monkeypatch.setattr("builtins.open", no_tty)
+        assert updater._can_ask_for_a_password() is False

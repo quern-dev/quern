@@ -36,6 +36,21 @@ from server.device.tool_updates import (
 )
 from server.device.tool_versions import ToolSite
 
+#: The home these tests describe, which is deliberately not the one they run on.
+#:
+#: Building the default path from the real `Path.home()` coupled five tests to
+#: whoever ran them: they passed here and failed under any other HOME. Worse,
+#: it made both sides of `_pipx_is_global`'s comparison agree by construction,
+#: so `resolve()` was the identity and the suite could not tell the buggy
+#: version from the fixed one in either direction.
+FAKE_HOME = Path("/tmp/quern-tests-home")
+
+
+@pytest.fixture(autouse=True)
+def _home_is_not_this_machine(monkeypatch):
+    """Point `Path.home()` at FAKE_HOME for every test in this module."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: FAKE_HOME))
+
 
 def _site(name="pymobiledevice3", role="cli", source="pipx", version="9.15.1", **kw):
     # `package` defaults to the tool's own name, which is true for most sites.
@@ -49,7 +64,7 @@ def _site(name="pymobiledevice3", role="cli", source="pipx", version="9.15.1", *
         # unknowingly describing one -- and asserting the per-user upgrade
         # command for it. Tests that mean a global install now say so.
         available=kw.pop("available", True),
-        path=kw.pop("path", f"{Path.home()}/.local/{source}/bin/{name}"),
+        path=kw.pop("path", f"{FAKE_HOME}/.local/{source}/bin/{name}"),
         **kw,
     )
 
@@ -1218,7 +1233,7 @@ async def test_the_newer_per_user_pipx_layout_is_also_per_user():
     assert update.needs_root is False
 
 
-async def test_an_unreadable_path_guesses_the_command_that_needs_no_password():
+async def test_a_site_with_no_path_guesses_the_command_that_needs_no_password():
     """Cannot tell means do not ask for credentials. The per-user command fails
     loudly; the sudo one prompts for a password on the strength of something we
     could not read."""
@@ -1229,6 +1244,36 @@ async def test_an_unreadable_path_guesses_the_command_that_needs_no_password():
     update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
 
     assert update.needs_root is False
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_path_guesses_the_command_that_needs_no_password(tmp_path):
+    """The `OSError` branch, which had no coverage at all.
+
+    The test above describes this case in its docstring and does not reach it:
+    `path=None` short-circuits on the `if not site.path` guard before the `try`
+    is entered. So this one hands over a path `resolve()` genuinely cannot
+    read -- a symlink loop -- and checks the same rule holds: when quern cannot
+    tell, it must not ask for a password.
+
+    Writing it found a second defect. `Path.resolve()` raises `RuntimeError`
+    for a symlink loop, not `OSError`, so the handler was catching a type this
+    failure never produces and the real one escaped into the tool-update plan.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    loop = tmp_path / "loop"
+    loop.symlink_to(tmp_path / "loop2")
+    (tmp_path / "loop2").symlink_to(loop)
+    with pytest.raises(RuntimeError):
+        loop.resolve()
+
+    site = _site(source="pipx", version="9.15.1", path=str(loop / "bin" / "pmd3"))
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+    assert "sudo" not in update.command
 
 
 @pytest.fixture
@@ -1345,3 +1390,42 @@ def test_a_per_user_install_is_not_called_global_when_home_is_a_symlink(
     )
     assert link.resolve() != link, "the symlink is the point of this test"
     assert _pipx_is_global(site) is False
+
+
+@pytest.mark.asyncio
+async def test_a_global_install_says_why_it_needs_a_password():
+    """The note was set and never asserted, so it could be dropped silently.
+
+    It is the only thing that explains an otherwise surprising password prompt,
+    which makes it the part a reader actually needs.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1",
+                 path="/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is True
+    assert update.note, "a sudo command with no explanation"
+    assert "sudo" in update.note
+
+
+@pytest.mark.asyncio
+async def test_a_relocated_global_pipx_home_is_still_global():
+    """`PIPX_GLOBAL_HOME` moves it, and the docstring claims tolerance for that.
+
+    Every other test used `/opt/pipx` or a path under home, so the claim rested
+    on the *absence* of a hardcoded `/opt/pipx` rather than on anything
+    exercised. Decided by location -- not under the user's home -- so a global
+    home anywhere outside it classifies correctly.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1",
+                 path="/usr/local/share/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is True
+    assert "--global" in update.command

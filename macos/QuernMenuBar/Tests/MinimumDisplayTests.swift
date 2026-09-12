@@ -115,3 +115,31 @@ enum MinimumDisplayTests {
         }
     }
 }
+
+// The flag QuernCLI's watchdog hands back to the thread waiting on the
+// process. Tested here rather than in its own file because it is four lines
+// and exists for one call site.
+enum FlagTests {
+    static func all() {
+        Harness.test("a flag starts clear and latches when set") {
+            let flag = Flag()
+            Harness.expect(flag.isSet, false, "initial")
+            flag.set()
+            Harness.expect(flag.isSet, true, "after set")
+        }
+
+        Harness.test("concurrent setters and readers agree at the end") {
+            // Not a proof -- a data race need not show itself. It runs under
+            // the thread sanitiser in CI, which is what actually detects one,
+            // and it fails outright if `set` and `isSet` ever disagree.
+            let flag = Flag()
+            let group = DispatchGroup()
+            for _ in 0..<200 {
+                DispatchQueue.global().async(group: group) { flag.set() }
+                DispatchQueue.global().async(group: group) { _ = flag.isSet }
+            }
+            group.wait()
+            Harness.expect(flag.isSet, true, "settled")
+        }
+    }
+}

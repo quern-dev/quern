@@ -38,7 +38,13 @@ final class MinimumDisplay {
     }
 
     /// Marks the moment the indicator went up.
+    ///
+    /// Main queue only, like everything else that touches the status item.
+    /// Nothing in the type enforced that, and nothing stated it either -- the
+    /// safety of the unsynchronised `startedAt` rests entirely on it, so it is
+    /// asserted rather than left as a property of today's two call sites.
     func begin() {
+        dispatchPrecondition(condition: .onQueue(.main))
         startedAt = scheduler.now
     }
 
@@ -50,6 +56,7 @@ final class MinimumDisplay {
     /// of its own start should still get its completion, because the
     /// alternative is an indicator that never comes down.
     func end(_ body: @escaping () -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
         guard let started = startedAt else {
             body()
             return

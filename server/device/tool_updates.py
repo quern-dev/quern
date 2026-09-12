@@ -84,7 +84,15 @@ def _pipx_is_global(site: ToolSite) -> bool:
         Path(site.path).resolve().relative_to(Path.home().resolve())
     except ValueError:
         return True
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError as well as OSError, and it is the one that actually
+        # happens: `Path.resolve()` raises RuntimeError for a symlink loop, not
+        # OSError, so the handler used to catch a type this failure never
+        # produces and the real one escaped into the tool-update plan. Found by
+        # writing the test whose docstring had claimed to cover this branch for
+        # a while; it reached the path-is-None guard instead and never entered
+        # the try at all.
+        #
         # Cannot tell. The per-user command is the one that needs no password,
         # so it is the safer guess: it fails loudly rather than prompting for
         # credentials on the strength of something we could not read.

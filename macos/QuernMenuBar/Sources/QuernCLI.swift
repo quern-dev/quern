@@ -6,6 +6,33 @@
 
 import Foundation
 
+/// A boolean two queues can share.
+///
+/// Small on purpose: the one thing `QuernCLI.run` needs to hand from its
+/// watchdog back to the thread waiting on the process is "did we kill it".
+///
+/// Set-once and never cleared, so there is no read-modify-write to get wrong;
+/// the lock is here for the memory model, not for arithmetic. A narrow window
+/// remains where a process exits microseconds before the watchdog fires and
+/// still reports as timed out. That is inherent in asking the question at a
+/// deadline, and both answers are defensible at that instant.
+final class Flag {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 enum QuernCLI {
     /// Where the installer puts a release install. Not derived from this
     /// bundle's location: the app is installed to ~/Applications (so Spotlight
@@ -137,14 +164,19 @@ enum QuernCLI {
 
             var status: Int32 = -1
             var output = ""
-            var timedOut = false
+            // Written by the watchdog on a global queue, read here on the run
+            // queue. A plain `var` captured by both is a data race -- not a
+            // theoretical one, since `cancel()` does not stop a work item that
+            // has already begun executing, so the write and the read really can
+            // overlap at the deadline.
+            let timedOut = Flag()
             do {
                 try proc.run()
                 // Terminating the child closes the pipe, which is what releases
                 // the blocking read below.
                 let watchdog = DispatchWorkItem {
                     guard proc.isRunning else { return }
-                    timedOut = true
+                    timedOut.set()
                     proc.terminate()
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
@@ -152,7 +184,7 @@ enum QuernCLI {
                 proc.waitUntilExit()
                 watchdog.cancel()
                 output = String(data: data, encoding: .utf8) ?? ""
-                if timedOut {
+                if timedOut.isSet {
                     status = timedOutStatus
                     let mins = Int(timeout / 60)
                     output += "\n\nquern \(args.first ?? "") did not finish within "
