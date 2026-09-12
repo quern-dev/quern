@@ -85,13 +85,13 @@ def _pipx_is_global(site: ToolSite) -> bool:
     except ValueError:
         return True
     except (OSError, RuntimeError):
-        # RuntimeError as well as OSError, and it is the one that actually
-        # happens: `Path.resolve()` raises RuntimeError for a symlink loop, not
-        # OSError, so the handler used to catch a type this failure never
-        # produces and the real one escaped into the tool-update plan. Found by
-        # writing the test whose docstring had claimed to cover this branch for
-        # a while; it reached the path-is-None guard instead and never entered
-        # the try at all.
+        # RuntimeError as well as OSError. `Path.resolve()` does not agree with
+        # itself across versions about how an unreadable path fails -- a
+        # symlink loop raises RuntimeError on 3.12 and resolves without
+        # complaint on 3.11 and 3.13 -- and OSError alone let the 3.12 case
+        # escape into the tool-update plan. Both are caught rather than
+        # whichever this interpreter happens to raise, since the supported
+        # range is 3.11+.
         #
         # Cannot tell. The per-user command is the one that needs no password,
         # so it is the safer guess: it fails loudly rather than prompting for

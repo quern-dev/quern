@@ -24,6 +24,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -1246,19 +1247,45 @@ async def test_a_site_with_no_path_guesses_the_command_that_needs_no_password():
     assert update.needs_root is False
 
 
+@pytest.mark.parametrize("raised", [OSError(5, "I/O error"), RuntimeError("loop")])
 @pytest.mark.asyncio
-async def test_an_unreadable_path_guesses_the_command_that_needs_no_password(tmp_path):
-    """The `OSError` branch, which had no coverage at all.
+async def test_an_unreadable_path_guesses_the_command_that_needs_no_password(raised):
+    """The branch for a path `resolve()` cannot read, which had no coverage.
 
-    The test above describes this case in its docstring and does not reach it:
-    `path=None` short-circuits on the `if not site.path` guard before the `try`
-    is entered. So this one hands over a path `resolve()` genuinely cannot
-    read -- a symlink loop -- and checks the same rule holds: when quern cannot
-    tell, it must not ask for a password.
+    The `path=None` test above describes this case in its docstring and does
+    not reach it: the `if not site.path` guard short-circuits before the `try`.
 
-    Writing it found a second defect. `Path.resolve()` raises `RuntimeError`
-    for a symlink loop, not `OSError`, so the handler was catching a type this
-    failure never produces and the real one escaped into the tool-update plan.
+    Both exception types, injected rather than provoked. Which one a real
+    failure produces is a Python-version detail -- a symlink loop raises
+    `RuntimeError` on 3.12 and resolves without complaint on 3.11 and 3.13 --
+    and an earlier version of this test pinned 3.12's answer and failed CI on
+    the other two. What the code actually promises is version-independent: when
+    it cannot tell where an install lives, it must not ask for a password.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    def cannot_read(_self, *args, **kwargs):
+        raise raised
+
+    site = _site(source="pipx", version="9.15.1")
+    with patch.object(Path, "resolve", cannot_read):
+        update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+    assert "sudo" not in update.command
+
+
+@pytest.mark.asyncio
+async def test_a_symlink_loop_does_not_crash_the_plan(tmp_path):
+    """However this Python reports a symlink loop, the plan survives it.
+
+    Deliberately asserts nothing about the exception type, or that there is
+    one. On 3.12 this exercises the handler; on 3.11 and 3.13 `resolve()`
+    returns the path unchanged and it exercises the ordinary route. Either way
+    the thing that must not happen -- an exception escaping into the
+    tool-update plan, which is what it did before the handler was widened --
+    does not.
     """
     async def pypi(_name):
         return "11.12.4"
@@ -1266,14 +1293,11 @@ async def test_an_unreadable_path_guesses_the_command_that_needs_no_password(tmp
     loop = tmp_path / "loop"
     loop.symlink_to(tmp_path / "loop2")
     (tmp_path / "loop2").symlink_to(loop)
-    with pytest.raises(RuntimeError):
-        loop.resolve()
 
     site = _site(source="pipx", version="9.15.1", path=str(loop / "bin" / "pmd3"))
     update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
 
-    assert update.needs_root is False
-    assert "sudo" not in update.command
+    assert update is not None
 
 
 @pytest.fixture
