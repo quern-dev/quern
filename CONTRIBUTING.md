@@ -117,12 +117,14 @@ the copy to trust, and the one to update.
   - **Tests never touch the real machine.** `QUERN_STATE_DIR` redirects
     `~/.quern` and `setup.WRAPPER_PATH` redirects the wrapper; a path with no
     redirect wants one adding rather than a `Path.home` patch at the call site.
-    An autouse fixture in `tests/conftest.py` fails any test that creates,
-    changes or deletes what quern installs -- including other tools' config,
-    which `_remove_mcp_registrations` legitimately rewrites in production. This
-    is not hypothetical: the uninstall tests patched six things and not
-    `Path.home`, so every full run deleted the developer's own `quern` command,
-    and it presented as the CLI working intermittently for months.
+    An autouse fixture in `tests/conftest.py` is the backstop, failing any test
+    that changes a known install path -- including other tools' config, which
+    `_remove_mcp_registrations` legitimately rewrites in production and no test
+    has business touching. It is a backstop rather than the mechanism: it knows
+    only the paths someone listed, so redirection is still the thing to get
+    right. This is not hypothetical. The uninstall tests patched six things and
+    not `Path.home`, so every full run deleted the developer's own `quern`
+    command, and it presented as the CLI working intermittently for months.
   - **Tests inject every external lookup.** A test that reaches PyPI, brew or the network is a bug — slow, nondeterministic, broken offline. Pass the fetcher in, the way `probe_container` takes `describe_point`. When a call site moves, re-audit every test that reaches it; moving one report ahead of a return turned two passing tests into network calls.
   - **Mutation-test the guard.** Revert the fix and confirm a test actually fails. Two tests here passed against the bug they claimed to cover — one injected a fake at the wrong layer, one asserted on empty input.
 - **A stacked PR is never auto-reviewed.** CodeRabbit skips any pull request whose base is not the default branch — it posts "Auto reviews are disabled on base/target branches other than the default branch" and does nothing else. Retargeting does not wake it up either: measured twice, a PR retargeted to `main` when its parent merged sat 13–14 minutes with no review and no bot activity until asked explicitly. So on a stack, the `@coderabbitai review` that `merge-pr.sh --ask` sends is not a belt-and-braces re-check, it is the *only* review that will ever happen. #108 sat open for 15 hours with 968 unreviewed lines because of this, and the first look it got found a real bug. Ask at every level, or don't stack.
