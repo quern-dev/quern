@@ -1081,9 +1081,30 @@ def _cmd_check_updates() -> int:
     never had this problem -- `quern update` checks when you run it -- but
     anything reading the cache does, the menu bar included.
     """
-    from server.lifecycle.update_check import check_for_updates, read_update_info
+    from server.lifecycle.update_check import (
+        CheckFailure,
+        check_for_updates,
+        read_update_info,
+    )
 
-    message = check_for_updates(force=True)
+    failures: list[CheckFailure] = []
+    message = check_for_updates(force=True, on_error=failures.append)
+
+    if failures:
+        # Before the cache is consulted, deliberately. read_update_info()
+        # returns whatever the last *successful* check left behind, so asking
+        # it first lets a stale "update available" answer a question the
+        # network never got to. The reader asked what is out there now; the
+        # honest answer is that we could not find out, and why.
+        #
+        # The remedies genuinely differ, which is the point of discriminating
+        # at all: a DNS failure is the reader's own network, a 503 is nobody's
+        # to fix but the service's, and a certificate error on a machine
+        # running quern is usually quern's own proxy still intercepting.
+        for line in failures[0].lines():
+            print(line, file=sys.stderr)
+        return 1
+
     info = read_update_info() or {}
 
     if info.get("update_available"):
@@ -1091,10 +1112,13 @@ def _cmd_check_updates() -> int:
         return 0
 
     if not info:
-        # Distinct from "checked, nothing new". The check could not complete --
-        # offline, a channel with no releases -- and saying "up to date" on the
-        # strength of a lookup that never ran is the wrong reassurance.
-        print("Could not check for updates. See ~/.quern/server.log")
+        # Distinct from "checked, nothing new" and from an error we caught: the
+        # check ran, raised nothing, and still left no result. Saying "up to
+        # date" on the strength of a lookup that produced nothing would be the
+        # wrong reassurance.
+        print("The update check produced no result.", file=sys.stderr)
+        print("Try again, and report it with `quern capture-env` if it "
+              "keeps happening.", file=sys.stderr)
         return 1
 
     current = info.get("current_version") or "unknown"

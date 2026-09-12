@@ -20,13 +20,17 @@ import asyncio
 import fcntl
 import json
 import logging
+import socket
+import ssl
 import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from server.config import CONFIG_DIR, read_user_config
 
@@ -139,7 +143,96 @@ def _is_ahead_of(latest_sha: str | None) -> bool:
         return False
 
 
-def check_for_updates(force: bool = False) -> str | None:
+#: What went wrong, and what the reader can do about it.
+#:
+#: An error with no instruction is a dead end. "Could not check for updates"
+#: told the reader nothing they could act on, and neither does a bare
+#: `URLError` -- so each failure is matched to the thing that actually fixes it.
+#: The remedies genuinely differ: a name-resolution failure is the reader's
+#: network, an HTTP 503 is quern.dev's problem and waiting is the only move, and
+#: a certificate error on a machine running quern is very likely quern's own
+#: proxy still intercepting traffic.
+class CheckFailure(NamedTuple):
+    detail: str
+    """What happened, in the words of the thing that failed."""
+
+    remedy: str
+    """What to do about it."""
+
+    def lines(self) -> list[str]:
+        return [self.detail, self.remedy]
+
+
+def describe_failure(exc: BaseException) -> CheckFailure:
+    """Match an exception to an instruction."""
+    endpoint = ENDPOINT.split("//", 1)[-1].split("/", 1)[0]
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return CheckFailure(
+            f"{endpoint} answered {exc.code} ({exc.reason}).",
+            "Nothing to fix locally — the update service is having trouble. "
+            "Try again later.",
+        )
+
+    ssl_error = exc if isinstance(exc, ssl.SSLError) else getattr(exc, "reason", None)
+    if isinstance(ssl_error, ssl.SSLError):
+        # `ssl_error`, not `exc`. urllib wraps the cause in a URLError whose
+        # str() is "<urlopen error (...)>" -- the wrapper's own name and a
+        # parenthesised tuple, with the sentence that says *which* check failed
+        # buried inside it. The inner error reads as prose.
+        #
+        # The one failure with a quern-specific cause. quern's proxy intercepts
+        # HTTPS, so a machine left with the system proxy configured cannot
+        # verify a certificate for anything, this included.
+        return CheckFailure(
+            f"Could not verify the TLS certificate for {endpoint}: {ssl_error}.",
+            "Something is intercepting HTTPS. If quern's proxy is still "
+            "configured, turn it off with `quern stop` or the menu bar's "
+            "Stop Server. Otherwise a corporate network or antivirus is "
+            "likely inspecting traffic.",
+        )
+
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, socket.gaierror):
+        return CheckFailure(
+            f"Could not resolve {endpoint}: {reason}.",
+            "Check your internet connection, then try again.",
+        )
+    if isinstance(reason, TimeoutError | socket.timeout):
+        return CheckFailure(
+            f"{endpoint} did not answer within {TIMEOUT}s.",
+            "Check your internet connection. If it is fine, the update "
+            "service may be slow — try again in a minute.",
+        )
+    if isinstance(reason, ConnectionRefusedError):
+        return CheckFailure(
+            f"{endpoint} refused the connection: {reason}.",
+            "A firewall or proxy is likely blocking it. Check your network "
+            "settings, then try again.",
+        )
+    if isinstance(exc, urllib.error.URLError):
+        return CheckFailure(
+            f"Could not reach {endpoint}: {reason}.",
+            "Check your internet connection, then try again.",
+        )
+    if isinstance(exc, ValueError):
+        # json.JSONDecodeError is a ValueError.
+        return CheckFailure(
+            f"{endpoint} sent a response quern could not read: {exc}.",
+            "Nothing to fix locally. Try again later, and report it if it "
+            "keeps happening.",
+        )
+
+    return CheckFailure(
+        f"{type(exc).__name__}: {exc}",
+        "Try again, and report it with `quern capture-env` if it persists.",
+    )
+
+
+def check_for_updates(
+    force: bool = False,
+    on_error: Callable[[CheckFailure], None] | None = None,
+) -> str | None:
     """Return a message if updates are available, None otherwise.
 
     Rate-limited to once per CHECK_INTERVAL seconds. Never blocks server
@@ -261,7 +354,12 @@ def check_for_updates(force: bool = False) -> str | None:
             })
         return message
 
-    except Exception:
+    except Exception as exc:
+        # Silent by default: this runs on every server start and a failed
+        # update check is not worth a line of startup noise. `on_error` is how
+        # a caller who *asked* gets told why -- see `_cmd_check_updates`.
+        if on_error is not None:
+            on_error(describe_failure(exc))
         return None
 
 

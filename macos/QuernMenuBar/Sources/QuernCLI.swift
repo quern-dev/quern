@@ -187,9 +187,12 @@ enum QuernCLI {
     }
 
     static func checkForUpdates(_ completion: ((Int32, String) -> Void)? = nil) {
-        // Short: it is one network request, and someone is watching the menu
-        // bar while it runs.
-        run(["check-updates"], timeout: 60, completion: completion)
+        // Fifteen seconds, sized from what the work actually costs: one HTTP
+        // request the server caps at 5s, plus process start-up. Measured at
+        // about half a second in practice. Deliberately *above* that 5s cap
+        // rather than at it -- if the two raced, a slow network would kill the
+        // process instead of letting the request time out and report why.
+        run(["check-updates"], timeout: 15, completion: completion)
     }
 
     static func update(_ completion: ((Int32, String) -> Void)? = nil) {

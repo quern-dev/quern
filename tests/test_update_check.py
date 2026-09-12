@@ -7,7 +7,9 @@ call so test runs are deterministic.
 from __future__ import annotations
 
 import json
+import socket
 import time
+import urllib.error
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -527,3 +529,238 @@ class TestForcingACheck:
 
         assert update_check.check_for_updates(force=True) is None
         assert not looked
+
+
+# --- Failure discrimination -------------------------------------------------
+#
+# One message per failure is the point. "Could not check for updates, see the
+# log" named no cause and no action, and the log it pointed at said no more.
+# What each case asserts is therefore not the wording but the two properties
+# the wording exists for: the raw error survives into the text a person reads,
+# and the instruction is the one that actually fixes *that* failure.
+
+
+def _describe(exc):
+    from server.lifecycle.update_check import describe_failure
+    return describe_failure(exc)
+
+
+def test_dns_failure_blames_the_connection_and_keeps_the_raw_error():
+    failure = _describe(urllib.error.URLError(socket.gaierror(8, "nodename nor servname")))
+    assert "Could not resolve quern.dev" in failure.detail
+    assert "nodename nor servname" in failure.detail
+    assert "internet connection" in failure.remedy
+
+
+def test_timeout_names_the_limit_it_actually_waited():
+    from server.lifecycle.update_check import TIMEOUT
+    failure = _describe(urllib.error.URLError(TimeoutError("timed out")))
+    # Derived, not written down. A literal here would keep saying "5s" after
+    # someone changed TIMEOUT, which is a lie about what just happened.
+    assert f"within {TIMEOUT}s" in failure.detail
+
+
+def test_http_error_tells_the_reader_it_is_not_theirs_to_fix():
+    failure = _describe(
+        urllib.error.HTTPError("https://quern.dev/x", 503, "Service Unavailable", {}, None)
+    )
+    assert "503" in failure.detail
+    assert "Service Unavailable" in failure.detail
+    assert "Nothing to fix locally" in failure.remedy
+
+
+def test_certificate_failure_points_at_querns_own_proxy():
+    import ssl
+    inner = ssl.SSLCertVerificationError(
+        1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1010)"
+    )
+    failure = _describe(urllib.error.URLError(inner))
+    # The inner error, not urllib's "<urlopen error (...)>" wrapper. The
+    # sentence saying which check failed is inside the wrapper, and printing
+    # the wrapper buries it in a parenthesised tuple.
+    assert "CERTIFICATE_VERIFY_FAILED" in failure.detail
+    assert "<urlopen error" not in failure.detail
+    assert "quern stop" in failure.remedy
+
+
+def test_connection_refused_blames_a_firewall_not_the_connection():
+    failure = _describe(urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")))
+    assert "refused the connection" in failure.detail
+    assert "firewall" in failure.remedy
+
+
+def test_unreachable_network_falls_back_to_the_connection_advice():
+    failure = _describe(urllib.error.URLError(OSError(51, "Network is unreachable")))
+    assert "Could not reach quern.dev" in failure.detail
+    assert "internet connection" in failure.remedy
+
+
+def test_unreadable_response_is_not_the_readers_problem():
+    import json as _json
+    failure = _describe(_json.JSONDecodeError("Expecting value", "<html>", 0))
+    assert "could not read" in failure.detail
+    assert "Nothing to fix locally" in failure.remedy
+
+
+def test_unrecognised_failure_still_names_itself_and_says_what_to_do():
+    # The fallback is the one that has to hold up, because it is the branch
+    # that runs for every failure nobody anticipated.
+    failure = _describe(RuntimeError("something odd"))
+    assert "RuntimeError" in failure.detail
+    assert "something odd" in failure.detail
+    assert "capture-env" in failure.remedy
+
+
+def test_every_failure_carries_an_instruction():
+    import ssl
+    cases = [
+        urllib.error.HTTPError("https://quern.dev/x", 500, "Boom", {}, None),
+        urllib.error.URLError(ssl.SSLError("bad")),
+        urllib.error.URLError(socket.gaierror(8, "no")),
+        urllib.error.URLError(TimeoutError("timed out")),
+        urllib.error.URLError(ConnectionRefusedError(61, "refused")),
+        urllib.error.URLError(OSError(51, "unreachable")),
+        ValueError("not json"),
+        RuntimeError("unknown"),
+    ]
+    for exc in cases:
+        failure = _describe(exc)
+        # The pet peeve this feature exists to satisfy: no error without an
+        # instruction. A remedy that is blank, or that only restates the
+        # error, is the dead end all over again.
+        assert failure.remedy.strip(), f"no remedy for {type(exc).__name__}"
+        assert failure.detail.strip(), f"no detail for {type(exc).__name__}"
+
+
+def test_check_for_updates_reports_the_failure_to_its_caller(isolated_update_files):
+    from server.lifecycle.update_check import check_for_updates
+    seen = []
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError(socket.gaierror(8, "nodename nor servname")),
+    ):
+        result = check_for_updates(force=True, on_error=seen.append)
+    assert result is None
+    assert len(seen) == 1
+    assert "Could not resolve" in seen[0].detail
+
+
+def test_check_for_updates_survives_a_caller_with_no_error_handler(isolated_update_files):
+    # on_error is optional, and the callers that predate it pass nothing. A
+    # failure must still be swallowed rather than propagating into a server
+    # start path that has no business dying over an update check.
+    from server.lifecycle.update_check import check_for_updates
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        assert check_for_updates(force=True) is None
+
+
+# --- The check-updates command ----------------------------------------------
+#
+# The command is where the ordering matters. read_update_info() returns
+# whatever the last *successful* check left behind, so consulting it first lets
+# a stale "update available" answer a question the network never got to.
+
+
+@pytest.fixture
+def check_updates_cmd(isolated_update_files, monkeypatch):
+    """The command, with server.main's view of the cache redirected too.
+
+    server.main imports check_for_updates and read_update_info from the module
+    at call time, so patching update_check's own constants is enough -- but
+    only because the import is inside the function. Asserted below rather than
+    assumed.
+    """
+    from server.main import _cmd_check_updates
+    return _cmd_check_updates
+
+
+def _cache(path, **fields):
+    payload = {
+        "checked_at": "2026-09-12T05:01:35+00:00",
+        "current_version": "0.16.1",
+        "latest_version": "0.16.1",
+        "update_available": False,
+    }
+    payload.update(fields)
+    (path / "update-info.json").write_text(json.dumps(payload))
+
+
+def test_command_reports_the_failure_rather_than_a_stale_update(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # The regression this ordering exists for. A cache left saying "update
+    # available" by a check that succeeded yesterday must not be printed as
+    # today's answer when today's check could not leave the machine.
+    _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError(socket.gaierror(8, "nodename nor servname")),
+    ):
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "0.17.0" not in captured.out
+    assert "Could not resolve quern.dev" in captured.err
+    assert "internet connection" in captured.err
+
+
+def test_command_sends_failures_to_stderr_not_stdout(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # So a caller that captures stdout to read the version does not get an
+    # error message where it expects an answer.
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        check_updates_cmd()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+
+
+def test_command_reports_an_update_when_the_check_succeeds(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.17.0", "update_available": True}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Update available" in captured.out
+    assert captured.err == ""
+
+
+def test_command_reports_up_to_date_without_claiming_a_check_it_did_not_make(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.16.1", "update_available": False}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Up to date" in captured.out
+
+
+def test_command_does_not_call_a_silent_no_result_up_to_date(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # No exception, no cache written. Nothing raised, so there is no failure to
+    # describe -- and still nothing was learned, so "up to date" would be a
+    # false all-clear.
+    with patch(
+        "server.lifecycle.update_check.check_for_updates", return_value=None
+    ), patch("server.lifecycle.update_check.read_update_info", return_value=None):
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Up to date" not in captured.out
+    assert "no result" in captured.err
+    assert "capture-env" in captured.err

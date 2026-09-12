@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     private var didAttemptLaunchStart = false
+    /// Holds "Checking…" on screen long enough to be seen. See MinimumDisplay.
+    private let checkIndicator = MinimumDisplay()
 
     /// Everything about what is happening to the daemon. This class renders it
     /// and owns none of it -- see LifecycleController for why that split
@@ -385,26 +387,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         checkingForUpdates = true
         lastCheckResult = nil
         activityText = "Checking…"
+        checkIndicator.begin()
         QuernCLI.checkForUpdates { [weak self] code, output in
             guard let self else { return }
-            self.checkingForUpdates = false
-            self.activityText = nil
-            // The reader refreshes on its own three-second poll, but waiting
-            // for that after an action the user explicitly took reads as
-            // nothing having happened.
-            self.reader.refresh()
-            guard code != 0 else {
-                // A successful check that found nothing still deserves an
-                // answer -- the menu would otherwise look identical before and
-                // after, which is indistinguishable from a dead menu item.
-                if !self.snapshot.update.updateAvailable {
-                    self.lastCheckResult = output
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .components(separatedBy: "\n").first
+            // The whole completion waits out the floor, not just the part that
+            // clears the text. Clearing late but answering early would put the
+            // result in the menu while the menu still said "Checking for
+            // updates…", which is a worse frame than either end state.
+            self.checkIndicator.end { [weak self] in
+                guard let self else { return }
+                self.checkingForUpdates = false
+                self.activityText = nil
+                // The reader refreshes on its own three-second poll, but
+                // waiting for that after an action the user explicitly took
+                // reads as nothing having happened.
+                self.reader.refresh()
+                guard code != 0 else {
+                    // A successful check that found nothing still deserves an
+                    // answer -- the menu would otherwise look identical before
+                    // and after, which is indistinguishable from a dead menu
+                    // item.
+                    if !self.snapshot.update.updateAvailable {
+                        self.lastCheckResult = output
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .components(separatedBy: "\n").first
+                    }
+                    return
                 }
-                return
+                self.reportFailure("Could not check for updates", detail: output)
             }
-            self.reportFailure("Could not check for updates", detail: output)
         }
     }
 
