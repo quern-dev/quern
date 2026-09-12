@@ -44,6 +44,17 @@ manager with a **Restart to Update** action.
   0.16.1 install and was believed.
 - **Quit** — exits only the menu bar; ⌥ reveals "Quit and Stop Server".
 
+Every CLI call carries `QUERN_INVOKED_BY=menubar`, so the CLI can word its
+advice for someone who clicked a menu item — "Open a terminal and run: …"
+rather than "there is no terminal to ask on". It never decides what the CLI is
+*able* to do: whether a password can be asked for is settled by looking for a
+terminal, which cannot be forgotten the way a caller can forget to identify
+itself. When a failure alert carries a command, **Copy** puts it on the
+clipboard; the app does not launch a terminal itself, because running a `sudo`
+command on one menu click is a larger commitment than it makes anywhere else,
+it would pick a terminal on your behalf, and driving one needs an Automation
+permission prompt.
+
 It starts the daemon but does not own it: quitting the menu bar leaves the
 server running (⌥ reveals "Quit and Stop Server" for when you mean both), and
 it coexists with `quern start` and the MCP `ensure_server` tool. Start-on-launch

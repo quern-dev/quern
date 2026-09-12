@@ -122,6 +122,13 @@ enum QuernCLI {
             var env = ProcessInfo.processInfo.environment
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             env["PATH"] = searchPath(home: home).joined(separator: ":")
+            // Who is asking, so the CLI can word its advice for someone who
+            // clicked a menu item. Never what decides whether it may prompt --
+            // that is a capability, and the CLI works it out by looking for a
+            // terminal, which cannot be forgotten the way a caller can forget
+            // to identify itself. Same convention as
+            // QUERN_UPDATE_TRIGGERED_BY on the HTTP path.
+            env["QUERN_INVOKED_BY"] = "menubar"
             proc.environment = env
 
             let pipe = Pipe()

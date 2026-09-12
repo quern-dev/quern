@@ -1281,6 +1281,25 @@ def test_a_sudo_upgrade_is_not_attempted_with_nowhere_to_ask(
     )
 
 
+def test_the_menu_bar_is_told_where_to_run_it(
+    globally_installed_tool, monkeypatch, capsys
+):
+    """Identity changes the wording only. "Cannot be asked for here" is the
+    diagnosis; someone who clicked a menu item needs the next step."""
+    from server.lifecycle import updater
+    from server.lifecycle.invocation import INVOKED_BY, MENUBAR
+
+    monkeypatch.setenv(INVOKED_BY, MENUBAR)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+
+    updater._report_tool_updates(apply=True)
+
+    out = capsys.readouterr().out
+    assert "Open a terminal and run" in out
+    assert "sudo pipx upgrade --global pymobiledevice3" in out
+    assert not globally_installed_tool, "wording must not change what is run"
+
+
 def test_a_sudo_upgrade_runs_when_there_is_a_terminal(
     globally_installed_tool, monkeypatch, capsys
 ):

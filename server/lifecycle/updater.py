@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from server.lifecycle.invocation import run_it_yourself
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
@@ -481,6 +482,12 @@ def _can_ask_for_a_password() -> bool:
 
     Same test `setup._prompt_yn` makes, and for the same reason: a GUI-launched
     process has no controlling terminal, so /dev/tty cannot be opened.
+
+    Deliberately not "was I run by the menu bar". That is a different question,
+    answered separately by `invoked_by()`, and using identity where capability
+    is meant gets it wrong in both directions: a caller that forgets to
+    identify itself still cannot prompt, and `quern update --tools | tee log`
+    has no tty while the user sits right in front of one.
     """
     if sys.stdin.isatty():
         return True
@@ -539,9 +546,9 @@ def _report_tool_updates(apply: bool = False) -> bool:
         if update.needs_root and not _can_ask_for_a_password():
             # sudo with nowhere to prompt either hangs or fails with a message
             # about a terminal, neither of which tells the reader what to do.
-            # `quern update` is reachable from the menu bar, which has no tty.
-            print(f"\n{update.name} needs sudo and there is no terminal to ask on.")
-            print(f"  Run it yourself: {' '.join(update.command)}")
+            print(f"\n{update.name} needs sudo, which cannot be asked for here.")
+            for line in run_it_yourself(update.command):
+                print(f"  {line}")
             failures.append(update.name)
             continue
         print(f"\nUpgrading {update.name}...")

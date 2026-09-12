@@ -409,10 +409,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 ? "Run `quern status` to see what state it is in."
                 : trimmed
             alert.addButton(withTitle: "OK")
+            // Copy before Open Log: when the CLI could not do something itself
+            // it prints the command to run instead, and getting that onto the
+            // clipboard is the next step. Copying rather than launching a
+            // terminal is deliberate -- running a `sudo` command on one menu
+            // click is a larger commitment than this app makes anywhere else,
+            // it would pick a terminal on the user's behalf, and driving one
+            // needs an Automation permission prompt. The command is visible
+            // here and gets pasted wherever they actually work.
+            let canCopy = !trimmed.isEmpty
+            if canCopy { alert.addButton(withTitle: "Copy") }
             let hasLog = FileManager.default.fileExists(atPath: Self.serverLog.path)
             if hasLog { alert.addButton(withTitle: "Open Log") }
-            if alert.runModal() == .alertSecondButtonReturn, hasLog {
+
+            switch alert.runModal() {
+            case .alertSecondButtonReturn where canCopy:
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(trimmed, forType: .string)
+            case .alertSecondButtonReturn where hasLog,
+                 .alertThirdButtonReturn where hasLog:
                 NSWorkspace.shared.open(Self.serverLog)
+            default:
+                break
             }
         }
     }

@@ -936,6 +936,27 @@ class TestPromptYn:
         assert "no terminal" in out
         assert _UNASKED == ["Install the thing?"], "it must be recallable at the end"
 
+    def test_the_menu_bar_is_told_where_it_can_answer(self, capsys, monkeypatch):
+        """The path the menu bar can actually reach today: `quern update` calls
+        run_setup, whose prompts are then declined. "No terminal attached" is
+        the diagnosis; where to go is the useful part."""
+        from server.lifecycle.invocation import INVOKED_BY, MENUBAR
+        from server.lifecycle.setup import _UNASKED, run_setup
+
+        monkeypatch.setenv(INVOKED_BY, MENUBAR)
+        monkeypatch.setattr("server.lifecycle.setup._can_prompt", lambda: False)
+        monkeypatch.setattr("server.lifecycle.setup.check_homebrew", lambda: CheckResult(
+            name="Homebrew", status=CheckStatus.MISSING, message="not found"))
+
+        _UNASKED.clear()
+        run_setup()
+
+        out = capsys.readouterr().out
+        assert "open a terminal" in out.lower(), (
+            "a caller that identified itself as the menu bar should be told "
+            "where it can answer, not only that it cannot here"
+        )
+
     def test_a_declined_default_is_not_taken_as_a_yes(self, capsys):
         """Several of these install things. Answering the default would have
         setup say yes on the user's behalf, which is worse than doing less."""
