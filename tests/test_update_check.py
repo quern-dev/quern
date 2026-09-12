@@ -531,9 +531,8 @@ class TestForcingACheck:
 
         assert looked, "someone who just asked should not be told tomorrow"
 
-    def test_force_does_not_override_the_opt_out(self, monkeypatch, tmp_path):
-        """A different thing entirely. Someone who turned checking off did not
-        ask, whoever is calling."""
+    def test_the_automatic_check_respects_the_opt_out(self, monkeypatch, tmp_path):
+        """What the setting is actually for: no unattended calls."""
         update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
         monkeypatch.setattr(update_check, "read_user_config",
                             lambda: {"update_check": False})
@@ -541,8 +540,31 @@ class TestForcingACheck:
         monkeypatch.setattr(update_check, "_get_local_version",
                             lambda: looked.append(True) or "0.16.1")
 
-        assert update_check.check_for_updates(force=True) is None
-        assert not looked
+        assert update_check.check_for_updates() is None
+        assert not looked, "the automatic check ignored the opt-out"
+
+    def test_asking_directly_still_works_with_the_opt_out_set(
+        self, monkeypatch, tmp_path
+    ):
+        """"update_check": false turns off the *automatic* check.
+
+        It is the checkbox every other updater has, and every one of them
+        leaves Check Now working. Refusing an explicit request answers a
+        question the setting was never asked -- and clicking Check for Updates
+        is not an unattended call, so the privacy reading of the setting is
+        satisfied too.
+        """
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
+        monkeypatch.setattr(update_check, "read_user_config",
+                            lambda: {"update_check": False})
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+        monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+        update_check.check_for_updates(force=True)
+
+        assert looked, "someone who asked was refused on the strength of a setting"
 
 
 # --- What a failure tells the reader ------------------------------------
@@ -760,23 +782,30 @@ def test_command_points_at_the_log_without_printing_the_raw_error(
     assert "gaierror" not in captured.err
 
 
-def test_a_check_turned_off_is_not_reported_as_a_failure(
+def test_the_command_still_checks_when_automatic_checking_is_off(
     check_updates_cmd, isolated_update_files, capsys, monkeypatch
 ):
-    # Neither "up to date" (a check we never made) nor an error with a link to
-    # the issue tracker (their own setting). A stale cache must not answer for
-    # it either.
+    # Running `quern check-updates` is asking. The setting governs the
+    # unattended check, so it must not turn this into a refusal -- and the
+    # answer must come from the network, not from the cache the last check
+    # before the opt-out happened to leave behind.
     from server.lifecycle import update_check
     monkeypatch.setattr(
         update_check, "read_user_config", lambda: {"update_check": False}
     )
     _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
-    code = check_updates_cmd()
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.18.0", "update_available": True}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp) as urlopen:
+        code = check_updates_cmd()
     captured = capsys.readouterr()
-    assert code == 1
-    assert "turned off" in captured.out
-    assert "0.17.0" not in captured.out
-    assert "capture-env" not in captured.err
+    assert urlopen.called, "an explicit check was refused by the opt-out"
+    assert code == 0
+    assert "Update available" in captured.out
 
 
 def test_command_sends_failures_to_stderr_not_stdout(

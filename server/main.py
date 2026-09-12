@@ -1127,21 +1127,11 @@ def _cmd_check_updates() -> int:
     )
 
     failures: list[CheckFailure] = []
-    declined: list[bool] = []
     with _update_check_logged_to_file():
-        message = check_for_updates(
-            force=True,
-            on_error=failures.append,
-            on_declined=lambda: declined.append(True),
-        )
-
-    if declined:
-        # Not a failure, and not an answer either. Saying "up to date" here
-        # would be a check we never made; saying "could not check" would send
-        # someone to the issue tracker over their own setting.
-        print("Update checking is turned off in ~/.quern/config.json.")
-        print('Set "update_check": true there to turn it back on.')
-        return 1
+        # force=True: someone asked. That skips the once-a-day rate limit and
+        # the "update_check": false opt-out alike, because the opt-out governs
+        # the automatic check and this is not one.
+        message = check_for_updates(force=True, on_error=failures.append)
 
     if failures:
         # Before the cache is consulted, deliberately. read_update_info()

@@ -230,7 +230,6 @@ def describe_failure(exc: BaseException) -> CheckFailure:
 def check_for_updates(
     force: bool = False,
     on_error: Callable[[CheckFailure], None] | None = None,
-    on_declined: Callable[[], None] | None = None,
 ) -> str | None:
     """Return a message if updates are available, None otherwise.
 
@@ -238,25 +237,27 @@ def check_for_updates(
     startup — returns None on any error. Respects "update_check": false
     in ~/.quern/config.json.
 
-    `force` skips the rate limit but not the opt-out. The limit exists so a
-    running server does not hit the network every few minutes; it is the wrong
-    answer for someone who has just asked. Without a way past it, a release
-    landing this afternoon would not be offered until tomorrow, and the menu
-    bar -- which only knows what the cache last recorded -- had no way to ask.
-    The opt-out is a different thing: a user who turned checking off did not
-    ask, whoever is calling.
+    `force` means a person asked for this, right now, and it skips both gates.
+
+    The rate limit exists so a running server does not hit the network every
+    few minutes. It is the wrong answer for someone who has just asked: without
+    a way past it, a release landing this afternoon would not be offered until
+    tomorrow, and the menu bar -- which only knows what the cache last recorded
+    -- had no way to ask.
+
+    The opt-out is skipped for the same reason, though it took a second look to
+    see it. "update_check": false turns off the *automatic* check, which is the
+    only kind that happens without anyone asking; it is the checkbox every
+    other updater has, and every one of them leaves Check Now working. Refusing
+    an explicit request on the strength of it answers a question the setting
+    was never asked. If the motivation for turning it off was to stop quern
+    talking to the network unattended, that still holds -- clicking Check for
+    Updates is not unattended, and is consent for the call it makes.
     """
     try:
-        # Respect opt-out
-        config = read_user_config()
-        if config.get("update_check") is False:
-            # Declined, not failed. The caller must be able to tell those
-            # apart: reporting an error at someone who deliberately turned
-            # checking off sends them to the issue tracker over a setting they
-            # chose, and falling through to the cache answers with whatever the
-            # last check before the opt-out happened to find.
-            if on_declined is not None:
-                on_declined()
+        # Respect the opt-out -- but only for the automatic check, which is the
+        # only one it governs. See the docstring.
+        if not force and read_user_config().get("update_check") is False:
             return None
 
         # Check rate limit
