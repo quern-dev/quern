@@ -876,3 +876,118 @@ class TestCertStatusIsVerifiedNotRecalled:
         assert [d["udid"] for d in r.json()["devices"]] == ["PHONE"], (
             "the recorded value should stand for a physical device"
         )
+
+
+class TestLocalCaptureIsGatedToo:
+    """`local_capture` routed traffic with no cert guard at all.
+
+    The field report's reproduction: capture a simulator via local_capture,
+    erase it, and every HTTPS request fails with a generic in-app error while
+    quern reports the certificate installed. `configure_system` refuses in that
+    situation; this path had nothing, so `auto_install_cert` had no code to fire
+    in either — which is why the setting looked broken rather than absent.
+    """
+
+    def _no_trust(self, monkeypatch):
+        async def missing(_controller):
+            return [{"udid": "AAAA", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", missing
+        )
+
+    def _app_with_proxy(self, app):
+        """A proxy adapter real enough to build a status response from.
+
+        The attributes matter: a bare MagicMock hands pydantic mock objects
+        where it wants strings, and the resulting validation error looks like
+        the endpoint failing rather than the fixture being thin.
+        """
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_enabling_capture_is_refused_when_the_ca_is_not_trusted(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"]},
+            headers=auth_headers,
+        )
+        assert r.status_code == 428, "capture was enabled into a state that cannot work"
+
+    def test_auto_install_fires_here_too(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """The setting's whole promise is "handled from now on"."""
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+        installed = []
+
+        async def fake_install(_c, udid, device_name=None, **kw):
+            installed.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", fake_install)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"]},
+            headers=auth_headers,
+        )
+        assert installed == ["AAAA"], "auto_install_cert did not fire on this path"
+        assert r.status_code == 200
+
+    def test_disabling_capture_is_never_refused(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Clearing the list stops capture, so it cannot create the broken state.
+
+        Refusing it would trap someone in exactly the situation they are trying
+        to leave.
+        """
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": []},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+
+    def test_the_escape_hatch_still_works(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"], "skip_cert_check": True},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200

@@ -35,6 +35,16 @@ class _Ctrl:
     def __init__(self, devices):
         self.list_devices = AsyncMock(return_value=devices)
 
+    def _is_android(self, udid):
+        """Real controllers have this; `is_cert_installed` calls it first.
+
+        Only the tests that run the real `is_cert_installed` reach it, and
+        without it the preflight's fail-open `except Exception` swallowed an
+        AttributeError and reported nothing missing -- a green test for a gate
+        that never ran.
+        """
+        return False
+
 
 def _trust(answers):
     """Patch what the cert manager reports, keyed by udid.
@@ -242,3 +252,64 @@ class TestStaleTrustIsFlaggedPerDevice:
         # simulator is never checked, so it must not acquire the flag.
         assert DeviceCertState(name="iPad").cert_trust_stale is False
 
+
+
+class TestAFreshEraseIsCaught:
+    """The record is never believed, however recently it was written.
+
+    These are the only tests here that run the real `is_cert_installed`. The
+    rest patch it, which means they cannot see the cache at all -- and the
+    cache is the whole defect: before this, the preflight asked with
+    `verify=False`, so a record written minutes ago was returned unchecked and
+    an erased simulator sailed through the gate that exists to stop it.
+
+    Measured on a real simulator: `simctl erase` at 17:50, TrustStore empty,
+    preflight reporting nothing missing, `POST /proxy/local-capture` answering
+    200. The record was 3 minutes old, well inside the hour the cache holds.
+
+    The seam is `verify_cert_in_truststore` -- the ground-truth oracle, the
+    lowest point above the SQLite file itself. Patching anything higher would
+    stub out the decision under test.
+    """
+
+    def _record(self, udid, *, installed, age_seconds=0):
+        """Write a real cert-state.json entry, as install_cert would."""
+        from datetime import UTC, datetime, timedelta
+
+        from server.proxy.cert_manager import update_cert_state
+
+        when = datetime.now(UTC) - timedelta(seconds=age_seconds)
+        update_cert_state(udid, DeviceCertState(
+            name="iPhone 17e",
+            cert_installed=installed,
+            verified_at=when.isoformat(),
+        ).model_dump())
+
+    def _truststore(self, answer):
+        return patch(
+            "server.proxy.cert_manager.verify_cert_in_truststore",
+            return_value=answer,
+        )
+
+    async def test_a_minutes_old_record_does_not_shield_an_erased_simulator(self):
+        self._record("AAAA", installed=True, age_seconds=180)
+        with self._truststore(False):
+            missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
+        assert [d["udid"] for d in missing] == ["AAAA"]
+
+    async def test_a_seconds_old_record_does_not_either(self):
+        # The narrowest version: nothing short of a zero TTL saves this, which
+        # is the point -- the fix is to stop consulting the cache, not to
+        # shorten it.
+        self._record("AAAA", installed=True, age_seconds=0)
+        with self._truststore(False):
+            missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
+        assert [d["udid"] for d in missing] == ["AAAA"]
+
+    async def test_the_truststore_is_still_what_decides_trust(self):
+        # The converse, so the test above cannot be satisfied by a function
+        # that reports every device missing.
+        self._record("AAAA", installed=False, age_seconds=0)
+        with self._truststore(True):
+            missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
+        assert missing == []
