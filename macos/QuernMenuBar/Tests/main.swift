@@ -11,8 +11,9 @@ LifecycleControllerTests.all()
 SettingsModelTests.all()
 AutoCheckReadingTests.all()
 SettingWriterTests.all()
+SettingsWriteTimeoutTests.all()
 MinimumDisplayTests.all()
 FlagTests.all()
 // The count is deliberate. See Harness.report(expected:) -- without it, a suite
 // that runs nothing exits 0.
-exit(Harness.report(expected: 69))
+exit(Harness.report(expected: 71))

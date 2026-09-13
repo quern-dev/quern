@@ -119,3 +119,28 @@ enum SettingWriterTests {
         }
     }
 }
+
+// The deadline that bounds the queue. Its own suite because it is a constant,
+// and a constant nothing asserts can be changed without any test noticing.
+enum SettingsWriteTimeoutTests {
+    static func all() {
+        Harness.test("a settings write is abandoned well before the CLI default") {
+            // SettingWriter serializes these, so this deadline is how long a
+            // queued write can wait for its predecessor. At the 120s default a
+            // hung write held the next click for two minutes, which for a
+            // checkbox reads as the app having ignored it.
+            Harness.expect(QuernCLI.settingsWriteTimeout < 120,
+                           "must be shorter than the run() default")
+            Harness.expect(QuernCLI.settingsWriteTimeout <= 30,
+                           "a queued click should not wait half a minute")
+        }
+
+        Harness.test("but long enough for the work it does") {
+            // One small file rewritten under a lock, plus interpreter start-up,
+            // measured at about half a second. Too tight and a slow machine
+            // gets its writes killed, which is worse than a slow one.
+            Harness.expect(QuernCLI.settingsWriteTimeout >= 10,
+                           "leaves no headroom over the measured cost")
+        }
+    }
+}
