@@ -380,7 +380,13 @@ class DeviceController(DeviceControllerUI):
         for d in sim_devices:
             self._device_type_cache[d.udid] = DeviceType.SIMULATOR
         for d in physical_devices:
-            self._device_type_cache[d.udid] = DeviceType.DEVICE
+            # The backend's own classification, not a hardcoded DEVICE. This
+            # loop runs after the simctl one, so stamping DEVICE here overwrote
+            # the correct SIMULATOR for any UDID appearing in both -- which is
+            # every simulator, once Xcode 26 started registering them as
+            # CoreDevices. devicectl now filters simulators out, and this stops
+            # the mistake being reintroduced if anything else ever returns one.
+            self._device_type_cache[d.udid] = d.device_type
             if d.os_version:
                 self.wda_client._device_os_versions[d.udid] = d.os_version
             if d.name:
