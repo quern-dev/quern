@@ -573,8 +573,12 @@ async def setup_guide(request: Request) -> dict:
                 # overwrite the record their own traffic-based verification
                 # reads. See the note in device.py's list endpoint.
                 if device.device_type == DeviceType.SIMULATOR:
+                    # `verify=True`: the guide tells someone what to do next,
+                    # so a cached "already installed" sends them away from the
+                    # one step that would fix it.
                     cert_installed = await cert_manager.is_cert_installed(
-                        controller, device.udid, device_name=device.name,
+                        controller, device.udid, verify=True,
+                        device_name=device.name,
                     )
                 else:
                     cert_installed = read_cert_state().get(device.udid, {}).get(

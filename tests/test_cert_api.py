@@ -833,6 +833,57 @@ class TestCertStatusIsVerifiedNotRecalled:
         r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
         assert [d["udid"] for d in r.json()["devices"]] == ["AAAA"]
 
+    def test_a_fresh_record_does_not_shield_an_erased_simulator(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        """The filter must ask the TrustStore, not the hour-long cache.
+
+        Every other test in this class patches `is_cert_installed` outright,
+        so none of them can see the cache at all -- and the cache is the
+        defect: without `verify=True` a record written minutes ago is returned
+        unchecked, and `?cert_installed=true` hands back a device erased since.
+        Same bug as the preflight had, in the endpoint that *filters* on it.
+
+        Seam is `verify_cert_in_truststore`, the ground-truth oracle.
+        """
+        from datetime import UTC, datetime
+
+        from server.models import DeviceCertState, DeviceInfo, DeviceState, DeviceType
+        from server.proxy.cert_manager import update_cert_state
+
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("contents unread: the fingerprint is stubbed")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_fingerprint", lambda _p: "a" * 64,
+        )
+
+        # What quern recorded minutes ago, before the erase.
+        update_cert_state("AAAA", DeviceCertState(
+            name="iPhone 16 Pro", cert_installed=True, fingerprint="a" * 64,
+            verified_at=datetime.now(UTC).isoformat(),
+        ).model_dump())
+
+        booted = DeviceInfo(
+            udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[booted])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        app.state.device_controller._is_android = lambda _u: False
+
+        truststore = MagicMock(return_value=False)  # the erase
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.verify_cert_in_truststore", truststore
+        )
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["devices"] == [], (
+            "a record minutes old shielded an erased simulator from the filter"
+        )
+        assert truststore.called, "the TrustStore was never consulted"
+
     def test_a_physical_device_is_never_truststore_verified(
         self, client, auth_headers, app, monkeypatch
     ):
@@ -934,6 +985,58 @@ class TestLocalCaptureIsGatedToo:
             headers=auth_headers,
         )
         assert r.status_code == 428, "capture was enabled into a state that cannot work"
+
+    def test_the_string_false_does_not_switch_the_gate_off(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """`bool("false")` is `True`.
+
+        With an untyped `body: dict` this endpoint read `skip_cert_check` with
+        `bool(...)`, so a JSON string `"false"` disabled the cert gate --
+        meaning the exact opposite of what was sent. Every other value a client
+        might reasonably use for false does the same: "no", "0", "False".
+        """
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        for falsey in ("false", "False", "no", "0", 0, False):
+            r = client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": ["MobileSafari"], "skip_cert_check": falsey},
+                headers=auth_headers,
+            )
+            assert r.status_code == 428, (
+                f"skip_cert_check={falsey!r} disabled the gate"
+            )
+
+    def test_a_genuine_skip_still_works(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        # The converse, so the test above cannot be satisfied by an endpoint
+        # that ignores the field entirely.
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"], "skip_cert_check": True},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+
+    def test_a_malformed_body_is_rejected_not_coerced(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        for body in ({}, {"processes": "MobileSafari"},
+                     {"processes": ["X"], "skip_cert_check": "banana"}):
+            r = client.post(
+                "/api/v1/proxy/local-capture", json=body, headers=auth_headers,
+            )
+            assert r.status_code == 422, f"{body!r} was accepted"
 
     def test_auto_install_fires_here_too(
         self, client, auth_headers, app, monkeypatch

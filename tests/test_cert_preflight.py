@@ -343,3 +343,55 @@ class TestAFreshEraseIsCaught:
             missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
         assert missing == []
         assert truststore.called
+
+
+class TestOneUncheckableDeviceDoesNotUnRefuseTheRest:
+    """A failing check must lose only that device, never the confirmed ones.
+
+    The handler used to sit around the whole loop, so one device raising
+    returned `[]` -- discarding every device already *confirmed* untrusted.
+    `_ensure_ca_is_trusted` then saw nothing missing and allowed capture, which
+    is the gate opening on precisely the state it exists to catch. Failing open
+    is right for a device we could not check and never for one we could.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _a_ca_must_exist(self, tmp_path, monkeypatch):
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("contents unread: the fingerprint is stubbed below")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_fingerprint", lambda _p: "a" * 64,
+        )
+
+    def _trust_raising_on(self, exploding_udid, answers):
+        async def fake(_controller, udid, verify=False, *, device_name=None):
+            if udid == exploding_udid:
+                raise OSError("TrustStore unreadable")
+            return answers.get(udid, False)
+
+        return patch("server.proxy.cert_manager.is_cert_installed", side_effect=fake)
+
+    async def test_a_confirmed_untrusted_device_survives_a_later_failure(self):
+        devices = [_sim(udid="GOOD", name="trusts it"),
+                   _sim(udid="BAD", name="does not"),
+                   _sim(udid="BOOM", name="unreadable")]
+        with self._trust_raising_on("BOOM", {"GOOD": True, "BAD": False}):
+            missing = await simulators_without_cert(_Ctrl(devices))
+        assert [d["udid"] for d in missing] == ["BAD"], (
+            "a failing check discarded a device already confirmed untrusted"
+        )
+
+    async def test_the_order_does_not_matter(self):
+        # The failure first, so the fix cannot be "collect before raising".
+        devices = [_sim(udid="BOOM", name="unreadable"),
+                   _sim(udid="BAD", name="does not")]
+        with self._trust_raising_on("BOOM", {"BAD": False}):
+            missing = await simulators_without_cert(_Ctrl(devices))
+        assert [d["udid"] for d in missing] == ["BAD"]
+
+    async def test_the_uncheckable_device_is_not_itself_reported_missing(self):
+        # Failing open for it specifically: we do not know, so we do not claim.
+        with self._trust_raising_on("BOOM", {}):
+            missing = await simulators_without_cert(_Ctrl([_sim(udid="BOOM")]))
+        assert missing == []

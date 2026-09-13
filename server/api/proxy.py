@@ -30,6 +30,7 @@ from server.models import (
     FlowRecord,
     FlowSummaryResponse,
     InterfaceInfo,
+    LocalCaptureRequest,
     ProxyStatusResponse,
     SystemProxyInfo,
     SystemProxyRestoreInfo,
@@ -857,7 +858,9 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
 
 
 @router.post("/local-capture", response_model=ProxyStatusResponse)
-async def set_local_capture(request: Request, body: dict) -> ProxyStatusResponse:
+async def set_local_capture(
+    request: Request, body: LocalCaptureRequest,
+) -> ProxyStatusResponse:
     """Set the local capture process list. Restarts the proxy to apply.
 
     Body: {"processes": ["Metatext", "MobileSafari"], "skip_cert_check": false}
@@ -869,12 +872,9 @@ async def set_local_capture(request: Request, body: dict) -> ProxyStatusResponse
     `auto_install_cert` set, it installs instead of refusing. Disabling capture
     is never refused.
     """
-    processes = body.get("processes")
-    if processes is None:
-        raise HTTPException(status_code=400, detail="Missing 'processes' field")
-    if not isinstance(processes, list):
-        raise HTTPException(status_code=400, detail="'processes' must be a list of strings")
-    processes = [str(p) for p in processes if p]
+    # FastAPI rejects a missing or non-list `processes` with 422 before this
+    # runs; only the empty-string filtering is left to do.
+    processes = [p for p in body.processes if p]
 
     adapter = request.app.state.proxy_adapter
     if adapter is None:
@@ -889,9 +889,7 @@ async def set_local_capture(request: Request, body: dict) -> ProxyStatusResponse
     # the broken state and must never be refused because of it -- that would
     # trap someone in exactly the situation they are trying to leave.
     if processes:
-        await _ensure_ca_is_trusted(
-            request, skip=bool(body.get("skip_cert_check", False)),
-        )
+        await _ensure_ca_is_trusted(request, skip=body.skip_cert_check)
 
     # Update app state
     request.app.state.local_capture_processes = processes

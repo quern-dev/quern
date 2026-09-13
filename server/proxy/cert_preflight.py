@@ -63,9 +63,23 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
             # reporting nothing missing. That is the field report's exact
             # scenario and the case this function exists to catch, so the cache
             # cannot be consulted on this path at any TTL.
-            trusted = await cert_manager.is_cert_installed(
-                controller, d.udid, verify=True, device_name=d.name,
-            )
+            # Per device, not around the loop. A single failing TrustStore
+            # query used to reach the outer handler and return `[]`, throwing
+            # away every device already *confirmed* untrusted -- so one
+            # unreadable device silently un-refused capture for all the others,
+            # and the gate opened on exactly the state it exists to catch.
+            # Failing open is the right call for a device we could not check;
+            # it is never right for one we could.
+            try:
+                trusted = await cert_manager.is_cert_installed(
+                    controller, d.udid, verify=True, device_name=d.name,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Could not check the CA on %s (%s), skipping it: %s",
+                    d.name, d.udid[:8], e,
+                )
+                continue
             if not trusted:
                 missing.append({"udid": d.udid, "name": d.name})
         return missing

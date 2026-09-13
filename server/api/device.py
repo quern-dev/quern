@@ -247,8 +247,14 @@ async def list_devices(
                     and dev.state == DeviceState.BOOTED
                 )
                 if verifiable and controller is not None:
+                    # `verify=True`, matching the preflight. Without it the
+                    # hour-long cache answers, and this both labels *and*
+                    # filters: asking for devices that trust the CA and being
+                    # handed one erased four minutes ago is the answer being
+                    # wrong, not merely stale. The query costs 0.6 ms.
                     dd["cert_installed"] = await cert_manager.is_cert_installed(
-                        controller, dd["udid"], device_name=dd.get("name"),
+                        controller, dd["udid"], verify=True,
+                        device_name=dd.get("name"),
                     )
                 else:
                     dd["cert_installed"] = cert_states.get(dd["udid"], {}).get(

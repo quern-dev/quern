@@ -468,6 +468,24 @@ class InterfaceInfo(BaseModel):
     ssid: str | None = None  # Wi-Fi SSID when the interface is associated, else None
 
 
+class LocalCaptureRequest(BaseModel):
+    """Body for ``POST /proxy/local-capture``."""
+
+    processes: list[str]
+    """Process names to capture. Empty list disables local capture.
+
+    Name the process that makes the requests: Safari's traffic leaves through
+    ``com.apple.WebKit.Networking``, not ``MobileSafari``.
+    """
+    skip_cert_check: bool = False
+    """Enable capture even when a booted simulator does not trust the CA.
+
+    A model rather than a raw dict because this field disables a safety gate,
+    and ``bool("false")`` is ``True`` -- an untyped body let the string
+    ``"false"`` switch the check off, meaning the opposite of what was sent.
+    """
+
+
 class ConfigureSystemProxyRequest(BaseModel):
     """Body for ``POST /proxy/configure-system``."""
 
