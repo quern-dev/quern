@@ -22,7 +22,14 @@ final class SettingsModel: ObservableObject {
     @Published var channel: String = "stable" {
         didSet {
             guard channel != oldValue else { return }
-            channelWriter.set(channel, persisted: snapshot.update.channel ?? channel)
+            // `oldValue`, not `channel`, when no snapshot has landed yet.
+            // `?? channel` passed the new value as its own persisted value, so
+            // the writer saw no difference and never wrote -- the picker moved
+            // and `set-channel` never ran. `readChannel()` falls back to the
+            // default rather than returning nil, so this window is only before
+            // the first refresh, but StateReader polls every three seconds and
+            // Settings can be opened inside it.
+            channelWriter.set(channel, persisted: snapshot.update.channel ?? oldValue)
         }
     }
 
@@ -90,8 +97,15 @@ final class SettingsModel: ObservableObject {
             self?.writeChannel(value, done)
         }
         writer.onFailure = { [weak self] in
-            guard let self, let persisted = self.snapshot.update.channel else { return }
-            self.reconcileChannel(persisted)
+            guard let self else { return }
+            // The default rather than giving up when no snapshot has landed.
+            // A failed write leaves config.json without a channel, and the
+            // server reads that absence as the default -- so showing it is
+            // showing what is in effect, and returning early would leave the
+            // picker on a value nothing wrote.
+            self.reconcileChannel(
+                self.snapshot.update.channel ?? StateReader.defaultChannel
+            )
         }
         writer.log = { [weak self] in self?.logSettings($0) }
         return writer

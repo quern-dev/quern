@@ -75,27 +75,48 @@ enum SettingWriterTests {
             rig.writer.set(false, persisted: true)
             rig.pending[0](0, "")
             // Not three writes: the middle answer was superseded before it ran.
-            Harness.expect(rig.requested, [false, false], "writes")
+            // And not two either -- the queued value is what the write that
+            // just succeeded already put on disk, so repeating it sends a
+            // command nobody asked for. This assertion used to read
+            // [false, false], encoding that redundant write as correct.
+            Harness.expect(rig.requested, [false], "writes")
         }
 
-        Harness.test("a value already queued is not queued twice") {
-            // Asserts on the queue rather than on the writes. The version that
-            // checked only `requested` passed against its own mutation:
-            // dropping `queued` from `heading` still produced [false, true],
-            // because the second queue attempt overwrites the first with the
-            // same value. Only a third distinct request makes the difference
-            // visible.
+        Harness.test("a queued value equal to the one just written is dropped") {
+            // beta, stable, beta before the first write returns. The queue ends
+            // holding beta, which is exactly what the in-flight write is about
+            // to put on disk -- so running it sends a second identical command.
+            // For the channel that is not merely wasteful: `set-channel`
+            // discards the cached update check, so the redundant write throws
+            // away the update hint a second time.
             let rig = Rig(answersImmediately: nil)
             rig.writer.set(false, persisted: true)
             rig.writer.set(true, persisted: true)
-            rig.writer.set(true, persisted: true)
             rig.writer.set(false, persisted: true)
             rig.pending[0](0, "")
-            // Not [false, true, false]: the repeat was recognised as already
-            // queued, so the last distinct answer replaced it rather than
-            // stacking behind it.
-            Harness.expect(rig.requested, [false, false], "writes")
+            Harness.expect(rig.requested, [false], "a redundant write went out")
         }
+
+        Harness.test("but a queued value is retried when the write failed") {
+            // Same shape, failed write. The value is not on disk, so the queued
+            // copy of it is not redundant -- dropping it would leave the user's
+            // choice unwritten with nothing to correct it.
+            let rig = Rig(answersImmediately: nil)
+            rig.writer.set(false, persisted: true)
+            rig.writer.set(true, persisted: true)
+            rig.writer.set(false, persisted: true)
+            rig.pending[0](1, "")
+            Harness.expect(rig.requested, [false, false], "the retry was dropped")
+        }
+
+        // Removed: "a value already queued is not queued twice".
+        //
+        // It promised a behaviour the design makes structurally impossible --
+        // `queued` is one slot, so a repeat overwrites itself -- and no
+        // mutation distinguished it. A review flagged it as passing against
+        // its own mutation once; the redundant-write fix then collapsed its
+        // scenario entirely. "only the last answer is written when several
+        // arrive" covers what it was reaching for.
 
         Harness.test("a failed write hands back the value to show instead") {
             let rig = Rig(answersImmediately: 1)
@@ -512,6 +533,43 @@ enum SettingWriteLoggingTests {
             let rig = Rig()
             rig.writer.set(false, persisted: false)
             Harness.expect(rig.lines.isEmpty, "logged a write it did not make")
+        }
+    }
+}
+
+// The channel before any snapshot has landed.
+//
+// `readChannel()` never returns nil -- it falls back to the default -- so
+// `snapshot.update.channel` is only nil before the first refresh. That window
+// is real: StateReader polls every three seconds, and Settings can be opened
+// inside it.
+enum ChannelWithoutASnapshotTests {
+    static func all() {
+        Harness.test("the first change writes even with no snapshot yet") {
+            // `?? channel` passed the new value as its own persisted value, so
+            // the writer saw no difference and never wrote. The picker moved
+            // to beta and `set-channel beta` never ran.
+            let model = SettingsModel()
+            var wrote: [String] = []
+            model.logSettings = { _ in }
+            model.writeChannel = { value, _ in wrote.append(value) }
+
+            Harness.expect(model.snapshot.update.channel == nil,
+                           "precondition: no snapshot has landed")
+            model.channel = "beta"
+
+            Harness.expect(wrote, ["beta"], "the first channel change was dropped")
+        }
+
+        Harness.test("and still does not write when nothing changed") {
+            let model = SettingsModel()
+            var wrote: [String] = []
+            model.logSettings = { _ in }
+            model.writeChannel = { value, _ in wrote.append(value) }
+
+            model.channel = "stable"   // already the initial value
+
+            Harness.expect(wrote.isEmpty, "wrote a change that was not one")
         }
     }
 }

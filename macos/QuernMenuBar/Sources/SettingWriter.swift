@@ -95,6 +95,20 @@ final class SettingWriter<Value: Equatable> {
                 // to a value they have already moved away from would be a
                 // worse answer than letting the next write settle it.
                 self.queued = nil
+                if code == 0, next == value {
+                    // Except when the queue holds what this write just put on
+                    // disk. Three clicks -- beta, stable, beta -- leave beta
+                    // queued behind a beta write, and running it sends a second
+                    // identical command. For the channel that is not merely
+                    // wasteful: `set-channel` discards the cached update check,
+                    // so the redundant write throws the update hint away again.
+                    //
+                    // Only on success. A failed write did not reach the disk,
+                    // so the queued copy of the same value is a retry rather
+                    // than a repeat, and dropping it would leave the user's
+                    // choice unwritten with nothing left to correct it.
+                    return
+                }
                 self.start(next)
                 return
             }
