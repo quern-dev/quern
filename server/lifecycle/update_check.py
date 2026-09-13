@@ -60,7 +60,21 @@ def _find_project_root() -> Path | None:
 
 
 def _get_local_version() -> str | None:
-    """Read version from pyproject.toml."""
+    """Read version from pyproject.toml.
+
+    Scraped from the raw line rather than read through
+    ``importlib.metadata.version()``, and that matters more than it looks.
+    This string is sent to quern.dev as ``version=``, where it is parsed as
+    semver -- which is the only thing a tarball install has to identify itself
+    with, since it has no ``.git`` and therefore no SHA.
+
+    ``importlib.metadata`` returns the *normalised* PEP 440 form, which is not
+    semver: it rewrites ``0.14.1-beta.2`` to ``0.14.1b2``. The endpoint would
+    fail to parse that and answer "no update", silently restoring the bug where
+    tarball installs never heard about a release -- for beta users specifically,
+    who are the ones most likely to want to hear. Keep reading the literal
+    string, or teach the endpoint PEP 440 first.
+    """
     project_root = _find_project_root()
     if project_root is None:
         return None

@@ -342,3 +342,69 @@ class TestXcodeGate:
         with patch("asyncio.create_subprocess_exec") as exec_mock:
             assert await backend.list_devices() == []
         assert exec_mock.call_count == 0
+
+
+class TestSimulatorsAreNotPhysicalDevices:
+    """Xcode 26 registers simulators as CoreDevices, so they show up here.
+
+    Reported against 0.16.1: `resolve_device` wrote `{"type": "device"}` for a
+    simulator, UI reads routed to WDA instead of sim-bridge, and
+    `get_screen_summary` returned HTTP 500 against a healthy booted simulator.
+    `hardwareProperties.reality` is exactly the signal needed -- "simulated" or
+    "physical" -- and nothing read it.
+    """
+
+    def _with_reality(self, *realities: str) -> dict:
+        """The fixture, with one entry per given reality value."""
+        data = json.loads(_load_fixture("devicectl_list_output.json"))
+        template = data["result"]["devices"][0]
+        devices = []
+        for i, reality in enumerate(realities):
+            dev = json.loads(json.dumps(template))
+            dev["identifier"] = f"UDID-{i}"
+            dev["deviceProperties"]["name"] = f"Device {i}"
+            dev["hardwareProperties"]["reality"] = reality
+            devices.append(dev)
+        data["result"]["devices"] = devices
+        return data
+
+    @pytest.mark.asyncio
+    async def test_a_simulated_device_is_not_returned(self):
+        # simctl is authoritative about simulators: it knows the runtime and
+        # the real boot state. A second, worse entry for the same UDID is what
+        # caused the misclassification.
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(
+            return_value=(json.dumps(self._with_reality("simulated")), "")
+        )
+        assert await backend.list_devices() == []
+
+    @pytest.mark.asyncio
+    async def test_physical_devices_are_still_returned(self):
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(
+            return_value=(json.dumps(self._with_reality("physical")), "")
+        )
+        devices = await backend.list_devices()
+        assert len(devices) == 1
+        assert devices[0].device_type == DeviceType.DEVICE
+
+    @pytest.mark.asyncio
+    async def test_only_the_simulated_ones_are_dropped(self):
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(
+            return_value=(json.dumps(self._with_reality("physical", "simulated", "physical")), "")
+        )
+        devices = await backend.list_devices()
+        assert [d.udid for d in devices] == ["UDID-0", "UDID-2"]
+
+    @pytest.mark.asyncio
+    async def test_a_missing_reality_field_is_treated_as_physical(self):
+        # Older devicectl versions do not emit it. Dropping those devices would
+        # be a worse failure than the one being fixed -- physical devices would
+        # vanish -- so only an explicit "simulated" filters.
+        data = self._with_reality("physical")
+        del data["result"]["devices"][0]["hardwareProperties"]["reality"]
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=(json.dumps(data), ""))
+        assert len(await backend.list_devices()) == 1

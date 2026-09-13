@@ -125,11 +125,40 @@ class DevicectlBackend:
             raw_transport = connection_props.get("transportType", "")
             connection_type = "usb" if raw_transport == "wired" else raw_transport
             tunnel_state = connection_props.get("tunnelState", "")
-            device_type_str = dev.get("hardwareProperties", {}).get("deviceType", "")
+            hardware_props = dev.get("hardwareProperties", {})
+            device_type_str = hardware_props.get("deviceType", "")
+
+            # Simulators belong to simctl, which is authoritative about them:
+            # it knows the runtime and the real boot state, and devicectl does
+            # not. Returning them here produced a second, worse entry for the
+            # same UDID -- and because the controller populates its type cache
+            # from simctl *first* and devicectl second, that entry overwrote
+            # the correct classification. `resolve_device` then wrote
+            # `{"type": "device"}` for a simulator, UI reads routed to WDA
+            # instead of sim-bridge, and `get_screen_summary` returned HTTP 500
+            # against a perfectly healthy booted simulator.
+            #
+            # Xcode 26 registers simulators as CoreDevices, so they appear here
+            # on machines where they never used to. `reality` is exactly the
+            # signal needed and was never read: it is "simulated" or "physical".
+            if hardware_props.get("reality") == "simulated":
+                continue
 
             # Map state: any active/reachable tunnel or explicit bootState = booted.
             # tunnelState values: "connected" (active tunnel), "disconnected"
             # (reachable but no tunnel yet — e.g. WiFi devices), "unavailable".
+            #
+            # Left alone deliberately. A bug report had shut-down *simulators*
+            # arriving here as booted, because they report "disconnected" too --
+            # but that is a symptom of simulators being in this list at all, and
+            # the filter above is the fix. Narrowing this rule instead would
+            # have reported a wifi-connected iPhone as shut down: measured, it
+            # carries no bootState and a disconnected tunnel while plainly
+            # being awake and deployable.
+            #
+            # The deeper problem is that the question does not apply. "Booted"
+            # is simctl's vocabulary; usbmux fills the same field with a
+            # constant because there is nothing to compute. See #147.
             boot_state = dev.get("deviceProperties", {}).get("bootState", "")
             if tunnel_state in ("connected", "disconnected"):
                 state = DeviceState.BOOTED
