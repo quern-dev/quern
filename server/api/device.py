@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -276,6 +277,7 @@ async def list_devices(
 @router.post("/boot")
 async def boot_device(request: Request, body: BootDeviceRequest):
     """Boot a simulator by udid or name."""
+    from server.config import get_auto_install_cert
     from server.proxy import cert_manager as _cert_manager
 
     controller = _get_controller(request)
@@ -284,9 +286,20 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
-    # Auto-install proxy cert if the cert file exists
+    # Auto-install the CA only where the user has said to. This used to fire on
+    # every boot whenever the CA file existed, so booting a simulator through
+    # quern installed a MITM root CA on a machine that had never consented --
+    # measured: `auto_install_cert: false`, TrustStore empty before the call and
+    # holding our CA after it.
+    #
+    # `auto_install_cert` defaults to False and its docstring says why: a typo
+    # should read as "ask me", never as consent. CONTRIBUTING is blunter -- a
+    # silent, persistent CA-install policy is worse than the failure it
+    # prevents. Nothing is lost by waiting: the capture gate installs on the
+    # next `configure_system` or `set_local_capture` when the setting is on,
+    # and refuses with 428 and instructions when it is off.
     cert_auto_installed: bool | None = None
-    if _cert_manager.get_cert_path().exists():
+    if get_auto_install_cert() and _cert_manager.get_cert_path().exists():
         try:
             cert_auto_installed = await _cert_manager.install_cert(controller, udid)
         except Exception as exc:
@@ -335,12 +348,47 @@ async def shutdown_device(request: Request, body: ShutdownDeviceRequest):
         raise _handle_device_error(e)
 
 
+def _invalidate_cert_record(udid: str) -> None:
+    """Record that this device no longer trusts the CA.
+
+    Not a delete: `wifi_proxy_configs` and `installed_at` are still true of the
+    device and are what tells a later reader it *had* the CA before the erase.
+    Only the trust claim is withdrawn.
+
+    Never raises. Failing to update bookkeeping must not turn a successful
+    erase into an error response for a device that is already erased.
+    """
+    from server.proxy.cert_state import read_cert_state_for_device, update_cert_state
+
+    try:
+        existing = read_cert_state_for_device(udid)
+        if not existing:
+            return
+        existing.update({
+            "cert_installed": False,
+            "fingerprint": None,
+            "verified_at": datetime.now(UTC).isoformat(),
+        })
+        update_cert_state(udid, existing)
+    except Exception:
+        logger.warning("Could not clear cert state for %s after erase", udid, exc_info=True)
+
+
 @router.post("/erase")
 async def erase_device(request: Request, body: ShutdownDeviceRequest):
-    """Erase a simulator, resetting it to factory state. Simulator only."""
+    """Erase a simulator, resetting it to factory state. Simulator only.
+
+    Clears the device's recorded certificate state, because the erase is what
+    invalidated it. An erase recreates the TrustStore empty while leaving
+    quern's record saying the CA is installed, and that record is then read as
+    fact by everything that cannot query a shut-down simulator. This endpoint is
+    the one path where quern *knows* the erase happened, so leaving the record
+    behind was creating the field report's state itself.
+    """
     controller = _get_controller(request)
     try:
         await controller.erase(udid=body.udid)
+        _invalidate_cert_record(body.udid)
         return {"status": "erased", "udid": body.udid}
     except DeviceError as e:
         raise _handle_device_error(e)
