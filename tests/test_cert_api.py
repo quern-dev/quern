@@ -1094,3 +1094,295 @@ class TestLocalCaptureIsGatedToo:
             headers=auth_headers,
         )
         assert r.status_code == 200
+
+
+class TestBootDoesNotInstallWithoutConsent:
+    """Booting a simulator used to install a MITM root CA unconditionally.
+
+    `boot_device` installed the CA whenever the CA file existed, with no
+    reference to `auto_install_cert` -- which defaults to False and whose
+    docstring says a typo should read as "ask me", never as consent.
+    CONTRIBUTING is blunter: a silent, persistent CA-install policy is worse
+    than the failure it prevents.
+
+    Measured before the fix on a real simulator: `auto_install_cert: false`,
+    TrustStore empty before the call, holding our CA after it, and the response
+    saying `cert_auto_installed: true`.
+    """
+
+    def _controller(self, app, *, android=False):
+        """The real controller's `_is_android` returns a bool.
+
+        A bare MagicMock returns a truthy mock, which silently satisfies the
+        Android exemption and lets the install fire -- a green test for a gate
+        that never ran, which is the failure this file has hit twice.
+        """
+        app.state.device_controller.boot = AsyncMock(return_value="AAAA")
+        app.state.device_controller._is_android = lambda _u: android
+        app.state.device_controller.is_cert_installed = AsyncMock(return_value=False)
+        return app.state.device_controller
+
+    def _installs(self, monkeypatch, tmp_path):
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("present")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        installed = []
+
+        async def fake_install(_c, udid, *a, **kw):
+            installed.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", fake_install)
+        return installed
+
+    def test_no_install_when_the_user_has_not_opted_in(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        self._controller(app)
+        installed = self._installs(monkeypatch, tmp_path)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post("/api/v1/device/boot", json={"udid": "AAAA"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert installed == [], "a root CA was installed without consent"
+        assert r.json()["cert_auto_installed"] is None
+
+    def test_it_still_installs_when_they_have(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        # The converse, so the fix cannot be "never install on boot".
+        self._controller(app)
+        installed = self._installs(monkeypatch, tmp_path)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+        r = client.post("/api/v1/device/boot", json={"udid": "AAAA"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert installed == ["AAAA"]
+        assert r.json()["cert_auto_installed"] is True
+
+    def test_android_is_exempt_because_nothing_would_refuse_for_it(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        """Gating Android would remove the install with nothing in its place.
+
+        `simulators_without_cert` skips every non-simulator, so the capture gate
+        neither installs nor refuses for an emulator (D9). And `install_cert`'s
+        Android path is the only caller of `adb.set_http_proxy` in the tree, so
+        gating it would drop the emulator's proxy configuration too and fail
+        every HTTPS request with nothing pointing at the cause.
+        """
+        self._controller(app, android=True)
+        installed = self._installs(monkeypatch, tmp_path)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post("/api/v1/device/boot", json={"udid": "AAAA"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert installed == ["AAAA"], "the Android exemption stopped working"
+
+
+class TestErasingWithdrawsTheTrustClaim:
+    """The erase is what invalidated the record, and this is the one path where
+    quern knows it happened.
+
+    Leaving `cert_installed: true` behind means every reader that cannot query
+    a shut-down simulator reports the CA as installed -- which is the field
+    report's state, created by quern's own endpoint.
+    """
+
+    def test_the_record_no_longer_claims_the_ca_is_installed(
+        self, client, auth_headers, app
+    ):
+
+        from server.models import DeviceCertState
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        before = "2020-01-01T00:00:00+00:00"
+        update_cert_state("ERASEME", DeviceCertState(
+            name="iPhone 16 Pro", cert_installed=True, fingerprint="a" * 64,
+            installed_at="2026-09-01T00:00:00+00:00",
+            verified_at=before,
+            # Populated on purpose: with this left at None, a mutation that
+            # dropped it was indistinguishable from one that kept it, so the
+            # docstring's "not a delete" claim had nothing pinning it.
+            wifi_proxy_configs={"MonaLisaOverdrive": {
+                "proxy_host": "192.168.1.189", "proxy_port": 9101,
+                "client_ip": "192.168.1.50", "set_at": before,
+            }},
+        ).model_dump())
+        app.state.device_controller.erase = AsyncMock(return_value=None)
+
+        r = client.post(
+            "/api/v1/device/erase", json={"udid": "ERASEME"}, headers=auth_headers
+        )
+        assert r.status_code == 200
+
+        after = read_cert_state_for_device("ERASEME")
+        assert after["cert_installed"] is False, "the erase left a stale trust claim"
+        assert after["fingerprint"] is None
+        # The erase is the basis and it happened now.
+        assert after["verified_at"] != before
+        # Not a delete: these are still true of the device, and installed_at is
+        # what tells a later reader it *had* the CA before the erase.
+        assert after["installed_at"] == "2026-09-01T00:00:00+00:00"
+        assert after["name"] == "iPhone 16 Pro"
+        assert list(after["wifi_proxy_configs"]) == ["MonaLisaOverdrive"]
+
+    def test_the_claim_is_withdrawn_only_after_the_erase_succeeds(
+        self, client, auth_headers, app
+    ):
+        """Order matters, and nothing pinned it.
+
+        With the invalidation moved above `controller.erase`, a *failed* erase
+        still wipes the trust claim — writing `cert_installed: false` for a
+        device that was never erased and still trusts the CA. Every other test
+        here passed with that mutation applied.
+        """
+        from datetime import UTC, datetime
+
+        from server.models import DeviceCertState, DeviceError
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("FAILME", DeviceCertState(
+            name="iPhone 16 Pro", cert_installed=True, fingerprint="a" * 64,
+            verified_at=datetime.now(UTC).isoformat(),
+        ).model_dump())
+        app.state.device_controller.erase = AsyncMock(
+            side_effect=DeviceError("simulator is booted")
+        )
+
+        r = client.post(
+            "/api/v1/device/erase", json={"udid": "FAILME"}, headers=auth_headers
+        )
+        assert r.status_code != 200, "a failed erase reported success"
+
+        after = read_cert_state_for_device("FAILME")
+        assert after["cert_installed"] is True, (
+            "a failed erase withdrew the trust claim anyway"
+        )
+        assert after["fingerprint"] == "a" * 64
+
+    def test_a_device_we_never_recorded_is_left_alone(
+        self, client, auth_headers, app, monkeypatch, caplog
+    ):
+        import logging
+
+        from server.proxy.cert_state import read_cert_state_for_device
+
+        app.state.device_controller.erase = AsyncMock(return_value=None)
+        # Watch the write, not just the result. Without this the test passed
+        # even with the `if not existing` guard deleted, because `None.update`
+        # raised into the `except` and produced the same empty outcome -- green
+        # by way of the error handler rather than the guard.
+        wrote = MagicMock()
+        monkeypatch.setattr("server.proxy.cert_state.update_cert_state", wrote)
+
+        r = client.post(
+            "/api/v1/device/erase", json={"udid": "NEVERSEEN"}, headers=auth_headers
+        )
+        assert r.status_code == 200
+        assert not wrote.called, "an entry was written for a device we never recorded"
+        assert read_cert_state_for_device("NEVERSEEN") is None
+        # Deleting the guard produces the identical observable outcome, because
+        # `None.update` raises into the `except` and no write happens either
+        # way. The only difference is the noise, so that is what pins it:
+        # a routine erase must not log a warning about clearing cert state.
+        assert not [
+            rec for rec in caplog.records
+            if rec.levelno >= logging.WARNING and "cert state" in rec.getMessage()
+        ], "erasing an unrecorded device logged a spurious warning"
+
+    def test_a_bookkeeping_failure_does_not_fail_the_erase(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        # The device is already erased by then; reporting an error would be a
+        # lie about the thing the caller actually asked for.
+        app.state.device_controller.erase = AsyncMock(return_value=None)
+        reader = MagicMock(side_effect=OSError("disk"))
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state_for_device", reader
+        )
+        r = client.post(
+            "/api/v1/device/erase", json={"udid": "AAAA"}, headers=auth_headers
+        )
+        assert r.status_code == 200
+        # Without this the test passes when the invalidation is never called at
+        # all, or reads through some other function -- proving nothing about
+        # the error handling it names.
+        assert reader.called, "the failing seam was never reached"
+
+
+class TestBootAutoStartAsksTheTrustStore:
+    """Gating the install removed this path's only ground-truth refresh.
+
+    `install_cert` calls `is_cert_installed(verify=True)` and writes what it
+    learns, so before the consent gate the boot path always refreshed the
+    record before deciding whether to auto-start the proxy. With the install
+    gated off, reading the record instead is wrong in both directions.
+    """
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        return adapter
+
+    def _boot(self, app, monkeypatch, tmp_path, *, truststore):
+        app.state.device_controller.boot = AsyncMock(return_value="AAAA")
+        app.state.device_controller._is_android = lambda _u: False
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("present")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_fingerprint", lambda _p: "a" * 64,
+        )
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.verify_cert_in_truststore",
+            MagicMock(return_value=truststore),
+        )
+
+    def test_it_starts_for_a_device_the_truststore_says_is_trusted(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        """A CA installed by hand, or a record quern never wrote.
+
+        Reading the record would say no and the proxy would not start.
+        """
+        from server.models import DeviceCertState
+        from server.proxy.cert_state import update_cert_state
+
+        adapter = self._adapter(app)
+        self._boot(app, monkeypatch, tmp_path, truststore=True)
+        update_cert_state("AAAA", DeviceCertState(
+            name="iPhone 16 Pro", cert_installed=False,
+        ).model_dump())
+
+        r = client.post("/api/v1/device/boot", json={"udid": "AAAA"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert adapter.start.called, "the proxy did not start for a trusting device"
+
+    def test_it_does_not_start_on_a_record_the_truststore_contradicts(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        """A simulator erased outside quern, record still saying installed."""
+        from server.models import DeviceCertState
+        from server.proxy.cert_state import update_cert_state
+
+        adapter = self._adapter(app)
+        self._boot(app, monkeypatch, tmp_path, truststore=False)
+        update_cert_state("AAAA", DeviceCertState(
+            name="iPhone 16 Pro", cert_installed=True, fingerprint="a" * 64,
+        ).model_dump())
+
+        r = client.post("/api/v1/device/boot", json={"udid": "AAAA"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert not adapter.start.called, (
+            "the proxy auto-started on a record the TrustStore contradicts"
+        )
