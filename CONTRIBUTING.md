@@ -139,6 +139,19 @@ the copy to trust, and the one to update.
   - **Mutation-test the guard.** Revert the fix and confirm a test actually fails. Two tests here passed against the bug they claimed to cover — one injected a fake at the wrong layer, one asserted on empty input.
 - **A stacked PR is never auto-reviewed.** CodeRabbit skips any pull request whose base is not the default branch — it posts "Auto reviews are disabled on base/target branches other than the default branch" and does nothing else. Retargeting does not wake it up either: measured twice, a PR retargeted to `main` when its parent merged sat 13–14 minutes with no review and no bot activity until asked explicitly. So on a stack, the `@coderabbitai review` that `merge-pr.sh --ask` sends is not a belt-and-braces re-check, it is the *only* review that will ever happen. #108 sat open for 15 hours with 968 unreviewed lines because of this, and the first look it got found a real bug. Ask at every level, or don't stack.
 
+- **Not every CodeRabbit finding is a review thread.** Inline comments are, and
+  those are what the GraphQL `reviewThreads` query returns. *Outside diff
+  range*, *Additional*, *Nitpick* and *Duplicate* findings are not: they live
+  in the review **body**, inside collapsed `<details>` blocks. So a check that
+  walks review threads reports "1 finding" on a review that made two, with
+  nothing to indicate the gap. Run `scripts/cr-findings.sh <number>`, which
+  reads both. Measured on #145: the thread list showed one finding while a
+  second, rated Major, sat unread in the body — a queued value equal to the one
+  just written was written again, which for the update channel discards the
+  cached update check a second time. It was found by a person scrolling the
+  page, and it was also the finding that exposed one of our own tests asserting
+  the bug as expected behaviour.
+
 - **Merging a PR: use `scripts/merge-pr.sh <number>`**, not `gh pr merge`. `.coderabbit.yaml` sets `auto_review.enabled: true` with `auto_incremental_review: false`, so a review fires when a PR is *opened* and never again — **pushing to an open PR does not trigger one**. That is deliberate: review runs are capped per hour, and re-reviewing every push spends the budget on intermediate states nobody merges. The consequence is that an "0 unresolved threads" reading goes stale the moment you push, not because a new review contradicted it but because the code moved out from under it, and it still reads exactly like all-clear. The script refuses to merge unless the newest review is newer than the newest commit, and internally runs `pr-review-status.py --ask`, which requests the missing review when the head has moved past it. `--force` overrides deliberately. `scripts/pr-review-status.py` is the same check on its own; don't pipe it if you care about the exit code — `| sed` or `| tee` reports the pipe's status, not the script's, which reads as success.
 
 ## Design decisions worth knowing
