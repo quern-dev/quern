@@ -443,7 +443,7 @@ def actionable(updates: list[ToolUpdate]) -> list[ToolUpdate]:
     )
 
 
-def format_offer(updates: list[ToolUpdate]) -> str:
+def format_offer(updates: list[ToolUpdate], *, apply: bool = False) -> str:
     """The block `quern update` prints. Empty string when there is nothing.
 
     Every line carries the command, because the alternative is a reader who
@@ -466,11 +466,15 @@ def format_offer(updates: list[ToolUpdate]) -> str:
         # command on its own line reads as an instruction: reported from the
         # field by someone who ran `quern update --tools`, saw this, and took it
         # as homework -- while the very next line of output was quern running it.
-        # `format_report` (doctor) says "run:" for the same text, and there it
-        # *is* imperative, because doctor never applies anything.
-        lead = "will run"
+        #
+        # `apply` matters, because this same text serves both callers. A plain
+        # `quern update` prints the offer and returns without running anything,
+        # so "will run" there would be a different false claim in place of the
+        # old one. `format_report` (doctor) says "run:" for the same text, and
+        # there it *is* imperative, because doctor never applies anything.
+        lead = "will run" if apply else "`quern update --tools` will run"
         if update.needs_root:
-            lead = "will run, asking sudo for your password"
+            lead += ", asking sudo for your password"
         lines.append(f"      {lead}: {' '.join(update.command)}")
     return "\n".join(lines)
 

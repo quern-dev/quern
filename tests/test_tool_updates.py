@@ -1356,6 +1356,39 @@ def test_a_sudo_upgrade_is_not_attempted_with_nowhere_to_ask(
     assert "terminal" in out
 
 
+def test_the_apply_path_says_it_is_running_them(
+    globally_installed_tool, monkeypatch, capsys
+):
+    """End of the wiring, not just the formatter.
+
+    `format_offer` taking an `apply` flag is worth nothing if the caller never
+    passes it -- dropping `apply=apply` at the call site left every formatter
+    test green while the output went back to being wrong.
+    """
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: True)
+    updater._report_tool_updates(apply=True)
+
+    out = capsys.readouterr().out
+    assert "will run" in out
+    assert "`quern update --tools` will run" not in out, (
+        "the apply path pointed at the command that is already running"
+    )
+
+
+def test_the_report_path_names_what_would_do_it(globally_installed_tool, capsys):
+    from server.lifecycle import updater
+
+    updater._report_tool_updates(apply=False)
+
+    out = capsys.readouterr().out
+    assert "`quern update --tools` will run" in out, (
+        "a report-only run claimed it was about to execute the command"
+    )
+    assert not globally_installed_tool, "report-only must not run anything"
+
+
 def test_the_menu_bar_is_told_where_to_run_it(
     globally_installed_tool, monkeypatch, capsys
 ):
@@ -1542,6 +1575,28 @@ def _plain_update():
     )
 
 
+def test_report_only_does_not_claim_the_command_will_run():
+    """`quern update` prints the offer and returns without running anything.
+
+    The same text serves both callers, so wording that is true for `--tools`
+    is a different false claim here -- swapping "you must run this" for
+    "quern is about to run this" when it is not.
+    """
+    from server.device.tool_updates import format_offer
+
+    text = format_offer([_plain_update()], apply=False)
+    assert "`quern update --tools` will run: pipx upgrade pymobiledevice3" in text
+
+
+def test_the_default_is_the_report_only_wording():
+    # A caller that forgets the flag must not accidentally promise execution.
+    from server.device.tool_updates import format_offer
+
+    assert format_offer([_plain_update()]) == format_offer(
+        [_plain_update()], apply=False
+    )
+
+
 def test_every_offered_command_says_who_runs_it():
     """A bare command on its own line reads as an instruction.
 
@@ -1555,14 +1610,17 @@ def test_every_offered_command_says_who_runs_it():
     """
     from server.device.tool_updates import format_offer
 
-    text = format_offer([_plain_update()])
+    text = format_offer([_plain_update()], apply=True)
     assert "will run: pipx upgrade pymobiledevice3" in text
+    assert "quern update --tools" not in text, (
+        "the apply path is already running it; pointing at --tools is circular"
+    )
 
 
 def test_a_sudo_command_also_says_it_will_ask_for_a_password():
     from server.device.tool_updates import format_offer
 
-    text = format_offer([_needs_root_update()])
+    text = format_offer([_needs_root_update()], apply=True)
     assert "will run, asking sudo for your password:" in text
     assert "sudo pipx upgrade --global pymobiledevice3" in text
 

@@ -534,7 +534,7 @@ def _report_tool_updates(apply: bool = False) -> bool:
         print(f"Note: could not check external tool versions ({exc}).")
         return True
 
-    offer = format_offer(updates)
+    offer = format_offer(updates, apply=apply)
     if not offer:
         return True
     print(offer)
