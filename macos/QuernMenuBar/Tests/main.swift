@@ -14,8 +14,11 @@ SettingWriterTests.all()
 SettingsWriteTimeoutTests.all()
 SettingsModelWritingTests.all()
 ReconcileInvariantTests.all()
+OtherSettingsWritingTests.all()
+SettingWriteLoggingTests.all()
+ChannelWithoutASnapshotTests.all()
 MinimumDisplayTests.all()
 FlagTests.all()
 // The count is deliberate. See Harness.report(expected:) -- without it, a suite
 // that runs nothing exits 0.
-exit(Harness.report(expected: 76))
+exit(Harness.report(expected: 93))

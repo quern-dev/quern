@@ -242,11 +242,13 @@ enum QuernCLI {
         run(["update"], timeout: 600, completion: completion)
     }
     static func setChannel(_ channel: String, completion: ((Int32, String) -> Void)? = nil) {
-        run(["set-channel", channel], completion: completion)
+        run(["set-channel", channel],
+            timeout: settingsWriteTimeout, completion: completion)
     }
 
     static func setAutoInstallCert(_ enabled: Bool, completion: ((Int32, String) -> Void)? = nil) {
-        run(["set-auto-install-cert", enabled ? "on" : "off"], completion: completion)
+        run(["set-auto-install-cert", enabled ? "on" : "off"],
+            timeout: settingsWriteTimeout, completion: completion)
     }
 
     /// How long a settings write may take before it is abandoned.

@@ -40,7 +40,7 @@ final class LifecycleController {
         var start: (@escaping (Int32, String) -> Void) -> Void = { QuernCLI.start($0) }
         var stop: (@escaping (Int32, String) -> Void) -> Void = { QuernCLI.stop($0) }
         var restart: (@escaping (Int32, String) -> Void) -> Void = { QuernCLI.restart($0) }
-        var log: (String) -> Void = { NSLog("%@", $0) }
+        var log: (String) -> Void = { Log.lifecycle.notice("\($0, privacy: .public)") }
     }
 
     /// How long to keep waiting after a nonzero exit, and how often to look.
