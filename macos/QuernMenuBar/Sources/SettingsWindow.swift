@@ -348,6 +348,40 @@ struct SettingsView: View {
     private var u: UpdateInfo { model.snapshot.update }
     private var d: ActiveDevice { model.snapshot.device }
 
+    /// Padding inside a GroupBox, on top of whatever the box insets itself.
+    ///
+    /// Applied by hand because the boxes have to agree and SwiftUI will not
+    /// make them. Before this there were three different gutters in one
+    /// window: one box padded by 6, another not padded at all, and the three
+    /// built from `grid()` not padded either.
+    private static let contentInset: CGFloat = 6
+
+    /// How far the bottom group sits in, to line its checkboxes up with the
+    /// ones inside the boxes above.
+    ///
+    /// A separate number from `contentInset`, and larger, because it covers a
+    /// different distance: a GroupBox's own inset *plus* the padding we add on
+    /// top of it. The two toggles and the button down there sit outside any
+    /// box, so nothing aligns them for free -- and being the only controls in
+    /// the window without a container makes a shallower gutter obvious rather
+    /// than subtle.
+    ///
+    /// Measured, not derived: a GroupBox's own inset is not a published
+    /// constant, and reading it out of SwiftUI at runtime would be a worse
+    /// dependency than a number with a comment.
+    ///
+    /// 11 is the gap between the checkbox glyphs, taken off a screenshot by
+    /// finding the leftmost blue pixel of each one: those inside a box start
+    /// at x=54, these started at x=43.
+    ///
+    /// Three earlier guesses -- 6, 12, 15 -- all appeared to do nothing, and
+    /// the reason was not the number. A stray brace had attached this padding
+    /// to the whole body rather than to this group, so every value shifted the
+    /// entire window and left the gap exactly where it was. Worth remembering
+    /// that "the fix had no effect" is evidence about the wiring at least as
+    /// often as it is about the value.
+    private static let outsideBoxInset: CGFloat = 11
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Quern").font(.title2).bold()
@@ -388,7 +422,7 @@ struct SettingsView: View {
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(6)
+                .padding(Self.contentInset)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -424,7 +458,13 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
-                        .frame(maxWidth: 220)
+                        // `.leading`, because frame(maxWidth:) centres by
+                        // default. The segmented control is about 115 wide in
+                        // a 220 box, so it sat ~50pt right of where the label
+                        // column ends -- clear of the value column every row
+                        // above lines up on. Centred was always wrong here; it
+                        // only became obvious once this box gained padding.
+                        .frame(maxWidth: 220, alignment: .leading)
                         .accessibilityLabel("Update channel")
                         .accessibilityValue(model.channel)
                         Spacer()
@@ -436,35 +476,45 @@ struct SettingsView: View {
                         Text("Up to date").foregroundColor(.secondary).font(.callout)
                     }
                 }
+                .padding(Self.contentInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // No .accessibilityLabel here, and not for want of trying. In an
-            // NSHostingController the modifier reaches Text but is dropped by
-            // Toggle, Button and GroupBox's label -- measured: the checkbox
-            // ends up with no AXTitle and no AXDescription attribute at all,
-            // and neither .accessibilityLabel nor .accessibilityElement
-            // (children: .combine) changes that. So VoiceOver announces this
-            // as a bare "checkbox". Left unfixed rather than papered over with
-            // a modifier that does nothing.
-            Toggle("Launch at login", isOn: $model.loginEnabled)
-                .onChange(of: model.loginEnabled) { newValue in
-                    if !LoginItem.setEnabled(newValue) {
-                        // Revert the toggle if the OS refused.
-                        model.loginEnabled = LoginItem.isEnabled()
+            // The toggles and the button below sit outside any GroupBox, so
+            // they align with the box *frames* rather than with the content
+            // inside them -- a second gutter about six points shallower than
+            // the one every row above uses. Grouped and inset by hand to put
+            // them on the same line.
+            VStack(alignment: .leading, spacing: 16) {
+                // No .accessibilityLabel here, and not for want of trying. In an
+                // NSHostingController the modifier reaches Text but is dropped by
+                // Toggle, Button and GroupBox's label -- measured: the checkbox
+                // ends up with no AXTitle and no AXDescription attribute at all,
+                // and neither .accessibilityLabel nor .accessibilityElement
+                // (children: .combine) changes that. So VoiceOver announces this
+                // as a bare "checkbox". Left unfixed rather than papered over with
+                // a modifier that does nothing.
+                Toggle("Launch at login", isOn: $model.loginEnabled)
+                    .onChange(of: model.loginEnabled) { newValue in
+                        if !LoginItem.setEnabled(newValue) {
+                            // Revert the toggle if the OS refused.
+                            model.loginEnabled = LoginItem.isEnabled()
+                        }
                     }
-                }
 
-            Toggle("Start the server when Quern launches", isOn: $model.startOnLaunch)
-                .onChange(of: model.startOnLaunch) { newValue in
-                    StartOnLaunch.isEnabled = newValue
-                }
+                Toggle("Start the server when Quern launches", isOn: $model.startOnLaunch)
+                    .onChange(of: model.startOnLaunch) { newValue in
+                        StartOnLaunch.isEnabled = newValue
+                    }
 
-            HStack {
-                Button("Documentation") {
-                    NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
+                HStack {
+                    Button("Documentation") {
+                        NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
+                    }
+                    Spacer()
                 }
-                Spacer()
             }
+            .padding(.leading, Self.outsideBoxInset)
         }
         .padding(20)
         .frame(width: 420)
@@ -486,11 +536,28 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                         .frame(width: 90, alignment: .leading)
                         .accessibilityLabel("\(section) \(row.0)")
-                    Text(row.1).textSelection(.enabled)
+                    Text(row.1)
+                        .textSelection(.enabled)
+                        // Let the row grow instead of spilling out of the box.
+                        //
+                        // A 36-character simulator UDID does not fit the value
+                        // column, so it wrapped to a second line -- but nothing
+                        // told the row to reserve the height for it, so the
+                        // tail rendered past the GroupBox and over the section
+                        // below. Selecting the text made it obvious because
+                        // that re-laid it out; the overflow was there either
+                        // way. Same modifier, for the same reason, as the
+                        // certificate explanation further down.
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                 }
             }
         }
+        // The same inset the other two boxes apply to their own content. All
+        // five boxes now share one gutter, and the value column here lines up
+        // with the channel picker below, which sits after a label column of
+        // the same width.
+        .padding(Self.contentInset)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
