@@ -462,7 +462,16 @@ def format_offer(updates: list[ToolUpdate]) -> str:
             lines.append(f"      required: {update.reason}")
         if update.note:
             lines.append(f"      note: {update.note}")
-        lines.append(f"      {' '.join(update.command)}")
+        # Say who runs it, for every command and not just the sudo ones. A bare
+        # command on its own line reads as an instruction: reported from the
+        # field by someone who ran `quern update --tools`, saw this, and took it
+        # as homework -- while the very next line of output was quern running it.
+        # `format_report` (doctor) says "run:" for the same text, and there it
+        # *is* imperative, because doctor never applies anything.
+        lead = "will run"
+        if update.needs_root:
+            lead = "will run, asking sudo for your password"
+        lines.append(f"      {lead}: {' '.join(update.command)}")
     return "\n".join(lines)
 
 

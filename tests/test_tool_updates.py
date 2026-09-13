@@ -1348,6 +1348,12 @@ def test_a_sudo_upgrade_is_not_attempted_with_nowhere_to_ask(
     assert "sudo pipx upgrade --global pymobiledevice3" in out, (
         "the command must be printed so the user can run it themselves"
     )
+    # Unfinished, but not broken. "failed" sends the reader looking for a
+    # broken tool; what they need is a terminal.
+    assert "failed" not in out, (
+        "an upgrade that was never attempted was reported as a failure"
+    )
+    assert "terminal" in out
 
 
 def test_the_menu_bar_is_told_where_to_run_it(
@@ -1507,3 +1513,65 @@ async def test_a_relocated_global_home_is_still_global(tmp_path, monkeypatch):
 
     assert update.needs_root is True
     assert "--global" in update.command
+
+
+# --------------------------------------------------------------------------
+# Who runs the sudo command
+# --------------------------------------------------------------------------
+
+
+def _needs_root_update():
+    from server.device.tool_updates import ToolUpdate
+
+    return ToolUpdate(
+        name="pymobiledevice3", role="cli", action="upgrade_available",
+        current="9.15.1", latest="11.12.4",
+        command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+        needs_root=True,
+        note="installed globally, so upgrading it needs sudo",
+    )
+
+
+def _plain_update():
+    from server.device.tool_updates import ToolUpdate
+
+    return ToolUpdate(
+        name="pymobiledevice3", role="cli", action="upgrade_available",
+        current="2.6.3", latest="11.12.4",
+        command=["pipx", "upgrade", "pymobiledevice3"],
+    )
+
+
+def test_every_offered_command_says_who_runs_it():
+    """A bare command on its own line reads as an instruction.
+
+    Reported from the field: someone ran `quern update --tools`, saw
+    `pipx upgrade pymobiledevice3` sitting under the version line, took it as
+    homework -- and the very next line of output was quern running it.
+
+    Not scoped to sudo. The reported case had no sudo in it at all, which is
+    why an earlier version of this fix, which only spoke up for `needs_root`,
+    would not have helped the person who hit it.
+    """
+    from server.device.tool_updates import format_offer
+
+    text = format_offer([_plain_update()])
+    assert "will run: pipx upgrade pymobiledevice3" in text
+
+
+def test_a_sudo_command_also_says_it_will_ask_for_a_password():
+    from server.device.tool_updates import format_offer
+
+    text = format_offer([_needs_root_update()])
+    assert "will run, asking sudo for your password:" in text
+    assert "sudo pipx upgrade --global pymobiledevice3" in text
+
+
+def test_doctor_still_speaks_imperatively():
+    """`format_report` is doctor's, and doctor never applies anything, so
+    "run:" there is correct and must not be swept along with this."""
+    from server.device.tool_updates import format_report
+
+    text = format_report([_plain_update()])
+    assert "run: pipx upgrade pymobiledevice3" in text
+    assert "will run" not in text
