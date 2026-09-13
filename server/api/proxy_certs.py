@@ -561,12 +561,16 @@ async def setup_guide(request: Request) -> dict:
 
             booted_devices = [d for d in all_devices if d.state == DeviceState.BOOTED]
 
-            # Load cached cert states from persistent cert-state.json
-            device_certs = read_cert_state()
-
+            # Verified, not cached. This renders a per-device tick or cross in
+            # a setup guide, and a tick against an erased simulator tells
+            # someone they are ready when every HTTPS request from that device
+            # will fail. `is_cert_installed` keeps an hour-long cache and falls
+            # through to the TrustStore after that, so this stays cheap without
+            # believing a record indefinitely.
             for device in booted_devices:
-                cached = device_certs.get(device.udid, {})
-                cert_installed = cached.get("cert_installed", False)
+                cert_installed = await cert_manager.is_cert_installed(
+                    controller, device.udid, device_name=device.name,
+                )
                 cert_status_by_device[device.udid] = {
                     "name": device.name,
                     "cert_installed": cert_installed,

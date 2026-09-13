@@ -241,3 +241,4 @@ class TestStaleTrustIsFlaggedPerDevice:
         # Absence means "not contradicted", not "verified" — a shutdown
         # simulator is never checked, so it must not acquire the flag.
         assert DeviceCertState(name="iPad").cert_trust_stale is False
+

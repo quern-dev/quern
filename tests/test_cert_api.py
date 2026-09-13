@@ -758,3 +758,77 @@ class TestCertInstall:
         assert response.status_code == 400
         assert "Physical devices are not eligible" in response.json()["detail"]
         mock_install.assert_not_called()
+
+
+class TestCertStatusIsVerifiedNotRecalled:
+    """The two endpoints that rendered a stored record as current fact.
+
+    Erasing a simulator recreates its TrustStore empty and leaves quern's
+    record saying the cert is installed. A field report read that record,
+    reasonably believed it, and spent the next hour concluding that staging
+    authentication was down.
+
+    Driven through the real endpoints, because the bug was in the call site
+    rather than in anything underneath it -- a test that stubs the decision and
+    asserts on the stub cannot see it.
+    """
+
+    def _erased(self, monkeypatch):
+        """A device quern recorded as trusting the CA, that no longer does."""
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state",
+            lambda: {"AAAA": {"name": "iPhone 16 Pro", "cert_installed": True}},
+        )
+
+        async def not_trusted(_c, _udid, verify=False, *, device_name=None):
+            return False
+
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.is_cert_installed", not_trusted
+        )
+
+    def test_the_device_filter_excludes_an_erased_simulator(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """`?cert_installed=true` both labels and filters.
+
+        Getting an erased device back from that query is the answer being
+        wrong, not merely stale — the caller asked which devices trust the CA.
+        """
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        booted = DeviceInfo(
+            udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[booted])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        self._erased(monkeypatch)
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["devices"] == [], "an erased simulator was reported as trusting the CA"
+
+    def test_the_device_filter_still_finds_a_trusting_simulator(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        # The other direction, so the fix cannot be "always report false".
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        booted = DeviceInfo(
+            udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[booted])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state", lambda: {}
+        )
+
+        async def trusted(_c, _udid, verify=False, *, device_name=None):
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.is_cert_installed", trusted)
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert [d["udid"] for d in r.json()["devices"]] == ["AAAA"]
