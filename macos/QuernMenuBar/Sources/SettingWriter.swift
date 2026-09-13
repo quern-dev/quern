@@ -1,4 +1,4 @@
-// Writes a boolean setting without losing the user's last answer.
+// Writes a setting without losing the user's last answer.
 //
 // The obvious guard -- "only write when the new value differs from the
 // snapshot" -- exists because `apply()` assigns these properties on every
@@ -20,13 +20,13 @@
 
 import Foundation
 
-final class SettingWriter {
+final class SettingWriter<Value: Equatable> {
     /// Performs the write, calling back with the process exit status.
-    typealias Write = (Bool, @escaping (Int32) -> Void) -> Void
+    typealias Write = (Value, @escaping (Int32) -> Void) -> Void
 
     private let write: Write
-    private var inFlight: Bool?
-    private var queued: Bool?
+    private var inFlight: Value?
+    private var queued: Value?
 
     /// Called when a write fails and nothing newer is waiting.
     ///
@@ -53,7 +53,7 @@ final class SettingWriter {
     /// `persisted` is what is currently on disk, used only when nothing is in
     /// flight -- once something is, where we are heading is known exactly and
     /// the snapshot is the less accurate answer.
-    func set(_ value: Bool, persisted: Bool) {
+    func set(_ value: Value, persisted: Value) {
         dispatchPrecondition(condition: .onQueue(.main))
         let heading = queued ?? inFlight ?? persisted
         guard value != heading else { return }
@@ -64,7 +64,7 @@ final class SettingWriter {
         start(value)
     }
 
-    private func start(_ value: Bool) {
+    private func start(_ value: Value) {
         inFlight = value
         write(value) { [weak self] code in
             guard let self else { return }

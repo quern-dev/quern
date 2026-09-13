@@ -13,7 +13,7 @@ enum SettingWriterTests {
         /// comparison could not see and every defect here lived in.
         private(set) var pending: [(Int32) -> Void] = []
         private(set) var fellBackTo: [Bool] = []
-        var writer: SettingWriter!
+        var writer: SettingWriter<Bool>!
 
         /// `answersImmediately: nil` parks each completion instead.
         init(answersImmediately: Int32? = 0) {
@@ -282,6 +282,152 @@ enum ReconcileInvariantTests {
                 Harness.expect(model.autoCheckUpdates, value, "UI followed \(value)")
             }
             Harness.expect(wrote.isEmpty, "reconciling with the file wrote to it")
+        }
+    }
+}
+
+// The other two controls in the same window, driven through the real model.
+//
+// Same defects, same shape, and the same rule about where to inject: only the
+// subprocess is replaced, so the writers, their failure handlers and the
+// model's guards are the shipped ones. A rig that stood in for any of those
+// would pass while production stayed broken -- measured, twice.
+enum OtherSettingsWritingTests {
+    private final class Rig {
+        let model = SettingsModel()
+        private(set) var channels: [String] = []
+        private(set) var certs: [Bool] = []
+        private var pendingChannel: [(Int32) -> Void] = []
+        private var pendingCert: [(Int32) -> Void] = []
+        var channel: String
+        var cert: Bool
+
+        init(channel: String = "stable", cert: Bool = false) {
+            self.channel = channel
+            self.cert = cert
+            model.writeChannel = { [unowned self] value, done in
+                self.channels.append(value)
+                self.pendingChannel.append(done)
+            }
+            model.writeAutoInstallCert = { [unowned self] value, done in
+                self.certs.append(value)
+                self.pendingCert.append(done)
+            }
+            refresh()
+        }
+
+        func refresh() {
+            var snap = QuernSnapshot()
+            var info = UpdateInfo()
+            info.channel = channel
+            snap.update = info
+            snap.proxy = ProxyPolicy(autoInstallCert: cert)
+            model.apply(snap)
+        }
+
+        func completeChannel(_ code: Int32, persisting: String? = nil) {
+            let done = pendingChannel.removeFirst()
+            if code == 0, let persisting { channel = persisting }
+            done(code)
+        }
+
+        func completeCert(_ code: Int32, persisting: Bool? = nil) {
+            let done = pendingCert.removeFirst()
+            if code == 0, let persisting { cert = persisting }
+            done(code)
+        }
+    }
+
+    static func all() {
+        Harness.test("a refresh never rewrites the channel it just read") {
+            // The reason this control had a guard at all, and why it matters
+            // more here than anywhere else: `set-channel` discards the cached
+            // update check, so merely opening Settings on a beta machine used
+            // to wipe the update hint.
+            let rig = Rig(channel: "beta")
+            for _ in 0..<5 { rig.refresh() }
+            Harness.expect(rig.channels.isEmpty, "a refresh wrote the channel back")
+            Harness.expect(rig.model.channel, "beta", "the picker followed")
+        }
+
+        Harness.test("a second channel change while the first is in flight is kept") {
+            let rig = Rig(channel: "stable")
+            rig.model.channel = "beta"
+            rig.model.channel = "stable"
+            Harness.expect(rig.channels, ["beta"], "only the first has run")
+            rig.completeChannel(0, persisting: "beta")
+            Harness.expect(rig.channels, ["beta", "stable"], "the second followed")
+        }
+
+        Harness.test("a refresh during a channel write does not undo it") {
+            let rig = Rig(channel: "stable")
+            rig.model.channel = "beta"
+            rig.refresh()
+            Harness.expect(rig.model.channel, "beta", "a refresh reverted the picker")
+            rig.completeChannel(0, persisting: "beta")
+            Harness.expect(rig.channels, ["beta"], "a refresh queued a reversal")
+        }
+
+        Harness.test("a failed channel write shows what is on disk") {
+            let rig = Rig(channel: "stable")
+            rig.model.channel = "beta"
+            rig.completeChannel(1)
+            Harness.expect(rig.model.channel, "stable", "should show the disk")
+            Harness.expect(rig.channels.count, 1, "the revert issued another write")
+        }
+
+        Harness.test("a refresh never rewrites the certificate policy") {
+            let rig = Rig(cert: true)
+            for _ in 0..<5 { rig.refresh() }
+            Harness.expect(rig.certs.isEmpty, "a refresh wrote the policy back")
+            Harness.expect(rig.model.autoInstallCert, true, "the toggle followed")
+        }
+
+        Harness.test("a second certificate change in flight is kept") {
+            let rig = Rig(cert: false)
+            rig.model.autoInstallCert = true
+            rig.model.autoInstallCert = false
+            Harness.expect(rig.certs, [true], "only the first has run")
+            rig.completeCert(0, persisting: true)
+            Harness.expect(rig.certs, [true, false], "the second followed")
+        }
+
+        Harness.test("a refresh during a certificate write does not undo it") {
+            // Asserts the visible state, not just that no write went out. The
+            // write is already suppressed by the writer's own guard, so the
+            // isBusy check exists solely to stop the control flicking back to
+            // the old value while the write is in flight -- and only an
+            // assertion on the control can see that.
+            let rig = Rig(cert: false)
+            rig.model.autoInstallCert = true
+            rig.refresh()
+            Harness.expect(rig.model.autoInstallCert, true,
+                           "a refresh reverted the toggle mid-write")
+            rig.completeCert(0, persisting: true)
+            Harness.expect(rig.certs, [true], "a refresh queued a reversal")
+        }
+
+        Harness.test("a failed certificate write shows what is on disk") {
+            let rig = Rig(cert: false)
+            rig.model.autoInstallCert = true
+            rig.completeCert(1)
+            Harness.expect(rig.model.autoInstallCert, false, "should show the disk")
+            Harness.expect(rig.certs.count, 1, "the revert issued another write")
+        }
+
+        Harness.test("the two controls do not interfere") {
+            // They share a snapshot and a window, and a user can move both
+            // before either write lands.
+            let rig = Rig(channel: "stable", cert: false)
+            rig.model.channel = "beta"
+            rig.model.autoInstallCert = true
+            Harness.expect(rig.channels, ["beta"], "channel write")
+            Harness.expect(rig.certs, [true], "cert write")
+            rig.completeChannel(0, persisting: "beta")
+            rig.completeCert(0, persisting: true)
+            rig.refresh()
+            Harness.expect(rig.model.channel, "beta", "channel settled")
+            Harness.expect(rig.model.autoInstallCert, true, "cert settled")
         }
     }
 }

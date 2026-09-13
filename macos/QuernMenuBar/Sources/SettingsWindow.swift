@@ -12,8 +12,26 @@ final class SettingsModel: ObservableObject {
     @Published var snapshot = QuernSnapshot()
     @Published var loginEnabled = LoginItem.isEnabled()
     @Published var startOnLaunch = StartOnLaunch.isEnabled
-    @Published var channel: String = "stable"
-    @Published var autoInstallCert: Bool = false
+    /// The update channel. Writes through the same path as the toggles below.
+    ///
+    /// Getting this one wrong costs more than a stale value: `set-channel`
+    /// discards the cached update check as part of the same operation, because
+    /// a verdict computed against the old channel is invalid. So a write the
+    /// user did not ask for does not merely persist the wrong string, it also
+    /// wipes the update hint.
+    @Published var channel: String = "stable" {
+        didSet {
+            guard channel != oldValue else { return }
+            channelWriter.set(channel, persisted: snapshot.update.channel ?? channel)
+        }
+    }
+
+    @Published var autoInstallCert: Bool = false {
+        didSet {
+            guard autoInstallCert != oldValue else { return }
+            certWriter.set(autoInstallCert, persisted: snapshot.proxy.autoInstallCert)
+        }
+    }
     /// The checkbox's state, and the only thing the view binds to.
     ///
     /// The decision about whether a change should be written lives here rather
@@ -59,6 +77,39 @@ final class SettingsModel: ObservableObject {
     /// snaps the checkbox back rather than leaving it showing a setting that
     /// was never written -- the next refresh would undo it anyway, which reads
     /// as the app forgetting.
+    var writeChannel: (String, @escaping (Int32) -> Void) -> Void = { value, done in
+        QuernCLI.setChannel(value) { code, _ in done(code) }
+    }
+
+    var writeAutoInstallCert: (Bool, @escaping (Int32) -> Void) -> Void = { value, done in
+        QuernCLI.setAutoInstallCert(value) { code, _ in done(code) }
+    }
+
+    lazy var channelWriter: SettingWriter<String> = {
+        let writer = SettingWriter<String> { [weak self] value, done in
+            self?.writeChannel(value, done)
+        }
+        writer.onFailure = { [weak self] in
+            guard let self, let persisted = self.snapshot.update.channel else { return }
+            self.reconcileChannel(persisted)
+        }
+        return writer
+    }()
+
+    lazy var certWriter: SettingWriter<Bool> = {
+        let writer = SettingWriter<Bool> { [weak self] value, done in
+            self?.writeAutoInstallCert(value, done)
+        }
+        writer.onFailure = { [weak self] in
+            guard let self else { return }
+            self.reconcileCert(self.snapshot.proxy.autoInstallCert)
+        }
+        return writer
+    }()
+
+    private func reconcileChannel(_ value: String) { channel = value }
+    private func reconcileCert(_ value: Bool) { autoInstallCert = value }
+
     /// Runs the CLI. Injected only so a test can stand in for the subprocess.
     ///
     /// Deliberately the lowest seam there is. Replacing the whole writer, or
@@ -69,7 +120,7 @@ final class SettingsModel: ObservableObject {
         QuernCLI.setUpdateCheck(value) { code, _ in done(code) }
     }
 
-    lazy var autoCheckWriter: SettingWriter = {
+    lazy var autoCheckWriter: SettingWriter<Bool> = {
         let writer = SettingWriter { [weak self] value, done in
             self?.writeAutoCheck(value, done)
         }
@@ -177,9 +228,18 @@ final class SettingsModel: ObservableObject {
     }
 
     func apply(_ snap: QuernSnapshot) {
+        // Assigned first, always. Every `reconcile` below passes the value now
+        // in this snapshot, so `didSet` hands `set()` a value equal to the
+        // `persisted` it also hands over and the writer's own guard stops
+        // there. Assign the snapshot afterwards and every refresh writes the
+        // file back to what it already holds, three times a second.
         snapshot = snap
-        if let c = snap.update.channel { channel = c }
-        autoInstallCert = snap.proxy.autoInstallCert
+        // None of these while a write is outstanding. The file still holds the
+        // old value until the write lands, so assigning from it would push the
+        // control back to where the user just moved it from -- and, worse,
+        // queue that echo as a fresh request. The next refresh reconciles.
+        if let c = snap.update.channel, !channelWriter.isBusy { reconcileChannel(c) }
+        if !certWriter.isBusy { reconcileCert(snap.proxy.autoInstallCert) }
         // Not while a write is outstanding. This runs on every refresh, and the
         // file still holds the old value until the write lands -- so assigning
         // from it mid-write pushes the checkbox back to where the user just
@@ -284,13 +344,6 @@ struct SettingsView: View {
                     Toggle(isOn: $model.autoInstallCert) {
                         Text("Install the capture certificate automatically")
                     }
-                    .onChange(of: model.autoInstallCert) { newValue in
-                        // Same guard as the channel picker below: apply()
-                        // assigns this on every fresh snapshot, and writing
-                        // back on that path would shell out on each refresh.
-                        guard newValue != model.snapshot.proxy.autoInstallCert else { return }
-                        QuernCLI.setAutoInstallCert(newValue)
-                    }
                     .accessibilityLabel("Install the capture certificate automatically")
 
                     // Says what it costs, not just what it does. This installs
@@ -341,18 +394,6 @@ struct SettingsView: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 220)
-                        .onChange(of: model.channel) { newValue in
-                            // Only write when the user actually moved the
-                            // picker. `apply()` assigns this too, whenever a
-                            // fresh snapshot lands, and writing back on that
-                            // path shells out to `quern set-channel` with the
-                            // value already on disk. That is not a no-op:
-                            // setting the channel clears the cached update
-                            // check, so merely opening Settings on a beta
-                            // machine wiped the update hint.
-                            guard newValue != model.snapshot.update.channel else { return }
-                            QuernCLI.setChannel(newValue)
-                        }
                         .accessibilityLabel("Update channel")
                         .accessibilityValue(model.channel)
                         Spacer()
