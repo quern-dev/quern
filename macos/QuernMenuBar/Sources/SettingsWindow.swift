@@ -14,6 +14,75 @@ final class SettingsModel: ObservableObject {
     @Published var startOnLaunch = StartOnLaunch.isEnabled
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
+    /// The checkbox's state, and the only thing the view binds to.
+    ///
+    /// The decision about whether a change should be written lives here rather
+    /// than in the view's `.onChange`. Same behaviour, but `SettingsView`
+    /// cannot be instantiated without SwiftUI rendering it, so logic in the
+    /// view is logic no test can reach -- and a test rig that mirrors the
+    /// wiring instead of calling it passes while the real thing is broken.
+    /// Measured: two regressions here survived their own mutations until this
+    /// moved.
+    @Published var autoCheckUpdates: Bool = true {
+        didSet {
+            guard autoCheckUpdates != oldValue else { return }
+            autoCheckWriter.set(
+                autoCheckUpdates, persisted: snapshot.update.autoCheck
+            )
+        }
+    }
+
+    /// Assign from what is on disk, rather than relaying a click.
+    ///
+    /// No suppression flag, and none needed: every caller passes the value
+    /// already in `snapshot`, so `didSet` hands `set()` a value equal to the
+    /// `persisted` it also hands over, and the writer's own guard stops there.
+    /// That is why `apply()` assigns `snapshot` before calling this.
+    ///
+    /// A flag did live here. It survived being deleted with the suite green,
+    /// which is this project's definition of dead code -- see the same note in
+    /// TestScheduler.advance(by:). The invariant it protected is stated above
+    /// instead, because the next reader will otherwise put it back.
+    private func reconcile(_ value: Bool) {
+        autoCheckUpdates = value
+    }
+
+    /// The view's toggle, in the form a test can call.
+    func userSetAutoCheck(_ value: Bool) {
+        autoCheckUpdates = value
+    }
+
+    /// Writes `autoCheckUpdates`, one at a time, keeping the last answer.
+    ///
+    /// Unlike this window's other two toggles, which write user defaults and
+    /// cannot fail, this one writes a file the server owns. A failed write
+    /// snaps the checkbox back rather than leaving it showing a setting that
+    /// was never written -- the next refresh would undo it anyway, which reads
+    /// as the app forgetting.
+    /// Runs the CLI. Injected only so a test can stand in for the subprocess.
+    ///
+    /// Deliberately the lowest seam there is. Replacing the whole writer, or
+    /// the failure handler, would leave the production wiring untested -- and
+    /// measured: two regressions survived their own mutations that way,
+    /// because the mutation landed in code the test had substituted out.
+    var writeAutoCheck: (Bool, @escaping (Int32) -> Void) -> Void = { value, done in
+        QuernCLI.setUpdateCheck(value) { code, _ in done(code) }
+    }
+
+    lazy var autoCheckWriter: SettingWriter = {
+        let writer = SettingWriter { [weak self] value, done in
+            self?.writeAutoCheck(value, done)
+        }
+        writer.onFailure = { [weak self] in
+            // The snapshot, not the negation of the failed write: a failed
+            // write leaves the file untouched, so the last value read from it
+            // is the right one to show. Through `reconcile` so the revert
+            // cannot itself become a write.
+            guard let self else { return }
+            self.reconcile(self.snapshot.update.autoCheck)
+        }
+        return writer
+    }()
     /// What the version row knows, which is not the same as what it can show.
     ///
     /// Three states, because two were not enough. The row used to fall back to
@@ -111,6 +180,17 @@ final class SettingsModel: ObservableObject {
         snapshot = snap
         if let c = snap.update.channel { channel = c }
         autoInstallCert = snap.proxy.autoInstallCert
+        // Not while a write is outstanding. This runs on every refresh, and the
+        // file still holds the old value until the write lands -- so assigning
+        // from it mid-write pushes the checkbox back to where the user just
+        // moved it from. The old snapshot guard in `.onChange` absorbed that
+        // echo; comparing against the in-flight value instead does not, and it
+        // queued the echo as a fresh request that wrote the change straight
+        // back off. Leaving the property alone until the writer settles is the
+        // narrower fix: the next refresh reconciles it either way.
+        if !autoCheckWriter.isBusy {
+            reconcile(snap.update.autoCheck)
+        }
     }
 }
 
@@ -230,6 +310,22 @@ struct SettingsView: View {
 
             GroupBox("Updates") {
                 VStack(alignment: .leading, spacing: 8) {
+                    // Above the channel, because it is the more general
+                    // setting: whether quern looks at all, then what it looks
+                    // against, then what it last found.
+                    //
+                    // No explanatory line under it, unlike the certificate
+                    // toggle. That one describes a security cost. This one
+                    // describes a convention -- an automatic check and a
+                    // manual one are different things in every updater -- and
+                    // a sentence explaining a convention the reader already
+                    // holds reads as the app being unsure of itself. The
+                    // adverb carries it.
+                    Toggle(isOn: $model.autoCheckUpdates) {
+                        Text("Check for updates automatically")
+                    }
+                    .accessibilityLabel("Check for updates automatically")
+
                     HStack(alignment: .firstTextBaseline) {
                         // Same 90pt label column as grid(), so this row lines
                         // up with every other label in the window. A Picker

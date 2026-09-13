@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from server.config import CONFIG_DIR, read_user_config
+from server.config import CONFIG_DIR, get_update_check
 
 logger = logging.getLogger("quern-debug-server.update-check")
 
@@ -257,7 +257,7 @@ def check_for_updates(
     try:
         # Respect the opt-out -- but only for the automatic check, which is the
         # only one it governs. See the docstring.
-        if not force and read_user_config().get("update_check") is False:
+        if not force and not get_update_check():
             return None
 
         # Check rate limit

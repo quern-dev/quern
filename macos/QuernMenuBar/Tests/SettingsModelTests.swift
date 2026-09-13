@@ -26,6 +26,33 @@ enum SettingsModelTests {
     }
 
     static func all() {
+        Harness.test("the automatic update check defaults to on") {
+            // Ticked unless config says otherwise, matching the server. A
+            // fresh install has no `update_check` key at all, and showing the
+            // box unticked there would claim quern had stopped checking when
+            // it had not.
+            var snap = QuernSnapshot()
+            snap.update = UpdateInfo()
+            let model = SettingsModel()
+            model.apply(snap)
+            Harness.expect(model.autoCheckUpdates, true, "default")
+        }
+
+        Harness.test("the toggle follows the snapshot") {
+            var snap = QuernSnapshot()
+            var info = UpdateInfo()
+            info.autoCheck = false
+            snap.update = info
+            let model = SettingsModel()
+            model.apply(snap)
+            Harness.expect(model.autoCheckUpdates, false, "after applying off")
+
+            info.autoCheck = true
+            snap.update = info
+            model.apply(snap)
+            Harness.expect(model.autoCheckUpdates, true, "after applying on")
+        }
+
         Harness.test("before anything is read, it says so rather than guessing") {
             let model = SettingsModel()
             Harness.expect(model.version, .pending, "initial reading")
@@ -152,6 +179,36 @@ enum SettingsModelTests {
             Harness.expect(SettingsModel.VersionReading.pending
                              != SettingsModel.VersionReading.unavailable,
                            "not asked yet and asked-but-could-not-tell must differ")
+        }
+    }
+}
+
+// How config.json is read into the toggle. Must agree with
+// `get_update_check` in server/config.py, value for value.
+enum AutoCheckReadingTests {
+    static func all() {
+        Harness.test("a missing key means checking is on") {
+            // A fresh install has no `update_check` key at all.
+            Harness.expect(StateReader.autoCheck(from: nil), true, "missing")
+        }
+
+        Harness.test("only a literal false turns it off") {
+            Harness.expect(StateReader.autoCheck(from: false), false, "false")
+            Harness.expect(StateReader.autoCheck(from: true), true, "true")
+        }
+
+        Harness.test("a numeric zero is not a false") {
+            // JSONSerialization hands back NSNumber for booleans and numbers
+            // alike, and `as? Bool` accepts 0. The server requires a real
+            // boolean, so reading 0 as off would show the box unticked here
+            // while quern kept checking.
+            Harness.expect(StateReader.autoCheck(from: 0), true, "zero")
+            Harness.expect(StateReader.autoCheck(from: 1), true, "one")
+        }
+
+        Harness.test("a string is not a false either") {
+            Harness.expect(StateReader.autoCheck(from: "false"), true, "\"false\"")
+            Harness.expect(StateReader.autoCheck(from: "off"), true, "\"off\"")
         }
     }
 }

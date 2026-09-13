@@ -248,4 +248,21 @@ enum QuernCLI {
     static func setAutoInstallCert(_ enabled: Bool, completion: ((Int32, String) -> Void)? = nil) {
         run(["set-auto-install-cert", enabled ? "on" : "off"], completion: completion)
     }
+
+    /// How long a settings write may take before it is abandoned.
+    ///
+    /// Short, and for a reason beyond taste: SettingWriter serializes these, so
+    /// this deadline is the upper bound on how long a *queued* write waits for
+    /// its predecessor. The 120s default meant a hung write held the next one
+    /// for two minutes, which for a checkbox is indistinguishable from the app
+    /// having ignored the click.
+    ///
+    /// Twenty seconds is generous for the work: one small file rewritten under
+    /// a lock, plus interpreter start-up, measured at about half a second.
+    static let settingsWriteTimeout: TimeInterval = 20
+
+    static func setUpdateCheck(_ enabled: Bool, completion: ((Int32, String) -> Void)? = nil) {
+        run(["set-update-check", enabled ? "on" : "off"],
+            timeout: settingsWriteTimeout, completion: completion)
+    }
 }
