@@ -1574,7 +1574,12 @@ def cli() -> None:
     )
     enable_lc.add_argument(
         "processes", nargs="*", default=[],
-        help="Process names to capture (default: MobileSafari)",
+        help=(
+            "Process names to capture (default: MobileSafari and "
+            "com.apple.WebKit.Networking). Safari's requests leave through the "
+            "WebKit networking extension, so naming the app alone captures "
+            "nothing."
+        ),
     )
     subparsers.add_parser("disable-local-capture", help="Disable local traffic capture")
 

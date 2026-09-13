@@ -310,8 +310,11 @@ configured. If null/false, the user's browser works normally and traffic
 is NOT being captured.
 
 The local_capture field is a list of process names being captured via mitmproxy
-local mode. When non-empty, traffic from those processes (e.g. ["MobileSafari"])
-is transparently captured without needing a system proxy. Empty list means disabled.
+local mode. When non-empty, traffic from those processes is transparently captured
+without needing a system proxy. Empty list means disabled.
+Name the process that actually makes the requests: Safari's traffic leaves through
+com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
+nothing. The default is ["MobileSafari", "com.apple.WebKit.Networking"].
 Use set_local_capture to change the process list on the fly.
 
 The local_ip field is the Mac's outward-facing IP address — use this as a
@@ -917,7 +920,7 @@ extension in System Settings > Privacy & Security.`,
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture (e.g. ["MobileSafari", "Metatext"]). Empty list disables local capture.'
+          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Empty list disables local capture.'
         ),
     }),
   }, async ({ processes }) => {
