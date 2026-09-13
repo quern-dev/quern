@@ -295,11 +295,24 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     # `auto_install_cert` defaults to False and its docstring says why: a typo
     # should read as "ask me", never as consent. CONTRIBUTING is blunter -- a
     # silent, persistent CA-install policy is worse than the failure it
-    # prevents. Nothing is lost by waiting: the capture gate installs on the
-    # next `configure_system` or `set_local_capture` when the setting is on,
-    # and refuses with 428 and instructions when it is off.
+    # prevents. For a simulator nothing is lost by waiting: the capture gate
+    # installs on the next `configure_system` or `set_local_capture` when the
+    # setting is on, and refuses with 428 and instructions when it is off.
+    #
+    # **Android is deliberately exempt, for now.** That sentence is false for
+    # it: `simulators_without_cert` skips every non-simulator, so the gate
+    # neither installs nor refuses (D9 in docs/proposals/cert-trust-model.md).
+    # Worse, `install_cert`'s Android path is also the only code in the tree
+    # that calls `adb.set_http_proxy`, so gating it here would remove both the
+    # cert and the emulator's proxy configuration and leave nothing to say so
+    # -- silent HTTPS failure, the exact class this subsystem exists to
+    # prevent, relocated to Android. `docs/guides/android-proxy.md` also
+    # promises the re-install after an emulator reboot that this provides.
+    # Bringing Android under the gate belongs with D9, where it can be tested
+    # against a real emulator.
     cert_auto_installed: bool | None = None
-    if get_auto_install_cert() and _cert_manager.get_cert_path().exists():
+    consented = get_auto_install_cert() or controller._is_android(udid)
+    if consented and _cert_manager.get_cert_path().exists():
         try:
             cert_auto_installed = await _cert_manager.install_cert(controller, udid)
         except Exception as exc:
@@ -309,10 +322,21 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     proxy_auto_started = False
     has_cert = cert_auto_installed is True
     if not has_cert:
-        # Check if cert was previously installed
-        from server.proxy.cert_state import read_cert_state_for_device
-        state = read_cert_state_for_device(udid)
-        has_cert = state.get("cert_installed", False) if state else False
+        # Ask the TrustStore, not the record. The install above used to do this
+        # as a side effect -- `install_cert` calls `is_cert_installed(verify=True)`
+        # and writes the result -- so it was the only ground-truth refresh on
+        # this path, and gating the install removed it. Reading the record
+        # instead gets both directions wrong: a simulator that trusts the CA
+        # from a manual `simctl keychain add-root-cert` never auto-starts, and
+        # one erased outside quern auto-starts on a record that is no longer
+        # true. 0.6 ms, the same query every other caller now makes.
+        try:
+            has_cert = await _cert_manager.is_cert_installed(
+                controller, udid, verify=True,
+            )
+        except Exception:
+            logger.debug("Could not verify the CA on %s", udid, exc_info=True)
+            has_cert = False
 
     if has_cert:
         proxy_adapter = request.app.state.proxy_adapter
