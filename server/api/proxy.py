@@ -105,11 +105,19 @@ async def _get_proxy_status(
     # The diagnostic path for the cases the preflight cannot reach: an app
     # launched by tapping its icon, or capture enabled before the device booted.
     from server.config import get_auto_install_cert
-    from server.proxy.cert_preflight import simulators_without_cert
+    from server.proxy.cert_preflight import simulators_without_cert, trust_is_stale
 
     auto_install_cert = get_auto_install_cert()
-    if await simulators_without_cert(getattr(request.app.state, "device_controller", None)):
+    untrusted = await simulators_without_cert(
+        getattr(request.app.state, "device_controller", None)
+    )
+    if untrusted:
         warnings.append("capture_without_cert")
+    # Which of those contradict what we recorded. The warning above says capture
+    # would fail; this says which device's stored `cert_installed: true` is no
+    # longer true, so a reader looking at one device does not have to correlate
+    # it with a list somewhere else in the response.
+    untrusted_udids = {d["udid"] for d in untrusted}
     try:
         from server.proxy.cert_state import read_cert_state, strip_noncanonical_fields
         device_certs = read_cert_state()
@@ -150,6 +158,9 @@ async def _get_proxy_status(
                         } if configs else None,
                         wifi_proxy_stale=wifi_proxy_stale,
                         active_wifi_network=active_network,
+                        cert_trust_stale=trust_is_stale(
+                            udid, cert_data, untrusted_udids
+                        ),
                     )
                 except Exception:
                     _proxy_logger.warning(
@@ -170,6 +181,9 @@ async def _get_proxy_status(
                         } if configs else None,
                         wifi_proxy_stale=wifi_proxy_stale,
                         active_wifi_network=active_network,
+                        cert_trust_stale=trust_is_stale(
+                            udid, canonical, untrusted_udids
+                        ),
                     )
 
                 cert_setup[udid] = entry

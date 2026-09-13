@@ -1414,6 +1414,19 @@ class DeviceCertState(BaseModel):
     # Computed at read time
     wifi_proxy_stale: bool = False
     active_wifi_network: str | None = None  # SSID whose config is currently active
+    #: Recorded as installed, but the device does not currently trust the CA.
+    #:
+    #: The usual cause is an erase: it recreates the TrustStore empty and leaves
+    #: this record untouched, so `cert_installed` keeps saying true. A field
+    #: report had one 10.5 hours out of date, read `cert_installed: true`, and
+    #: reasonably moved on -- then spent the next hour concluding that staging
+    #: authentication was down, because every HTTPS request from that simulator
+    #: failed with nothing pointing at the proxy.
+    #:
+    #: Only ever set for a device that was actually checked and found wanting.
+    #: A shutdown simulator is not checked, and absence of this flag therefore
+    #: means "not contradicted" rather than "verified".
+    cert_trust_stale: bool = False
 
 
 class CertStatusResponse(BaseModel):
