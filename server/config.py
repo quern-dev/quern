@@ -130,10 +130,7 @@ def set_update_channel(channel: str) -> None:
             f"Unknown update channel {channel!r}. "
             f"Valid: {', '.join(VALID_UPDATE_CHANNELS)}"
         )
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = read_user_config()
-    config["update_channel"] = channel
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    update_user_config(lambda c: c.__setitem__("update_channel", channel))
 
 
 def get_auto_install_cert() -> bool:
@@ -167,7 +164,11 @@ def _config_lock():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = CONFIG_DIR / "config.lock"
     try:
-        handle = lock_path.open("w")
+        # "a", not "w". "w" truncates, which needs write permission on an
+        # existing file -- so one `sudo quern set-...` leaves a root-owned lock
+        # file and every later write by the user falls through to the unlocked
+        # path from then on, permanently, behind a warning nobody reads.
+        handle = lock_path.open("a")
     except OSError:
         # Cannot lock. Proceeding unlocked is what happened before there was a
         # lock at all, and refusing to save a setting because a lock file could
@@ -176,7 +177,16 @@ def _config_lock():
         yield
         return
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as e:
+            # flock is not supported on every filesystem -- SMB, AFP and some
+            # NFS mounts answer ENOTSUP or ENOLCK -- and a home directory on
+            # one of those is not exotic. Letting this escape would propagate
+            # out of a setter, so the setting is lost and the CLI exits with a
+            # traceback. Same trade as above: unlocked beats not saved.
+            logger.warning("Could not lock %s (%s); writing config unlocked",
+                           lock_path, e)
         yield
     finally:
         handle.close()
@@ -188,6 +198,12 @@ def update_user_config(change: Callable[[dict], None]) -> None:
     The read and the write are inside one lock deliberately. Reading outside it
     and writing inside would still let two callers start from the same snapshot,
     which is the whole failure.
+
+    `change` must not call this again. The lock is not reentrant -- a nested
+    call opens a second descriptor and blocks against the first, in the same
+    thread, forever. Reading with `read_user_config()` inside `change` is fine;
+    it takes no lock. Nothing nests today, and the callable is the reason to
+    say so rather than leave it to be discovered.
 
     Swapped in rather than written over: the menu-bar app reads this file on a
     poll, and ``write_text`` truncates before it writes, so a read landing in
@@ -271,10 +287,7 @@ def set_local_capture_processes(processes: list[str]) -> None:
 
     An empty list disables local capture.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = read_user_config()
-    config["local_capture"] = processes
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    update_user_config(lambda c: c.__setitem__("local_capture", processes))
 
 
 # ---------------------------------------------------------------------------
@@ -298,20 +311,21 @@ def set_plist_watch_config(
 
     watches: list of {container, plist_path, ignore_prefixes} dicts.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = read_user_config()
-    pw = config.setdefault("plist_watch", {})
-    pw[bundle_id] = {"watches": watches}
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    def _set(config: dict) -> None:
+        config.setdefault("plist_watch", {})[bundle_id] = {"watches": watches}
+
+    update_user_config(_set)
 
 
 def clear_plist_watch_config(bundle_id: str) -> bool:
     """Remove plist watch config for a bundle_id. Returns True if it existed."""
-    config = read_user_config()
-    pw = config.get("plist_watch", {})
-    if bundle_id not in pw:
+    if bundle_id not in read_user_config().get("plist_watch", {}):
         return False
-    del pw[bundle_id]
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+    def _clear(config: dict) -> None:
+        # Re-read under the lock, so the decision and the write see the same
+        # document. The check above is only to answer False without taking it.
+        config.get("plist_watch", {}).pop(bundle_id, None)
+
+    update_user_config(_clear)
     return True

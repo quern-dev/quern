@@ -28,9 +28,18 @@ final class SettingWriter {
     private var inFlight: Bool?
     private var queued: Bool?
 
-    /// Called when a write fails and nothing newer is waiting, with the value
-    /// the UI should fall back to.
-    var onFailure: ((Bool) -> Void)?
+    /// Called when a write fails and nothing newer is waiting.
+    ///
+    /// Takes no value deliberately. It used to hand back the negation of the
+    /// write that failed, which is only the same as "what is on disk" when
+    /// nothing superseded anything -- click on then off, let the `off` write
+    /// fail, and the negation says `on` while the file says `off`. The caller
+    /// knows the persisted value and this does not, so the caller supplies it.
+    ///
+    /// That also stops the revert becoming a write. Assigning the persisted
+    /// value fires the UI's change handler, which re-enters `set()`, where it
+    /// matches `persisted` and stops. Assigning anything else does not.
+    var onFailure: (() -> Void)?
 
     init(write: @escaping Write) {
         self.write = write
@@ -70,7 +79,7 @@ final class SettingWriter {
                 return
             }
             if code != 0 {
-                self.onFailure?(!value)
+                self.onFailure?()
             }
         }
     }

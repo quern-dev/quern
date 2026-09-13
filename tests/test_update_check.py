@@ -1067,8 +1067,12 @@ class TestTheAutomaticCheckSetting:
         """
         import subprocess
         import sys
+        # The repo root derived from this file, not from the working directory.
+        # `Path.cwd()` made the test pass only when pytest was invoked from the
+        # root, which is a property of how it was run rather than of the code.
+        REPO_ROOT = Path(__file__).resolve().parent.parent
         script = f'''
-import sys; sys.path.insert(0, {str(Path.cwd())!r})
+import sys; sys.path.insert(0, {str(REPO_ROOT)!r})
 from server import config as cfg
 from pathlib import Path
 cfg.CONFIG_DIR = Path({str(config.CONFIG_DIR)!r})
@@ -1130,6 +1134,53 @@ cfg.update_user_config(change)
         monkeypatch.setattr(Path, "open", no_lock)
         config.set_update_check(False)
         assert config.get_update_check() is False
+    def test_a_filesystem_that_cannot_lock_does_not_lose_the_setting(
+        self, config, monkeypatch
+    ):
+        """`flock` answers ENOTSUP on SMB, AFP and some NFS mounts.
+
+        A home directory on one of those is not exotic. Letting the error
+        escape propagates it out of the setter, so the setting is lost and the
+        CLI exits with a traceback -- and the box can never be ticked on that
+        machine. Same trade as a lock file that cannot be created: unlocked
+        beats not saved.
+        """
+        import fcntl
+
+        def unsupported(*_a, **_k):
+            raise OSError(45, "Operation not supported")
+
+        monkeypatch.setattr(fcntl, "flock", unsupported)
+        config.set_update_check(False)
+        assert config.get_update_check() is False
+
+    def test_every_setter_writes_through_the_lock(self, config):
+        """Not two of six.
+
+        `set_update_channel` is reachable from the same Settings window as the
+        update-check toggle, one row apart, so a lock covering only some writers
+        leaves the documented race open between two controls a user can click in
+        the same second. The others also used `write_text`, which truncates --
+        reopening the torn-read window this was supposed to close.
+        """
+        import inspect
+        source = inspect.getsource(config)
+        assert "USER_CONFIG_FILE.write_text" not in source, (
+            "a setter still writes the config directly"
+        )
+
+    def test_the_setters_do_not_clobber_each_other(self, config):
+        # Each one changes its own key and leaves the rest alone.
+        config.set_update_check(False)
+        config.set_update_channel("beta")
+        config.set_auto_install_cert(True)
+        config.set_local_capture_processes(["Safari"])
+
+        written = json.loads(config.USER_CONFIG_FILE.read_text())
+        assert written["update_check"] is False
+        assert written["update_channel"] == "beta"
+        assert written["auto_install_cert"] is True
+        assert written["local_capture"] == ["Safari"]
 
 class TestTheSetUpdateCheckCommand:
     """`quern set-update-check` — what the menu-bar toggle shells out to."""
