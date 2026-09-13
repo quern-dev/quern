@@ -11,13 +11,16 @@ import asyncio
 import json
 import logging
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.config import CONFIG_DIR
+
 logger = logging.getLogger("quern-debug-server.preview")
 
-QUERN_BIN_DIR = Path.home() / ".quern" / "bin"
+QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "ios-preview"
 APP_BUNDLE_NAME = "Quern Preview.app"
 _SOURCE_CANDIDATES = [
@@ -54,6 +57,104 @@ _INFO_PLIST = """\
 """
 
 
+def bundle_paths() -> tuple[Path, Path]:
+    """Where the preview app bundle and its binary live."""
+    bundle = QUERN_BIN_DIR / APP_BUNDLE_NAME
+    return bundle, bundle / "Contents" / "MacOS" / BINARY_NAME
+
+
+def write_app_bundle(bundle: Path) -> None:
+    """Create a minimal .app bundle so macOS shows the correct name and icon."""
+    contents = bundle / "Contents"
+    macos_dir = contents / "MacOS"
+    resources_dir = contents / "Resources"
+
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    resources_dir.mkdir(parents=True, exist_ok=True)
+
+    (contents / "Info.plist").write_text(_INFO_PLIST)
+
+    icon_src = _RESOURCES_DIR / "wda-icon.png"
+    icon_dst = resources_dir / "AppIcon.png"
+    if icon_src.exists():
+        shutil.copy2(icon_src, icon_dst)
+
+    logger.info("Created app bundle: %s", bundle)
+
+
+def build_preview_bundle() -> Path:
+    """Compile ios-preview into its .app bundle, and return the binary path.
+
+    Synchronous on purpose: `quern setup` is a synchronous CLI path and calls
+    this directly, while the server reaches it through a worker thread. One
+    implementation rather than two, because a second copy of the compile
+    command is exactly the kind of thing that drifts.
+
+    A no-op when the binary is newer than the source. Raises RuntimeError with
+    an actionable message when the source or swiftc is missing -- callers
+    decide whether that is fatal (the preview API) or a skipped optional check
+    (setup).
+    """
+    source = _find_source()
+    if source is None:
+        raise RuntimeError(
+            "ios-preview.swift source not found. "
+            "Expected at tools/ios-preview.swift relative to the project root."
+        )
+
+    bundle, binary = bundle_paths()
+    if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+        # Rewrite the bundle scaffolding even on the fast path. The freshness
+        # test only asks about the binary, so a run that compiled and then
+        # failed to finish the bundle -- no Info.plist, no icon -- leaves a
+        # binary newer than the source, and every later call would sail past
+        # this return and report success for an app macOS cannot launch.
+        # Idempotent and cheap: one small plist write and one icon copy.
+        write_app_bundle(bundle)
+        return binary
+
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        raise RuntimeError(
+            "swiftc not found. Install Xcode or Xcode Command Line Tools: "
+            "xcode-select --install"
+        )
+
+    (bundle / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+    logger.info("Compiling ios-preview: %s -> %s", source, binary)
+
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [
+                swiftc,
+                "-o", str(binary),
+                str(source),
+                "-framework", "AVFoundation",
+                "-framework", "CoreMediaIO",
+                "-framework", "AppKit",
+            ],
+            capture_output=True,
+            text=True,
+            # The compile takes ~1.5s. A minute is not a performance budget,
+            # it is the line past which swiftc is stuck rather than slow --
+            # and unbounded, a stuck compiler hangs `quern setup` with no
+            # output and no way to tell it apart from a hang in Quern itself.
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            "swiftc did not finish within 60s while building the screen-mirror "
+            "app. Try `xcode-select -p` to check the active toolchain."
+        ) from e
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
+
+    logger.info("ios-preview compiled successfully")
+    write_app_bundle(bundle)
+    return binary
+
+
 def _find_source() -> Path | None:
     for p in _SOURCE_CANDIDATES:
         if p.exists():
@@ -83,82 +184,34 @@ class PreviewManager:
         self._available: list[PreviewDeviceInfo] = []
         self._ready = asyncio.Event()
         self._reader_task: asyncio.Task | None = None
-        self._pending: dict[str, asyncio.Future] = {}
+        # name -> (command id, operation, future).
+        #
+        # The id is what correlates a reply with the request that caused it.
+        # The name cannot: a write that times out was still delivered and may
+        # still run, so its late reply would otherwise be matched against
+        # whatever request holds that name next -- a delayed `removed` landing
+        # on a subsequent `add` and reporting a preview the process had just
+        # torn down.
+        #
+        # The operation matters too: a disconnect while an add is in flight
+        # must fail that add, not complete it.
+        self._pending: dict[str, tuple[str, str, asyncio.Future]] = {}
+        self._command_seq = 0
         self._positions: set[int] = set()
         self._stagger_lock = asyncio.Lock()
         self._bundle_path = QUERN_BIN_DIR / APP_BUNDLE_NAME
         self._binary_path = self._bundle_path / "Contents" / "MacOS" / BINARY_NAME
 
     async def ensure_binary(self) -> Path:
-        """Lazy-compile ios-preview if needed. Returns path to binary."""
-        source = _find_source()
-        if source is None:
-            raise RuntimeError(
-                "ios-preview.swift source not found. "
-                "Expected at tools/ios-preview.swift relative to the project root."
-            )
+        """Lazy-compile ios-preview if needed. Returns path to binary.
 
-        if self._binary_path.exists():
-            src_mtime = source.stat().st_mtime
-            bin_mtime = self._binary_path.stat().st_mtime
-            if bin_mtime >= src_mtime:
-                return self._binary_path
-
-        swiftc = shutil.which("swiftc")
-        if swiftc is None:
-            raise RuntimeError(
-                "swiftc not found. Install Xcode or Xcode Command Line Tools: "
-                "xcode-select --install"
-            )
-
-        # Create bundle directory structure before compiling into it
-        macos_dir = self._bundle_path / "Contents" / "MacOS"
-        macos_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Compiling ios-preview: %s → %s", source, self._binary_path)
-
-        proc = await asyncio.create_subprocess_exec(
-            swiftc,
-            "-o", str(self._binary_path),
-            str(source),
-            "-framework", "AVFoundation",
-            "-framework", "CoreMediaIO",
-            "-framework", "AppKit",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            err = stderr.decode().strip() or stdout.decode().strip()
-            raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
-
-        logger.info("ios-preview compiled successfully")
-
-        # Finalize .app bundle (Info.plist, icon)
-        self._create_app_bundle()
-
-        return self._binary_path
+        Off the event loop: the compile takes ~1.5s, which is a long time to
+        stall every other request for.
+        """
+        return await asyncio.to_thread(build_preview_bundle)
 
     def _create_app_bundle(self) -> None:
-        """Create a minimal .app bundle so macOS shows the correct name and icon."""
-        contents = self._bundle_path / "Contents"
-        macos_dir = contents / "MacOS"
-        resources_dir = contents / "Resources"
-
-        macos_dir.mkdir(parents=True, exist_ok=True)
-        resources_dir.mkdir(parents=True, exist_ok=True)
-
-        # Write Info.plist
-        plist_path = contents / "Info.plist"
-        plist_path.write_text(_INFO_PLIST)
-
-        # Copy icon
-        icon_src = _RESOURCES_DIR / "wda-icon.png"
-        icon_dst = resources_dir / "AppIcon.png"
-        if icon_src.exists():
-            shutil.copy2(icon_src, icon_dst)
-
-        logger.info("Created app bundle: %s", self._bundle_path)
+        write_app_bundle(self._bundle_path)
 
     # ------------------------------------------------------------------
     # Process lifecycle
@@ -215,7 +268,7 @@ class PreviewManager:
             self._reader_task.cancel()
         self._reader_task = None
         # Reject all pending futures
-        for name, fut in self._pending.items():
+        for _name, (_cid, _op, fut) in self._pending.items():
             if not fut.done():
                 fut.set_exception(RuntimeError("Preview process exited"))
         self._pending.clear()
@@ -245,6 +298,41 @@ class PreviewManager:
             logger.info("ios-preview stdout closed")
             self._cleanup_state()
 
+    def _take_pending(self, name: str, event: dict) -> tuple[str, asyncio.Future] | None:
+        """Claim the pending command this event answers, if it answers one.
+
+        A reply must carry the id of the command it answers. Anything else
+        belongs to a request that already timed out, and applying it to the one
+        waiting now is the whole failure this guards against.
+
+        That includes a reply with no id at all. Accepting those was meant to
+        tolerate a subprocess built before the id existed, but it reopened the
+        same hole from the other side: an id-less `removed` arriving late still
+        settles a newer add. The tolerance is not needed anyway -- the
+        subprocess is compiled from source that ships with this server and is
+        rebuilt whenever that source is newer, so a binary that cannot echo an
+        id is one this code never sent an id to.
+        """
+        entry = self._pending.get(name)
+        if entry is None:
+            return None
+        cid, op, fut = entry
+        reply_id = event.get("id")
+        if reply_id != cid:
+            logger.debug(
+                "Ignoring stale %s for %s (id %s, waiting on %s)",
+                event.get("event"), name, reply_id, cid,
+            )
+            return None
+        self._pending.pop(name, None)
+        return op, fut
+
+    def _next_command_id(self) -> str:
+        """Monotonic per-process id. Uniqueness within this process is the
+        whole requirement -- the subprocess only ever echoes it back."""
+        self._command_seq += 1
+        return f"c{self._command_seq}"
+
     def _dispatch_event(self, event: dict) -> None:
         """Handle a single event from the subprocess."""
         evt_type = event.get("event")
@@ -263,20 +351,58 @@ class PreviewManager:
             )
 
         elif evt_type == "added":
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_result(True)
+            entry = self._take_pending(name, event)
+            if entry and not entry[1].done():
+                entry[1].set_result(True)
 
         elif evt_type == "add_failed":
             error = event.get("error", "Unknown error")
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_exception(RuntimeError(f"Failed to add preview for {name}: {error}"))
+            entry = self._take_pending(name, event)
+            if entry and not entry[1].done():
+                entry[1].set_exception(
+                    RuntimeError(f"Failed to add preview for {name}: {error}")
+                )
 
         elif evt_type == "removed":
-            fut = self._pending.pop(name, None)
-            if fut and not fut.done():
-                fut.set_result(True)
+            entry = self._take_pending(name, event)
+            if entry and not entry[1].done():
+                entry[1].set_result(True)
+
+        elif evt_type == "disconnected":
+            # The phone was unplugged. Distinct from "removed", which answers a
+            # remove command we sent: nobody asked for this, and the preview is
+            # gone whether or not anything was waiting on it. Drop it from the
+            # active set so its slot is free and a reconnect can take the name.
+            if name in self._active:
+                preview = self._active.pop(name)
+                self._positions.discard(preview.position)
+                logger.info("Preview device disconnected: %s", name)
+            self._available = [d for d in self._available if d.name != name]
+            # Settle whatever was in flight, according to what it asked for. A
+            # remove got what it wanted -- the preview is gone. An add did not:
+            # completing it successfully would have add() record a preview for
+            # an unplugged device and reserve a window position for it.
+            # No id to match against: a disconnect answers no command, it
+            # just invalidates whatever is outstanding for this device.
+            entry = self._pending.pop(name, None)
+            if entry and not entry[2].done():
+                _cid, op, fut = entry
+                if op == "remove":
+                    fut.set_result(True)
+                else:
+                    fut.set_exception(
+                        RuntimeError(f"{name} disconnected before its preview opened")
+                    )
+
+        elif evt_type == "connected":
+            # Announced, not opened -- in interactive mode the server decides
+            # what is on screen. Recording it keeps the available list honest
+            # between explicit `list` calls.
+            if not any(d.name == name for d in self._available):
+                self._available.append(
+                    PreviewDeviceInfo(name=name, cmio_id=event.get("id", ""))
+                )
+                logger.info("Preview device connected: %s", name)
 
         elif evt_type == "window_closed":
             # User closed the window manually
@@ -345,9 +471,12 @@ class PreviewManager:
 
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
-            self._pending[name] = fut
+            cid = self._next_command_id()
+            self._pending[name] = (cid, "add", fut)
 
-            await self._send({"cmd": "add", "name": name, "position": position})
+            await self._send(
+                {"cmd": "add", "name": name, "position": position, "id": cid}
+            )
 
             try:
                 await asyncio.wait_for(fut, timeout=10.0)
@@ -375,9 +504,10 @@ class PreviewManager:
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
-        self._pending[name] = fut
+        cid = self._next_command_id()
+        self._pending[name] = (cid, "remove", fut)
 
-        await self._send({"cmd": "remove", "name": name})
+        await self._send({"cmd": "remove", "name": name, "id": cid})
 
         try:
             await asyncio.wait_for(fut, timeout=5.0)

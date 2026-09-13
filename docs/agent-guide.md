@@ -73,6 +73,12 @@ Use `wait_for_element` instead of calling `get_ui_tree` in a loop. It polls serv
 
 Use `wait_for_flow` after triggering a UI action to observe the resulting network request — it blocks until a matching flow appears or times out. Auto-sets `since` to 5 seconds before the call to catch flows that completed between the action and the wait. Use `list_held_flows` with a `timeout` when you need to intercept and *modify* flows.
 
+Use `wait_for_settle` when you are waiting for the screen to stop changing rather than for a specific element — after a navigation, an animation, or before interacting with a web view, whose content is invisible to the accessibility tree so nothing else can tell you it has finished drawing.
+
+It answers "has drawing stopped", not "has content arrived". A blank page still loading is perfectly still, and will be called settled in under two seconds. Raising the timeout does not help, because nothing is moving. So for a slow load, wait for the content first — poll `get_web_content` until it returns elements, or `wait_for_element` for a native one — and use `wait_for_settle` afterwards to let the result stop moving.
+
+Check the `settled` field before acting on the result. `settled: false` means something is animating rather than loading — a spinner, a video, a carousel — and will never settle. Treat that as a fact about the screen, not a failed wait.
+
 ---
 
 ### 6. Filter Aggressively
@@ -109,11 +115,15 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). Use `set_local_capture` to change the process list at runtime without restarting the server.
 - **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
 
+**`configure_system_proxy` can refuse, and that refusal is not an error to retry.** It returns **428** when a booted simulator does not trust the mitmproxy CA, because capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and three ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, or pass `skip_cert_check` to proceed anyway.
+
+Ask the user which they want. Installing a certificate authority persists across sessions and outlives the capture window, so it needs their say-so — the same way `update_quern` does. `skip_cert_check` is the right answer when they are deliberately exercising TLS-failure paths.
+
 **Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
 1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database. Defaults to **booted simulators only**; pass `state="all"` or `device_type="device"` to check shutdown sims or physical devices
 2. Returns per-device `status`: `installed`, `not_installed`, `never_booted`, or `error`
 3. Returns `erased_devices` — UDIDs where a previously installed cert is now missing (probable device erase)
-4. If cert is missing, install it with: `xcrun simctl keychain <udid> add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem`
+4. If the cert is missing, install it with `install_proxy_cert` — **after asking the user**. Do not shell out to `xcrun simctl keychain add-root-cert` directly: that installs a root certificate authority with no record in Quern's cert state, so `proxy_status` and the capture preflight both go on believing the device is untrusted, and nothing tracks it for removal.
 
 **Physical device proxy capture**: Physical devices need their Wi-Fi proxy configured manually in Settings. The full setup flow is: install cert → trust cert → configure Wi-Fi proxy → call `record_device_proxy_config`. After that, filter flows by the device's `client_ip`.
 
@@ -157,6 +167,31 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 **If the element isn't on screen**: reach for `tap_element` (which auto-scrolls) or `scroll_to_element` rather than a manual `swipe` loop. Be aware that reading the full UI tree can itself scroll the content — on Android's `CoordinatorLayout`/`RecyclerView` screens the accessibility traversal a dump performs pushes top controls out of view before your tap lands. Both scroll paths avoid the dump for exactly this reason, so prefer them over "dump, read coordinates, tap".
 
 **Debugging the platform normalizer**: When `tap_element` or a landmark match doesn't behave as expected and you suspect the underlying source attributes aren't surfacing correctly (e.g. an Android tab that doesn't appear `selected`), call `get_ui_tree` with `include_raw=true` to get the raw provider attributes (full uiautomator2 XML on Android) on each element under `extra_attrs`. This is faster than dropping to `adb shell uiautomator dump` and stays inside the Quern API surface.
+
+**If the screen looks empty apart from its chrome**: you are probably looking at
+a `WKWebView`. On iOS simulators it is absent from the accessibility tree
+entirely, so `get_screen_summary` shows the navigation bar and nothing else,
+and it is easy to read that as a failed load or a blank screen. Call
+`get_web_content` — it pairs the Web Inspector's view of the DOM with the
+native tree so elements come back with real screen frames, which means you can
+tap them like any other element.
+
+The results are merged into subsequent UI reads, so `tap_element`,
+`get_ui_tree` and `get_screen_summary` all see them and you can tap by label as
+usual. That overlay is dropped as soon as anything changes the screen — a tap,
+swipe, scroll or launch — so **call `get_web_content` again after each
+interaction with the page** rather than reusing an earlier read. A tap against
+stale web content is refused with reason `stale_web_content` instead of landing
+somewhere wrong.
+
+If the response reports `anchored: false`, the page was found but its position
+on screen could not be confirmed, and the elements are withheld rather than
+returned at a guessed offset. Treat that as "look again", not "no content".
+
+Simulator only, and deliberately: Android's accessibility tree already descends
+into `WebView`, and physical iOS devices are reached over a different
+transport. On both, the ordinary UI tree is the right tool and this one has
+nothing to add.
 
 ---
 
@@ -277,6 +312,12 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Full detail: `get_ui_tree`
 - Visual for humans: `take_screenshot`
 - Accessibility overlay: `take_annotated_screenshot` — draws bounding boxes on interactive elements, useful for debugging why `tap_element` can't find an element
+
+**"The screen looks empty, or I know it's a web view"**
+- `get_web_content` — reads `WKWebView` content the accessibility tree cannot see, with real screen coordinates
+- iOS simulator only; on Android and physical iOS the normal `get_ui_tree` already covers web views
+- Optional `bundle_id` when several apps are running, and `udid` to target a specific simulator
+- Re-read after every interaction; the merged results are dropped when the screen changes
 
 **"I need to tap/interact with UI"**
 - Known element: `tap_element` with label and element_type
@@ -451,7 +492,7 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **"Proxy not running"** — Check with `proxy_status` and call `start_proxy` if needed.
 
-**"No flows captured"** — Check `proxy_status`. If `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. If local capture is not enabled, the device may not be configured to route through the proxy. Check `proxy_setup_guide` for device configuration steps. Also check for certificate pinning in the app.
+**"No flows captured"** — Check `proxy_status` first; a `capture_without_cert` warning there means a booted simulator does not trust the CA, which fails HTTPS silently. Otherwise: If `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. If local capture is not enabled, the device may not be configured to route through the proxy. Check `proxy_setup_guide` for device configuration steps. Also check for certificate pinning in the app.
 
 **"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
 

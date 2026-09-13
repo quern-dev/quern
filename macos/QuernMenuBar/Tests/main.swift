@@ -1,0 +1,24 @@
+// Test entry point. Compiled by run-tests.sh against the app's own sources,
+// minus its main.swift -- two top-level files cannot coexist in one binary.
+
+import Foundation
+
+print("QuernMenuBar tests")
+print("")
+UpdaterTests.all()
+UpdateResultTests.all()
+LifecycleControllerTests.all()
+SettingsModelTests.all()
+AutoCheckReadingTests.all()
+SettingWriterTests.all()
+SettingsWriteTimeoutTests.all()
+SettingsModelWritingTests.all()
+ReconcileInvariantTests.all()
+OtherSettingsWritingTests.all()
+SettingWriteLoggingTests.all()
+ChannelWithoutASnapshotTests.all()
+MinimumDisplayTests.all()
+FlagTests.all()
+// The count is deliberate. See Harness.report(expected:) -- without it, a suite
+// that runs nothing exits 0.
+exit(Harness.report(expected: 93))

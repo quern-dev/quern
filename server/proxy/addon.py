@@ -196,6 +196,23 @@ MAX_BODY_SIZE = 100 * 1024
 # Default timeout for held (intercepted) flows
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
+#: Hosts quern never intercepts, whatever the bypass list says.
+#:
+#: quern's own update check talks to quern.dev, and urllib honours the macOS
+#: system proxy -- so the moment quern configured that proxy, it began
+#: man-in-the-middling its own update check, and the certificate stopped
+#: verifying. quern created that condition, so quern clears it rather than
+#: printing advice about it. Enforced in `tls_clienthello`, which sets
+#: `ignore_connection` before TLS is terminated: true passthrough, with no
+#: certificate replaced and so nothing to fail verification.
+#:
+#: Deliberately not seeded into `_bypass_patterns`. That list belongs to the
+#: user and `clear_bypass` empties it, so a seed there would be silently
+#: removable -- the same failure with an extra step between. The cost is that
+#: quern's own site cannot be captured through quern, and debugging quern.dev
+#: is not what this proxy is for.
+ALWAYS_BYPASS: tuple[str, ...] = ("quern.dev", "*.quern.dev")
+
 
 def _write_json(obj: dict[str, Any]) -> None:
     """Write a JSON object as a single line to stdout."""
@@ -391,6 +408,8 @@ class IOSDebugAddon:
 
     def _is_bypassed(self, host: str) -> bool:
         """Check if a host matches any bypass pattern."""
+        if any(fnmatch.fnmatch(host, p) for p in ALWAYS_BYPASS):
+            return True
         with self._bypass_lock:
             for pattern in self._bypass_patterns:
                 if fnmatch.fnmatch(host, pattern):

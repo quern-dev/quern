@@ -1,0 +1,161 @@
+{
+  "captured_at": "2026-09-11T19:19:17.945608+00:00",
+  "home": "/Volumes/Home/jham",
+  "home_is_external": true,
+  "project_root": "/Volumes/Home/jham/Dev/quern",
+  "path": [
+    {
+      "index": 0,
+      "dir": "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin",
+      "category": "android",
+      "tools": [
+        "java"
+      ]
+    },
+    {
+      "index": 1,
+      "dir": "/Volumes/Home/jham/Library/Android/sdk/platform-tools",
+      "category": "android",
+      "tools": [
+        "adb"
+      ]
+    },
+    {
+      "index": 2,
+      "dir": "/Volumes/Home/jham/Library/Android/sdk/emulator",
+      "category": "android",
+      "tools": [
+        "emulator"
+      ]
+    },
+    {
+      "index": 3,
+      "dir": "/Volumes/Home/jham/Library/Android/sdk/build-tools/36.1.0",
+      "category": "android",
+      "tools": []
+    },
+    {
+      "index": 4,
+      "dir": "/Volumes/Home/jham/.local/bin",
+      "category": "quern",
+      "tools": []
+    },
+    {
+      "index": 5,
+      "dir": "/Users/jham/Dev/quern",
+      "category": "quern",
+      "tools": []
+    },
+    {
+      "index": 7,
+      "dir": "/opt/homebrew/bin",
+      "category": "system",
+      "tools": [
+        "brew",
+        "ideviceinstaller",
+        "ios_webkit_debug_proxy",
+        "pipx",
+        "python3"
+      ]
+    },
+    {
+      "index": 8,
+      "dir": "/opt/homebrew/sbin",
+      "category": "system",
+      "tools": []
+    },
+    {
+      "index": 9,
+      "dir": "/usr/local/bin",
+      "category": "system",
+      "tools": [
+        "pymobiledevice3"
+      ]
+    },
+    {
+      "index": 10,
+      "dir": "/System/Cryptexes/App/usr/bin",
+      "category": "apple",
+      "tools": []
+    },
+    {
+      "index": 11,
+      "dir": "/usr/bin",
+      "category": "system",
+      "tools": [
+        "git",
+        "java",
+        "python3",
+        "swiftc",
+        "xcodebuild",
+        "xcrun"
+      ]
+    },
+    {
+      "index": 12,
+      "dir": "/bin",
+      "category": "system",
+      "tools": []
+    },
+    {
+      "index": 13,
+      "dir": "/usr/sbin",
+      "category": "system",
+      "tools": []
+    },
+    {
+      "index": 14,
+      "dir": "/sbin",
+      "category": "system",
+      "tools": []
+    },
+    {
+      "index": 19,
+      "dir": "/Library/Apple/usr/bin",
+      "category": "apple",
+      "tools": []
+    },
+    {
+      "index": 20,
+      "dir": "/Volumes/Home/jham/.local/state/fnm_multishells/1794_1787032486225/bin",
+      "category": "node",
+      "tools": [
+        "node",
+        "npm"
+      ]
+    }
+  ],
+  "path_entries_total": 29,
+  "path_entries_omitted": 13,
+  "sys_prefix": "/Volumes/Home/jham/Dev/quern/.venv",
+  "sys_base_prefix": "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12",
+  "virtual_env": null,
+  "which_pymobiledevice3": "/usr/local/bin/pymobiledevice3",
+  "which_pymobiledevice3_as_setup_sees_it": "/Volumes/Home/jham/Dev/quern/.venv/bin/pymobiledevice3",
+  "pymobiledevice3_installs": [
+    {
+      "kind": "pipx-global",
+      "path": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+      "resolves_to": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3"
+    },
+    {
+      "kind": "pipx-global-shim",
+      "path": "/usr/local/bin/pymobiledevice3",
+      "resolves_to": "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3"
+    },
+    {
+      "kind": "project-venv-console-script",
+      "path": "/Volumes/Home/jham/Dev/quern/.venv/bin/pymobiledevice3",
+      "resolves_to": "/Volumes/Home/jham/Dev/quern/.venv/bin/pymobiledevice3"
+    }
+  ],
+  "tunneld_plist": {
+    "exists": true,
+    "program_arguments": [
+      "/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
+      "remote",
+      "tunneld"
+    ],
+    "standard_out_path": "/Library/Logs/com.quern.tunneld.log"
+  }
+}

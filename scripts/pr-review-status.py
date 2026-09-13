@@ -18,9 +18,13 @@ Do not pipe it when you care about that exit code: `... | tail` reports tail's
 status, not this script's, so a still-pending PR reads as success. merge-pr.sh
 calls it directly for exactly this reason.
 
-Note on cadence: CodeRabbit allows a limited number of review runs per hour
-(10 at time of writing), so a push can sit queued rather than being reviewed
-promptly. Several small pushes to the same branch spend that budget faster than
+Note on cadence: reviews are rationed, so a push can sit queued rather than
+being reviewed promptly. The message is "You've used all free OSS reviews for
+now" -- a free open-source allowance that resets on its own schedule, not a
+per-hour count, so exhausting it can cost far longer than an hour. Asking again
+is free and does not consume it; only a review that actually runs does.
+
+Several small pushes to the same branch therefore spend the budget faster than
 one considered push, and leave every intermediate state unreviewed.
 """
 from __future__ import annotations

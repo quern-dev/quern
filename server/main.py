@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -352,8 +353,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             devices = await device_controller.list_devices()
             logger.info("Device warmup: discovered %d device(s)", len(devices))
+            # The caches are warm now, so the restored active device can be
+            # written back with its name and type. Doing it here rather than
+            # leaving it to a later resolve: the pool's sticky-active path
+            # returns the UDID without running the setter, so a session that
+            # never resolves by name or UDID would never refresh the sidecar.
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
+            return
+        try:
+            device_controller.refresh_active_device()
+        except OSError:
+            # Its own handler, at its own level. Folded into the warmup catch
+            # this was logged as "Device warmup failed" at debug -- invisible
+            # by default and pointing at device discovery rather than at an
+            # unwritable ~/.quern.
+            logger.warning(
+                "Could not refresh the active-device sidecar; the menu bar may "
+                "show a UDID instead of a name", exc_info=True,
+            )
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
@@ -1025,54 +1043,221 @@ def _cmd_status(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
-def _cmd_doctor(args: argparse.Namespace) -> None:
-    """Report device-tool availability (read-only diagnostics)."""
+def _fetch_device_tools() -> tuple[dict | None, str]:
+    """Device-tool availability from the running server, or None and the reason.
+
+    ``None`` means "could not ask" and is deliberately distinct from ``{}``,
+    which means "asked, and the server has no device controller". Collapsing
+    the two would report a check that never ran as one that came back empty.
+
+    This is the only part of doctor that needs a server at all.
+    """
     state = read_state()
     if not state:
-        print("No server running. Start it with: quern start")
-        sys.exit(1)
+        return None, "no server running (start it with `quern start`)"
 
     port = state.get("server_port", 9100)
     if not is_server_healthy(port):
-        print("Server is not responding on /health")
-        sys.exit(1)
+        return None, f"server on port {port} is not responding on /health"
 
     data = fetch_tools(port)
     if data is None:
-        print("Could not fetch tool status from /tools")
-        sys.exit(1)
+        return None, f"server on port {port} did not answer /tools"
 
-    tools = data.get("tools", {})
-    if not tools:
-        print("No device tools reported (device controller unavailable).")
-        # Still report dependencies — an installation without a device
-        # controller is exactly one where a missing dependency is plausible,
-        # so this is the worst possible place to skip the check.
-        #
-        # The same argument covers the external tools: a missing device
-        # controller often *is* a missing or stale external tool, so this branch
-        # is where their versions matter most. Skipping it here also made the
-        # README's description of `quern doctor` false on exactly the machines
-        # someone runs it on.
-        _report_python_deps(getattr(args, "fix", False))
-        _report_external_tools(getattr(args, "fix", False))
-        sys.exit(0)
+    tools = data.get("tools")
+    if not isinstance(tools, dict):
+        # An explicit null is not the same as a missing key, and `.get(k, {})`
+        # only defaults on the latter. Without this, a null answer produced a
+        # dangling "not checked — " with no reason, blaming an unreachable
+        # server for one that replied.
+        return None, f"server on port {port} answered /tools without a tool list"
+    return tools, ""
 
+
+@contextlib.contextmanager
+def _update_check_logged_to_file() -> Iterator[bool]:
+    """Send the update check's own log lines to server.log, not the terminal.
+
+    The daemon gets this for free: `daemonize()` redirects its stderr into
+    server.log, so a `logger.warning` lands there. A CLI command has no such
+    redirection and no handler, so logging falls back to stderr -- which would
+    print the raw exception on screen directly underneath the one-line summary
+    that exists to replace it, and would make "the full error is in
+    server.log" a false promise in the same breath.
+    """
+    log = logging.getLogger("quern-debug-server.update-check")
+    from server.lifecycle.daemon import LOG_FILE
+
+    handler = None
+    previous = log.propagate
+    # Off first, and regardless of whether the handler opens. Leaving it on in
+    # the failure case sends the record to the CLI's root handler, which prints
+    # it to stderr -- the raw exception, directly underneath the one-line
+    # summary that exists to replace it.
+    log.propagate = False
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(LOG_FILE)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        log.addHandler(handler)
+    except OSError:
+        # An unwritable log directory must not stop the check. The summary and
+        # the remedy still reach the reader; only the detail is lost -- and the
+        # caller is told, so it does not point at a file nothing was written to.
+        handler = None
+    try:
+        yield handler is not None
+    finally:
+        log.propagate = previous
+        if handler is not None:
+            log.removeHandler(handler)
+            handler.close()
+
+
+def _is_from_this_run(info: dict, started: datetime) -> bool:
+    """Whether this update-info record was written by the check just made.
+
+    Compared rather than assumed, because "the file exists" and "the file
+    answers the question I just asked" are different claims and only the second
+    one is safe to print. A record with no readable timestamp is not trusted:
+    there is no way to tell which run it belongs to, and guessing in the
+    optimistic direction is what reports a stale "up to date".
+    """
+    stamp = info.get("checked_at")
+    if not isinstance(stamp, str):
+        return False
+    try:
+        checked_at = datetime.fromisoformat(stamp)
+    except ValueError:
+        return False
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=UTC)
+    # A second of slack: the record's timestamp is taken inside the check, a
+    # moment after `started`, but a filesystem with coarse clock granularity --
+    # or a record written by a process whose clock is a hair behind -- should
+    # not read as stale.
+    return checked_at >= started - timedelta(seconds=1)
+
+
+def _cmd_check_updates() -> int:
+    """Ask now, rather than waiting for the daily check.
+
+    The cached answer in update-info.json is refreshed at most once a day, so
+    a release landing this afternoon is not offered until tomorrow. The CLI has
+    never had this problem -- `quern update` checks when you run it -- but
+    anything reading the cache does, the menu bar included.
+    """
+    from server.lifecycle.update_check import (
+        CheckFailure,
+        check_for_updates,
+        read_update_info,
+    )
+
+    failures: list[CheckFailure] = []
+    # Before the check, so the cache it leaves can be told apart from the one
+    # that was already there. See the freshness test below.
+    started = datetime.now(UTC)
+    with _update_check_logged_to_file() as detail_was_logged:
+        # force=True: someone asked. That skips the once-a-day rate limit and
+        # the "update_check": false opt-out alike, because the opt-out governs
+        # the automatic check and this is not one.
+        message = check_for_updates(force=True, on_error=failures.append)
+
+    if failures:
+        # Before the cache is consulted, deliberately. read_update_info()
+        # returns whatever the last *successful* check left behind, so asking
+        # it first lets a stale "update available" answer a question the
+        # network never got to.
+        for line in failures[0].lines():
+            print(line, file=sys.stderr)
+        # Where the raw error went. The screen gets a summary now, so this is
+        # the pointer to the thing that actually happened.
+        if detail_was_logged:
+            from server.lifecycle.daemon import LOG_FILE
+            print(f"The full error is in {LOG_FILE}", file=sys.stderr)
+
+        return 1
+
+    info = read_update_info() or {}
+
+    # The cache only answers for this run if this run wrote it. A raised
+    # exception is not the only way to learn nothing: check_for_updates returns
+    # None silently when it cannot read a local version or a HEAD sha, and
+    # _write_update_info swallows its own write errors -- so the check can come
+    # back having produced no result at all while a record from days ago sits
+    # on disk. Reporting that as today's answer is the same false all-clear the
+    # failure ordering above exists to prevent, arrived at down a quieter path.
+    if not _is_from_this_run(info, started):
+        print("Could not check for updates: the check produced no result.",
+              file=sys.stderr)
+        print("Try again. If it keeps happening, run `quern capture-env` and "
+              "open an issue.", file=sys.stderr)
+        return 1
+
+    if info.get("update_available"):
+        print(message or f"Update available: v{info.get('latest_version')}")
+        return 0
+
+    current = info.get("current_version") or "unknown"
+    print(f"Up to date (v{current}, channel '{info.get('channel', 'stable')}').")
+    return 0
+
+
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    """Read-only diagnostics: device tools, venv, tool versions, service health.
+
+    Only the device-tool section needs a running server. Everything else reads
+    the filesystem or probes a separate daemon, so it used to be withheld for no
+    reason: doctor exited at the first check it could not make and printed
+    nothing else. That put its most useful output -- whether the venv matches
+    pyproject.toml -- behind the very condition that most often sends someone
+    looking for it, since a stale venv is a good way to stop the server coming
+    up at all. A command named `doctor` should work when the patient is sick.
+
+    Two different exit contracts, because `--fix` is an action and plain doctor
+    is a report:
+
+    * Without `--fix`, nonzero means a check could not be *made* -- an
+      unreachable server, a probe that threw. A check that ran and found
+      something wrong still exits 0: a stale venv is doctor working, not doctor
+      failing, and the finding is in the output where it belongs.
+    * With `--fix`, the status is the repair's. `quern doctor --fix && quern
+      start` is the sequence this exists for, and it ran only when the server
+      was already down -- so an exit code that folded in "device tools could
+      not be checked" refused to continue after a repair that worked.
+    """
+    fix = getattr(args, "fix", False)
+
+    tools, reason = _fetch_device_tools()
     print("Device tools:")
-    for name, ok in sorted(tools.items()):
-        print(f"  {'✓' if ok else '✗'} {name}")
+    if tools is None:
+        print(f"  ? not checked — {reason}")
+    elif not tools:
+        print("  ? none reported — the server has no device controller")
+    else:
+        for name, ok in sorted(tools.items()):
+            print(f"  {'✓' if ok else '✗'} {name}")
 
-    _report_python_deps(getattr(args, "fix", False))
-    _report_external_tools(getattr(args, "fix", False))
-    _report_service_health(getattr(args, "fix", False))
-    sys.exit(0)
+    repaired = _report_python_deps(fix)
+    _report_external_tools(fix)
+    services_complete = _report_service_health(fix)
+
+    if fix:
+        sys.exit(1 if repaired is False else 0)
+    sys.exit(0 if tools is not None and services_complete else 1)
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
 
 
-def _report_service_health(fix: bool = False) -> None:
+def _report_service_health(fix: bool = False) -> bool:
     """Whether tunneld and local capture are actually working, not just present.
+
+    Returns whether both probes completed. A probe that threw is doctor failing
+    to look, not a clean result, and it reaches the exit code for the same
+    reason an unreachable device-tool section does.
 
     Both fail in the same shape: the thing quern checks stays green while the
     thing that matters stops working. `check_tools()` reports tunneld from an
@@ -1089,6 +1274,7 @@ def _report_service_health(fix: bool = False) -> None:
 
     print()
     print("Service health:")
+    complete = True
 
     try:
         from server.device.tunneld import tunneld_health
@@ -1096,6 +1282,7 @@ def _report_service_health(fix: bool = False) -> None:
         health = asyncio.run(tunneld_health())
     except Exception as exc:
         print(f"  ? tunneld — could not be checked ({exc})")
+        complete = False
     else:
         marker = _HEALTH_MARKERS.get(health.status, "\u2717")
         print(f"  {marker} tunneld — {health.detail}")
@@ -1110,7 +1297,7 @@ def _report_service_health(fix: bool = False) -> None:
         ext = extension_health()
     except Exception as exc:
         print(f"  ? local capture extension — could not be checked ({exc})")
-        return
+        return False
 
     marker = _HEALTH_MARKERS.get(ext.status, "\u2717")
     print(f"  {marker} local capture extension — {ext.detail}")
@@ -1118,11 +1305,11 @@ def _report_service_health(fix: bool = False) -> None:
     if not ext.fixable:
         if ext.remedy:
             print(f"      {ext.remedy}")
-        return
+        return complete
 
     if not fix:
         print(f"      {ext.remedy}")
-        return
+        return complete
 
     from server.proxy.extension import reinstall
 
@@ -1131,6 +1318,7 @@ def _report_service_health(fix: bool = False) -> None:
     # success here would be reporting a repair that has not happened yet.
     outcome = "\u2192" if ok else "\u2717"
     print(f"      {outcome} {message}")
+    return complete
 
 
 def _report_external_tools(fix: bool = False) -> None:
@@ -1184,8 +1372,12 @@ def _report_external_tools(fix: bool = False) -> None:
         print("  Run them yourself, or: quern update --tools")
 
 
-def _report_python_deps(fix: bool) -> None:
+def _report_python_deps(fix: bool) -> bool | None:
     """Report whether the venv matches pyproject.toml, and optionally repair it.
+
+    Returns the repair outcome: True repaired, False repair failed, None no
+    repair attempted. `doctor --fix` reports that rather than the diagnostics,
+    because it is an action and the caller wants to know whether it worked.
 
     Read-only by default — `doctor` is documented as read-only diagnostics, and
     a tool you reach for when things are broken should not change state while
@@ -1204,25 +1396,30 @@ def _report_python_deps(fix: bool) -> None:
 
     if not state["applicable"]:
         print(f"  - not applicable ({state['reason']})")
-        return
+        return None
 
     if state["in_sync"]:
         print("  ✓ in sync with pyproject.toml")
         if fix:
             print("    --fix: nothing to do")
-        return
+        return None
 
     print(f"  ✗ out of sync — {state['reason']}")
     if not fix:
         print("    Repair with: quern doctor --fix")
         print("    (starting the server also reconciles this automatically)")
-        return
+        return None
 
     if _ensure_python_deps(quiet=False, force=True):
         print("  ✓ repaired")
-    else:
-        print("  ✗ repair failed — see the error above")
-        sys.exit(1)
+        return True
+
+    print("  ✗ repair failed — see the error above")
+    # Returned, not exited. Exiting here skipped the external-tool and
+    # service-health sections, so the one run where the most has gone wrong
+    # printed the least -- and a failed venv repair is a good reason to want
+    # to know what else is stale.
+    return False
 
 
 def _cmd_enable_local_capture(process_names: list[str]) -> None:
@@ -1290,7 +1487,23 @@ def _cmd_disable_local_capture() -> None:
 def cli() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
+        # Without this the usage line reads "__main__.py", because the `quern`
+        # wrapper execs `python3 -m server` and argparse takes argv[0].
+        prog="quern",
         description="Quern — capture device logs for AI agents",
+        epilog=(
+            "Other commands:\n"
+            "  help                          Show this message\n"
+            "  version, --version, -V        Print the installed version\n"
+            "  update [--tools]              Update to the latest release on your channel\n"
+            "  set-channel [name]            Show or set the update channel (stable / beta)\n"
+            "  set-auto-install-cert [on|off]\n"
+            "                                Show or set automatic capture-certificate install\n"
+            "  set-update-check [on|off]     Show or set the automatic update check\n"
+            "  install-precommit-hook        Install the pre-commit checklist hook\n"
+            "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.set_defaults(command=None)
 
@@ -1329,6 +1542,23 @@ def cli() -> None:
     )
 
     # setup
+    # Declared so `quern help` lists it and test_readme_sync sees it. Normally
+    # unreachable -- server/__main__.py handles it before the venv re-exec,
+    # which is the point of the command -- but reachable via `python -m
+    # server.main`, and a declared command that silently does nothing is worse
+    # than one that is not declared. It is dispatched below.
+    capture_parser = subparsers.add_parser(
+        "capture-env",
+        help="Write an environment report to attach to a bug report",
+    )
+    capture_parser.add_argument(
+        "output", nargs="?",
+        help="File to write (default: print to stdout)",
+    )
+    subparsers.add_parser(
+        "check-updates",
+        help="Check for a new release now, ignoring the once-a-day rate limit",
+    )
     subparsers.add_parser("setup", help="Check environment and install dependencies")
 
     # uninstall
@@ -1390,6 +1620,11 @@ def cli() -> None:
         _cmd_enable_local_capture(args.processes)
     elif args.command == "disable-local-capture":
         _cmd_disable_local_capture()
+    elif args.command == "capture-env":
+        from server.lifecycle.capture_env import run
+        sys.exit(run(getattr(args, "output", None)))
+    elif args.command == "check-updates":
+        sys.exit(_cmd_check_updates())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())

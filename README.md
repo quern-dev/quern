@@ -125,13 +125,34 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | File | Purpose |
 |------|---------|
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
-| `active-device.json` | UDID of the active device set via `resolve_device` — persists across stop/start so you don't have to re-resolve after every restart |
+| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the menu-bar app reads |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture settings and other configuration |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
+
+### The menu bar app
+
+On macOS, Quern installs a menu-bar app so you can see whether the server is up
+without opening a terminal. It appears automatically after `quern setup`, and
+`quern update` keeps it current. It lives at `~/Applications/Quern.app` — quit
+it from its own menu, and `open ~/Applications/Quern.app` to bring it back.
+
+It shows the daemon's state and uptime, the active device, the proxy's port,
+and an update notice when one is available. From its menu you can start, stop
+and restart the server, open a live screen mirror of a connected device, and
+reach Settings — which carries the update channel picker and a launch-at-login
+toggle.
+
+It does not own the daemon. Starting Quern from the app and starting it from
+the CLI do the same thing, and quitting the app leaves the server running;
+"Quit and Stop Server" is a separate item for when you mean both.
+
+The app is signed and notarized, and ships inside the release asset rather than
+the source tarball. If you installed before v0.15.0 and have never run
+`quern update`, you will not have it — updating brings it in.
 
 ### Connect via MCP
 
@@ -211,14 +232,58 @@ both while one runs a 9.15.1 binary and the other an 11.3.1 one.
 tools, and says so when it finds some it cannot help with, rather than printing
 "nothing to do" above a tool it just flagged as behind.
 
+**Reporting an environment problem.** `quern capture-env` writes the
+facts these checks read — where each `pymobiledevice3` lives and what it resolves to,
+the order of `PATH`, and what the tunneld daemon has baked in. Attach it to an issue
+and the configuration can be replayed as a test rather than guessed at from a
+description; `tests/fixtures/envs/` holds the ones that have already found bugs.
+
+It is read-only and deliberately narrow. It never opens `~/.quern/api-key`,
+`state.json`, the certificate state or the device pool. The output is meant for a
+public issue, so what it may contain is pinned by a test rather than remembered:
+`tests/test_capture_env.py` watches every read through an interpreter audit hook,
+below any particular way of opening a file, and fails if the capture ever reaches
+for one of those.
+
+`PATH` is filtered to the entries that matter: anything recognisably a toolchain
+quern cares about, plus any directory that actually holds a tool it uses. That second
+clause is what keeps the filter honest — a whitelist alone would hide an unexpected
+directory a tool is genuinely resolved from, which is the one surprise worth
+reporting. Each survivor keeps its original index, so the order that decides which
+copy wins is still reconstructible without publishing the rest of your `PATH`.
+
+It is a filter, not a redactor. A kept entry is published in full, so a directory
+matching on a toolchain name carries whatever else is in its path. Read it before
+attaching it if that matters to you.
+
+If quern is broken enough that the command will not run, `python3
+scripts/capture-env.py` does the same thing. Both record what `which` resolves
+once setup has prepended its venv, as well as the plain answer. Those differ, and
+the first is the one the checks act on. It is stdlib-only and works on the
+Python that ships with Xcode's Command Line Tools, so it does not need the venv
+that may be the problem.
+
+**Doctor does not need a running server.** Only the device-tool section does, and when
+that cannot be reached doctor names the reason and reports everything else anyway —
+the venv, the external tools, service health. That matters because a stale venv is a
+good way to stop the server coming up, so the check most likely to explain the failure
+used to be withheld by the failure. The exit status still reflects the gap: a section
+that could not be checked is not one that passed.
+
 Doctor also reports **service health**, which is a different question from whether a
 tool is installed:
 
 - **tunneld** — a failed device pairing can leave the daemon alive but not serving. It
   holds no listener and never exits, so `KeepAlive` never fires and launchd reports it
   healthy indefinitely. Doctor separates that *wedged* state from a merely *stopped*
-  one by pairing the HTTP probe with the launchd job state, and prints the `bootout` +
-  `bootstrap` recovery. It never runs it — recovery is tracked in issue #73.
+  one by pairing the HTTP probe with the launchd job state.
+
+  Since v0.15.0 Quern can also recover it. Getting the stuck process to exit is the
+  entire fix, because the plist sets `KeepAlive` and launchd respawns it against clean
+  state in about a second. That needs root, so the authorisation is taken once and
+  explicitly with `quern tunneld grant-recovery` — a single `NOPASSWD` rule for one
+  signal to one job, nothing else. Without the grant the behaviour is unchanged: the
+  wedge is reported, not healed.
 - **local capture extension** — the mitmproxy macOS system extension is approved once
   by a human and then upgraded underneath that approval by ordinary dependency updates.
   When the version macOS runs falls behind the version the installed wheel ships, local
@@ -260,7 +325,7 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 - **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
 - **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
 - **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
-- **Certificate management** — check, install, and verify mitmproxy CA certificates
+- **Certificate management** — check, install, and verify mitmproxy CA certificates. Quern asks before installing one: capturing through a device that does not trust the CA fails every HTTPS request with nothing pointing at the proxy, so enabling capture refuses in that state rather than creating it. `quern set-auto-install-cert on` answers the question once
 - **LLM summaries** — traffic digests grouped by host with error highlights
 
 **Proxy setup for simulators:**
@@ -318,10 +383,19 @@ quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
 quern doctor                 # Read-only diagnostics: device tools, venv, tool versions, service health
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
+quern capture-env            # Write an environment report to attach to a bug report
+quern help                   # Show the command list
 quern version                # Print the installed version
+quern check-updates          # Ask now, ignoring the once-a-day rate limit
 quern update                 # Update to the latest release on your channel and rebuild
 quern update --tools         # Also upgrade external tools quern installed (pipx, brew)
 quern set-channel [name]     # Show or set the update channel (stable / beta)
+quern set-update-check [on|off]
+                             # Show or set the automatic daily update check
+                             #   (default: on). check-updates works either way.
+quern set-auto-install-cert [on|off]
+                             # Show or set whether the capture certificate is installed
+                             #   automatically, or Quern asks first (default: ask)
 quern uninstall              # Remove Quern and dependencies installed by setup
 quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
@@ -329,7 +403,8 @@ quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without 
 quern install-precommit-hook # Install the pre-commit checklist hook
 quern enable-local-capture   # Enable transparent simulator traffic capture
 quern disable-local-capture  # Disable local capture
-quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart)
+quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart,
+                             #   grant-recovery/revoke-recovery for password-free wedge recovery)
 ```
 
 `~/.quern/state.json` is the single source of truth for discovering a running instance.
@@ -389,7 +464,7 @@ server/
   device/              Simulator control (simctl, sim-bridge, idb fallback) + physical device control (WDA, pymobiledevice3), device pool
   api/                 HTTP route handlers
 mcp/                   MCP server (TypeScript)
-tests/                 993 tests
+tests/                 pytest suite (~2,000 tests)
 ```
 
 ## Development

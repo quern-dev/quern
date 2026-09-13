@@ -23,6 +23,25 @@ from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceT
 logger = logging.getLogger("quern-debug-server.device")
 
 
+def _display_name(name: str | None, kind: str | None) -> str | None:
+    """Turn an AVD name into something meant for a person to read.
+
+    AVD names cannot contain spaces, so the emulator reports "Pixel_7". The
+    underscores are a naming-rule artefact rather than anyone's choice, and
+    the sidecar feeds the menu bar, which shows the value verbatim.
+
+    Deliberately restricted to emulators. An underscore in a simulator's or a
+    physical device's name was typed by a person -- "J_iPhone" is a name, not
+    an encoding -- and rewriting it would be wrong. The canonical AVD name is
+    untouched either way: it keys the AVD config lookup, the duplicate
+    suppression against list_avds(), and boot-by-name, none of which would
+    match a prettified string.
+    """
+    if not name or kind != DeviceType.ANDROID_EMULATOR.value:
+        return name
+    return name.replace("_", " ")
+
+
 class DeviceController(DeviceControllerUI):
     """High-level device management: resolves active device, delegates to backends."""
 
@@ -39,6 +58,12 @@ class DeviceController(DeviceControllerUI):
         self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
         self._sim_bridge_ok = False
         self.__active_udid: str | None = None
+        # What was last persisted, so an assignment that changes nothing can
+        # skip the write entirely. Separate from __active_udid, which is
+        # assigned before the comparison runs. See the setter.
+        self.__active_name_key: str | None = None
+        self.__active_name: str | None = None
+        self.__active_kind: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
 
         # Restore active device from its sidecar file (lives separately
@@ -72,6 +97,10 @@ class DeviceController(DeviceControllerUI):
         self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        # Device name cache: udid -> human-readable name (populated by
+        # list_devices). Only consumer is the active-device sidecar, so that
+        # readers outside the server can show a name instead of a UDID.
+        self._device_name_cache: dict[str, str] = {}
         # CoreDevice UUID -> libimobiledevice UDID mapping (populated by list_devices)
         self._usbmux_udid_map: dict[str, str] = {}
 
@@ -81,8 +110,80 @@ class DeviceController(DeviceControllerUI):
 
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
+        # Best-effort name: the cache is filled by list_devices(), which
+        # every resolve path runs before landing here, but the pool and the
+        # set-active-device API can assign a UDID directly. A miss writes no
+        # name and readers fall back to the UDID -- the previous behaviour.
+        name = self._device_name_cache.get(value) if value else None
+        # The cache, not _device_type(), which answers SIMULATOR for an
+        # unknown UDID. A guess persisted to the sidecar would have the menu
+        # bar label real hardware as a simulator, so an unknown type is
+        # written as absent and the reader shows no qualifier at all.
+        cached_kind = self._device_type_cache.get(value) if value else None
+        kind = cached_kind.value if cached_kind else None
+        name = _display_name(name, kind)
         self.__active_udid = value
-        write_active_udid(value)
+
+        # Write only on an actual change. resolve_udid() assigns this on every
+        # call that names a device, which is most tool calls, so the sidecar
+        # was being rewritten -- taking LOCK_EX on the event loop each time --
+        # to store the value it already held. The active device changes rarely,
+        # so this takes the I/O off the hot path altogether rather than moving
+        # it to a thread, which a property setter cannot await anyway and which
+        # would make two rapid switches race to land out of order.
+        #
+        # The name and the type are part of the comparison, not just the UDID:
+        # both caches are warmed by list_devices() and can arrive after the
+        # first assignment, and that later fill is exactly when the sidecar
+        # needs rewriting.
+        if (
+            value == self.__active_name_key
+            and name == self.__active_name
+            and kind == self.__active_kind
+        ):
+            return
+        self.__active_name_key = value
+        self.__active_name = name
+        self.__active_kind = kind
+        write_active_udid(value, name, kind)
+
+    def refresh_active_device(self) -> None:
+        """Rewrite the active-device sidecar from the warmed caches.
+
+        `__init__` restores the persisted UDID straight into the backing field
+        rather than through the setter, deliberately -- restoring a device is
+        not a change worth writing. The consequence is that the sidecar keeps
+        whatever the previous server left there, which for anything written
+        before the name and type existed is a bare UDID.
+
+        Nothing else reliably refreshes it. `resolve_udid()` does, but the
+        tool everyone actually uses to pick a device goes through the pool,
+        and the pool's sticky-active path returns `controller._active_udid`
+        without assigning it -- so no setter runs, and the menu bar shows an
+        identifier for the whole session. Only an explicit resolve by UDID or
+        by name repaired it, which is a strange thing to have to know.
+
+        Called once at startup after `list_devices()` has filled the name and
+        type caches. The dedup guard in the setter makes it a no-op whenever
+        the sidecar already agrees.
+        """
+        udid = self._active_udid
+        if not udid:
+            return
+        # Only when the caches actually know this device. An empty cache is
+        # not evidence that the device has no name -- list_devices() swallows
+        # DeviceError per backend, so a simctl or adb failure yields exactly
+        # the same empty cache as "nothing is connected". Writing on that
+        # replaces a good name with a bare UDID, which is the symptom this
+        # method exists to prevent, caused by this method.
+        if udid not in self._device_name_cache and udid not in self._device_type_cache:
+            logger.debug(
+                "Not refreshing the active-device sidecar: %s is not in the "
+                "device caches, so any name it already holds is better than "
+                "what this would write", udid[:8],
+            )
+            return
+        self._active_udid = udid
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of CLI tools."""
@@ -179,8 +280,18 @@ class DeviceController(DeviceControllerUI):
             return udid
 
         if self._active_udid:
-            await self._ensure_device_type_cached(self._active_udid)
-            return self._active_udid
+            restored = self._active_udid
+            await self._ensure_device_type_cached(restored)
+            # Reassign through the setter now the caches are warm. __init__
+            # puts the persisted UDID straight into the backing field, on
+            # purpose -- restoring a device is not a change worth writing --
+            # so nothing has run the setter yet on this path, and it is the
+            # path a restart takes. Returning early left a sidecar written by
+            # an older server holding only its UDID however many tool calls
+            # ran, and the menu bar showed the UDID. The dedup guard makes
+            # this a no-op once the name and type have landed.
+            self._active_udid = restored
+            return restored
 
         # Step 3: try pool-based resolution (silent upgrade)
         if self._pool is not None:
@@ -282,6 +393,11 @@ class DeviceController(DeviceControllerUI):
                 self.wda_client._device_names[d.udid] = d.name
         for d in android_devices:
             self._device_type_cache[d.udid] = d.device_type
+        # One pass over every backend rather than four: the name is wanted
+        # for all device kinds and nothing else here varies by kind.
+        for d in sim_devices + physical_devices + usbmux_devices + android_devices:
+            if d.name:
+                self._device_name_cache[d.udid] = d.name
 
         # Build CoreDevice UUID -> libimobiledevice UDID mapping
         # by correlating device names between devicectl and usbmux

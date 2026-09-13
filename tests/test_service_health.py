@@ -114,7 +114,13 @@ def tunneld_env(monkeypatch, tmp_path):
     binary = tmp_path / "pymobiledevice3"
     binary.write_text("#!/bin/sh\n")
 
-    state = {"serving": True, "job": {}, "plist_current": True,
+    # `plist_drift` is the reason `installed_plist_drift()` reports, or None
+    # when the plist is fine. It replaced a `plist_current` bool that stubbed
+    # `installed_plist_is_current` -- the weaker of the two checks. With that
+    # stubbed, no health test could ever observe that the gate was weaker than
+    # drift, which is how a plist with wrong trailing arguments came to report
+    # healthy while the CLI called it outdated.
+    state = {"serving": True, "job": {}, "plist_drift": None,
              "plist": plist, "binary": binary}
 
     async def fake_running():
@@ -123,7 +129,7 @@ def tunneld_env(monkeypatch, tmp_path):
     monkeypatch.setattr("server.device.tunneld.is_tunneld_running", fake_running)
     monkeypatch.setattr("server.device.tunneld.launchd_job", lambda: state["job"])
     monkeypatch.setattr(
-        "server.device.tunneld.installed_plist_is_current", lambda: state["plist_current"])
+        "server.device.tunneld.installed_plist_drift", lambda: state["plist_drift"])
     monkeypatch.setattr(
         "server.device.tunneld.installed_plist_log_path", lambda: Path("/old/log"))
     monkeypatch.setattr(
@@ -192,10 +198,104 @@ async def test_missing_plist_reads_as_not_installed(tunneld_env, monkeypatch, tm
 async def test_a_serving_daemon_on_a_stale_plist_is_flagged(tunneld_env):
     from server.device.tunneld import tunneld_health
 
-    tunneld_env["plist_current"] = False
+    tunneld_env["plist_drift"] = "log path is /old/log, expected /Library/Logs/…"
     tunneld_env["job"] = {"state": "running", "pid": "5"}
     health = await tunneld_health()
     assert health.status == "stale_plist"
+    assert "log path" in health.detail, "the reason must reach the detail, not just the status"
+
+
+async def test_a_plist_the_weaker_check_misses_is_still_flagged(tunneld_env):
+    """`installed_plist_is_current` only compares ProgramArguments[0], so a
+    plist carrying the right binary with different trailing arguments passes it
+    -- and launches something other than the tunnel daemon. Gating health on
+    that check reported healthy while `tunneld status` said outdated, about the
+    same plist."""
+    from server.device.tunneld import tunneld_health
+
+    tunneld_env["plist_drift"] = "arguments are ['remote', 'start-tunnel'], expected …"
+    tunneld_env["job"] = {"state": "running", "pid": "5"}
+
+    health = await tunneld_health()
+
+    assert health.status == "stale_plist"
+    assert "arguments" in health.detail
+
+
+async def test_health_uses_the_same_check_the_cli_does(monkeypatch, tmp_path):
+    """Drives the *real* `installed_plist_is_current` and `installed_plist_drift`.
+
+    The fixture above stubs drift, so it cannot tell the two checks apart --
+    which is exactly how the weaker one came to gate this. Here the plist is
+    crafted so `is_current()` passes and `drift()` does not: the right binary,
+    the right log path, and trailing arguments that would launch something
+    other than the tunnel daemon.
+    """
+    from server.device import tunneld
+
+    binary = tmp_path / "pymobiledevice3"
+    binary.write_text("#!/bin/sh\n")
+    plist = {
+        "ProgramArguments": [str(binary), "remote", "start-tunnel"],
+        "StandardOutPath": str(tunneld.LOG_PATH),
+    }
+
+    async def running():
+        return True
+
+    monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: plist)
+    monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda *a, **k: binary)
+    monkeypatch.setattr(tunneld, "is_tunneld_running", running)
+    monkeypatch.setattr(
+        tunneld, "launchd_job",
+        lambda: {"state": "running", "pid": "5", "program": str(binary)},
+    )
+    monkeypatch.setattr(tunneld, "PLIST_PATH", tmp_path / "com.quern.tunneld.plist")
+    (tmp_path / "com.quern.tunneld.plist").write_text("<plist/>")
+
+    # The two checks cannot disagree any more -- `installed_plist_is_current`
+    # is defined as "drift found nothing" -- so this asserts that rather than
+    # the gap it was originally written to expose.
+    assert tunneld.installed_plist_drift() is not None, "precondition: the plist is wrong"
+    assert tunneld.installed_plist_is_current() is False, (
+        "the two checks must not be able to disagree about the same plist"
+    )
+
+    health = await tunneld.tunneld_health()
+
+    assert health.status == "stale_plist", (
+        "health reported healthy for a plist the CLI and the start banner both "
+        "call outdated — a failed check reading as a passing one"
+    )
+    assert "arguments" in health.detail, (
+        "trailing arguments are what is wrong here; a plist carrying the right "
+        "binary with different arguments launches something else entirely"
+    )
+
+
+async def test_a_running_daemon_from_an_old_binary_is_not_called_a_stale_plist(tunneld_env):
+    """Both faults at once, which is the realistic case and the one that pins
+    the ordering.
+
+    launchd's `program` *is* `ProgramArguments[0]`, so a program/binary mismatch
+    always means the plist drifted too. Checking the file first therefore hides
+    the running-daemon fact entirely -- and the older test did not catch that,
+    because it left `plist_drift` at None, asserting a machine that cannot
+    exist.
+    """
+    from server.device.tunneld import tunneld_health
+
+    tunneld_env["plist_drift"] = "binary is /old/pymobiledevice3, but quern now resolves …"
+    tunneld_env["job"] = {"state": "running", "pid": "5",
+                          "program": "/old/pymobiledevice3"}
+
+    health = await tunneld_health()
+
+    assert health.status == "binary_drift", (
+        "the file is stale *because* the daemon is running an old binary; "
+        "reporting only the file loses the actionable fact"
+    )
+    assert "/old/pymobiledevice3" in health.detail
 
 
 async def test_binary_drift_is_caught_while_serving(tunneld_env):

@@ -2,15 +2,31 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import secrets
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("quern-debug-server.config")
 
-CONFIG_DIR = Path.home() / ".quern"
+# Honours QUERN_STATE_DIR, so redirecting it redirects *everything* under
+# ~/.quern -- the api key, config.json, the device pool, crash reports, the
+# tool snapshot, the installed-by-setup manifest, all of it.
+#
+# It used to redirect two files. `server/lifecycle/state.py` read the variable
+# itself and applied it to state.json and active-device.json only, while every
+# other path was built from `Path.home()` here. The test suite's own comment
+# said "QUERN_STATE_DIR redirects ~/.quern", which was the sandbox everyone
+# believed in: a test calling `regenerate_api_key()` would have rewritten the
+# developer's real key and left every MCP client on the machine authenticating
+# with a stale one, silently.
+_state_dir = os.environ.get("QUERN_STATE_DIR")
+CONFIG_DIR = Path(_state_dir) if _state_dir else Path.home() / ".quern"
 API_KEY_FILE = CONFIG_DIR / "api-key"
 USER_CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -55,14 +71,28 @@ class ServerConfig:
 
 
 def read_user_config() -> dict:
-    """Read user config from ~/.quern/config.json. Returns {} if missing or invalid."""
+    """Read user config from ~/.quern/config.json. Returns {} if missing or invalid.
+
+    "Invalid" includes a document that parses but is not an object. A config
+    holding `[]` or `"on"` or `42` is valid JSON, so it came back as-is and
+    every caller's `.get()` raised AttributeError -- which read commands turned
+    into a crash and the periodic check swallowed, silently skipping the
+    automatic update check. The type is in the signature; honour it.
+    """
     if not USER_CONFIG_FILE.exists():
         return {}
     try:
-        return json.loads(USER_CONFIG_FILE.read_text())
+        parsed = json.loads(USER_CONFIG_FILE.read_text())
     except Exception as e:
         logger.warning("Failed to read config file %s: %s", USER_CONFIG_FILE, e)
         return {}
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "Config file %s holds %s, not an object; ignoring it",
+            USER_CONFIG_FILE, type(parsed).__name__,
+        )
+        return {}
+    return parsed
 
 
 def get_default_device_family() -> str:
@@ -100,10 +130,129 @@ def set_update_channel(channel: str) -> None:
             f"Unknown update channel {channel!r}. "
             f"Valid: {', '.join(VALID_UPDATE_CHANNELS)}"
         )
+    update_user_config(lambda c: c.__setitem__("update_channel", channel))
+
+
+def get_auto_install_cert() -> bool:
+    """Whether to install the mitmproxy CA automatically when capture needs it.
+
+    Defaults to False, and deliberately: installing a MITM root CA is a larger
+    and longer-lived commitment than the proxy toggle that prompts it. It
+    persists across sessions, outlives the capture window, and the user has to
+    know it happened in order to undo it. So the first encounter costs one
+    round of asking, and this makes the second onwards free.
+
+    Anything other than a real boolean is treated as unset -- a typo should
+    read as "ask me", never as consent.
+    """
+    return read_user_config().get("auto_install_cert") is True
+
+
+@contextmanager
+def _config_lock():
+    """Hold an exclusive lock for a whole read-modify-write of the config.
+
+    Each setter reads the file, changes one key and replaces it. Two of them at
+    once -- the menu bar writes this file, and so does every `quern set-...`
+    command -- both read the same starting point and the second replacement
+    drops the first one's key. Nothing in the file says it happened.
+
+    The lock is its own file rather than the config: the config is replaced
+    rather than written in place, so a lock held on it would be a lock on an
+    inode nobody looks at any more.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = read_user_config()
-    config["update_channel"] = channel
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    lock_path = CONFIG_DIR / "config.lock"
+    try:
+        # "a", not "w". "w" truncates, which needs write permission on an
+        # existing file -- so one `sudo quern set-...` leaves a root-owned lock
+        # file and every later write by the user falls through to the unlocked
+        # path from then on, permanently, behind a warning nobody reads.
+        handle = lock_path.open("a")
+    except OSError:
+        # Cannot lock. Proceeding unlocked is what happened before there was a
+        # lock at all, and refusing to save a setting because a lock file could
+        # not be created would be a worse trade than a rare lost key.
+        logger.warning("Could not open %s; writing config unlocked", lock_path)
+        yield
+        return
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as e:
+            # flock is not supported on every filesystem -- SMB, AFP and some
+            # NFS mounts answer ENOTSUP or ENOLCK -- and a home directory on
+            # one of those is not exotic. Letting this escape would propagate
+            # out of a setter, so the setting is lost and the CLI exits with a
+            # traceback. Same trade as above: unlocked beats not saved.
+            logger.warning("Could not lock %s (%s); writing config unlocked",
+                           lock_path, e)
+        yield
+    finally:
+        handle.close()
+
+
+def update_user_config(change: Callable[[dict], None]) -> None:
+    """Apply `change` to the config and persist it, as one atomic step.
+
+    The read and the write are inside one lock deliberately. Reading outside it
+    and writing inside would still let two callers start from the same snapshot,
+    which is the whole failure.
+
+    `change` must not call this again. The lock is not reentrant -- a nested
+    call opens a second descriptor and blocks against the first, in the same
+    thread, forever. Reading with `read_user_config()` inside `change` is fine;
+    it takes no lock. Nothing nests today, and the callable is the reason to
+    say so rather than leave it to be discovered.
+
+    Swapped in rather than written over: the menu-bar app reads this file on a
+    poll, and ``write_text`` truncates before it writes, so a read landing in
+    that window gets a partial document. ``os.replace`` is atomic within a
+    filesystem; the temporary lives in the same directory for that reason, since
+    a move across filesystems is a copy and the window comes back.
+    """
+    with _config_lock():
+        config = read_user_config()
+        change(config)
+        tmp = USER_CONFIG_FILE.with_name(f".{USER_CONFIG_FILE.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(config, indent=2) + "\n")
+            os.replace(tmp, USER_CONFIG_FILE)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+
+def set_auto_install_cert(enabled: bool) -> None:
+    """Persist the auto-install policy.
+
+    Surfaced in ``proxy_status`` and in the menu-bar app's Settings pane, both
+    on purpose: a silent, persistent CA-install policy would be worse than the
+    failure it exists to prevent.
+    """
+    update_user_config(lambda c: c.__setitem__("auto_install_cert", bool(enabled)))
+
+
+def get_update_check() -> bool:
+    """Whether quern checks for updates on its own.
+
+    Defaults to True: this is the "check automatically" box, and it starts
+    ticked. Note the asymmetry with ``auto_install_cert``, which requires a
+    literal ``true`` -- there, anything unclear must read as "ask me", because
+    the cost of guessing wrong is a root CA installed without consent. Here the
+    cost of guessing wrong is one HTTPS request a day, so only an explicit
+    ``false`` turns it off and a typo leaves checking on.
+
+    Governs the *automatic* check alone. ``quern check-updates`` and the menu
+    bar's Check for Updates ignore it, the way every other updater leaves Check
+    Now working when the box is unticked.
+    """
+    return read_user_config().get("update_check") is not False
+
+
+def set_update_check(enabled: bool) -> None:
+    """Persist whether the automatic update check runs."""
+    update_user_config(lambda c: c.__setitem__("update_check", bool(enabled)))
 
 
 def channel_to_release_branch(channel: str) -> str:
@@ -138,10 +287,7 @@ def set_local_capture_processes(processes: list[str]) -> None:
 
     An empty list disables local capture.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = read_user_config()
-    config["local_capture"] = processes
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    update_user_config(lambda c: c.__setitem__("local_capture", processes))
 
 
 # ---------------------------------------------------------------------------
@@ -165,20 +311,21 @@ def set_plist_watch_config(
 
     watches: list of {container, plist_path, ignore_prefixes} dicts.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config = read_user_config()
-    pw = config.setdefault("plist_watch", {})
-    pw[bundle_id] = {"watches": watches}
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    def _set(config: dict) -> None:
+        config.setdefault("plist_watch", {})[bundle_id] = {"watches": watches}
+
+    update_user_config(_set)
 
 
 def clear_plist_watch_config(bundle_id: str) -> bool:
     """Remove plist watch config for a bundle_id. Returns True if it existed."""
-    config = read_user_config()
-    pw = config.get("plist_watch", {})
-    if bundle_id not in pw:
+    if bundle_id not in read_user_config().get("plist_watch", {}):
         return False
-    del pw[bundle_id]
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+    def _clear(config: dict) -> None:
+        # Re-read under the lock, so the decision and the write see the same
+        # document. The check above is only to answer False without taking it.
+        config.get("plist_watch", {}).pop(bundle_id, None)
+
+    update_user_config(_clear)
     return True

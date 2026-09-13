@@ -101,12 +101,31 @@ def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
             if state:
                 _print_status(state)
                 sys.exit(0)
+            # Answering /health but leaving no state file is its own fault, and
+            # not the one the timeout message below names. Every consumer finds
+            # the server through that file, so a server without one is not
+            # usable even though it is up -- and being told the health check
+            # timed out sends the reader to look for a server that is running.
+            print(f"Error: server (pid {child_pid}) is healthy but wrote no "
+                  f"state file — nothing can find it", file=sys.stderr)
+            print(f"Check logs: {LOG_FILE}", file=sys.stderr)
+            sys.exit(1)
 
+    # Nonzero, deliberately. This printed a warning and exited 0, which told
+    # every caller the opposite of what happened -- the exact shape
+    # CONTRIBUTING calls out. It is not hypothetical: the menu-bar app gates
+    # its error reporting on this status, so a server that never became
+    # healthy produced a dimmed icon, a "Quern is stopped" menu and no
+    # explanation anywhere, indistinguishable from never having tried.
+    #
+    # The child is left running on purpose. It may still be coming up, and
+    # killing it would throw away the logs naming the reason. The exit code
+    # says "this did not finish", not "nothing is running".
     elapsed_total = time.monotonic() - start
     print(f"Warning: Server started (pid {child_pid}) but health check timed out "
           f"after {elapsed_total:.1f}s", file=sys.stderr)
     print(f"Check logs: {LOG_FILE}", file=sys.stderr)
-    sys.exit(0)
+    sys.exit(1)
 
 
 def _print_status(state: dict) -> None:
@@ -143,12 +162,14 @@ def _print_status(state: dict) -> None:
             print(f"{prefix}{line}")
 
     try:
-        from server.device.tunneld import PLIST_PATH, installed_plist_is_current
-        if PLIST_PATH.exists() and not installed_plist_is_current():
-            print(
-                "  Warning:    tunneld plist is outdated "
-                "(old user-home log path). Run: ./quern tunneld install",
-            )
+        from server.device.tunneld import PLIST_PATH, installed_plist_drift
+        # The third copy of this. Two others said "old user-home log path"
+        # whichever condition had drifted; this one is printed in the start
+        # banner, so it said it more often than either. Report what drifted.
+        drift = PLIST_PATH.exists() and installed_plist_drift()
+        if drift:
+            print(f"  Warning:    tunneld plist is outdated — {drift}.")
+            print("              Run: ./quern tunneld install")
     except Exception:
         pass  # never let an opportunistic check block the banner
 

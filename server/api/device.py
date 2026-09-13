@@ -307,6 +307,11 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
 async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     """Set the active device by UDID."""
     controller = _get_controller(request)
+    # Warm the device caches first. This is the one route that names a device
+    # the server may never have enumerated, so without it the type falls back
+    # to "simulator" -- routing a physical device to idb instead of WDA -- and
+    # the active-device sidecar is written with no human-readable name.
+    await controller._ensure_device_type_cached(body.udid)
     controller._active_udid = body.udid
     return {"active_udid": body.udid}
 

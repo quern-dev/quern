@@ -1,0 +1,216 @@
+# Quern Menu-Bar Daemon Manager
+
+A lightweight macOS menu-bar app (`LSUIElement`, no Dock icon) that surfaces
+the Quern daemon's state and drives it through the `quern` CLI — an Ollama-style
+manager with a **Restart to Update** action.
+
+## What it does
+
+- **Status** — running/stopped + uptime, read from `~/.quern/state.json`. The
+  icon dims when the daemon is down and turns red when a start was tried and
+  given up on: "nobody started it" and "starting it failed" are otherwise
+  identical in the menu bar, which is the only part most people look at. The
+  silhouette is the same in all three states.
+- **Active device & proxy** — from `~/.quern/active-device.json` and `state.json`.
+  The sidecar carries the device's name and type as well as its UDID, so the
+  row reads `iPhone 16 Pro (Simulator)` rather than a 36-character identifier.
+  An absent type is shown unqualified rather than guessed.
+- **Start / Stop / Restart** — shells out to the installed `quern` CLI.
+- **Restart to Update** — appears only when `~/.quern/update-info.json` reports
+  `update_available`; runs `quern update`, then relaunches into the new build.
+- **Check for Updates…** — shown instead, when nothing is staged. That cache is
+  refreshed at most once a day, so without this a release landing in the
+  afternoon would not be offered until tomorrow and there was no way to ask.
+  Runs `quern check-updates`, which skips the once-a-day rate limit and the
+  `update_check: false` opt-out alike: that setting turns off the *automatic*
+  check, and clicking this is not one.
+  A check that finds nothing says so, because a menu identical before and after
+  is indistinguishable from a dead item.
+- **Start on launch** — launching the app starts the daemon, unless it is
+  already running or you turn it off in Settings. On by default: you opened the
+  Quern app, and a menu that greets you with "stopped" and a button to press is
+  a step that did not need to exist. A failure here goes to the menu and the
+  log rather than an alert, because this can fire at login and a modal stealing
+  focus as you open your laptop is worse than the failure it reports. Either
+  way the menu says what is happening while it happens, hides the lifecycle
+  items until the outcome is known — including the fifteen seconds it keeps
+  waiting after a nonzero exit, since `quern start` leaves its child running —
+  and offers **Open Server Log** once it has given up.
+- **Settings** — full state, the capture-certificate policy, stable/beta channel
+  picker, launch-at-login and start-on-launch toggles, docs link. The certificate toggle writes
+  `auto_install_cert` via `quern set-auto-install-cert`; it is surfaced here
+  deliberately, because a standing policy to install a root certificate
+  authority should be visible and reversible rather than living only in a
+  config file. It reads a *literal* JSON boolean — `JSONSerialization` hands
+  back `NSNumber` for numbers too, and `as? Bool` accepts a numeric 1, which
+  would show the policy enabled while the server treated it as unset.
+- **Server version** — read live from the CLI, and reported as `checking…` or
+  `unavailable` when it cannot be. It used to fall back to `current_version` in
+  `update-info.json`, which only the server rewrites and only on an update
+  check: on a machine where the CLI could not be found, that showed a version
+  from days earlier under a heading saying "Server". It read 0.15.0 for an
+  0.16.1 install and was believed.
+- **Quit** — exits only the menu bar; ⌥ reveals "Quit and Stop Server".
+
+Every CLI call carries `QUERN_INVOKED_BY=menubar`, so the CLI can word its
+advice for someone who clicked a menu item — "Open a terminal and run: …"
+rather than "there is no terminal to ask on". It never decides what the CLI is
+*able* to do: whether a password can be asked for is settled by looking for a
+terminal, which cannot be forgotten the way a caller can forget to identify
+itself. When a failure alert carries a command, **Copy** puts it on the
+clipboard; the app does not launch a terminal itself, because running a `sudo`
+command on one menu click is a larger commitment than it makes anywhere else,
+it would pick a terminal on your behalf, and driving one needs an Automation
+permission prompt.
+
+It starts the daemon but does not own it: quitting the menu bar leaves the
+server running (⌥ reveals "Quit and Stop Server" for when you mean both), and
+it coexists with `quern start` and the MCP `ensure_server` tool. Start-on-launch
+is a setting rather than unconditional behaviour because the app also registers
+itself as a login item, so "on launch" includes every login — a daemon running
+because you installed a menu bar app is worth being able to decline. Starting
+the server opens the HTTP listener and a crash-report watcher; syslog and OSLog
+capture stay off, and the proxy and its certificate stay behind their own
+consent gates. State comes from the
+unauthenticated `~/.quern/*.json` files, so no API key / HTTP is needed.
+
+## Tests
+
+```sh
+./macos/QuernMenuBar/run-tests.sh
+```
+
+Plain `swiftc`, compiling `Sources/` (minus its `main.swift`) against `Tests/`.
+It uses the same deployment target as `build.sh` and honours `STRICT` the same
+way, but not its optimisation flags — a test binary gains nothing from
+whole-module optimisation. Not SwiftPM: that wants `Sources/<Target>/`, which
+means splitting these sources into a library and an executable, and both
+`build.sh` and `release-menubar.sh` depend on the current layout. Restructuring
+the two scripts that produce a signed artifact is a poor trade for test
+discovery. CI runs this on the same macOS job that builds the app, with
+`STRICT=1`.
+
+What makes it possible is `Scheduler.swift`. Every timing defect found in
+review — a deadline that could not be reached, a deadline that counted ticks
+rather than seconds, a flag left set because a call never returned — needed
+minutes of real time to reproduce, so none was ever going to be covered by a
+test that waits. `Updater` and `LifecycleController` both take their clock,
+their CLI calls and their effects as dependencies; `TestScheduler` advances
+time on demand.
+
+The harness fails when a suite or a case is not reached, and when a test body
+asserts nothing. Both were real: commenting out a suite printed "0 passed" and
+exited 0, and a body that returned before its first expectation printed "ok".
+A test count that looks healthy is the worst possible way to report missing
+coverage, so `main.swift` states how many cases there should be.
+
+Rendering is not tested and should not pretend to be. The bug where
+`contentTintColor` silently did nothing to a menu-bar template image was found
+by screenshotting the real menu bar and measuring the pixels, which is still
+how to check that.
+
+## Architecture
+
+| File | Responsibility |
+|------|----------------|
+| `Sources/main.swift` | Accessory-app bootstrap |
+| `Sources/LifecycleController.swift` | What is happening to the daemon, as distinct from how it is drawn |
+| `Sources/Scheduler.swift` | Where the app gets the time and schedules work |
+| `Sources/AppDelegate.swift` | Status item + menu construction + actions |
+| `Sources/StateReader.swift` | Reads `~/.quern/*.json`; poll + directory watch |
+| `Sources/QuernCLI.swift` | Resolves & runs the `quern` CLI |
+| `Sources/Updater.swift` | "Restart to Update" + self-relaunch |
+| `Sources/SettingsWindow.swift` | SwiftUI settings + `SMAppService` login item |
+
+Requires macOS 13+ (for `SMAppService`).
+
+## Build (development)
+
+```sh
+# Native-arch, unsigned dev build → macos/QuernMenuBar/build/Quern.app
+UNIVERSAL=0 ./build.sh
+open build/Quern.app
+```
+
+`build.sh` compiles all `Sources/*.swift` with `swiftc` (no Xcode project),
+stamps the version from the repo's `pyproject.toml` into `Info.plist`, and
+assembles the `.app` bundle. Icons are optional — drop `Assets/AppIcon.png`
+and/or `Assets/StatusIcon.png` to override the SF Symbol fallback.
+
+> Dev builds are unsigned, so launch-at-login and macOS permissions may be
+> unstable across rebuilds (unstable code-signing identity). That's expected
+> for local iteration — releases are signed (below).
+
+## Release (signed + notarized)
+
+Releases are cut by a maintainer on a Mac with a Developer ID identity. The
+menu-bar app ships **inside the release tarball asset** and updates through
+Quern's existing updater (Option A — no Sparkle, no second update path).
+
+**The asset is not the only delivery path, and cannot be.** v0.15.0 reached
+every existing user without the app: their updater predated the asset
+preference, so it fetched GitHub's generated source tarball — and the code
+that prefers the asset shipped *inside* the asset, so it could not help
+itself. Any future capability delivered only through the asset has the same
+bootstrap problem.
+
+So `quern setup` fetches the app when a release install is missing it, which
+is the first code of ours that runs on an affected machine. It verifies before
+installing — a designated requirement anchored to Apple and pinned to this
+team, Gatekeeper acceptance, and the bundle's stamped version against the
+release requested — because that path downloads an executable and then
+launches it. A git checkout is left alone; developers build their own.
+
+One-time credential setup:
+
+```sh
+# Apple ID credentials, with an app-specific password (not your Apple ID
+# password). The profile name is yours to choose -- pass the same one to the
+# script below.
+xcrun notarytool store-credentials my-notary-profile \
+  --apple-id "you@example.com" --team-id TEAMID --password "app-specific-pw"
+```
+
+An App Store Connect API key works too, and avoids storing a password:
+
+```sh
+xcrun notarytool store-credentials my-notary-profile \
+  --key AuthKey_XXXXXXXXXX.p8 --key-id XXXXXXXXXX --issuer "issuer-uuid"
+```
+
+Per release, in two phases. The full procedure is in
+`docs/release-channels.md`; this is the part that runs here.
+
+**Before cutting the tag** — build, sign and notarize:
+
+```sh
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+NOTARY_PROFILE="my-notary-profile" \
+  ../../scripts/release-menubar.sh --app-only 0.16.0     # no leading v
+```
+
+This leaves a signed, notarized `Quern.app` in `dist/` and prints the publish
+command for later. Doing it first means a notary-service failure costs you
+nothing: no tag has been cut and no Release exists yet.
+
+**After the tag and Release exist** — assemble and upload:
+
+```sh
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+  ../../scripts/release-menubar.sh --publish v0.16.0
+```
+
+That assembles `dist/quern-<version>.tar.gz` (source tree at the tag + the
+signed `Quern.app` at the top level) and uploads it as a release asset. Both
+the updater (`_select_asset_url` in `server/lifecycle/updater.py`) and the
+install script on quern.dev prefer this asset over GitHub's generated source
+tarball, so a fresh install and an upgrade both get the app.
+
+`--publish` re-verifies the staged app before uploading anything: stamped
+version against the tag, signature validity, stapled ticket, Gatekeeper
+acceptance, and that the signing team matches `DEVELOPER_ID_APP` — which is
+why that variable is needed in both phases. A staged app can come from
+anywhere, including a previous release.
+
+The one-shot form, `release-menubar.sh v0.16.0`, still does everything in a
+single run, but it needs the tag and Release to already exist.

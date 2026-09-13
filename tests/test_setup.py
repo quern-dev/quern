@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from server.lifecycle.setup import (
     PYTHON_MAX,
@@ -914,6 +917,59 @@ class TestBrewInstallTracking:
 
 
 class TestPromptYn:
+    def test_no_terminal_declines_and_says_so(self, capsys):
+        """`quern update` runs setup, and the menu bar's "Restart to Update"
+        runs `quern update` — so setup runs with no controlling terminal, where
+        /dev/tty cannot be opened. It used to decline every question silently."""
+        from server.lifecycle.setup import _UNASKED, _prompt_yn
+
+        _UNASKED.clear()
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install the thing?", default=True) is False
+
+        out = capsys.readouterr().out
+        assert "Install the thing?" in out, "the question must be shown, not swallowed"
+        assert "no terminal" in out
+        assert _UNASKED == ["Install the thing?"], "it must be recallable at the end"
+
+    def test_the_menu_bar_is_told_where_it_can_answer(self, capsys, monkeypatch):
+        """The path the menu bar can actually reach today: `quern update` calls
+        run_setup, whose prompts are then declined. "No terminal attached" is
+        the diagnosis; where to go is the useful part."""
+        from server.lifecycle.invocation import INVOKED_BY, MENUBAR
+        from server.lifecycle.setup import _UNASKED, run_setup
+
+        monkeypatch.setenv(INVOKED_BY, MENUBAR)
+        monkeypatch.setattr("server.lifecycle.setup._can_prompt", lambda: False)
+        monkeypatch.setattr("server.lifecycle.setup.check_homebrew", lambda: CheckResult(
+            name="Homebrew", status=CheckStatus.MISSING, message="not found"))
+
+        _UNASKED.clear()
+        run_setup()
+
+        out = capsys.readouterr().out
+        assert "open a terminal" in out.lower(), (
+            "a caller that identified itself as the menu bar should be told "
+            "where it can answer, not only that it cannot here"
+        )
+
+    def test_a_declined_default_is_not_taken_as_a_yes(self, capsys):
+        """Several of these install things. Answering the default would have
+        setup say yes on the user's behalf, which is worse than doing less."""
+        from server.lifecycle.setup import _UNASKED, _prompt_yn
+
+        _UNASKED.clear()
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert _prompt_yn("Install it?", default=True) is False
+
     def test_tty_stdin(self):
         """Normal TTY stdin reads via input()."""
         from server.lifecycle.setup import _prompt_yn
@@ -981,6 +1037,22 @@ class TestPromptYn:
 
 
 class TestRunUninstall:
+    @pytest.fixture(autouse=True)
+    def _wrapper_in_a_sandbox(self, tmp_path, monkeypatch):
+        """Redirect the wrapper `run_uninstall` removes.
+
+        It was not redirected, so these three tests deleted the developer's own
+        `~/.local/bin/quern` on every run -- and on a machine where that is the
+        only way `quern` resolves, that is the CLI gone until setup is re-run.
+        Patching the module constant rather than `Path.home` keeps the redirect
+        in one place and next to the other sandboxing these tests already do.
+        """
+        wrapper = tmp_path / "sandbox-bin" / "quern"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\n")
+        monkeypatch.setattr("server.lifecycle.setup.WRAPPER_PATH", wrapper)
+        return wrapper
+
     def test_abort_on_decline(self, tmp_path):
         """Declining the confirmation aborts cleanly."""
         manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
@@ -1115,3 +1187,706 @@ class TestXcodeGate:
         for call in run_mock.call_args_list:
             args = call.args[0]
             assert args[0] != "xcrun", f"unexpected xcrun call: {args}"
+
+
+class TestBuildPreviewApp:
+    """The screen-mirror app is built during setup, not on first use.
+
+    Lazy building left the menu-bar app's "Screen Mirror…" item hidden on a
+    fresh install: the item only appears when the bundle exists, and nothing
+    created it until someone had already driven a preview from the API or an
+    MCP tool. That is the opposite of who the menu bar is for.
+    """
+
+    def test_builds_when_swiftc_is_available(self):
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.preview.build_preview_bundle") as build:
+            result = build_preview_app()
+
+        build.assert_called_once()
+        assert result.status == CheckStatus.OK
+
+    def test_missing_command_line_tools_is_skipped_not_failed(self):
+        """A machine without swiftc has a missing convenience, not a broken
+        install -- the same call scrcpy gets for Android preview."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=False):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.SKIPPED
+        assert result.fixable is True
+        assert "xcode-select --install" in (result.detail or "")
+
+    def test_accepting_the_prompt_opens_the_installer(self):
+        """`xcode-select --install` hands off to a macOS dialog rather than
+        installing inline, so setup can only open it and say what comes next."""
+        from server.lifecycle.setup import build_preview_app
+
+        ran: list[list[str]] = []
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=True), \
+             patch("server.lifecycle.setup._run",
+                   side_effect=lambda cmd, **kw: (ran.append(cmd), (0, "", ""))[1]):
+            result = build_preview_app()
+
+        assert ran == [["xcode-select", "--install"]]
+        # Still skipped: the dialog is asynchronous, so nothing was built.
+        assert result.status == CheckStatus.SKIPPED
+
+    def test_declining_the_prompt_runs_nothing(self):
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=False), \
+             patch("server.lifecycle.setup._run") as run:
+            build_preview_app()
+
+        run.assert_not_called()
+
+    def test_a_filesystem_failure_warns_rather_than_stopping_setup(self):
+        """The build stats files, makes directories, writes a plist, copies an
+        icon and launches a process. An unwritable ~/.quern raises OSError, and
+        catching only RuntimeError would end setup over an optional extra."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.preview.build_preview_bundle",
+                   side_effect=PermissionError("~/.quern is not writable")):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.WARNING
+        assert "not writable" in (result.detail or "")
+
+    def test_a_failed_build_warns_rather_than_stopping_setup(self):
+        """Setup continues: everything else about the install is still fine."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.preview.build_preview_bundle",
+                   side_effect=RuntimeError("swiftc exploded")):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.WARNING
+        assert "swiftc exploded" in (result.detail or "")
+
+
+class TestTunneldDriftReporting:
+    """The staleness check tests two conditions with different remedies, and
+    reported the log path whichever one failed."""
+
+    def test_a_drifted_binary_is_not_reported_as_a_log_path(self, monkeypatch):
+        """The symptom that prompted this: a machine reinstalled the daemon,
+        the log path became correct, and doctor went on printing the log path
+        as the problem -- so the reinstall looked like it had not worked."""
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/old/pmd3", "remote", "tunneld"],
+        )
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: Path("/new/pmd3"))
+
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None
+        assert "/old/pmd3" in drift and "/new/pmd3" in drift
+        assert "log path" not in drift
+
+    def test_a_stale_log_path_still_says_so(self, monkeypatch):
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(
+            tunneld, "installed_plist_log_path", lambda: Path("/Users/x/.quern/tunneld.log")
+        )
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None and "log path" in drift
+
+    @pytest.mark.asyncio
+    async def test_a_missing_binary_still_reports_plist_drift(self, monkeypatch, tmp_path):
+        """"pymobiledevice3 not found" and "the daemon points at a binary that
+        no longer exists" are the same situation from two ends, and only the
+        second says the daemon is broken too. Returning early reported the
+        first and hid the second."""
+
+        from server.device import tunneld
+
+        plist = tmp_path / "com.quern.tunneld.plist"
+        plist.write_text("")
+        monkeypatch.setattr(tunneld, "PLIST_PATH", plist)
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: None)
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/gone/pmd3", "remote", "tunneld"],
+        )
+
+        health = await tunneld.tunneld_health()
+        assert health.status == "no_binary"
+        assert "/gone/pmd3" in health.detail, "drift was not surfaced"
+
+    def test_wrong_trailing_arguments_are_drift(self, monkeypatch):
+        """generate_plist() writes [binary, "remote", "tunneld"]. A plist with
+        the right binary and different trailing arguments launches something
+        other than the tunnel daemon, and passed a check that read args[0]."""
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/usr/bin/pmd3", "remote", "something-else"],
+        )
+        drift = tunneld.installed_plist_drift()
+        assert drift is not None and "arguments are" in drift
+
+    def test_a_current_plist_reports_no_drift(self, monkeypatch):
+        from pathlib import Path
+
+        from server.device import tunneld
+
+        monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
+        monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
+        monkeypatch.setattr(
+            tunneld, "installed_plist_arguments",
+            lambda: ["/same/pmd3", "remote", "tunneld"],
+        )
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: Path("/same/pmd3"))
+        assert tunneld.installed_plist_drift() is None
+
+
+def _forbid_network(monkeypatch):
+    """Make any outbound request an immediate failure.
+
+    These tests pass today only because an early return fires first. Reorder
+    or remove that return and they would quietly start calling api.github.com
+    -- slow, nondeterministic, broken offline, and exactly what CONTRIBUTING
+    warns about.
+    """
+    def _boom(*a, **kw):
+        raise AssertionError("test reached the network")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+
+
+class TestFetchMenubarApp:
+    """v0.15.0 reached existing users without the menu-bar app, and those
+    machines cannot repair themselves: `quern update` sees the latest version
+    already installed and downloads nothing. Setup is the first code of ours
+    that runs on them."""
+
+    def test_a_git_checkout_is_left_alone(self, tmp_path, monkeypatch):
+        """A developer builds the app themselves; fetching a release build
+        over a working tree would be wrong."""
+        from server.lifecycle.setup import fetch_menubar_app
+
+        _forbid_network(monkeypatch)
+        (tmp_path / ".git").mkdir()
+        assert fetch_menubar_app(tmp_path) is None
+
+    def test_an_install_that_has_the_app_is_left_alone(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import fetch_menubar_app
+
+        _forbid_network(monkeypatch)
+        (tmp_path / "Quern.app").mkdir()
+        assert fetch_menubar_app(tmp_path) is None
+
+    def test_it_does_nothing_off_macos(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Linux")
+        assert setup_mod.fetch_menubar_app(tmp_path) is None
+
+    def test_a_release_without_the_asset_is_skipped_not_failed(self, tmp_path, monkeypatch):
+        """Releases cut before the asset existed have nothing to offer, and
+        saying so is more useful than a download error."""
+        import io as _io
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        payload = json.dumps({"assets": []}).encode()
+
+        class _Resp:
+            def read(self):
+                return payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.SKIPPED
+        assert _io  # keep the import meaningful for linters
+
+    def test_a_network_failure_warns_rather_than_ending_setup(self, tmp_path, monkeypatch):
+        """A missing menu-bar app is a missing convenience; failing setup over
+        it would be worse than the gap it fills."""
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("network is down")),
+        )
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.WARNING
+        assert "network is down" in (result.detail or "")
+        assert "releases/tag" in (result.detail or ""), "no manual route offered"
+
+    def test_extraction_goes_through_macos_tar(self, tmp_path, monkeypatch):
+        """Python's tarfile cannot extract this bundle correctly.
+
+        The archive carries AppleDouble metadata. macOS tar applies those as
+        extended attributes and removes them; tarfile writes them as literal
+        `._Contents` files inside the bundle, which breaks the code signature
+        seal and makes Gatekeeper reject the app with "a sealed resource is
+        missing or invalid". Measured: 21 entries where a correct bundle has
+        10, and the damaged copy still passes `stapler validate`, so nothing
+        short of `spctl` notices.
+
+        Asserting on the command is a proxy for a property no unit test can
+        check without a signed artifact and a network fetch.
+        """
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://github.com/quern-dev/quern/releases/download/v9.9.9/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self, body=payload):
+                self._body = body
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", "stopped before extraction")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod.fetch_menubar_app(tmp_path)
+
+        assert calls, "nothing was executed to extract the archive"
+        assert calls[0][0] == "/usr/bin/tar", f"extracted with {calls[0][0]}, not macOS tar"
+
+    def test_a_tampered_bundle_is_refused(self, tmp_path, monkeypatch):
+        """This is an executable fetched over the network and then launched,
+        so "the release asset said so" is not sufficient provenance."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "--verify" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "code object is not signed")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="signature is not valid"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
+
+    def test_a_bundle_signed_by_someone_else_is_refused(self, tmp_path, monkeypatch):
+        """A valid signature says nothing about whose it is."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "TeamIdentifier=EVIL123456\n")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="expected 3QUH73KW5Q"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
+
+    def test_gatekeeper_rejection_is_refused(self, tmp_path, monkeypatch):
+        """A bundle can be validly signed by us and still not notarized."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "spctl":
+                return subprocess.CompletedProcess(cmd, 3, "", "rejected")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="Gatekeeper rejects it"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")
+
+    def test_our_own_signed_bundle_passes(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "9.9.9\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")  # must not raise
+
+    def test_the_download_is_bounded(self, tmp_path, monkeypatch):
+        """urlretrieve takes no timeout and defaults to none, so a stalled
+        transfer held setup open with no deadline."""
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        src = inspect.getsource(setup_mod.fetch_menubar_app)
+        assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
+        assert "timeout=" in src, "the transfer has no socket timeout"
+        assert "deadline" in src, "the transfer has no whole-operation deadline"
+
+    def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
+        """Signature, team and Gatekeeper are all satisfied by any genuine
+        Quern app we ever signed, so a replaced asset containing an older real
+        build would pass every one of them. That is a downgrade, not a
+        forgery, and the asset name alone does not rule it out."""
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "0.14.1\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="it is v0.14.1, but v0.15.0 was requested"):
+            setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")
+
+    def test_the_matching_version_is_accepted(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "codesign" and "-dv" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "", f"TeamIdentifier={setup_mod.RELEASE_TEAM_ID}\n"
+                )
+            if "PlistBuddy" in cmd[0]:
+                return subprocess.CompletedProcess(cmd, 0, "0.15.0\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise
+
+
+    def test_verification_runs_before_the_app_is_installed(self, tmp_path, monkeypatch):
+        """Every other test calls _verify_menubar_app directly. Deleting its
+        call site left the whole suite green while setup would download,
+        install and launch an unverified bundle -- and because urllib writes
+        no quarantine attribute, macOS gives it no first-launch assessment
+        either. This is the only trust gate in that path."""
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://github.com/quern-dev/quern/releases/download/v9.9.9/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self):
+                self._body = payload
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+
+        def fake_tar(cmd, **kw):
+            # Stand in for a successful extraction.
+            if cmd and "tar" in str(cmd[0]):
+                member = Path(kw.get("cwd") or cmd[cmd.index("-C") + 1])
+                (member / "quern-9.9.9" / "Quern.app").mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_tar)
+
+        called: list[str] = []
+
+        def refusing_verify(app, version):
+            called.append(str(app))
+            raise setup_mod._UntrustedBundle("substituted asset")
+
+        monkeypatch.setattr(setup_mod, "_verify_menubar_app", refusing_verify)
+
+        result = setup_mod.fetch_menubar_app(tmp_path)
+
+        assert called, "the bundle was installed without ever being verified"
+        assert not (tmp_path / "Quern.app").exists(), "a rejected bundle was installed"
+        assert result.status == CheckStatus.ERROR
+
+    def test_an_asset_url_off_github_is_refused(self, tmp_path, monkeypatch):
+        """The URL comes out of the API response. Anything not on github.com
+        means the response is not what we think it is, and following it would
+        fetch code from somewhere else entirely."""
+        import json
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        monkeypatch.setattr("server.get_version", lambda: "9.9.9")
+        payload = json.dumps({
+            "assets": [{
+                "name": "quern-9.9.9.tar.gz",
+                "browser_download_url": "https://evil.example/q.tar.gz",
+            }]
+        }).encode()
+
+        class _Resp:
+            def __init__(self):
+                self._body = payload
+            def read(self, n=None):
+                body, self._body = self._body, b""
+                return body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+        result = setup_mod.fetch_menubar_app(tmp_path)
+        assert result.status == CheckStatus.ERROR
+        assert "not on github.com" in (result.detail or "")
+
+
+def _boom_oserror(*a, **kw):
+    raise OSError("simulated failure")
+
+
+class TestMenubarInstallLocation:
+    """The app was installed into the payload directory under ~/.local, which
+    Spotlight excludes, and `open` activated the running old build instead of
+    starting the new one — so an update could never deliver a new app to
+    anyone already running one."""
+
+    def test_the_app_is_installed_where_a_person_can_find_it(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", lambda cmd, timeout=30: (0, "", ""))
+
+        result = setup_mod.launch_menubar_app(root)
+
+        assert (apps / "Quern.app").exists(), "app was not installed to ~/Applications"
+        assert not (root / "Quern.app").exists(), "a second copy was left in the payload dir"
+        assert result.status == CheckStatus.OK
+
+    def test_a_running_instance_is_quit_before_the_new_one_opens(self, tmp_path, monkeypatch):
+        """`open` activates a running instance rather than starting the new
+        binary. Without a quit first, setup reports "Launched" while the old
+        build keeps running — true, and describing something that did not
+        happen."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app").mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        def record(cmd, timeout=30):
+            calls.append(cmd)
+            if cmd[0] == "pgrep":
+                return (1, "", "")   # nothing running after the quit
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", record)
+        setup_mod.launch_menubar_app(root)
+
+        quit_at = next(i for i, c in enumerate(calls) if c[0] == "osascript")
+        open_at = next(i for i, c in enumerate(calls) if c[0] == "open")
+        assert quit_at < open_at, "opened the app before asking the old one to quit"
+
+    def test_an_already_installed_app_is_not_refetched(self, tmp_path, monkeypatch):
+        """After the first setup the app lives only in ~/Applications.
+        Checking the payload directory alone would download it every run."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        root.mkdir()
+        apps = tmp_path / "Applications"
+        (apps / "Quern.app").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        _forbid_network(monkeypatch)
+
+        assert setup_mod.fetch_menubar_app(root) is None
+
+    def test_nothing_is_left_behind_in_the_payload_directory(self, tmp_path, monkeypatch):
+        """The delivered copy is moved, not copied, so an old app cannot sit
+        forgotten under ~/.local while a newer one runs from ~/Applications."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app" / "Contents").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", lambda cmd, timeout=30: (0, "", ""))
+        setup_mod.launch_menubar_app(root)
+
+        assert list(root.iterdir()) == [], "a copy was left in the payload directory"
+
+    def test_a_failed_install_says_where_the_app_actually_is(self, tmp_path, monkeypatch):
+        """The move empties the payload directory before the final rename, so
+        a failure after that point left the advice pointing at a path that no
+        longer existed."""
+        from server.lifecycle import setup as setup_mod
+
+        root = tmp_path / "install"
+        apps = tmp_path / "Applications"
+        (root / "Quern.app" / "Contents").mkdir(parents=True)
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod, "_run", lambda cmd, timeout=30: (0, "", ""))
+        monkeypatch.setattr(setup_mod.os, "replace", _boom_oserror)
+
+        result = setup_mod.launch_menubar_app(root)
+
+        assert result.status == CheckStatus.WARNING
+        named = result.detail.split("The app is at ")[-1].rstrip(".").strip()
+        assert Path(named).exists(), f"pointed at {named}, which does not exist"
+        # And it must be back where the next run will find it, not stranded
+        # under the temporary staging name -- which exists, so merely checking
+        # existence passes while the app is somewhere nobody would look.
+        assert Path(named).name == "Quern.app", f"left at {named}"
+        assert (root / "Quern.app").exists(), "not restored to the payload directory"
+
+    def test_a_source_only_install_is_left_alone(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
+        assert setup_mod.launch_menubar_app(tmp_path / "install") is None
+
+
+class TestOtherQuernOnPath:
+    """A second `quern` on PATH is what makes a stale shell hash possible."""
+
+    def _make(self, directory: Path, executable: bool = True) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "quern"
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755 if executable else 0o644)
+        return path
+
+    def test_reports_nothing_when_ours_is_the_only_copy(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        monkeypatch.setenv("PATH", f"{ours.parent}:{tmp_path / 'empty'}")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_reports_a_second_copy_in_path_order(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        clone = self._make(tmp_path / "Dev" / "quern")
+        other = self._make(tmp_path / "opt" / "bin")
+        monkeypatch.setenv("PATH", f"{ours.parent}:{clone.parent}:{other.parent}")
+
+        assert _other_quern_on_path(ours) == [clone, other]
+
+    def test_ignores_a_non_executable_file(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        stub = self._make(tmp_path / "Dev" / "quern", executable=False)
+        monkeypatch.setenv("PATH", f"{ours.parent}:{stub.parent}")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_ignores_a_directory_named_quern(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        (tmp_path / "Dev" / "quern").mkdir(parents=True)
+        monkeypatch.setenv("PATH", f"{ours.parent}:{tmp_path / 'Dev'}")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_survives_an_empty_path_entry(self, tmp_path, monkeypatch):
+        from server.lifecycle.setup import _other_quern_on_path
+
+        ours = self._make(tmp_path / "local" / "bin")
+        monkeypatch.setenv("PATH", f"{ours.parent}::")
+
+        assert _other_quern_on_path(ours) == []
+
+    def test_setup_warns_rather_than_reporting_a_clean_install(self, tmp_path, monkeypatch):
+        """The whole point: a shadowed wrapper must not read as all-clear."""
+        from server.lifecycle import setup as setup_mod
+
+        project = tmp_path / "clone"
+        (project / ".venv" / "bin").mkdir(parents=True)
+        (project / ".venv" / "bin" / "python").write_text("")
+        (project / "server").mkdir()
+
+        home = tmp_path / "home"
+        clone_copy = self._make(project)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        # WRAPPER_PATH is resolved at import, so patching `Path.home` no longer
+        # redirects it -- this test wrote to the developer's real
+        # ~/.local/bin/quern until the guard in conftest caught it. The constant
+        # exists precisely so the redirect is one line and in one place.
+        monkeypatch.setattr(setup_mod, "WRAPPER_PATH", home / ".local" / "bin" / "quern")
+        monkeypatch.setattr(setup_mod, "_find_project_root", lambda: project)
+        monkeypatch.setenv("PATH", f"{home / '.local' / 'bin'}:{project}")
+
+        result = setup_mod.install_wrapper_script()
+
+        assert result.status is CheckStatus.WARNING
+        assert str(clone_copy) in result.detail
+        assert "rehash" in result.detail

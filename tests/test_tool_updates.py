@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -35,6 +37,21 @@ from server.device.tool_updates import (
 )
 from server.device.tool_versions import ToolSite
 
+#: The home these tests describe, which is deliberately not the one they run on.
+#:
+#: Building the default path from the real `Path.home()` coupled five tests to
+#: whoever ran them: they passed here and failed under any other HOME. Worse,
+#: it made both sides of `_pipx_is_global`'s comparison agree by construction,
+#: so `resolve()` was the identity and the suite could not tell the buggy
+#: version from the fixed one in either direction.
+FAKE_HOME = Path("/tmp/quern-tests-home")
+
+
+@pytest.fixture(autouse=True)
+def _home_is_not_this_machine(monkeypatch):
+    """Point `Path.home()` at FAKE_HOME for every test in this module."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: FAKE_HOME))
+
 
 def _site(name="pymobiledevice3", role="cli", source="pipx", version="9.15.1", **kw):
     # `package` defaults to the tool's own name, which is true for most sites.
@@ -43,7 +60,12 @@ def _site(name="pymobiledevice3", role="cli", source="pipx", version="9.15.1", *
     return ToolSite(
         name=name, role=role, source=source, version=version,
         package=kw.pop("package", name), brew_cask=kw.pop("brew_cask", False),
-        available=kw.pop("available", True), path=kw.pop("path", f"/opt/{source}/bin/{name}"),
+        # Under the user's home by default. The old default, `/opt/<source>/…`,
+        # is where pipx puts a *global* install, so every pipx test here was
+        # unknowingly describing one -- and asserting the per-user upgrade
+        # command for it. Tests that mean a global install now say so.
+        available=kw.pop("available", True),
+        path=kw.pop("path", f"{FAKE_HOME}/.local/{source}/bin/{name}"),
         **kw,
     )
 
@@ -788,15 +810,31 @@ def test_fix_is_silent_when_every_tool_is_current(monkeypatch, capsys):
     assert "--fix does not upgrade" not in capsys.readouterr().out
 
 
-def test_doctor_passes_the_fix_flag_through():
+def test_doctor_passes_the_fix_flag_through(monkeypatch):
     """Pin the wiring: the flag reached `_report_python_deps` and not this
-    section, which is how the inconsistency arose in the first place."""
-    import inspect
+    section, which is how the inconsistency arose in the first place.
+
+    Asserted by calling doctor rather than by reading its source. The earlier
+    version matched a literal call expression, which made every refactor of
+    `_cmd_doctor` look like a regression while a genuinely dropped flag inside
+    an unchanged-looking line would have passed.
+    """
+    import argparse
+
+    import pytest
 
     from server import main
 
-    source = inspect.getsource(main._cmd_doctor)
-    assert '_report_external_tools(getattr(args, "fix", False))' in source
+    seen: dict[str, bool] = {}
+    monkeypatch.setattr(main, "_report_python_deps", lambda fix: seen.update(deps=fix))
+    monkeypatch.setattr(main, "_report_external_tools", lambda fix: seen.update(external=fix))
+    monkeypatch.setattr(main, "_report_service_health", lambda fix: seen.update(health=fix))
+    monkeypatch.setattr(main, "read_state", lambda: None)
+
+    with pytest.raises(SystemExit):
+        main._cmd_doctor(argparse.Namespace(fix=True))
+
+    assert seen == {"deps": True, "external": True, "health": True}
 
 
 # --------------------------------------------------------------------------
@@ -1137,3 +1175,335 @@ def test_an_mcp_build_timeout_is_recorded(rebuild):
         assert rebuild["_run"]() == ["MCP build"]
     finally:
         entry._ensure_mcp_built = original
+
+
+# --------------------------------------------------------------------------
+# A global pipx install is upgraded with a different command
+# --------------------------------------------------------------------------
+#
+# `pipx upgrade <name>` only ever looks in the per-user PIPX_HOME. Run against
+# a globally-installed tool it fails with "Package is not installed. Expected
+# to find ~/.local/pipx/venvs/<name>, but it does not exist" -- naming a path
+# the user never chose, for a tool that is plainly installed and working.
+#
+# Not an edge case here: setup steers machines whose home is an external volume
+# towards `sudo pipx install --global`, because the tunneld LaunchDaemon starts
+# at boot and cannot reach a volume that mounts at login.
+
+
+async def test_a_global_pipx_install_is_upgraded_with_sudo():
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1",
+                 path="/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.command == ["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"]
+    assert update.needs_root is True
+
+
+async def test_a_per_user_pipx_install_needs_no_password():
+    async def pypi(_name):
+        return "11.12.4"
+
+    home = str(Path.home())
+    site = _site(source="pipx", version="9.15.1",
+                 path=f"{home}/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.command == ["pipx", "upgrade", "pymobiledevice3"]
+    assert update.needs_root is False
+
+
+async def test_the_newer_per_user_pipx_layout_is_also_per_user():
+    """pipx 1.5 moved PIPX_HOME on macOS to ~/Library/Application Support/pipx.
+    Deciding by location rather than by a list of known directories is what
+    makes that a non-event."""
+    async def pypi(_name):
+        return "11.12.4"
+
+    home = str(Path.home())
+    site = _site(
+        source="pipx", version="9.15.1",
+        path=f"{home}/Library/Application Support/pipx/venvs/pymobiledevice3"
+             "/bin/pymobiledevice3",
+    )
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+
+
+async def test_a_site_with_no_path_guesses_the_command_that_needs_no_password():
+    """Cannot tell means do not ask for credentials. The per-user command fails
+    loudly; the sudo one prompts for a password on the strength of something we
+    could not read."""
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1", path=None)
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+
+
+@pytest.mark.parametrize("raised", [OSError(5, "I/O error"), RuntimeError("loop")])
+@pytest.mark.asyncio
+async def test_an_unreadable_path_guesses_the_command_that_needs_no_password(raised):
+    """The branch for a path `resolve()` cannot read, which had no coverage.
+
+    The `path=None` test above describes this case in its docstring and does
+    not reach it: the `if not site.path` guard short-circuits before the `try`.
+
+    Both exception types, injected rather than provoked. Which one a real
+    failure produces is a Python-version detail -- a symlink loop raises
+    `RuntimeError` on 3.12 and resolves without complaint on 3.11 and 3.13 --
+    and an earlier version of this test pinned 3.12's answer and failed CI on
+    the other two. What the code actually promises is version-independent: when
+    it cannot tell where an install lives, it must not ask for a password.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    def cannot_read(_self, *args, **kwargs):
+        raise raised
+
+    site = _site(source="pipx", version="9.15.1")
+    with patch.object(Path, "resolve", cannot_read):
+        update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+    assert "sudo" not in update.command
+
+
+@pytest.mark.asyncio
+async def test_a_symlink_loop_does_not_crash_the_plan(tmp_path):
+    """However this Python reports a symlink loop, the plan survives it.
+
+    Deliberately asserts nothing about the exception type, or that there is
+    one. On 3.12 this exercises the handler; on 3.11 and 3.13 `resolve()`
+    returns the path unchanged and it exercises the ordinary route. Either way
+    the thing that must not happen -- an exception escaping into the
+    tool-update plan, which is what it did before the handler was widened --
+    does not.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    loop = tmp_path / "loop"
+    loop.symlink_to(tmp_path / "loop2")
+    (tmp_path / "loop2").symlink_to(loop)
+
+    site = _site(source="pipx", version="9.15.1", path=str(loop / "bin" / "pmd3"))
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update is not None
+
+
+@pytest.fixture
+def globally_installed_tool(monkeypatch):
+    """A tool installed with `pipx install --global`, needing sudo to upgrade."""
+    from server.device import tool_updates
+
+    async def fake_sites():
+        return []
+
+    async def fake_plan(sites, **kw):
+        return [
+            tool_updates.ToolUpdate(
+                name="pymobiledevice3", role="cli", action="upgrade_available",
+                current="9.15.1", latest="11.12.4",
+                command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+                needs_root=True,
+                reason="newer release available (11.12.4)",
+            ),
+        ]
+
+    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        "server.lifecycle.updater.subprocess.run",
+        lambda cmd, **kw: ran.append(cmd) or SimpleNamespace(returncode=0),
+    )
+    return ran
+
+
+def test_a_sudo_upgrade_is_not_attempted_with_nowhere_to_ask(
+    globally_installed_tool, monkeypatch, capsys
+):
+    """`quern update` is reachable from the menu bar, which has no controlling
+    terminal. sudo there either hangs or fails with a message about a tty,
+    neither of which tells the reader what to do."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+
+    ok = updater._report_tool_updates(apply=True)
+
+    assert not globally_installed_tool, "sudo must not run with no terminal to prompt on"
+    assert ok is False, "a skipped upgrade is a failure and must reach the exit code"
+    out = capsys.readouterr().out
+    assert "sudo pipx upgrade --global pymobiledevice3" in out, (
+        "the command must be printed so the user can run it themselves"
+    )
+
+
+def test_the_menu_bar_is_told_where_to_run_it(
+    globally_installed_tool, monkeypatch, capsys
+):
+    """Identity changes the wording only. "Cannot be asked for here" is the
+    diagnosis; someone who clicked a menu item needs the next step."""
+    from server.lifecycle import updater
+    from server.lifecycle.invocation import INVOKED_BY, MENUBAR
+
+    monkeypatch.setenv(INVOKED_BY, MENUBAR)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+
+    updater._report_tool_updates(apply=True)
+
+    out = capsys.readouterr().out
+    assert "Open a terminal and run" in out
+    assert "sudo pipx upgrade --global pymobiledevice3" in out
+    assert not globally_installed_tool, "wording must not change what is run"
+
+
+def test_a_sudo_upgrade_runs_when_there_is_a_terminal(
+    globally_installed_tool, monkeypatch, capsys
+):
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: True)
+
+    ok = updater._report_tool_updates(apply=True)
+
+    assert globally_installed_tool == [
+        ["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"]
+    ]
+    assert ok is True
+    assert "may be asked for your password" in capsys.readouterr().out
+
+
+def test_a_per_user_install_is_not_called_global_when_home_is_a_symlink(
+    tmp_path, monkeypatch
+):
+    """The case the other tests structurally cannot see.
+
+    Every other test builds its paths from `Path.home()` itself, so both sides
+    of the comparison agree by construction and `resolve()` is the identity.
+    That is the recorded shape of a test passing against the bug it claims to
+    cover, so this one reaches home through a symlink -- which is how a machine
+    with its home on an external volume is actually set up, i.e. the exact
+    population the global-pipx feature was written for.
+    """
+    from server.device.tool_updates import _pipx_is_global
+
+    real = tmp_path / "real_home"
+    (real / ".local" / "pipx" / "venvs" / "fb-idb" / "bin").mkdir(parents=True)
+    link = tmp_path / "home"
+    link.symlink_to(real)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: link))
+
+    site = ToolSite(
+        name="idb",
+        role="primary",
+        source="pipx",
+        path=str(link / ".local/pipx/venvs/fb-idb/bin/idb"),
+        version="1.0.0",
+    )
+    assert link.resolve() != link, "the symlink is the point of this test"
+    assert _pipx_is_global(site) is False
+
+
+@pytest.mark.asyncio
+async def test_a_global_install_says_why_it_needs_a_password():
+    """The note was set and never asserted, so it could be dropped silently.
+
+    It is the only thing that explains an otherwise surprising password prompt,
+    which makes it the part a reader actually needs.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1",
+                 path="/opt/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is True
+    assert update.note, "a sudo command with no explanation"
+    assert "sudo" in update.note
+
+
+@pytest.mark.asyncio
+async def test_a_relocated_global_pipx_home_is_still_global():
+    """`PIPX_GLOBAL_HOME` moves it, and the docstring claims tolerance for that.
+
+    Every other test used `/opt/pipx` or a path under home, so the claim rested
+    on the *absence* of a hardcoded `/opt/pipx` rather than on anything
+    exercised. Decided by location -- not under the user's home -- so a global
+    home anywhere outside it classifies correctly.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    site = _site(source="pipx", version="9.15.1",
+                 path="/usr/local/share/pipx/venvs/pymobiledevice3/bin/pymobiledevice3")
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is True
+    assert "--global" in update.command
+
+
+@pytest.mark.asyncio
+async def test_a_relocated_pipx_home_is_still_per_user(tmp_path, monkeypatch):
+    """PIPX_HOME outside the home directory must not read as global.
+
+    The location test on its own -- "outside $HOME means global" -- gets this
+    exactly backwards. quern would offer `sudo pipx upgrade --global`, which
+    targets PIPX_GLOBAL_HOME rather than the environment the tool is installed
+    in, so it asks for a password and then fails "Package is not installed".
+    That is the failure this whole branch exists to prevent, reached from the
+    other direction.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    pipx_home = tmp_path / "elsewhere" / "pipx"
+    (pipx_home / "venvs" / "pymobiledevice3" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("PIPX_HOME", str(pipx_home))
+
+    site = _site(
+        source="pipx", version="9.15.1",
+        path=str(pipx_home / "venvs/pymobiledevice3/bin/pymobiledevice3"),
+    )
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+    assert "--global" not in update.command
+
+
+@pytest.mark.asyncio
+async def test_a_relocated_global_home_is_still_global(tmp_path, monkeypatch):
+    """And the same in reverse: PIPX_GLOBAL_HOME moved, under the user's home.
+
+    Nothing says a relocated global home cannot sit inside $HOME, and the
+    location test would then call a genuinely global install per-user and offer
+    an upgrade with no sudo, which fails on permissions.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    global_home = tmp_path / "shared-pipx"
+    (global_home / "venvs" / "pymobiledevice3" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("PIPX_GLOBAL_HOME", str(global_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    site = _site(
+        source="pipx", version="9.15.1",
+        path=str(global_home / "venvs/pymobiledevice3/bin/pymobiledevice3"),
+    )
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is True
+    assert "--global" in update.command

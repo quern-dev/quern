@@ -39,17 +39,22 @@ from server.device.tunneld import (
 
 
 class TestFindBinary:
+    # `excluded_roots=[]` says these are about the lookup, not the exclusion.
+    # They patch `Path.resolve` to a single fixed value, so without it the
+    # shadowing roots resolve to the same path as the candidate and everything
+    # is excluded -- the blanket patch colliding with a later feature, not a
+    # real behaviour. The exclusion has its own tests.
     def test_found_on_path(self):
         with patch("shutil.which", return_value="/usr/local/bin/pymobiledevice3"):
             with patch.object(Path, "resolve", return_value=Path("/usr/local/bin/pymobiledevice3")):
-                result = find_pymobiledevice3_binary()
+                result = find_pymobiledevice3_binary(excluded_roots=[])
                 assert result == Path("/usr/local/bin/pymobiledevice3")
 
     def test_found_in_pipx(self):
         with patch("shutil.which", return_value=None):
             with patch.object(Path, "exists", return_value=True):
                 with patch.object(Path, "resolve", return_value=Path("/resolved/pymobiledevice3")):
-                    result = find_pymobiledevice3_binary()
+                    result = find_pymobiledevice3_binary(excluded_roots=[])
                     assert result == Path("/resolved/pymobiledevice3")
 
     def test_not_found(self):
@@ -687,7 +692,11 @@ class TestHealthDoesNotBlockTheEventLoop:
     async def test_launchd_job_runs_on_a_worker_thread(self):
         with (
             patch("server.device.tunneld.is_tunneld_running", return_value=True),
-            patch("server.device.tunneld.installed_plist_is_current", return_value=True),
+            # Patching `installed_plist_is_current` here became a no-op when
+            # it was derived from drift, and the real drift check then read
+            # this machine's actual /Library/LaunchDaemons plist -- host state
+            # deciding a test about the event loop.
+            patch("server.device.tunneld.installed_plist_drift", return_value=None),
             patch(
                 "server.device.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/bin/pmd3"),

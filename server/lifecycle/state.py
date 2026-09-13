@@ -10,28 +10,23 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
-import os
 import socket
 import urllib.request
-from pathlib import Path
 from typing import Any, TypedDict
 
 from server.config import CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
-# Allow tests to override the state file path via env var to avoid
-# clobbering a running server's state.json.
-_state_dir = os.environ.get("QUERN_STATE_DIR")
-STATE_FILE = Path(_state_dir) / "state.json" if _state_dir else CONFIG_DIR / "state.json"
+# CONFIG_DIR honours QUERN_STATE_DIR, so these follow it too. They used to read
+# the variable themselves, which redirected these two files and nothing else --
+# see the note on CONFIG_DIR in server/config.py.
+STATE_FILE = CONFIG_DIR / "state.json"
 
 # Active device persistence is intentionally separate from STATE_FILE.
 # state.json is server-runtime data and gets deleted on `quern stop`; the
 # active device is user preference and must survive stop/start cycles.
-ACTIVE_DEVICE_FILE = (
-    Path(_state_dir) / "active-device.json" if _state_dir
-    else CONFIG_DIR / "active-device.json"
-)
+ACTIVE_DEVICE_FILE = CONFIG_DIR / "active-device.json"
 
 
 class ServerState(TypedDict, total=False):
@@ -126,17 +121,72 @@ def read_active_udid() -> str | None:
         return None
 
 
-def write_active_udid(udid: str | None) -> None:
+def read_active_device() -> dict:
+    """Read the whole active-device sidecar, not just the UDID.
+
+    Returns {} when the file is missing, empty or malformed, so callers
+    can treat every failure the same way.
+    """
+    if not ACTIVE_DEVICE_FILE.exists():
+        return {}
+    try:
+        fd = ACTIVE_DEVICE_FILE.open("r")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            content = fd.read()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        if not content.strip():
+            return {}
+        data = json.loads(content)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to read active-device.json: %s", e)
+        return {}
+
+
+def write_active_udid(
+    udid: str | None, name: str | None = None, kind: str | None = None
+) -> None:
     """Persist the active-device UDID to its sidecar file.
 
     Pass None (or empty string) to clear. Survives `quern stop` —
     `remove_state()` deletes state.json but does not touch this file.
+
+    `name` is the human-readable device name, written alongside so that
+    readers outside the server -- the menu-bar app is the one that
+    prompted this -- can show "iPhone 17 Pro" instead of a 36-character
+    UDID. It is optional and best-effort: the name comes from a cache
+    the caller may not have warmed yet, and a device is still perfectly
+    usable without one. Readers must therefore treat it as absent-able
+    and fall back to the UDID rather than showing an empty label.
+
+    `kind` is the DeviceType value -- "simulator", "device",
+    "android_emulator", "android_device" -- carried for the same reason as
+    the name: the menu bar says whether it is driving a simulator or real
+    hardware, and cannot work that out from a UDID. Optional and
+    best-effort on the same terms; readers must tolerate its absence.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"udid": udid} if udid else {}
-    fd = ACTIVE_DEVICE_FILE.open("w")
+    if udid:
+        payload: dict[str, str] = {"udid": udid}
+        if name:
+            payload["name"] = name
+        if kind:
+            payload["type"] = kind
+    else:
+        payload = {}
+    # "a+" rather than "w", then truncate under the lock. "w" empties the file
+    # on open, before the lock is taken, so a concurrent read_active_device()
+    # holding LOCK_SH could see an empty file and report no active device --
+    # for as long as this writer waited for LOCK_EX. Same pattern update_state
+    # already uses below.
+    fd = ACTIVE_DEVICE_FILE.open("a+")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        fd.truncate()
         fd.write(json.dumps(payload, indent=2))
         fd.flush()
     finally:

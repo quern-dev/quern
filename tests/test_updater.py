@@ -7,6 +7,8 @@ step must be skipped when the user isn't actually on that branch.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -422,3 +424,318 @@ def test_update_via_git_on_release_branch_with_updates_still_pulls(
     assert len(pull_calls) == 1
     captured = capsys.readouterr()
     assert "0.13.5" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Release asset selection — the tarball must belong to the tag being installed
+# ---------------------------------------------------------------------------
+
+
+def test_asset_must_match_the_release_version():
+    """A release can carry more than one ``quern-*.tar.gz``: a stale upload, a
+    hand-built archive, a re-cut asset left behind. Taking the first match
+    installs whichever GitHub happened to list first while the caller reports
+    the current tag as the version -- an install that lies about what it is."""
+    from server.lifecycle.updater import _select_asset_url
+
+    assets = [
+        {"name": "quern-0.14.0.tar.gz", "browser_download_url": "https://x/old"},
+        {"name": "quern-0.15.0.tar.gz", "browser_download_url": "https://x/new"},
+    ]
+
+    assert _select_asset_url(assets, "0.15.0") == "https://x/new"
+    assert _select_asset_url(assets, "0.14.0") == "https://x/old"
+
+
+def test_asset_absent_falls_back_rather_than_guessing():
+    """No asset for this tag means None, so the caller uses GitHub's generated
+    source tarball. Releases cut before the asset existed still update."""
+    from server.lifecycle.updater import _select_asset_url
+
+    assets = [{"name": "quern-0.14.0.tar.gz", "browser_download_url": "https://x/old"}]
+
+    assert _select_asset_url(assets, "0.15.0") is None
+    assert _select_asset_url([], "0.15.0") is None
+    assert _select_asset_url(assets, "") is None
+
+
+def test_asset_ignores_near_miss_names():
+    """Prefix matching also accepted names that merely start with the version,
+    so quern-0.15.0-rc1 could be served to someone installing 0.15.0."""
+    from server.lifecycle.updater import _select_asset_url
+
+    assets = [
+        {"name": "quern-0.15.0-rc1.tar.gz", "browser_download_url": "https://x/rc"},
+        {"name": "quern-0.15.0.tar.gz.sha256", "browser_download_url": "https://x/sum"},
+    ]
+
+    assert _select_asset_url(assets, "0.15.0") is None
+
+
+class TestAskingForAPassword:
+    """`_can_ask_for_a_password`, including the half that had no coverage.
+
+    Every existing test reached it with `isatty()` true or replaced the function
+    wholesale, so the /dev/tty fallback was never exercised -- and that fallback
+    *is* the menu-bar path: a GUI-launched process has no controlling terminal.
+    The case the feature was written for was the untested one.
+    """
+
+    def test_a_terminal_on_stdin_is_enough(self, monkeypatch):
+        from server.lifecycle import updater
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        assert updater._can_ask_for_a_password() is True
+
+    def test_a_controlling_terminal_counts_even_without_one_on_stdin(
+        self, monkeypatch
+    ):
+        # `quern update --tools | tee log` has no tty on stdin while the user
+        # sits right in front of one, so stdin alone would refuse to prompt
+        # someone who could answer.
+        from server.lifecycle import updater
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        opened = []
+
+        def fake_open(path, *args, **kwargs):
+            opened.append(path)
+            import io as _io
+            return _io.StringIO()
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert updater._can_ask_for_a_password() is True
+        assert "/dev/tty" in opened
+
+    def test_no_terminal_anywhere_means_do_not_prompt(self, monkeypatch):
+        # The menu-bar case. sudo with nowhere to prompt either hangs or fails
+        # with a message about a terminal, and neither tells the reader what to
+        # do about it.
+        from server.lifecycle import updater
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        def no_tty(path, *args, **kwargs):
+            raise OSError(6, "Device not configured")
+
+        monkeypatch.setattr("builtins.open", no_tty)
+        assert updater._can_ask_for_a_password() is False
+
+
+class TestTheUpdateRecord:
+    """`quern update` writes down what it did, because the exit code cannot.
+
+    "Already up to date" has to exit 0 -- the same as a real update -- or every
+    script treating nonzero as failure breaks. So a caller seeing 0 could not
+    tell an update from a no-op, and the menu bar, assuming it had updated,
+    polled thirty seconds for a version that was never going to move and then
+    announced that an update had finished.
+    """
+
+    @pytest.fixture
+    def sandbox(self, tmp_path, monkeypatch):
+        from server.lifecycle import updater
+        monkeypatch.setattr(updater, "RESULT_FILE", tmp_path / "last-update.json")
+        return updater
+
+    def _read(self, updater):
+        return json.loads(updater.RESULT_FILE.read_text())
+
+    def test_nothing_to_do_is_recorded_as_such(self, sandbox, monkeypatch):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        assert updater.run_update() == 0, "a no-op must still exit 0"
+        assert self._read(updater)["outcome"] == updater.NO_OP
+
+    def test_a_real_update_is_recorded_as_an_update(self, sandbox, monkeypatch):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _r: [])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+
+        assert updater.run_update() == 0
+        record = self._read(updater)
+        assert record["outcome"] == updater.UPDATED
+        assert record["version"] == "0.17.0"
+
+    def test_a_failure_is_recorded_as_a_failure(self, sandbox, monkeypatch):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 1)
+
+        assert updater.run_update() == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_a_partial_rebuild_is_a_failure_not_an_update(self, sandbox, monkeypatch):
+        # The source moved but part of the rebuild did not. Recording this as
+        # "updated" would have the menu bar relaunch into an install that is
+        # half-built.
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _r: ["restart"])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+
+        assert updater.run_update() == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_the_previous_run_is_cleared_even_if_this_one_crashes(
+        self, sandbox, monkeypatch
+    ):
+        """A stale record is worse than none.
+
+        Every ordinary path overwrites it, so clearing up front only matters
+        when a run ends without writing at all -- an exception escaping
+        mid-update. Then the previous run's record is still sitting there, and
+        the menu bar reading a "no_op" from it would skip the relaunch after an
+        update that genuinely happened. Asserting the ordinary paths instead
+        would pass with the clear removed entirely, which is what the first
+        version of this test did.
+        """
+        updater = sandbox
+        updater.RESULT_FILE.write_text(json.dumps({"outcome": "no_op"}))
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+
+        def explode(_root):
+            raise RuntimeError("the update died half way")
+
+        monkeypatch.setattr(updater, "_update_via_git", explode)
+
+        with pytest.raises(RuntimeError):
+            updater.run_update()
+
+        assert not updater.RESULT_FILE.exists(), (
+            "last run's record survived a run that wrote none"
+        )
+
+    def test_the_record_carries_a_timestamp_the_reader_can_parse(
+        self, sandbox, monkeypatch
+    ):
+        # The menu bar compares this against when it started the run, so a
+        # missing or unreadable one disables the whole mechanism.
+        from datetime import datetime
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        updater.run_update()
+        stamp = self._read(updater)["finished_at"]
+        assert datetime.fromisoformat(stamp).tzinfo is not None, "must be aware"
+
+    def test_an_unwritable_record_does_not_fail_the_update(
+        self, sandbox, monkeypatch
+    ):
+        # Best-effort. Losing the record costs the caller its shortcut, and it
+        # falls back to the version poll; failing the update would cost the
+        # user the update.
+        updater = sandbox
+
+        def unwritable(*_a, **_k):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(Path, "write_text", unwritable)
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        assert updater.run_update() == 0
+
+    def test_a_failed_tool_upgrade_is_not_recorded_as_success(
+        self, sandbox, monkeypatch
+    ):
+        """The exit code and the record must not disagree.
+
+        `_report_tool_updates` returning False makes `run_update` return 1.
+        Recording NO_OP or UPDATED alongside that leaves the file -- the
+        durable artefact, the one anybody reads afterwards -- saying the run
+        went fine while the exit code says it did not.
+        """
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: False)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        assert updater.run_update(apply_tools=True) == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_a_failed_tool_upgrade_after_a_real_update_is_also_recorded(
+        self, sandbox, monkeypatch
+    ):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _r: [])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: False)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+
+        assert updater.run_update(apply_tools=True) == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_the_record_is_swapped_in_never_written_over(
+        self, sandbox, monkeypatch
+    ):
+        """The menu bar reads this file while the CLI writes it.
+
+        `write_text` truncates first, so a read landing in that window gets a
+        partial document. Asserted by watching how the file is produced rather
+        than by racing a reader against it, which would be a flaky test of the
+        same thing.
+        """
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        replaced = []
+        real_replace = os.replace
+        monkeypatch.setattr(
+            updater.os, "replace",
+            lambda src, dst: replaced.append((str(src), str(dst))) or real_replace(src, dst),
+        )
+
+        updater.run_update()
+
+        assert replaced, "the record was written in place rather than swapped in"
+        src, dst = replaced[-1]
+        assert dst == str(updater.RESULT_FILE)
+        # Same directory, or the "move" is a copy and the window reopens.
+        assert Path(src).parent == updater.RESULT_FILE.parent
+        assert self._read(updater)["outcome"] == updater.NO_OP
+
+    def test_a_failed_swap_leaves_no_temporary_file_behind(
+        self, sandbox, monkeypatch
+    ):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        def boom(_src, _dst):
+            raise OSError(18, "Invalid cross-device link")
+
+        monkeypatch.setattr(updater.os, "replace", boom)
+
+        assert updater.run_update() == 0, "a lost record must not fail the update"
+        leftovers = list(updater.RESULT_FILE.parent.glob(".*tmp"))
+        assert leftovers == [], f"left behind: {leftovers}"

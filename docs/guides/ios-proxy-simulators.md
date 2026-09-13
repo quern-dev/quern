@@ -33,9 +33,19 @@ If local capture isn't working (System Extension issues, corporate MDM blocking 
 
 The proxy certificate needs to be installed on each simulator for HTTPS decryption to work. Without it, your agent can see that traffic is happening but can't read the request/response bodies.
 
-Your agent installs this automatically when it sets up network capture. The cert persists across app installs and simulator reboots — it's only lost if you erase the simulator entirely.
+Quern checks for it before enabling capture, and **asks before installing it**. Capturing through a simulator that does not trust the certificate fails every HTTPS request from that device, and the symptom points nowhere near the proxy — a blank screen, or an app that seems to have no network — so Quern refuses to create that state rather than leaving you to discover it.
 
-If you've recently erased a simulator or created a new one, your agent may need to reinstall the cert. It detects this automatically.
+You are asked rather than having it done for you because installing a certificate authority is a bigger commitment than turning capture on: it persists across sessions, outlives the capture window, and you have to know it happened in order to undo it.
+
+If you would rather answer once:
+
+```sh
+quern set-auto-install-cert on
+```
+
+That setting also appears in the menu-bar app's Settings window, under Network capture, so it is visible and reversible from the same place. `quern set-auto-install-cert` with no argument prints the current setting.
+
+The cert persists across app installs and simulator reboots — it's only lost if you erase the simulator entirely. If you've recently erased a simulator or created a new one, Quern detects that the cert is gone and asks again.
 
 ## Per-Simulator Traffic Isolation
 

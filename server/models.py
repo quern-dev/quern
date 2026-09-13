@@ -468,6 +468,20 @@ class InterfaceInfo(BaseModel):
     ssid: str | None = None  # Wi-Fi SSID when the interface is associated, else None
 
 
+class ConfigureSystemProxyRequest(BaseModel):
+    """Body for ``POST /proxy/configure-system``."""
+
+    interface: str | None = None
+    """Network service to configure. Auto-detected when omitted."""
+    skip_cert_check: bool = False
+    """Configure the proxy even when a booted simulator does not trust the
+    mitmproxy CA. Correct when deliberately exercising TLS-failure paths;
+    otherwise the request is refused with 428 and the devices are named.
+
+    Typed rather than read off a raw dict: ``bool("false")`` is True, so a
+    caller sending the string would have silently skipped the check."""
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -496,7 +510,13 @@ class ProxyStatusResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     """Network-state warnings the agent should surface. Currently:
     ``"multi_interface_active"`` — more than one interface is on a distinct
-    /24, so ``local_ip`` is not the right answer for every device."""
+    /24, so ``local_ip`` is not the right answer for every device.
+    ``"capture_without_cert"`` — a booted simulator does not trust the
+    mitmproxy CA, so HTTPS from it fails with nothing pointing at the proxy."""
+    auto_install_cert: bool = False
+    """Whether Quern will install the CA by itself when capture needs it.
+    Reported because a persistent, silent CA-install policy would be worse
+    than the failure it prevents — see ``server/config.py``."""
     system_proxy: SystemProxyInfo | None = None
     cert_setup: dict[str, DeviceCertState] | None = None  # Per-device cert status
     network_state: dict | None = None

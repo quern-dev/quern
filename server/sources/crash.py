@@ -19,12 +19,13 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.models import CrashReport, LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
 
 logger = logging.getLogger(__name__)
 
-CRASH_DIR = Path.home() / ".quern" / "crashes"
+CRASH_DIR = CONFIG_DIR / "crashes"
 DIAGNOSTIC_REPORTS_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
 POLL_INTERVAL = 10  # seconds
 PULL_TIMEOUT = 30  # seconds

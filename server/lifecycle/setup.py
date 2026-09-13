@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shutil
@@ -20,7 +21,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from server.config import CONFIG_DIR
 from server.device._xcode import xcode_available
+from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself
 
 # ── Result types ──────────────────────────────────────────────────────────
 
@@ -211,7 +214,7 @@ def _get_version(cmd: list[str]) -> str | None:
     return None
 
 
-INSTALL_MANIFEST = Path.home() / ".quern" / "installed-by-setup.json"
+INSTALL_MANIFEST = CONFIG_DIR / "installed-by-setup.json"
 
 
 def _read_manifest() -> dict:
@@ -320,25 +323,66 @@ def _brew_install(formula: str) -> bool:
         return False
 
 
+#: Questions setup could not ask, in the order it would have asked them.
+#: Reset by `run_setup`; reported by it at the end.
+_UNASKED: list[str] = []
+
+
+def _can_prompt() -> bool:
+    """Whether there is anyone to answer a question.
+
+    A GUI-launched process has no controlling terminal, so `/dev/tty` cannot be
+    opened. That is reachable in practice, not in theory: the menu-bar app's
+    "Restart to Update" runs `quern update`, which runs setup.
+    """
+    if sys.stdin.isatty():
+        return True
+    try:
+        open("/dev/tty").close()
+    except OSError:
+        return False
+    return True
+
+
 def _prompt_yn(question: str, default: bool = True) -> bool:
     """Prompt the user for yes/no confirmation.
 
     When stdin is not a TTY (e.g. ``curl | bash``), reopens /dev/tty so
     interactive prompts still work.
+
+    With no terminal at all this declines *and records that it did*. Declining
+    is the safe answer -- several of these install things, and answering the
+    default would have setup say yes on the user's behalf -- but doing it
+    silently meant a menu-bar update ran a visibly different setup from a
+    terminal one, and said so nowhere. The question is printed and kept, so the
+    output shows what was asked and `run_setup` can say how many went
+    unanswered.
     """
     suffix = " [Y/n] " if default else " [y/N] "
-    try:
-        if sys.stdin.isatty():
+    if sys.stdin.isatty():
+        try:
             answer = input(question + suffix).strip().lower()
-        else:
-            # stdin is a pipe (curl | bash) — read from the real terminal
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+    else:
+        # stdin is a pipe (curl | bash) — read from the real terminal. One
+        # open attempt, and its failure is the test for whether anyone is
+        # there: asking separately meant opening /dev/tty twice per question.
+        try:
             tty = open("/dev/tty")
+        except OSError:
+            _UNASKED.append(question)
+            print(f"{question}{suffix}— no terminal to ask on, assuming no")
+            return False
+        try:
             print(question + suffix, end="", flush=True)
             answer = tty.readline().strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return False
+        finally:
             tty.close()
-    except (EOFError, KeyboardInterrupt, OSError):
-        print()
-        return False
     if not answer:
         return default
     return answer in ("y", "yes")
@@ -464,10 +508,50 @@ def _build_mcp(project_root: Path) -> CheckResult:
     )
 
 
+def _other_quern_on_path(ours: Path) -> list[Path]:
+    """Other executables named `quern` on PATH, in PATH order.
+
+    A second copy is not itself a problem -- ours is normally found first. The
+    problem is that zsh caches the path it resolved for a command and does not
+    notice a new file appearing in a directory already on PATH. So the shell
+    that just ran setup keeps invoking the old copy, while `type -a` re-scans
+    and reports ours, which reads as though the right wrapper is running. The
+    cure is `rehash`, and it is only worth mentioning when a stale hash is
+    actually possible -- with no second copy, zsh re-scans on its own.
+    """
+    found: list[Path] = []
+    for entry in os.environ.get("PATH", "").split(":"):
+        if not entry:
+            continue
+        candidate = Path(entry) / "quern"
+        try:
+            if candidate == ours or not os.access(candidate, os.X_OK):
+                continue
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        if candidate not in found:
+            found.append(candidate)
+    return found
+
+
+#: Where the `quern` wrapper lives.
+#:
+#: A module constant rather than `Path.home() / ...` computed at each use, so
+#: tests can redirect it the way they already redirect INSTALL_MANIFEST. They
+#: could not: `run_uninstall` built the path inline, the uninstall tests patched
+#: six other things and not `Path.home`, and so every full test run deleted the
+#: developer's own wrapper. On a machine where `~/.local/bin/quern` is the only
+#: way `quern` resolves, that breaks the CLI until setup is run again -- which
+#: presented as the command working intermittently for months.
+WRAPPER_PATH = Path.home() / ".local" / "bin" / "quern"
+
+
 def install_wrapper_script() -> CheckResult:
     """Install quern wrapper script to ~/.local/bin."""
-    local_bin = Path.home() / ".local" / "bin"
-    wrapper_path = local_bin / "quern"
+    local_bin = WRAPPER_PATH.parent
+    wrapper_path = WRAPPER_PATH
 
     # Find project root (works regardless of folder name)
     project_root = _find_project_root()
@@ -541,6 +625,21 @@ exec "{venv_python}" -m server "$@"
                 ),
             )
 
+        shadowed = _other_quern_on_path(wrapper_path)
+        if shadowed:
+            listed = "\n".join(f"    {p}" for p in shadowed)
+            return CheckResult(
+                name="Wrapper script",
+                status=CheckStatus.WARNING,
+                message=f"Installed to {wrapper_path}",
+                detail=(
+                    "Another quern is on your PATH:\n"
+                    f"{listed}\n"
+                    "  Your shell may have cached it and will keep running it.\n"
+                    "  Run: rehash   (or open a new terminal)"
+                ),
+            )
+
         return CheckResult(
             name="Wrapper script",
             status=CheckStatus.OK,
@@ -553,6 +652,447 @@ exec "{venv_python}" -m server "$@"
             message="Installation failed",
             detail=str(e),
         )
+
+
+def build_preview_app() -> CheckResult:
+    """Compile the screen-mirror app during setup rather than on first use.
+
+    It used to be built lazily, the first time something asked for a preview.
+    That left a hole: the menu-bar app only offers "Screen Mirror…" when the
+    bundle exists on disk, so on a fresh install the item was missing until
+    the user had already driven a preview from the API or an MCP tool. The
+    menu bar is the route for people who would rather not do that, so the
+    feature was hidden from exactly the audience it is for.
+
+    Building it here costs about 1.5 seconds and makes the menu item appear.
+
+    Treated as optional, the way scrcpy is: a machine without Xcode Command
+    Line Tools cannot compile it, and that is a missing convenience rather
+    than a broken install.
+    """
+    name = "Screen mirror (Quern Preview)"
+
+    if _which("swiftc") is None:
+        result = CheckResult(
+            name=name,
+            status=CheckStatus.SKIPPED,
+            message="Xcode Command Line Tools not found — screen mirror unavailable",
+            detail="Install with: xcode-select --install",
+            fixable=True,
+        )
+        if _prompt_yn(
+            "    Xcode Command Line Tools not found (needed for the screen-mirror "
+            "app). Open the installer?",
+        ):
+            # `xcode-select --install` hands off to a macOS dialog and returns
+            # immediately, so there is nothing to wait on and no exit code
+            # worth trusting -- it also reports failure when the tools are
+            # already present. Say what happens next instead.
+            _run(["xcode-select", "--install"])
+            print("    A macOS installer dialog should have opened.")
+            print("    Re-run `quern setup` once it finishes to build the app.")
+        return result
+
+    try:
+        from server.device.preview import build_preview_bundle
+
+        build_preview_bundle()
+    except (RuntimeError, OSError) as e:
+        # OSError as well as RuntimeError, per the error-path convention in
+        # CONTRIBUTING: catch the base class, not the subclasses seen so far.
+        # The build stats files, creates directories, writes a plist, copies an
+        # icon and launches a process -- an unwritable ~/.quern or a transient
+        # filesystem fault raises OSError, and catching only RuntimeError would
+        # end setup entirely over an optional convenience.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Could not build the screen-mirror app",
+            detail=str(e),
+        )
+
+    return CheckResult(
+        name=name,
+        status=CheckStatus.OK,
+        message="Built (available from the menu bar)",
+    )
+
+
+# The Developer ID team that signs Quern releases. A fetched app must carry
+# this, not merely a valid signature from anyone.
+RELEASE_TEAM_ID = "3QUH73KW5Q"
+
+
+MENUBAR_APP_DIR = Path.home() / "Applications"
+"""Where the menu-bar app is installed for the user to find.
+
+Not the install root. The release asset delivers the app to
+``~/.local/share/quern``, but that is a dot-directory: Spotlight excludes it,
+Launchpad does not look there, and neither does a person. An app nobody can
+find is one nobody can restart -- which matters because quitting it is a menu
+item.
+
+~/Applications rather than /Applications so no admin prompt appears inside an
+otherwise unprivileged setup.
+"""
+
+
+def menubar_app_path() -> Path:
+    """The installed location of the menu-bar app."""
+    return MENUBAR_APP_DIR / "Quern.app"
+
+
+class _UntrustedBundle(RuntimeError):
+    """The downloaded app is not the one we would have published.
+
+    Separate from every other failure in the fetch so it can be reported
+    differently: a transfer that failed is a network problem and the manual
+    download is a fine answer, while a bundle that failed verification must
+    not be installed by hand either.
+    """
+
+
+def _verify_menubar_app(app: Path, expected_version: str) -> None:
+    """Raise unless the bundle is signed by us, notarized, accepted and current.
+
+    Three checks, because each catches something the others do not: the
+    signature can be valid while belonging to someone else, the team can match
+    on a bundle that was never notarized, and a bundle can carry a stapled
+    ticket while its resources have been altered -- that last one is real, and
+    an earlier version of this function produced exactly it by extracting with
+    Python's tarfile.
+    """
+    # The designated requirement is the check that actually anchors to Apple.
+    # `codesign --verify` alone validates the internal seal, not the
+    # certificate chain, and TeamIdentifier is read out of the leaf's OU field
+    # -- a self-signed certificate can simply claim ours. `spctl` does anchor,
+    # but a user can turn assessments off. `-R` cannot be disabled or spoofed.
+    requirement = (
+        f'anchor apple generic and certificate leaf[subject.OU] = "{RELEASE_TEAM_ID}"'
+    )
+    checks = [
+        (
+            ["codesign", "--verify", "--deep", "--strict", f"-R={requirement}", str(app)],
+            "signature is not valid, or is not ours",
+        ),
+        (["spctl", "-a", "-vvv", str(app)], "Gatekeeper rejects it"),
+    ]
+    for cmd, failure in checks:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
+        if proc.returncode != 0:
+            raise _UntrustedBundle(
+                f"{failure} "
+                f"({proc.stderr.strip() or proc.stdout.strip()})"
+            )
+
+    proc = subprocess.run(  # noqa: S603
+        ["codesign", "-dv", str(app)], capture_output=True, text=True, timeout=60,
+    )
+    team = None
+    for line in (proc.stderr + proc.stdout).splitlines():
+        if line.startswith("TeamIdentifier="):
+            team = line.split("=", 1)[1].strip()
+            break
+    if team != RELEASE_TEAM_ID:
+        raise _UntrustedBundle(
+            f"signed by team {team or '<none>'}, expected {RELEASE_TEAM_ID}"
+        )
+
+    # Bind the bundle to the release that was asked for. Everything above is
+    # satisfied by *any* genuine Quern app we ever signed, so a replaced asset
+    # containing an older real build would pass all of it -- a downgrade, not
+    # a forgery. The asset name identifies the release; this checks that its
+    # contents agree.
+    proc = subprocess.run(  # noqa: S603
+        [
+            "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString",
+            str(app / "Contents" / "Info.plist"),
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    stamped = proc.stdout.strip()
+    if proc.returncode != 0 or stamped != expected_version:
+        raise _UntrustedBundle(
+            f"it is v{stamped or '<unknown>'}, but v{expected_version} was requested"
+        )
+
+
+def fetch_menubar_app(project_root: Path) -> CheckResult | None:
+    """Fetch the menu-bar app when a release install is missing it.
+
+    v0.15.0 reached existing users without the app. Their updater ran from an
+    older version that fetched GitHub's generated source tarball, because the
+    code that prefers the release asset shipped *inside* that asset and so
+    could not help itself. The update reported success, setup reported all
+    checks passed, and the app was simply absent with nothing saying so.
+
+    Those machines will not repair themselves: `quern update` sees the latest
+    version already installed and downloads nothing. Setup is the first code
+    of ours that runs on them, so the guarantee belongs here rather than in
+    the download path -- any future capability delivered only via the asset
+    would hit the same bootstrap problem.
+
+    Returns None when there is nothing to do: not macOS, a git checkout (where
+    a developer builds the app themselves), or the app is already present.
+    """
+    if platform.system() != "Darwin":
+        return None
+    if (project_root / ".git").exists():
+        return None
+    # Both locations. The asset delivers to the install root and
+    # launch_menubar_app moves it to ~/Applications, so after the first setup
+    # the app is only in the second place -- checking the delivery location
+    # alone would re-download it on every run.
+    app = project_root / "Quern.app"
+    if app.exists() or menubar_app_path().exists():
+        return None
+
+    import json as _json
+    import tempfile
+    import urllib.request
+
+    from server import get_version
+
+    name = "Menu-bar app"
+    version = get_version()
+    asset_name = f"quern-{version}.tar.gz"
+    manual = (
+        f"Download {asset_name} from\n"
+        f"      https://github.com/quern-dev/quern/releases/tag/v{version}\n"
+        f"      and copy Quern.app to {project_root}"
+    )
+
+    try:
+        api = f"https://api.github.com/repos/quern-dev/quern/releases/tags/v{version}"
+        with urllib.request.urlopen(api, timeout=15) as resp:  # noqa: S310
+            release = _json.loads(resp.read())
+
+        url = next(
+            (
+                a.get("browser_download_url")
+                for a in release.get("assets", [])
+                if a.get("name") == asset_name
+            ),
+            None,
+        )
+        if url and not url.startswith("https://github.com/"):
+            # The URL comes out of the API response. Releases are served from
+            # github.com; anything else means the response is not what we
+            # think it is, and following it would fetch code from elsewhere.
+            raise _UntrustedBundle(f"asset URL is not on github.com: {url}")
+        if not url:
+            # Releases cut before the asset existed have nothing to offer, and
+            # saying "not available for this release" is more useful than a
+            # download error.
+            return CheckResult(
+                name=name,
+                status=CheckStatus.SKIPPED,
+                message=f"Not published with v{version}",
+                detail="This release has no menu-bar app asset.",
+            )
+
+        print(f"    Menu-bar app missing — fetching it from the v{version} release...")
+        # Beside the destination, not in $TMPDIR. On this project's own
+        # machines project_root and $TMPDIR sit on different volumes, and
+        # shutil.move then falls back to copytree + rmtree: a failure mid-copy
+        # leaves a partial Quern.app that later runs treat as installed, and
+        # what gets verified is not byte-for-byte what gets installed. Staying
+        # on one filesystem makes the final step a rename.
+        with tempfile.TemporaryDirectory(dir=project_root) as tmp:
+            tarball = Path(tmp) / asset_name
+            # urlretrieve takes no timeout and defaults to none, so a stalled
+            # transfer hangs setup with no deadline at all. Stream it instead,
+            # with a socket timeout and a whole-operation deadline -- a partial
+            # download that never finishes is the failure mode here, not a slow
+            # one.
+            deadline = time.monotonic() + 180
+            # A size cap as well as a clock. The deadline bounds how long a
+            # hostile or broken server can stream, not how much it can write:
+            # at line rate, 180s is tens of gigabytes into the install volume.
+            # The real asset is single-digit megabytes.
+            max_bytes = 200 * 1024 * 1024
+            written = 0
+            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
+                with open(tarball, "wb") as out:
+                    while True:
+                        if time.monotonic() > deadline:
+                            raise RuntimeError(
+                                "download exceeded 180s; giving up rather than "
+                                "holding setup open"
+                            )
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise RuntimeError(
+                                f"download exceeded {max_bytes // (1024 * 1024)}MB; "
+                                "refusing to keep writing"
+                            )
+                        out.write(chunk)
+
+            # macOS tar, not Python's tarfile. The archive carries AppleDouble
+            # metadata (`._Contents` and friends); macOS tar applies those as
+            # extended attributes and removes them, while tarfile extracts them
+            # as literal files *inside* the bundle. That breaks the code
+            # signature seal -- CodeResources sealed a directory that did not
+            # contain them -- and Gatekeeper then rejects the app with "a
+            # sealed resource is missing or invalid". Measured: 21 entries
+            # extracted where a correct bundle has 10.
+            #
+            # Only the app is extracted. The source tree beside it is already
+            # installed, and unpacking it over a running install is not this
+            # step's job.
+            member = f"quern-{version}/Quern.app"
+            proc = subprocess.run(  # noqa: S603
+                ["/usr/bin/tar", "-xzf", str(tarball), "-C", tmp, member],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"could not extract {member}: {proc.stderr.strip() or proc.stdout.strip()}"
+                )
+            extracted = Path(tmp) / member
+            if not extracted.is_dir():
+                raise RuntimeError(f"{asset_name} contains no Quern.app")
+
+            # Verify before installing. This is an executable fetched over the
+            # network and then launched, so "the release asset said so" is not
+            # sufficient provenance: a replaced asset would otherwise be
+            # installed and run. Checked against the identity that signs
+            # releases, not merely "validly signed by someone".
+            _verify_menubar_app(extracted, version)
+
+            # os.replace, so the destination either has the whole verified
+            # bundle or nothing at all. A half-written Quern.app would be
+            # launched by the next step and would make every future setup
+            # return early, wedging the install with no route back.
+            os.replace(str(extracted), str(app))
+    except _UntrustedBundle as e:
+        # Distinct from a transfer failure on purpose. This is the one case
+        # where the manual route must NOT be offered: it would tell the user
+        # to download by hand the very asset that just failed verification,
+        # bypassing the check entirely.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.ERROR,
+            message="The downloaded menu-bar app failed verification",
+            detail=(
+                f"{e}\n"
+                "      Not installed. This is not a network problem -- the "
+                "asset did not verify.\n"
+                "      Do not install it by hand; report it instead."
+            ),
+        )
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+        # Never fatal. A missing menu-bar app is a missing convenience, and
+        # failing setup over it would be worse than the gap it fills.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Could not fetch the menu-bar app",
+            detail=f"{e}\n      {manual}",
+        )
+
+    return CheckResult(
+        name=name,
+        status=CheckStatus.OK,
+        message=f"Fetched from the v{version} release",
+    )
+
+
+def launch_menubar_app(project_root: Path) -> CheckResult | None:
+    """Install the menu-bar app where it can be found, and (re)launch it.
+
+    Two things this has to get right, both learned the hard way.
+
+    **Location.** The release asset delivers ``Quern.app`` to the install root,
+    which lives under ``~/.local`` -- a dot-directory Spotlight excludes. An
+    app installed there cannot be found by search, does not appear in
+    Launchpad, and is in neither place a person looks. Since quitting it is a
+    menu item, that makes it unrestartable in practice. It is moved to
+    ``~/Applications``.
+
+    **Relaunch.** ``open`` on a bundle activates a running instance rather than
+    starting the new binary, so after an update the old build simply stayed
+    running while setup reported "Launched" -- true, and describing something
+    that had not happened. A running instance is asked to quit first.
+
+    Returns None for source-only installs (no app in the payload).
+    """
+    delivered = project_root / "Quern.app"
+    installed = menubar_app_path()
+
+    if not delivered.exists() and not installed.exists():
+        return None
+
+    # Move the delivered copy into place, replacing any older install.
+    if delivered.exists():
+        try:
+            MENUBAR_APP_DIR.mkdir(parents=True, exist_ok=True)
+            staging = installed.with_name("Quern.app.incoming")
+            shutil.rmtree(staging, ignore_errors=True)
+            shutil.move(str(delivered), str(staging))
+            # Quit before replacing: a running app whose bundle is swapped
+            # underneath it keeps executing the old image from an inode that
+            # no longer has a name, which is a confusing state to debug.
+            _quit_menubar_app()
+            shutil.rmtree(installed, ignore_errors=True)
+            os.replace(str(staging), str(installed))
+        except OSError as e:
+            # Put it back if we can. The move empties the payload directory
+            # before the final rename, so a failure after that point left the
+            # app at the staging name while this message pointed at a path
+            # that no longer existed.
+            location = next(
+                (c for c in (installed, staging, delivered) if c.exists()), None
+            )
+            if location == staging:
+                with contextlib.suppress(OSError):
+                    shutil.move(str(staging), str(delivered))
+                    location = delivered
+            where = (
+                f"The app is at {location}."
+                if location
+                else "The app could not be located; re-run `quern setup` to fetch it again."
+            )
+            return CheckResult(
+                name="Menu-bar app",
+                status=CheckStatus.WARNING,
+                message=f"Could not install to {MENUBAR_APP_DIR}",
+                detail=f"{e}\n      {where}",
+            )
+    else:
+        _quit_menubar_app()
+
+    rc, _out, err = _run(["open", str(installed)])
+    if rc == 0:
+        return CheckResult(
+            name="Menu-bar app",
+            status=CheckStatus.OK,
+            message=f"Running from {installed}",
+        )
+    return CheckResult(
+        name="Menu-bar app",
+        status=CheckStatus.WARNING,
+        message="Could not launch Quern.app",
+        detail=err.strip() or f"Try: open {installed}",
+    )
+
+
+def _quit_menubar_app() -> None:
+    """Ask a running menu-bar app to quit, so a new build can take over.
+
+    Best-effort and deliberately gentle: `osascript` asks the app to quit
+    rather than killing it, so it can tear down its status item cleanly. If
+    nothing is running, this is a no-op that costs a fraction of a second.
+    """
+    _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
+    for _ in range(20):
+        rc, out, _err = _run(["pgrep", "-f", "Quern.app/Contents/MacOS/QuernMenuBar"])
+        if rc != 0 or not out.strip():
+            return
+        time.sleep(0.25)
 
 
 def _install_skills(project_root: Path) -> CheckResult:
@@ -677,7 +1217,7 @@ def _install_precommit_hook(project_root: Path) -> CheckResult:
     # resolves the checklist path relative to its own location ($0/..),
     # so the layout is: ~/.quern/bin/agent-precommit-checklist.sh and
     # ~/.quern/agent-precommit-checklist.md.
-    quern_dir = Path.home() / ".quern"
+    quern_dir = CONFIG_DIR
     bin_dir = quern_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     dest_script = bin_dir / "agent-precommit-checklist.sh"
@@ -1114,7 +1654,7 @@ def check_idb() -> CheckResult:
 
 def check_idb_companion() -> CheckResult:
     """Check for idb_companion, preferring the patched build in ~/.quern/bin/."""
-    quern_companion = Path.home() / ".quern" / "bin" / "idb_companion"
+    quern_companion = CONFIG_DIR / "bin" / "idb_companion"
     if quern_companion.is_file():
         return CheckResult(
             name="idb_companion",
@@ -1147,7 +1687,7 @@ def _install_patched_companion() -> bool:
     """Download and install the patched idb_companion to ~/.quern/bin/."""
     import urllib.request
 
-    dest = Path.home() / ".quern" / "bin"
+    dest = CONFIG_DIR / "bin"
     dest.mkdir(parents=True, exist_ok=True)
     tarball = dest / "idb-companion.tar.gz"
 
@@ -1292,11 +1832,9 @@ def check_pymobiledevice3() -> CheckResult:
 def check_tunneld() -> CheckResult:
     """Check if the tunneld LaunchDaemon is installed and running."""
     from server.device.tunneld import (
-        LOG_PATH,
         PLIST_PATH,
         TUNNELD_URL,
-        installed_plist_is_current,
-        installed_plist_log_path,
+        installed_plist_drift,
     )
 
     if not PLIST_PATH.exists():
@@ -1308,7 +1846,7 @@ def check_tunneld() -> CheckResult:
                    "Required for physical device screenshots.",
         )
 
-    plist_outdated = not installed_plist_is_current()
+    drift = installed_plist_drift()
 
     # Check if running
     running = False
@@ -1320,15 +1858,17 @@ def check_tunneld() -> CheckResult:
     except Exception:
         pass
 
-    if plist_outdated:
-        old = installed_plist_log_path()
+    if drift:
+        # The reason, not a guess at it. This reported the log path whichever
+        # condition had failed, so a drifted *binary* was described as a stale
+        # log path -- with both paths printed identical, because they were.
+        # `installed_plist_drift` was written to fix exactly that and this
+        # caller was never switched over to it.
         return CheckResult(
             name="tunneld",
             status=CheckStatus.WARNING,
-            message=f"Plist outdated (log path: {old})",
-            detail=f"Log path moved to {LOG_PATH}. The old location under the "
-                   "user home caused boot-time races for home-on-external-volume "
-                   "setups. Reinstall with: ./quern tunneld install",
+            message=f"Plist outdated — {drift}",
+            detail="Reinstall with: ./quern tunneld install",
         )
 
     if running:
@@ -1556,6 +2096,14 @@ def run_setup() -> int:
     print("  Quern — Setup")
     print("  Checking your environment...")
     print()
+
+    _UNASKED.clear()
+    if not _can_prompt():
+        print("  No terminal attached, so nothing can be asked. Setup will do")
+        print("  what it can and decline the rest rather than answer for you.")
+        if invoked_by() == MENUBAR:
+            print("  To answer them, open a terminal and run: quern setup")
+        print()
 
     report = SetupReport()
     project_root = _find_project_root()
@@ -2064,6 +2612,26 @@ def run_setup() -> int:
 
     report.add(install_wrapper_script())
 
+    # ── Screen-mirror app ──
+    #
+    # Before the menu-bar launch below, deliberately: the menu only shows
+    # "Screen Mirror…" when this bundle exists, and it reads that at launch.
+
+    report.add(build_preview_app())
+
+    # ── Menu-bar app (only present in bundled release tarballs) ──
+
+    if project_root:
+        # Fetch before launching: a release install that arrived without the
+        # app has nothing to launch, and reported nothing at all rather than
+        # saying so.
+        fetch_result = fetch_menubar_app(project_root)
+        if fetch_result is not None:
+            report.add(fetch_result)
+        menubar_result = launch_menubar_app(project_root)
+        if menubar_result is not None:
+            report.add(menubar_result)
+
     # ── Claude Code skills ──
 
     if project_root:
@@ -2093,13 +2661,26 @@ def run_setup() -> int:
     # ── Summary ──
 
     report.print_summary()
+
+    if _UNASKED:
+        # Named, not counted. "3 questions were skipped" tells the reader they
+        # missed something without telling them what, which is the same dead
+        # end as saying nothing.
+        print("  Setup had no terminal, so these were declined without asking:")
+        for question in _UNASKED:
+            print(f"    • {question}")
+        print()
+        for line in run_it_yourself(["quern", "setup"]):
+            print(f"  {line}")
+        print()
+
     return 1 if report.has_errors else 0
 
 
 # ── Tool inventory ───────────────────────────────────────────────────────
 
 
-TOOL_SNAPSHOT = Path.home() / ".quern" / "tool-sites.json"
+TOOL_SNAPSHOT = CONFIG_DIR / "tool-sites.json"
 
 
 def _collect_sites_sync() -> list[dict]:
@@ -2372,7 +2953,7 @@ def run_uninstall() -> int:
 
     # ── Remove wrapper script ──
 
-    wrapper = Path.home() / ".local" / "bin" / "quern"
+    wrapper = WRAPPER_PATH
     if wrapper.exists():
         print()
         print(f"  Removing wrapper script ({wrapper})...")

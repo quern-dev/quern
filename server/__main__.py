@@ -424,6 +424,88 @@ def _cmd_grant_full_perms() -> int:
     return 0
 
 
+def _cmd_set_auto_install_cert(args: list[str]) -> int:
+    """Read or set the automatic CA-install policy.
+
+    Usage:
+        quern set-auto-install-cert on|off
+        quern set-auto-install-cert          # print the current setting
+
+    Capturing HTTPS from a device that does not trust the mitmproxy CA fails
+    every request, and the symptom points nowhere near the proxy. Quern
+    normally refuses to configure the proxy in that state and asks. Turning
+    this on answers the question once, in advance.
+
+    It is off by default because installing a MITM root CA is a larger and
+    longer-lived commitment than the proxy toggle that prompts it.
+    """
+    from server.config import get_auto_install_cert, set_auto_install_cert
+
+    if not args:
+        state = "on" if get_auto_install_cert() else "off"
+        print(f"Automatic certificate install: {state}")
+        if state == "off":
+            print("Quern will ask before installing the mitmproxy CA on a device.")
+        else:
+            print("Quern will install the mitmproxy CA when capture needs it.")
+        return 0
+
+    target = args[0].lower()
+    if target in ("on", "true", "yes", "1"):
+        set_auto_install_cert(True)
+        print("Automatic certificate install: on")
+        print("Quern will install the mitmproxy CA when capture needs it.")
+        return 0
+    if target in ("off", "false", "no", "0"):
+        set_auto_install_cert(False)
+        print("Automatic certificate install: off")
+        return 0
+
+    print(f"Unknown value {args[0]!r}. Use 'on' or 'off'.", file=sys.stderr)
+    return 2
+
+
+def _cmd_set_update_check(args: list[str]) -> int:
+    """Read or set whether quern checks for updates on its own.
+
+    Usage:
+        quern set-update-check on|off
+        quern set-update-check          # print the current setting
+
+    Governs the *automatic* check alone. `quern check-updates` and the menu
+    bar's Check for Updates keep working when this is off, the way every other
+    updater leaves Check Now working when the box is unticked: turning off
+    automatic checking says "do not call home unprompted", and asking is a
+    prompt.
+
+    On by default, unlike `set-auto-install-cert`. The asymmetry is deliberate
+    -- the cost of guessing wrong there is a root CA installed without consent,
+    and here it is one HTTPS request a day.
+    """
+    from server.config import get_update_check, set_update_check
+
+    if not args:
+        state = "on" if get_update_check() else "off"
+        print(f"Automatic update check: {state}")
+        if state == "off":
+            print("Run `quern check-updates` to check now.")
+        return 0
+
+    target = args[0].lower()
+    if target in ("on", "true", "yes", "1"):
+        set_update_check(True)
+        print("Automatic update check: on")
+        return 0
+    if target in ("off", "false", "no", "0"):
+        set_update_check(False)
+        print("Automatic update check: off")
+        print("Run `quern check-updates` to check now.")
+        return 0
+
+    print(f"Unknown value {args[0]!r}. Use 'on' or 'off'.", file=sys.stderr)
+    return 2
+
+
 def _cmd_set_channel(args: list[str]) -> int:
     """Persist the update channel preference (``stable`` or ``beta``).
 
@@ -440,7 +522,6 @@ def _cmd_set_channel(args: list[str]) -> int:
         VALID_UPDATE_CHANNELS,
         channel_to_release_branch,
         get_update_channel,
-        set_update_channel,
     )
 
     if not args:
@@ -451,8 +532,14 @@ def _cmd_set_channel(args: list[str]) -> int:
         return 0
 
     target = args[0]
+    # switch_channel persists the preference and drops the cached check as one
+    # locked operation, so the next check is asked afresh instead of waiting
+    # out the 24h rate limit, and a check already in flight cannot put the old
+    # channel's answer back afterwards.
+    from server.lifecycle.update_check import switch_channel
+
     try:
-        set_update_channel(target)
+        switch_channel(target)
     except ValueError as e:
         print(f"Error: {e}")
         return 1
@@ -560,7 +647,46 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _capture_env_usage() -> None:
+    print("Usage: quern capture-env [FILE]")
+    print()
+    print("Writes an environment report for attaching to a bug report.")
+    print("With no FILE, prints to stdout.")
+
+
 def main() -> None:
+    # Before the re-exec, deliberately, and the ordering is the whole point:
+    # this is the command people reach for when quern is broken, and
+    # `_maybe_reexec_in_venv` is one of the things that can be broken. A venv
+    # missing its pyvenv.cfg leaves `.venv/bin/python` executable but not
+    # recognised as a venv, so that function execs itself forever -- and the
+    # diagnostic would spin instead of producing a report, on exactly the
+    # install it exists for. It was below this line, with a comment claiming it
+    # was above.
+    if len(sys.argv) >= 2 and sys.argv[1] == "capture-env":
+        from server.lifecycle.capture_env import run
+        # Anything after the subcommand is a destination, so a flag would be
+        # taken as a filename: `capture-env --help` wrote a file called
+        # "--help" and exited 0.
+        rest = sys.argv[2:]
+        if any(a in ("-h", "--help") for a in rest):
+            # Checked before the flag rejection below: `capture-env out.json
+            # --help` reported "unrecognised option: --help", which it is not.
+            _capture_env_usage()
+            sys.exit(0)
+        if any(arg.startswith("-") for arg in rest):
+            _capture_env_usage()
+            bad = next(a for a in rest if a.startswith("-"))
+            print(f"unrecognised option: {bad}", file=sys.stderr)
+            sys.exit(2)
+        if len(rest) > 1:
+            # Silently writing the first and ignoring the rest is the wrong
+            # kind of forgiving for a command whose output someone is about to
+            # attach to a bug report.
+            print(f"Expected at most one FILE, got {len(rest)}.", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(run(rest[0] if rest else None))
+
     _maybe_reexec_in_venv()
 
     # Version flag — handle before anything else
@@ -591,8 +717,23 @@ def main() -> None:
         from server.lifecycle.updater import run_update
         sys.exit(run_update(apply_tools="--tools" in sys.argv[2:]))
 
+    # `help` is what people type. argparse only understands -h/--help, so
+    # without this the most obvious command in the tool exits 2 with an
+    # "invalid choice" error.
+    if len(sys.argv) >= 2 and sys.argv[1] in ("help", "--help", "-h"):
+        from server.main import cli
+        sys.argv = [sys.argv[0], "--help"]
+        cli()
+        return
+
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
         sys.exit(_cmd_set_channel(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-auto-install-cert":
+        sys.exit(_cmd_set_auto_install_cert(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-update-check":
+        sys.exit(_cmd_set_update_check(sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
         from server.device.tunneld import cli_tunneld

@@ -67,7 +67,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `set_local_capture` | POST | `/api/v1/proxy/local-capture` | Set local capture process list |
 | `set_bypass` | POST | `/api/v1/proxy/bypass` | Add domain patterns to the bypass allowlist |
 | `clear_bypass` | DELETE | `/api/v1/proxy/bypass` | Remove bypass patterns, or clear all |
-| `configure_system_proxy` | POST | `/api/v1/proxy/configure-system` | Auto-configure macOS system proxy |
+| `configure_system_proxy` | POST | `/api/v1/proxy/configure-system` | Auto-configure macOS system proxy. Returns **428** when a booted simulator does not trust the mitmproxy CA; pass `skip_cert_check` to proceed anyway |
 | `unconfigure_system_proxy` | POST | `/api/v1/proxy/unconfigure-system` | Restore original proxy settings |
 
 ### Intercept and mock
