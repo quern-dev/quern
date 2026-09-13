@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import secrets
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,14 +71,28 @@ class ServerConfig:
 
 
 def read_user_config() -> dict:
-    """Read user config from ~/.quern/config.json. Returns {} if missing or invalid."""
+    """Read user config from ~/.quern/config.json. Returns {} if missing or invalid.
+
+    "Invalid" includes a document that parses but is not an object. A config
+    holding `[]` or `"on"` or `42` is valid JSON, so it came back as-is and
+    every caller's `.get()` raised AttributeError -- which read commands turned
+    into a crash and the periodic check swallowed, silently skipping the
+    automatic update check. The type is in the signature; honour it.
+    """
     if not USER_CONFIG_FILE.exists():
         return {}
     try:
-        return json.loads(USER_CONFIG_FILE.read_text())
+        parsed = json.loads(USER_CONFIG_FILE.read_text())
     except Exception as e:
         logger.warning("Failed to read config file %s: %s", USER_CONFIG_FILE, e)
         return {}
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "Config file %s holds %s, not an object; ignoring it",
+            USER_CONFIG_FILE, type(parsed).__name__,
+        )
+        return {}
+    return parsed
 
 
 def get_default_device_family() -> str:
@@ -134,24 +151,60 @@ def get_auto_install_cert() -> bool:
     return read_user_config().get("auto_install_cert") is True
 
 
-def _write_user_config(config: dict) -> None:
-    """Persist the whole config, swapping it in rather than writing over it.
+@contextmanager
+def _config_lock():
+    """Hold an exclusive lock for a whole read-modify-write of the config.
 
-    The menu-bar app reads this file on a poll while the CLI writes it, and
-    ``write_text`` truncates before it writes -- so a read landing in that
-    window gets a partial document, and the app's parse fails. ``os.replace``
-    is atomic within a filesystem, so a reader sees either the old file or the
-    new one. The temporary lives in the same directory for that reason: a move
-    across filesystems is a copy, and the window comes back.
+    Each setter reads the file, changes one key and replaces it. Two of them at
+    once -- the menu bar writes this file, and so does every `quern set-...`
+    command -- both read the same starting point and the second replacement
+    drops the first one's key. Nothing in the file says it happened.
+
+    The lock is its own file rather than the config: the config is replaced
+    rather than written in place, so a lock held on it would be a lock on an
+    inode nobody looks at any more.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = USER_CONFIG_FILE.with_name(f".{USER_CONFIG_FILE.name}.{os.getpid()}.tmp")
+    lock_path = CONFIG_DIR / "config.lock"
     try:
-        tmp.write_text(json.dumps(config, indent=2) + "\n")
-        os.replace(tmp, USER_CONFIG_FILE)
+        handle = lock_path.open("w")
     except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+        # Cannot lock. Proceeding unlocked is what happened before there was a
+        # lock at all, and refusing to save a setting because a lock file could
+        # not be created would be a worse trade than a rare lost key.
+        logger.warning("Could not open %s; writing config unlocked", lock_path)
+        yield
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
+def update_user_config(change: Callable[[dict], None]) -> None:
+    """Apply `change` to the config and persist it, as one atomic step.
+
+    The read and the write are inside one lock deliberately. Reading outside it
+    and writing inside would still let two callers start from the same snapshot,
+    which is the whole failure.
+
+    Swapped in rather than written over: the menu-bar app reads this file on a
+    poll, and ``write_text`` truncates before it writes, so a read landing in
+    that window gets a partial document. ``os.replace`` is atomic within a
+    filesystem; the temporary lives in the same directory for that reason, since
+    a move across filesystems is a copy and the window comes back.
+    """
+    with _config_lock():
+        config = read_user_config()
+        change(config)
+        tmp = USER_CONFIG_FILE.with_name(f".{USER_CONFIG_FILE.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(config, indent=2) + "\n")
+            os.replace(tmp, USER_CONFIG_FILE)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 def set_auto_install_cert(enabled: bool) -> None:
@@ -161,9 +214,7 @@ def set_auto_install_cert(enabled: bool) -> None:
     on purpose: a silent, persistent CA-install policy would be worse than the
     failure it exists to prevent.
     """
-    config = read_user_config()
-    config["auto_install_cert"] = bool(enabled)
-    _write_user_config(config)
+    update_user_config(lambda c: c.__setitem__("auto_install_cert", bool(enabled)))
 
 
 def get_update_check() -> bool:
@@ -185,9 +236,7 @@ def get_update_check() -> bool:
 
 def set_update_check(enabled: bool) -> None:
     """Persist whether the automatic update check runs."""
-    config = read_user_config()
-    config["update_check"] = bool(enabled)
-    _write_user_config(config)
+    update_user_config(lambda c: c.__setitem__("update_check", bool(enabled)))
 
 
 def channel_to_release_branch(channel: str) -> str:

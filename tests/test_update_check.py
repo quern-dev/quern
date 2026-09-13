@@ -1056,6 +1056,80 @@ class TestTheAutomaticCheckSetting:
             config.set_update_check(False)
         assert list(config.USER_CONFIG_FILE.parent.glob(".*tmp")) == []
 
+    def test_two_writers_do_not_drop_each_others_keys(self, config):
+        """Each setter reads, changes one key, and replaces the file.
+
+        Two at once -- the menu bar writes this file, and so does every `quern
+        set-...` command -- both read the same starting point, and the second
+        replacement drops the first one's key with nothing recording that it
+        happened. Driven through real processes rather than threads, because the
+        lock is an interprocess one and a threaded test would pass without it.
+        """
+        import subprocess
+        import sys
+        script = f'''
+import sys; sys.path.insert(0, {str(Path.cwd())!r})
+from server import config as cfg
+from pathlib import Path
+cfg.CONFIG_DIR = Path({str(config.CONFIG_DIR)!r})
+cfg.USER_CONFIG_FILE = Path({str(config.USER_CONFIG_FILE)!r})
+import time
+key = sys.argv[1]
+
+def change(c):
+    # Widen the read-modify-write window so an unlocked version loses
+    # reliably rather than occasionally.
+    time.sleep(0.3)
+    c[key] = True
+
+cfg.update_user_config(change)
+'''
+        procs = [
+            subprocess.Popen([sys.executable, "-c", script, key])
+            for key in ("first_key", "second_key")
+        ]
+        for proc in procs:
+            assert proc.wait(timeout=30) == 0
+
+        written = json.loads(config.USER_CONFIG_FILE.read_text())
+        assert written.get("first_key") is True, "first writer's key was lost"
+        assert written.get("second_key") is True, "second writer's key was lost"
+
+    @pytest.mark.parametrize("document", ["[]", '"on"', "42", "null", "true"])
+    def test_a_config_that_is_not_an_object_is_ignored(self, config, document):
+        """Valid JSON, but not a mapping.
+
+        It used to come back as-is, so every caller's `.get()` raised
+        AttributeError -- which read commands turned into a crash and the
+        periodic check swallowed, silently skipping the automatic update check.
+        """
+        config.USER_CONFIG_FILE.write_text(document)
+        assert config.read_user_config() == {}
+        assert config.get_update_check() is True
+        assert config.get_auto_install_cert() is False
+
+    def test_a_config_that_is_not_an_object_can_still_be_written(self, config):
+        # And the next write replaces it, rather than trying to mutate a list.
+        config.USER_CONFIG_FILE.write_text("[1, 2, 3]")
+        config.set_update_check(False)
+        assert config.get_update_check() is False
+
+    def test_a_lock_that_cannot_be_created_does_not_lose_the_setting(
+        self, config, monkeypatch
+    ):
+        # Proceeding unlocked is what happened before the lock existed.
+        # Refusing to save a setting because a lock file could not be made
+        # would be a worse trade than a rare lost key.
+        real_open = Path.open
+
+        def no_lock(self, *args, **kwargs):
+            if self.name == "config.lock":
+                raise OSError(30, "Read-only file system")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", no_lock)
+        config.set_update_check(False)
+        assert config.get_update_check() is False
 
 class TestTheSetUpdateCheckCommand:
     """`quern set-update-check` — what the menu-bar toggle shells out to."""
@@ -1118,6 +1192,13 @@ class TestTheSetUpdateCheckCommand:
         # exits 0, and the checkbox would appear to work.
         import server.__main__ as entry
         called = []
+        # `main()` re-execs itself under .venv/bin/python when the current
+        # interpreter is not already in a virtualenv. Run from outside the venv
+        # -- which is how someone's global pytest would run this -- that os.execv
+        # replaces the test process before it ever reaches the dispatch, and the
+        # assertions below simply never execute. Passing by not running is the
+        # failure mode this whole file keeps finding.
+        monkeypatch.setattr(entry, "_maybe_reexec_in_venv", lambda: None)
         monkeypatch.setattr(
             entry, "_cmd_set_update_check", lambda args: called.append(args) or 0
         )

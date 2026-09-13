@@ -15,6 +15,23 @@ final class SettingsModel: ObservableObject {
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
     @Published var autoCheckUpdates: Bool = true
+
+    /// Writes `autoCheckUpdates`, one at a time, keeping the last answer.
+    ///
+    /// Unlike this window's other two toggles, which write user defaults and
+    /// cannot fail, this one writes a file the server owns. A failed write
+    /// snaps the checkbox back rather than leaving it showing a setting that
+    /// was never written -- the next refresh would undo it anyway, which reads
+    /// as the app forgetting.
+    lazy var autoCheckWriter: SettingWriter = {
+        let writer = SettingWriter { value, done in
+            QuernCLI.setUpdateCheck(value) { code, _ in done(code) }
+        }
+        writer.onFailure = { [weak self] fallback in
+            self?.autoCheckUpdates = fallback
+        }
+        return writer
+    }()
     /// What the version row knows, which is not the same as what it can show.
     ///
     /// Three states, because two were not enough. The row used to fall back to
@@ -247,20 +264,14 @@ struct SettingsView: View {
                         Text("Check for updates automatically")
                     }
                     .onChange(of: model.autoCheckUpdates) { newValue in
-                        // Same guard as the channel picker below. `apply()`
-                        // assigns this on every fresh snapshot, and writing
-                        // back on that path would shell out on each refresh.
-                        guard newValue != model.snapshot.update.autoCheck else { return }
-                        QuernCLI.setUpdateCheck(newValue) { code, _ in
-                            // Unlike its neighbours at the bottom of this
-                            // window, this one writes a file the server owns,
-                            // so it can fail. Snap back rather than leave the
-                            // checkbox showing a setting that was never
-                            // written -- the next refresh would silently undo
-                            // it anyway, which looks like the app forgetting.
-                            guard code != 0 else { return }
-                            model.autoCheckUpdates = model.snapshot.update.autoCheck
-                        }
+                        // Through SettingWriter rather than compared against
+                        // the snapshot directly. The snapshot lags a click by
+                        // up to one refresh, so two clicks inside that window
+                        // used to drop the second one and leave the file
+                        // holding the opposite of the checkbox.
+                        model.autoCheckWriter.set(
+                            newValue, persisted: model.snapshot.update.autoCheck
+                        )
                     }
                     .accessibilityLabel("Check for updates automatically")
 
