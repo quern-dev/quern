@@ -56,6 +56,14 @@ class ToolSite:
     source: str = "unknown"
     """Where it came from: brew, pipx, venv, fnm, android-sdk, xcode, system."""
 
+    diagnostic: str | None = None
+    """Something the tool complained about while still answering correctly.
+
+    Nothing fails when this is set, which is exactly why it is worth showing:
+    the tool works, so no check goes red, but its environment is wrong and will
+    surface later wearing a different face. See #154.
+    """
+
     package: str | None = None
     """What the package manager calls this, which is not always what quern does.
 
@@ -176,13 +184,29 @@ async def _run(args: list[str], timeout: float) -> tuple[int, str]:
 
 
 async def binary_version(path: str, args: list[str], timeout: float = 5.0) -> str | None:
-    """Run a binary's version command and pull the version out of it."""
+    """Run a binary's version command and pull the version out of it.
+
+    The two streams are kept apart and stdout is asked first. Merging them let
+    a version-shaped token in a *warning* outrank the tool's own version:
+    pymobiledevice3 prints a `RequestsDependencyWarning` naming urllib3's
+    version to stderr before its own version reaches stdout, and
+    `parse_version` returns the first match, so quern reported urllib3's
+    `2.6.3` as pymobiledevice3's version -- and offered an upgrade that no
+    amount of upgrading could ever clear, because the tool was already current.
+    Reported in #154 on a machine where Python 3.14 pulled in a chardet that
+    `requests` rejects.
+
+    stderr is still read, because printing a version there is a real shape and
+    merging was presumably meant to catch it. It is only consulted when stdout
+    yielded nothing, so it can no longer outrank a real answer. `_run` directly
+    above has always used DEVNULL; this is the only place that merged.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             path, *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         # Kill it: communicate() leaves the child running, and a version
         # command that hangs would otherwise stay alive across requests.
@@ -192,7 +216,65 @@ async def binary_version(path: str, args: list[str], timeout: float = 5.0) -> st
         return None
     except OSError:
         return None
-    return parse_version(out.decode(errors="replace"))
+    return (
+        parse_version(out.decode(errors="replace"))
+        or parse_version(err.decode(errors="replace"))
+    )
+
+
+#: Python warning lines carry a "path/to/file.py:113: " prefix naming a file
+#: inside someone's venv. The reader cannot act on the path and it is usually
+#: longer than the message, so it is dropped.
+_WARNING_PREFIX_RE = re.compile(r"^.*?\.py:\d+:\s*")
+
+
+def diagnostic_from(stderr: str) -> str | None:
+    """A complaint a tool made while still answering correctly.
+
+    Worth surfacing rather than discarding: the tool works, so nothing fails
+    and nothing is reported, but something in its environment is wrong and will
+    surface later as something else. #154 is the worked example -- a
+    `RequestsDependencyWarning` about a chardet version that quern first
+    misparsed as the tool's own version, and would otherwise have thrown away
+    entirely once the parse was fixed.
+
+    Only the first non-empty line. Warnings are followed by the source line
+    that triggered them, which is noise to anyone not editing that library.
+    """
+    for raw in stderr.splitlines():
+        line = _WARNING_PREFIX_RE.sub("", raw.strip())
+        if line:
+            return line[:300]
+    return None
+
+
+async def probe_version(
+    path: str, args: list[str], timeout: float = 5.0,
+) -> tuple[str | None, str | None]:
+    """`binary_version`, plus anything the tool complained about on the way.
+
+    The diagnostic is only reported when stdout answered, because otherwise
+    stderr *is* the answer and reporting it twice would be noise.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            path, *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return None, None
+    except OSError:
+        return None, None
+
+    stdout_version = parse_version(out.decode(errors="replace"))
+    stderr_text = err.decode(errors="replace")
+    if stdout_version is not None:
+        return stdout_version, diagnostic_from(stderr_text)
+    return parse_version(stderr_text), None
 
 
 async def brew_provenance(formula: str) -> tuple[bool | None, list[str]]:
@@ -262,10 +344,13 @@ async def collect_sites() -> list[ToolSite]:
 
     binary = find_pymobiledevice3_binary()
     binary_path = str(binary) if binary else None
+    _v_binary_path, _d_binary_path = (
+        await probe_version(binary_path, ["version"]) if binary_path else (None, None)
+    )
     sites.append(ToolSite(
         name="pymobiledevice3", role="cli", package="pymobiledevice3",
         available=binary_path is not None,
-        version=await binary_version(binary_path, ["version"]) if binary_path else None,
+        version=_v_binary_path, diagnostic=_d_binary_path,
         path=binary_path, source=classify_source(binary_path),
         volatile_path=is_volatile(binary_path),
         detail="run by tunneld and the device log; a separate install from the library",
@@ -294,32 +379,41 @@ async def collect_sites() -> list[ToolSite]:
 
     # --- adb --------------------------------------------------------------
     adb_path = shutil.which("adb") or _android_sdk_adb()
+    _v_adb_path, _d_adb_path = (
+        await probe_version(adb_path, ["version"]) if adb_path else (None, None)
+    )
     sites.append(ToolSite(
         # There is no `adb` formula: brew ships the binary in the
         # android-platform-tools *cask*.
         name="adb", role="cli", package="android-platform-tools", brew_cask=True,
         available=adb_path is not None,
-        version=await binary_version(adb_path, ["version"]) if adb_path else None,
+        version=_v_adb_path, diagnostic=_d_adb_path,
         path=adb_path, source=classify_source(adb_path),
         volatile_path=is_volatile(adb_path),
     ))
 
     # --- libimobiledevice -------------------------------------------------
     imd_path = shutil.which("idevice_id")
+    _v_imd_path, _d_imd_path = (
+        await probe_version(imd_path, ["--version"]) if imd_path else (None, None)
+    )
     sites.append(ToolSite(
         name="libimobiledevice", role="cli", package="libimobiledevice",
         available=imd_path is not None,
-        version=await binary_version(imd_path, ["--version"]) if imd_path else None,
+        version=_v_imd_path, diagnostic=_d_imd_path,
         path=imd_path, source=classify_source(imd_path),
         volatile_path=is_volatile(imd_path),
     ))
 
     # --- node -------------------------------------------------------------
     node_path = shutil.which("node")
+    _v_node_path, _d_node_path = (
+        await probe_version(node_path, ["--version"]) if node_path else (None, None)
+    )
     sites.append(ToolSite(
         name="node", role="cli", package="node",
         available=node_path is not None,
-        version=await binary_version(node_path, ["--version"]) if node_path else None,
+        version=_v_node_path, diagnostic=_d_node_path,
         path=node_path, source=classify_source(node_path),
         volatile_path=is_volatile(node_path),
         detail="runs the MCP server",

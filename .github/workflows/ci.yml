@@ -11,7 +11,13 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # 3.14 added after #154 arrived from a machine running it. The bug
+        # there was ours, not 3.14's, but the report is the first evidence
+        # anyone runs quern on it -- and `requires-python = ">=3.11"` has no
+        # upper bound, so it was already claimed and merely untested.
+        # Verified before adding: the full suite passes on 3.14.5, collecting
+        # the same 2273 tests as 3.12 rather than quietly skipping any.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v7

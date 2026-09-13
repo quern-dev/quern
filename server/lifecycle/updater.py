@@ -534,7 +534,7 @@ def _report_tool_updates(apply: bool = False) -> bool:
         print(f"Note: could not check external tool versions ({exc}).")
         return True
 
-    offer = format_offer(updates)
+    offer = format_offer(updates, apply=apply)
     if not offer:
         return True
     print(offer)
@@ -545,14 +545,21 @@ def _report_tool_updates(apply: bool = False) -> bool:
         return True
 
     failures: list[str] = []
+    #: Upgrades that were never attempted. Still unfinished work, so it still
+    #: reaches the exit code -- a script that asked for updates and got none
+    #: must not read success. But it is not a *failure*, and saying "1 tool
+    #: upgrade(s) failed" about something never tried sends the reader looking
+    #: for a broken tool instead of opening a terminal.
+    deferred: list[str] = []
     for update in todo:
         if update.needs_root and not _can_ask_for_a_password():
             # sudo with nowhere to prompt either hangs or fails with a message
             # about a terminal, neither of which tells the reader what to do.
-            print(f"\n{update.name} needs sudo, which cannot be asked for here.")
+            print(f"\n{update.name} needs sudo, and there is no terminal here "
+                  f"to ask for a password on.")
             for line in run_it_yourself(update.command):
                 print(f"  {line}")
-            failures.append(update.name)
+            deferred.append(update.name)
             continue
         print(f"\nUpgrading {update.name}...")
         if update.needs_root:
@@ -569,7 +576,12 @@ def _report_tool_updates(apply: bool = False) -> bool:
 
     if failures:
         print(f"\n{len(failures)} tool upgrade(s) failed: {', '.join(failures)}")
-    return not failures
+    if deferred:
+        print(f"\n{len(deferred)} still to do, needing a terminal: "
+              f"{', '.join(deferred)}")
+    # Deferred counts against the exit status, deliberately: the caller asked
+    # for the upgrades to be applied and one was not. Only the wording changes.
+    return not failures and not deferred
 
 
 #: Where `quern update` records what it did.
