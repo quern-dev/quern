@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from server.models import DeviceCertState, DeviceInfo, DeviceState, DeviceType
 from server.proxy.cert_preflight import (
     refusal_detail,
@@ -272,6 +274,28 @@ class TestAFreshEraseIsCaught:
     stub out the decision under test.
     """
 
+    @pytest.fixture(autouse=True)
+    def _a_ca_must_exist(self, tmp_path, monkeypatch):
+        """`is_cert_installed` returns False before it reaches the TrustStore
+        if no CA file exists, so without this the tests below never run the
+        code they are about.
+
+        Found by CI, not locally: this machine has `~/.mitmproxy` and the
+        runner does not. One test failed honestly. The other two **passed for
+        the wrong reason** -- the device was reported missing because the CA
+        was absent, not because the TrustStore was consulted, which is their
+        entire claim. They would have passed with the fix reverted.
+
+        Neither of these is the decision under test. `verify_cert_in_truststore`
+        stays the only oracle.
+        """
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("contents unread: the fingerprint is stubbed below")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_fingerprint", lambda _p: "a" * 64,
+        )
+
     def _record(self, udid, *, installed, age_seconds=0):
         """Write a real cert-state.json entry, as install_cert would."""
         from datetime import UTC, datetime, timedelta
@@ -293,23 +317,29 @@ class TestAFreshEraseIsCaught:
 
     async def test_a_minutes_old_record_does_not_shield_an_erased_simulator(self):
         self._record("AAAA", installed=True, age_seconds=180)
-        with self._truststore(False):
+        with self._truststore(False) as truststore:
             missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
         assert [d["udid"] for d in missing] == ["AAAA"]
+        # Not decoration. Without it this passes whenever `is_cert_installed`
+        # returns False for any reason at all -- which is exactly how it passed
+        # on a runner with no CA file while proving nothing.
+        assert truststore.called
 
     async def test_a_seconds_old_record_does_not_either(self):
         # The narrowest version: nothing short of a zero TTL saves this, which
         # is the point -- the fix is to stop consulting the cache, not to
         # shorten it.
         self._record("AAAA", installed=True, age_seconds=0)
-        with self._truststore(False):
+        with self._truststore(False) as truststore:
             missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
         assert [d["udid"] for d in missing] == ["AAAA"]
+        assert truststore.called
 
     async def test_the_truststore_is_still_what_decides_trust(self):
-        # The converse, so the test above cannot be satisfied by a function
+        # The converse, so the tests above cannot be satisfied by a function
         # that reports every device missing.
         self._record("AAAA", installed=False, age_seconds=0)
-        with self._truststore(True):
+        with self._truststore(True) as truststore:
             missing = await simulators_without_cert(_Ctrl([_sim(udid="AAAA")]))
         assert missing == []
+        assert truststore.called
