@@ -222,16 +222,31 @@ async def list_devices(
             cert_states = read_cert_state()
             controller = request.app.state.device_controller
             for dd, dev in zip(device_dicts, devices, strict=True):
-                # Verified for booted devices, because this both labels and
+                # Verified for booted simulators, because this both labels and
                 # *filters*: asking for devices that trust the CA and getting
                 # an erased one back is the answer being wrong, not stale.
                 # Erasing recreates the TrustStore empty and leaves quern's
                 # record saying installed.
                 #
-                # Shutdown devices keep the recorded value. There is nothing to
-                # query -- and nothing to capture from either, so the record is
-                # both the best answer available and one nobody acts on.
-                if dev.state == DeviceState.BOOTED and controller is not None:
+                # Simulators only, and that scoping is load-bearing.
+                # `is_cert_installed` verifies against
+                # `CoreSimulator/Devices/<udid>/.../TrustStore.sqlite3`, a path
+                # that does not exist for a physical device -- so it would
+                # answer `false` for a phone that genuinely trusts the CA, and
+                # then *write* that false into cert-state.json, destroying the
+                # record `_verify_physical_device` reads. Physical devices are
+                # verified from traffic instead, because they are proxied by
+                # their own per-network WiFi config rather than the host's.
+                #
+                # Shutdown simulators keep the recorded value too. There is
+                # nothing to query -- and nothing to capture from either, so
+                # the record is both the best answer available and one nobody
+                # acts on.
+                verifiable = (
+                    dev.device_type == DeviceType.SIMULATOR
+                    and dev.state == DeviceState.BOOTED
+                )
+                if verifiable and controller is not None:
                     dd["cert_installed"] = await cert_manager.is_cert_installed(
                         controller, dd["udid"], device_name=dd.get("name"),
                     )

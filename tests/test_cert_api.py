@@ -832,3 +832,47 @@ class TestCertStatusIsVerifiedNotRecalled:
 
         r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
         assert [d["udid"] for d in r.json()["devices"]] == ["AAAA"]
+
+    def test_a_physical_device_is_never_truststore_verified(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Verifying a phone against a simulator path answers false, then saves it.
+
+        `is_cert_installed` looks in
+        `CoreSimulator/Devices/<udid>/.../TrustStore.sqlite3`, which does not
+        exist for a physical device — so it returns `false` for a phone that
+        genuinely trusts the CA, and writes that false into cert-state.json,
+        destroying the record `_verify_physical_device` reads to check traffic.
+
+        Physical devices are proxied by their own per-network WiFi config, not
+        the host's, so a network change matters for them and is irrelevant to a
+        simulator. That asymmetry is why the two cannot share a verifier.
+        """
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        phone = DeviceInfo(
+            udid="PHONE", name="iPhone 15 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.DEVICE, os_version="iOS 26.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[phone])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state",
+            lambda: {"PHONE": {"name": "iPhone 15 Pro", "cert_installed": True}},
+        )
+
+        asked = []
+
+        async def should_not_be_called(_c, udid, verify=False, *, device_name=None):
+            asked.append(udid)
+            return False
+
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.is_cert_installed", should_not_be_called
+        )
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert asked == [], "a physical device was sent to the simulator verifier"
+        assert [d["udid"] for d in r.json()["devices"]] == ["PHONE"], (
+            "the recorded value should stand for a physical device"
+        )
