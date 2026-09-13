@@ -9,6 +9,7 @@
 //   ios-preview "iPhone 11"  # preview devices matching a name substring
 //   ios-preview 0 2          # preview devices by index
 //   ios-preview --interactive # JSON Lines protocol on stdin/stdout
+//   ios-preview --sim-udid <UDID>  # preview a booted simulator (headless)
 //
 // Build: swiftc -o tools/ios-preview tools/ios-preview.swift -framework AVFoundation -framework CoreMediaIO -framework AppKit
 
@@ -16,6 +17,8 @@ import AVFoundation
 import AppKit
 import CoreMediaIO
 import Foundation
+import IOSurface
+import ObjectiveC
 
 // MARK: - Enable iOS screen capture device discovery
 
@@ -139,6 +142,9 @@ enum FilterMode {
     case all
     case listOnly
     case interactive
+    /// Simulator framebuffer preview. `viaCGImage` selects the copy-through
+    /// render path instead of handing the IOSurface to CALayer directly.
+    case simUDID(udid: String, viaCGImage: Bool)
     case byArgs([String])
 }
 
@@ -147,6 +153,9 @@ func parseArgs() -> FilterMode {
     if args.isEmpty { return .all }
     if args.contains("--list") || args.contains("-l") { return .listOnly }
     if args.contains("--interactive") { return .interactive }
+    if let i = args.firstIndex(of: "--sim-udid"), i + 1 < args.count {
+        return .simUDID(udid: args[i + 1], viaCGImage: args.contains("--cgimage"))
+    }
     return .byArgs(args)
 }
 
@@ -530,7 +539,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             break
         case .byArgs(let args):
             guard !filterDevices([device], args: args).isEmpty else { return }
-        case .listOnly, .interactive:
+        case .listOnly, .interactive, .simUDID:
+            // Simulator mode never runs through AppDelegate -- it has no
+            // capture devices to hot-plug -- but the switch must cover it.
             return
         }
 
@@ -1001,6 +1012,469 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     }
 }
 
+// MARK: - Simulator framebuffer preview
+//
+// Physical devices show up as CoreMediaIO capture devices; simulators never
+// do, which is why the AVCaptureSession path above cannot see them. This
+// path reads CoreSimulator's framebuffer directly -- the same IOSurface
+// that tools/sim-bridge.swift grabs one-shot for screenshots, but
+// subscribed continuously via screen callbacks instead of polled.
+//
+// No Simulator.app and no codec: the surface goes straight to a CALayer.
+// Encoding would only make sense if these frames left the machine.
+
+nonisolated(unsafe) private var simFrameworksLoaded = false
+
+func simLogErr(_ msg: String) {
+    fputs("\(msg)\n", stderr)
+}
+
+private func simDlerror() -> String {
+    guard let e = dlerror() else { return "unknown" }
+    return String(cString: e)
+}
+
+private func simHasSimulatorKit(at dev: String) -> Bool {
+    let path = (dev as NSString)
+        .appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit")
+    return FileManager.default.fileExists(atPath: path)
+}
+
+private func simXcodeSelectDir() -> String? {
+    let pipe = Pipe()
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+    task.arguments = ["-p"]
+    task.standardOutput = pipe
+    do { try task.run() } catch { return nil }
+    task.waitUntilExit()
+    let out = String(
+        data: pipe.fileHandleForReading.readDataToEndOfFile(),
+        encoding: .utf8
+    )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return out.isEmpty ? nil : out
+}
+
+func simDeveloperDir() -> String {
+    if let dev = simXcodeSelectDir(), simHasSimulatorKit(at: dev) { return dev }
+    let canonical = "/Applications/Xcode.app/Contents/Developer"
+    if simHasSimulatorKit(at: canonical) { return canonical }
+    return simXcodeSelectDir() ?? canonical
+}
+
+func simLoadFrameworks() {
+    guard !simFrameworksLoaded else { return }
+    simFrameworksLoaded = true
+
+    let coreSim = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator"
+    if dlopen(coreSim, RTLD_NOW | RTLD_GLOBAL) == nil {
+        simLogErr("CoreSimulator load failed: \(simDlerror())")
+    }
+    // SimulatorKit is not needed for the framebuffer itself -- CoreSimulator
+    // owns the IOSurface. It is loaded anyway so this path stays a drop-in
+    // neighbour of sim-bridge, which needs it for HID input.
+    let simKit = (simDeveloperDir() as NSString)
+        .appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit")
+    if dlopen(simKit, RTLD_NOW | RTLD_GLOBAL) == nil {
+        simLogErr("SimulatorKit load failed: \(simDlerror())")
+    }
+}
+
+private func simInvokeClassObjWithObjAndError(
+    _ cls: AnyClass, _ sel: Selector, _ arg: AnyObject, _ err: inout NSError?
+) -> NSObject? {
+    guard let metaCls = object_getClass(cls),
+          let imp = class_getMethodImplementation(metaCls, sel) else { return nil }
+    typealias Fn = @convention(c) (
+        AnyClass, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> AnyObject?
+    return unsafeBitCast(imp, to: Fn.self)(cls, sel, arg, &err) as? NSObject
+}
+
+private func simInvokeObjWithError(
+    _ target: NSObject, _ sel: Selector, _ err: inout NSError?
+) -> NSObject? {
+    guard let imp = class_getMethodImplementation(type(of: target), sel) else { return nil }
+    typealias Fn = @convention(c) (
+        AnyObject, Selector, AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> AnyObject?
+    return unsafeBitCast(imp, to: Fn.self)(target, sel, &err) as? NSObject
+}
+
+func simAvailableDevices() -> [NSObject] {
+    guard let cls = NSClassFromString("SimServiceContext") else {
+        simLogErr("SimServiceContext unavailable -- private frameworks did not load")
+        return []
+    }
+    var err: NSError?
+    guard let ctx = simInvokeClassObjWithObjAndError(
+        cls,
+        NSSelectorFromString("sharedServiceContextForDeveloperDir:error:"),
+        simDeveloperDir() as NSString,
+        &err
+    ) else {
+        simLogErr("sharedServiceContext failed: \(err?.description ?? "nil")")
+        return []
+    }
+    let setSel = NSSelectorFromString("defaultDeviceSetWithError:")
+    guard ctx.responds(to: setSel),
+          let set = simInvokeObjWithError(ctx, setSel, &err) else {
+        simLogErr("defaultDeviceSet failed: \(err?.description ?? "nil")")
+        return []
+    }
+    return (set.value(forKey: "availableDevices") as? [NSObject]) ?? []
+}
+
+func simResolveDevice(udid: String) -> NSObject? {
+    for device in simAvailableDevices()
+    where (device.value(forKey: "UDID") as? NSUUID)?.uuidString.lowercased() == udid.lowercased() {
+        return device
+    }
+    return nil
+}
+
+enum SimFramebufferError: Error, CustomStringConvertible {
+    case deviceNotFound(String)
+    case notBooted(String)
+    case ioUnavailable
+    case noFramebuffer
+    case callbackUnavailable
+
+    var description: String {
+        switch self {
+        case .deviceNotFound(let u): return "simulator not found: \(u)"
+        case .notBooted(let s): return "simulator is not booted (state: \(s))"
+        case .ioUnavailable: return "device.io unavailable"
+        case .noFramebuffer: return "no com.apple.framebuffer.display descriptor"
+        case .callbackUnavailable: return "registerScreenCallbacks selector unavailable"
+        }
+    }
+}
+
+/// Subscribes to a booted simulator's framebuffer and emits an `IOSurface`
+/// per composited frame.
+///
+/// Registers on *every* framebuffer descriptor rather than the first. A
+/// simulator exposes secondary planes and overlays -- `simctl io screenshot`
+/// says as much when it reports defaulting to a display -- and the main
+/// screen is simply whichever live surface is largest at that moment.
+final class SimFramebuffer {
+    private let udid: String
+    private let queue = DispatchQueue(label: "quern.sim-preview.frames", qos: .userInteractive)
+    private let onSurface: (IOSurface) -> Void
+
+    private var ioClient: NSObject?
+    private var descriptors: [NSObject] = []
+    private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
+
+    init(udid: String, onSurface: @escaping (IOSurface) -> Void) {
+        self.udid = udid
+        self.onSurface = onSurface
+    }
+
+    func start() throws {
+        simLoadFrameworks()
+
+        guard let device = simResolveDevice(udid: udid) else {
+            throw SimFramebufferError.deviceNotFound(udid)
+        }
+        // A shut-down device still resolves and still hands back an `io`
+        // client; it just never composites. Failing here beats a window that
+        // stays black with no explanation.
+        let state = (device.value(forKey: "state") as? NSNumber)?.intValue ?? -1
+        guard state == 3 else {
+            throw SimFramebufferError.notBooted(simStateName(state))
+        }
+
+        guard let io = device.perform(NSSelectorFromString("io"))?
+            .takeUnretainedValue() as? NSObject else {
+            throw SimFramebufferError.ioUnavailable
+        }
+        ioClient = io
+
+        io.perform(NSSelectorFromString("updateIOPorts"))
+        guard let ports = io.value(forKey: "deviceIOPorts") as? [NSObject] else {
+            throw SimFramebufferError.noFramebuffer
+        }
+
+        let pidSel = NSSelectorFromString("portIdentifier")
+        let descSel = NSSelectorFromString("descriptor")
+        let surfSel = NSSelectorFromString("framebufferSurface")
+
+        for port in ports where port.responds(to: pidSel) {
+            guard let pid = port.perform(pidSel)?.takeUnretainedValue(),
+                  "\(pid)" == "com.apple.framebuffer.display",
+                  port.responds(to: descSel),
+                  let desc = port.perform(descSel)?.takeUnretainedValue() as? NSObject,
+                  desc.responds(to: surfSel) else { continue }
+            descriptors.append(desc)
+        }
+        guard !descriptors.isEmpty else { throw SimFramebufferError.noFramebuffer }
+        simLogErr("[sim-preview] framebuffer descriptors: \(descriptors.count)")
+
+        for desc in descriptors { try register(on: desc) }
+
+        // Nothing composites on an idle screen, so the callback alone can
+        // leave the window empty until the user touches something. Prime it
+        // with whatever is on screen right now.
+        queue.async { [weak self] in self?.captureLatest() }
+    }
+
+    func stop() {
+        let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
+        for desc in descriptors {
+            if let uuid = callbackUUIDs[ObjectIdentifier(desc)], desc.responds(to: unregSel) {
+                desc.perform(unregSel, with: uuid)
+            }
+        }
+        descriptors.removeAll()
+        callbackUUIDs.removeAll()
+        ioClient = nil
+    }
+
+    private func register(on desc: NSObject) throws {
+        let regSel = NSSelectorFromString(
+            "registerScreenCallbacksWithUUID:callbackQueue:frameCallback:" +
+                "surfacesChangedCallback:propertiesChangedCallback:"
+        )
+        guard desc.responds(to: regSel),
+              let imp = class_getMethodImplementation(type(of: desc), regSel) else {
+            throw SimFramebufferError.callbackUnavailable
+        }
+
+        let uuid = NSUUID()
+        callbackUUIDs[ObjectIdentifier(desc)] = uuid
+
+        let frame: @convention(block) () -> Void = { [weak self] in
+            self?.queue.async { self?.captureLatest() }
+        }
+        let surfaces: @convention(block) () -> Void = { [weak self] in
+            self?.queue.async { self?.captureLatest() }
+        }
+        let props: @convention(block) () -> Void = {}
+
+        typealias Fn = @convention(c) (
+            AnyObject, Selector, AnyObject, AnyObject, AnyObject, AnyObject, AnyObject
+        ) -> Void
+        unsafeBitCast(imp, to: Fn.self)(
+            desc, regSel,
+            uuid, queue as AnyObject,
+            frame as AnyObject, surfaces as AnyObject, props as AnyObject
+        )
+    }
+
+    private func captureLatest() {
+        let surfSel = NSSelectorFromString("framebufferSurface")
+        var best: IOSurface?
+        var bestArea = 0
+        for desc in descriptors {
+            guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { continue }
+            let surf = unsafeBitCast(surfObj, to: IOSurface.self)
+            let area = IOSurfaceGetWidth(surf) * IOSurfaceGetHeight(surf)
+            if area > bestArea {
+                best = surf
+                bestArea = area
+            }
+        }
+        if let best { onSurface(best) }
+    }
+}
+
+func simStateName(_ state: Int) -> String {
+    switch state {
+    case 0: return "creating"
+    case 1: return "shutdown"
+    case 2: return "booting"
+    case 3: return "booted"
+    case 4: return "shutting down"
+    default: return "unknown(\(state))"
+    }
+}
+
+/// Window that renders simulator frames. Mirrors `PreviewSession`'s shape so
+/// the two can collapse behind one frame-source protocol later.
+final class SimPreviewWindow: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    var onWindowClosed: ((String) -> Void)?
+
+    private let udid: String
+    private let viaCGImage: Bool
+    private let contentLayer = CALayer()
+    private var framebuffer: SimFramebuffer?
+
+    // Frames arrive faster than AppKit needs to draw them. Keep only the
+    // newest and coalesce: an older frame is worthless the moment a newer
+    // one exists, and queueing every callback onto main is how you build a
+    // preview that runs seconds behind the device.
+    private let lock = NSLock()
+    private var pending: IOSurface?
+    private var scheduled = false
+
+    private var sizedToContent = false
+    private var frameCount = 0
+    private var lastReport = Date()
+
+    init(udid: String, viaCGImage: Bool) {
+        self.udid = udid
+        self.viaCGImage = viaCGImage
+
+        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let w: CGFloat = 400
+        let h: CGFloat = 710
+        window = NSWindow(
+            contentRect: NSRect(x: 50, y: screenFrame.height - h - 80, width: w, height: h),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Simulator \(udid.prefix(8))"
+        window.isReleasedWhenClosed = false
+
+        contentLayer.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        contentLayer.contentsGravity = .resizeAspect
+        contentLayer.backgroundColor = NSColor.black.cgColor
+        contentLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        view.layer = contentLayer
+        view.wantsLayer = true
+        window.contentView = view
+
+        super.init()
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func start() throws {
+        let fb = SimFramebuffer(udid: udid) { [weak self] surface in
+            self?.present(surface)
+        }
+        try fb.start()
+        framebuffer = fb
+    }
+
+    func stop() {
+        framebuffer?.stop()
+        framebuffer = nil
+        window.delegate = nil
+        window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        framebuffer?.stop()
+        framebuffer = nil
+        onWindowClosed?(udid)
+    }
+
+    private func present(_ surface: IOSurface) {
+        lock.lock()
+        pending = surface
+        let alreadyScheduled = scheduled
+        scheduled = true
+        lock.unlock()
+
+        guard !alreadyScheduled else { return }
+        DispatchQueue.main.async { [weak self] in self?.drain() }
+    }
+
+    private func drain() {
+        lock.lock()
+        let surface = pending
+        pending = nil
+        scheduled = false
+        lock.unlock()
+
+        guard let surface else { return }
+        render(surface)
+        reportRate()
+    }
+
+    private func render(_ surface: IOSurface) {
+        if !sizedToContent {
+            sizeToSurface(surface)
+            sizedToContent = true
+        }
+        // Implicit animation would cross-fade every single frame.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentLayer.contents = viaCGImage ? (cgImage(from: surface) as Any?) : (surface as Any?)
+        CATransaction.commit()
+    }
+
+    private func sizeToSurface(_ surface: IOSurface) {
+        let pw = CGFloat(IOSurfaceGetWidth(surface))
+        let ph = CGFloat(IOSurfaceGetHeight(surface))
+        guard pw > 0, ph > 0 else { return }
+        simLogErr("[sim-preview] surface \(Int(pw))x\(Int(ph)) px")
+
+        let targetWidth: CGFloat = 400
+        let size = NSSize(width: targetWidth, height: (targetWidth * ph / pw).rounded())
+        window.setContentSize(size)
+        contentLayer.frame = NSRect(origin: .zero, size: size)
+    }
+
+    /// Fallback render path. `CALayer.contents` takes an IOSurface directly,
+    /// which keeps the frame on the GPU; this copies it through CGContext
+    /// instead. Kept behind a flag so a format mismatch on some runtime is a
+    /// one-word change rather than a rewrite.
+    private func cgImage(from surface: IOSurface) -> CGImage? {
+        IOSurfaceLock(surface, .readOnly, nil)
+        defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: IOSurfaceGetBaseAddress(surface),
+                  width: IOSurfaceGetWidth(surface),
+                  height: IOSurfaceGetHeight(surface),
+                  bitsPerComponent: 8,
+                  bytesPerRow: IOSurfaceGetBytesPerRow(surface),
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                      | CGImageAlphaInfo.premultipliedFirst.rawValue
+              ) else { return nil }
+        return ctx.makeImage()
+    }
+
+    private func reportRate() {
+        frameCount += 1
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastReport)
+        guard elapsed >= 1.0 else { return }
+        let fps = Double(frameCount) / elapsed
+        simLogErr(String(format: "[sim-preview] %.1f fps", fps))
+        frameCount = 0
+        lastReport = now
+    }
+}
+
+// MARK: - Simulator mode app delegate
+
+class SimAppDelegate: NSObject, NSApplicationDelegate {
+    private let udid: String
+    private let viaCGImage: Bool
+    private var preview: SimPreviewWindow?
+
+    init(udid: String, viaCGImage: Bool) {
+        self.udid = udid
+        self.viaCGImage = viaCGImage
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        loadAppIcon()
+        let preview = SimPreviewWindow(udid: udid, viaCGImage: viaCGImage)
+        preview.onWindowClosed = { _ in NSApplication.shared.terminate(nil) }
+        do {
+            try preview.start()
+            self.preview = preview
+            simLogErr("[sim-preview] streaming \(udid)")
+        } catch {
+            simLogErr("[sim-preview] failed: \(error)")
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+}
+
 // MARK: - Main
 
 setlinebuf(stdout)
@@ -1014,6 +1488,8 @@ let delegate: NSApplicationDelegate
 switch mode {
 case .interactive:
     delegate = InteractiveDelegate()
+case .simUDID(let udid, let viaCGImage):
+    delegate = SimAppDelegate(udid: udid, viaCGImage: viaCGImage)
 default:
     delegate = AppDelegate(mode: mode)
 }
