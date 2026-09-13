@@ -228,6 +228,7 @@ class DeviceController(DeviceControllerUI):
                 requested=site.requested,
                 required_by=site.required_by,
                 upgrade_note=upgrade_note(site),
+                diagnostic=site.diagnostic,
             )
             for site in await collect_sites()
         ]

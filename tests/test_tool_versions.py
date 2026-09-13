@@ -405,3 +405,89 @@ class TestAWarningOnStderrCannotOutrankTheVersion:
 
         assert parse_version(self.WARNING + "\n11.12.4\n") == "2.6.3"
         assert parse_version("11.12.4\n") == "11.12.4"
+
+
+class TestAToolThatWorksButComplains:
+    """#154's follow-up: surface the warning instead of discarding it.
+
+    Before the parse fix quern *misread* this text as the tool's version. After
+    it, quern would have thrown it away entirely -- a quieter failure than the
+    loud one, and arguably worse, because the environment is still wrong and
+    now nothing says so.
+
+    The sample is captured verbatim from a real reproduction: pymobiledevice3
+    11.12.4 on Python 3.14.5 with requests 2.32.3, whose check_compatibility
+    bounds chardet below 6.0.0 while ASGIWebDAV pulls in 7.6.0.
+    """
+
+    REAL_STDERR = (
+        "/tmp/repro314/lib/python3.14/site-packages/requests/__init__.py:113: "
+        "RequestsDependencyWarning: urllib3 (2.7.0) or chardet (7.6.0)"
+        "/charset_normalizer (3.5.1) doesn't match a supported version!\n"
+        "  warnings.warn(\n"
+    )
+
+    def _tool(self, tmp_path, *, stdout: str, stderr: str):
+        import json as _json
+
+        script = tmp_path / "fake_tool.py"
+        script.write_text(
+            "import sys\n"
+            f"sys.stderr.write({_json.dumps(stderr)})\n"
+            f"sys.stdout.write({_json.dumps(stdout)})\n"
+        )
+        return str(script)
+
+    async def test_the_version_is_right_and_the_complaint_is_kept(self, tmp_path):
+        import sys
+
+        from server.device.tool_versions import probe_version
+
+        tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.REAL_STDERR)
+        version, diagnostic = await probe_version(sys.executable, [tool])
+        assert version == "11.12.4"
+        assert diagnostic is not None
+        assert "RequestsDependencyWarning" in diagnostic
+        assert "chardet (7.6.0)" in diagnostic
+
+    async def test_the_file_path_prefix_is_dropped(self, tmp_path):
+        # It names a file inside someone else's venv, is longer than the
+        # message, and there is nothing the reader can do with it.
+        import sys
+
+        from server.device.tool_versions import probe_version
+
+        tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.REAL_STDERR)
+        _, diagnostic = await probe_version(sys.executable, [tool])
+        assert not diagnostic.startswith("/")
+        assert "site-packages" not in diagnostic
+        assert diagnostic.startswith("RequestsDependencyWarning")
+
+    async def test_only_the_first_line(self, tmp_path):
+        # Warnings are followed by the source line that raised them, which is
+        # noise to anyone not editing that library.
+        import sys
+
+        from server.device.tool_versions import probe_version
+
+        tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.REAL_STDERR)
+        _, diagnostic = await probe_version(sys.executable, [tool])
+        assert "warnings.warn" not in diagnostic
+
+    async def test_a_healthy_tool_reports_nothing(self, tmp_path):
+        import sys
+
+        from server.device.tool_versions import probe_version
+
+        tool = self._tool(tmp_path, stdout="1.0.41\n", stderr="")
+        assert await probe_version(sys.executable, [tool]) == ("1.0.41", None)
+
+    async def test_stderr_used_as_the_version_is_not_also_a_complaint(self, tmp_path):
+        # When stdout is empty, stderr *is* the answer. Reporting it twice --
+        # once as the version and once as a grievance -- would be nonsense.
+        import sys
+
+        from server.device.tool_versions import probe_version
+
+        tool = self._tool(tmp_path, stdout="", stderr="tool version 3.2.1\n")
+        assert await probe_version(sys.executable, [tool]) == ("3.2.1", None)

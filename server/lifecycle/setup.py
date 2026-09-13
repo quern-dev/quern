@@ -2698,6 +2698,7 @@ def _collect_sites_sync() -> list[dict]:
             "name": s.name, "role": s.role, "version": s.version,
             "path": s.path, "source": s.source, "available": s.available,
             "volatile_path": s.volatile_path, "upgrade_note": upgrade_note(s),
+            "diagnostic": s.diagnostic,
         }
         for s in sites
     ]
@@ -2778,11 +2779,18 @@ def report_tool_sites(record: bool = False) -> list[CheckResult]:
         where = site["source"]
         if site["volatile_path"]:
             where += " (per-shell path)"
+        # A tool that answered correctly but complained on the way. Reported as
+        # a warning rather than OK: nothing failed, which is exactly why it
+        # would otherwise go unnoticed until it surfaced as something else.
+        # The remedy is in the tool's own environment, so quern names it and
+        # changes nothing -- that venv is not ours to rewrite.
+        diagnostic = site.get("diagnostic")
+        notes = [n for n in (site.get("upgrade_note"), diagnostic) if n]
         results.append(CheckResult(
             name=label,
-            status=CheckStatus.OK,
+            status=CheckStatus.WARNING if diagnostic else CheckStatus.OK,
             message=f"{site['version'] or 'version unknown'} — {where}",
-            detail=site.get("upgrade_note") or "",
+            detail="; ".join(notes),
         ))
 
     results.extend(_report_drift(sites))

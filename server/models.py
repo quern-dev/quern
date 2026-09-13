@@ -1219,6 +1219,8 @@ class ToolSiteInfo(BaseModel):
     requested: bool | None = None
     required_by: list[str] = Field(default_factory=list)
     upgrade_note: str | None = None
+    diagnostic: str | None = None
+    """Something the tool complained about while still answering correctly."""
 
 
 class ToolSitesResponse(BaseModel):
