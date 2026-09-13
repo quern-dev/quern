@@ -903,3 +903,62 @@ def test_the_commands_exit_code_reaches_the_shell(monkeypatch):
         main.cli()
 
     assert exit_info.value.code == 1
+
+
+def test_a_check_that_learned_nothing_does_not_report_the_old_cache(
+    check_updates_cmd, isolated_update_files, capsys, monkeypatch
+):
+    """The quiet sibling of the stale-cache bug.
+
+    A raised exception is not the only way to learn nothing. check_for_updates
+    returns None silently when it cannot read a local version or a HEAD sha,
+    and _write_update_info swallows its own write errors -- so the check can
+    come back having produced no result while a record from days ago sits on
+    disk. Printing that as today's answer is the same false all-clear.
+    """
+    from server.lifecycle import update_check
+    _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: None)
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+    code = check_updates_cmd()
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "0.17.0" not in captured.out
+    assert "no result" in captured.err
+
+
+def test_a_cache_this_run_wrote_is_reported(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # The other side: a record written by this very check must be trusted, or
+    # the freshness test would reject every answer and the command could never
+    # report anything.
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.17.0", "update_available": True}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        code = check_updates_cmd()
+
+    assert code == 0
+    assert "Update available" in capsys.readouterr().out
+
+
+def test_a_record_with_no_timestamp_is_not_trusted(
+    check_updates_cmd, isolated_update_files, capsys, monkeypatch
+):
+    # No way to tell which run it belongs to, and guessing optimistically is
+    # what reports a stale "up to date".
+    from server.lifecycle import update_check
+    (isolated_update_files / "update-info.json").write_text(
+        json.dumps({"current_version": "0.16.1", "update_available": False})
+    )
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: None)
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+    assert check_updates_cmd() == 1
+    assert "Up to date" not in capsys.readouterr().out

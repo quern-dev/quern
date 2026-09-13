@@ -21,8 +21,9 @@ manager with a **Restart to Update** action.
 - **Check for Updates…** — shown instead, when nothing is staged. That cache is
   refreshed at most once a day, so without this a release landing in the
   afternoon would not be offered until tomorrow and there was no way to ask.
-  Runs `quern check-updates`, which skips the rate limit but not the
-  `update_check: false` opt-out — someone who turned checking off did not ask.
+  Runs `quern check-updates`, which skips the once-a-day rate limit and the
+  `update_check: false` opt-out alike: that setting turns off the *automatic*
+  check, and clicking this is not one.
   A check that finds nothing says so, because a menu identical before and after
   is indistinguishable from a dead item.
 - **Start on launch** — launching the app starts the daemon, unless it is

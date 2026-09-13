@@ -138,7 +138,11 @@ enum FlagTests {
                 DispatchQueue.global().async(group: group) { flag.set() }
                 DispatchQueue.global().async(group: group) { _ = flag.isSet }
             }
-            group.wait()
+            // Bounded. An unbalanced lock in `set` or `isSet` would deadlock
+            // here, and an untimed wait turns that into a CI job that hangs
+            // until the runner kills it -- with no failing test to point at.
+            let finished = group.wait(timeout: .now() + 10) == .success
+            Harness.expect(finished, "the flag deadlocked")
             Harness.expect(flag.isSet, true, "settled")
         }
     }

@@ -30,6 +30,7 @@ caller's decision, and `quern update` asks first.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,43 +62,98 @@ CLI_FLOORS: dict[tuple[str, str], str] = {}
 ACTION_ORDER = ("upgrade_required", "upgrade_available", "current", "unmanaged", "unknown")
 
 
+def _resolved(path: Path) -> Path | None:
+    """`path` with symlinks followed, or None if it cannot be read.
+
+    Both RuntimeError and OSError. `Path.resolve()` does not agree with itself
+    across versions about how an unreadable path fails -- a symlink loop raises
+    RuntimeError on 3.12 and resolves without complaint on 3.11 and 3.13 -- and
+    catching only OSError let the 3.12 case escape into the tool-update plan.
+    """
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _pipx_homes() -> tuple[list[Path], Path]:
+    """Where pipx keeps per-user venvs, and where it keeps global ones.
+
+    Both are configurable, and the defaults have moved: the per-user home was
+    `~/.local/pipx` before pipx 1.5 and `~/Library/Application Support/pipx`
+    after, so both are candidates when `PIPX_HOME` is unset. The global default
+    is `/opt/pipx`.
+    """
+    user_env = os.environ.get("PIPX_HOME")
+    user = [Path(user_env)] if user_env else [
+        Path.home() / ".local" / "pipx",
+        Path.home() / "Library" / "Application Support" / "pipx",
+    ]
+    return user, Path(os.environ.get("PIPX_GLOBAL_HOME", "/opt/pipx"))
+
+
+def _is_under(path: Path, root: Path) -> bool | None:
+    """Whether `path` is inside `root`. None means it could not be determined.
+
+    Three states, not two. Folding "could not read it" into False makes an
+    unreadable path look like one that is definitely elsewhere, and the caller
+    turns "definitely elsewhere" into a sudo command -- so a path nobody could
+    read would prompt for a password. Which is the one outcome this must not
+    produce on a guess.
+
+    Both sides resolved. Resolving only one compares paths from two different
+    namespaces: any symlink above the root -- and symlinking /Users/<name> to an
+    external volume is exactly how the machines this targets are set up -- makes
+    the resolved path escape the unresolved root, so a per-user install reads as
+    global.
+    """
+    here, there = _resolved(path), _resolved(root)
+    if here is None or there is None:
+        return None
+    try:
+        here.relative_to(there)
+    except ValueError:
+        return False
+    return True
+
+
 def _pipx_is_global(site: ToolSite) -> bool:
     """Whether this pipx venv belongs to root rather than to the user.
 
-    Decided by location, not by a known list of directories. pipx's global home
-    is `/opt/pipx` by default and `PIPX_GLOBAL_HOME` can move it, while the
-    per-user one has moved once already -- `~/.local/pipx` before pipx 1.5,
-    `~/Library/Application Support/pipx` after. What does not move is that a
-    per-user install lives under the user's home and a global one does not.
+    Asked of pipx's own homes rather than of the user's home directory. The
+    location test alone -- "outside $HOME means global" -- is wrong whenever
+    PIPX_HOME points somewhere else, which is supported and not rare: the venv
+    is then called global, quern offers `sudo pipx upgrade --global`, and that
+    command targets PIPX_GLOBAL_HOME rather than the environment the tool is
+    actually installed in, so it asks for a password and then fails "Package is
+    not installed". That is the failure this function exists to prevent,
+    arrived at from the other direction.
+
+    Order matters. The explicit homes are checked first and the home-relative
+    test is only the fallback, for a layout neither variable describes.
     """
     if not site.path:
         return False
-    try:
-        # Both sides resolved. Resolving only the left one compares paths from
-        # two different namespaces: any symlink above home -- and symlinking
-        # /Users/<name> to an external volume is exactly how the machines this
-        # targets are set up -- makes the resolved site path escape the
-        # unresolved home, relative_to raises, and a per-user install is called
-        # global. quern then offers `sudo pipx upgrade --global`, which asks
-        # for a password and then fails "Package is not installed": the bug
-        # this function exists to prevent, in mirror image.
-        Path(site.path).resolve().relative_to(Path.home().resolve())
-    except ValueError:
+
+    path = Path(site.path)
+    user_homes, global_home = _pipx_homes()
+
+    if _is_under(path, global_home) is True:
         return True
-    except (OSError, RuntimeError):
-        # RuntimeError as well as OSError. `Path.resolve()` does not agree with
-        # itself across versions about how an unreadable path fails -- a
-        # symlink loop raises RuntimeError on 3.12 and resolves without
-        # complaint on 3.11 and 3.13 -- and OSError alone let the 3.12 case
-        # escape into the tool-update plan. Both are caught rather than
-        # whichever this interpreter happens to raise, since the supported
-        # range is 3.11+.
-        #
-        # Cannot tell. The per-user command is the one that needs no password,
-        # so it is the safer guess: it fails loudly rather than prompting for
-        # credentials on the strength of something we could not read.
+    if any(_is_under(path, home) is True for home in user_homes):
         return False
-    return False
+
+    # Neither home claims it. Fall back to the original question, which is
+    # right for a default layout and is all there was before.
+    #
+    # Cannot tell means do not ask for credentials. The per-user command is the
+    # safer guess: it fails loudly rather than prompting for a password on the
+    # strength of something we could not read.
+    # `is False`, not `not`. None means the path could not be read at all, and
+    # the safe answer there is the command that needs no password: it fails
+    # loudly rather than prompting for credentials on the strength of something
+    # nobody could look at.
+    return _is_under(path, Path.home()) is False
 
 
 @dataclass

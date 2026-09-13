@@ -1453,3 +1453,57 @@ async def test_a_relocated_global_pipx_home_is_still_global():
 
     assert update.needs_root is True
     assert "--global" in update.command
+
+
+@pytest.mark.asyncio
+async def test_a_relocated_pipx_home_is_still_per_user(tmp_path, monkeypatch):
+    """PIPX_HOME outside the home directory must not read as global.
+
+    The location test on its own -- "outside $HOME means global" -- gets this
+    exactly backwards. quern would offer `sudo pipx upgrade --global`, which
+    targets PIPX_GLOBAL_HOME rather than the environment the tool is installed
+    in, so it asks for a password and then fails "Package is not installed".
+    That is the failure this whole branch exists to prevent, reached from the
+    other direction.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    pipx_home = tmp_path / "elsewhere" / "pipx"
+    (pipx_home / "venvs" / "pymobiledevice3" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("PIPX_HOME", str(pipx_home))
+
+    site = _site(
+        source="pipx", version="9.15.1",
+        path=str(pipx_home / "venvs/pymobiledevice3/bin/pymobiledevice3"),
+    )
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is False
+    assert "--global" not in update.command
+
+
+@pytest.mark.asyncio
+async def test_a_relocated_global_home_is_still_global(tmp_path, monkeypatch):
+    """And the same in reverse: PIPX_GLOBAL_HOME moved, under the user's home.
+
+    Nothing says a relocated global home cannot sit inside $HOME, and the
+    location test would then call a genuinely global install per-user and offer
+    an upgrade with no sudo, which fails on permissions.
+    """
+    async def pypi(_name):
+        return "11.12.4"
+
+    global_home = tmp_path / "shared-pipx"
+    (global_home / "venvs" / "pymobiledevice3" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("PIPX_GLOBAL_HOME", str(global_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    site = _site(
+        source="pipx", version="9.15.1",
+        path=str(global_home / "venvs/pymobiledevice3/bin/pymobiledevice3"),
+    )
+    update = _by_name(await _plan([site], pypi=pypi), "pymobiledevice3")
+
+    assert update.needs_root is True
+    assert "--global" in update.command

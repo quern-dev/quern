@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -607,16 +608,31 @@ def _installed_version() -> str | None:
 
 def _write_result(outcome: str, detail: str, version: str | None = None) -> None:
     """Record the outcome. Best-effort: a failed write must not fail the update."""
+    payload = json.dumps({
+        "outcome": outcome,
+        "detail": detail,
+        "version": version,
+        "finished_at": datetime.now(UTC).isoformat(),
+    }, indent=2)
     try:
         RESULT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        RESULT_FILE.write_text(json.dumps({
-            "outcome": outcome,
-            "detail": detail,
-            "version": version,
-            "finished_at": datetime.now(UTC).isoformat(),
-        }, indent=2))
+        # Written aside and moved into place, not written over. The menu bar
+        # reads this file while the CLI writes it, and `write_text` truncates
+        # first -- so a read landing in that window gets a partial document.
+        # `os.replace` is atomic within a filesystem, so a reader sees either
+        # the old file or the new one. Same directory for that reason: a move
+        # across filesystems is a copy, and the window comes back.
+        tmp = RESULT_FILE.with_name(f".{RESULT_FILE.name}.{os.getpid()}.tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, RESULT_FILE)
     except OSError:
-        pass
+        # Best-effort. Losing the record costs a caller its shortcut and it
+        # falls back to the version poll; failing here would cost the user the
+        # update.
+        try:
+            tmp.unlink(missing_ok=True)
+        except (OSError, NameError, UnboundLocalError):
+            pass
 
 
 def run_update(apply_tools: bool = False) -> int:
@@ -652,8 +668,15 @@ def run_update(apply_tools: bool = False) -> int:
         # caller to wait for. External tools age independently of quern, so
         # they are still reported.
         tools_ok = _report_tool_updates(apply_tools)
+        if not tools_ok:
+            # A success marker must not survive a failure. Recording "nothing
+            # to do" and then returning 1 leaves the file saying the run went
+            # fine while the exit code says it did not, and the file is the
+            # durable one -- it is what anybody reads afterwards.
+            _write_result(FAILED, "a tool upgrade failed")
+            return 1
         _write_result(NO_OP, "already up to date", version=_installed_version())
-        return 0 if tools_ok else 1
+        return 0
 
     failures = _rebuild_and_restart(project_root)
 
@@ -672,5 +695,13 @@ def run_update(apply_tools: bool = False) -> int:
         _write_result(FAILED, f"{', '.join(failures)} failed")
         return 1
 
+    if not tools_ok:
+        # quern itself updated, but a tool upgrade the caller asked for did
+        # not, and that is what the exit code reports. The record agrees rather
+        # than claiming the whole run succeeded.
+        _write_result(FAILED, "quern updated, but a tool upgrade failed",
+                      version=_installed_version())
+        return 1
+
     _write_result(UPDATED, "update applied", version=_installed_version())
-    return 0 if tools_ok else 1
+    return 0

@@ -8,6 +8,7 @@ step must be skipped when the user isn't actually on that branch.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -652,3 +653,89 @@ class TestTheUpdateRecord:
         monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
 
         assert updater.run_update() == 0
+
+    def test_a_failed_tool_upgrade_is_not_recorded_as_success(
+        self, sandbox, monkeypatch
+    ):
+        """The exit code and the record must not disagree.
+
+        `_report_tool_updates` returning False makes `run_update` return 1.
+        Recording NO_OP or UPDATED alongside that leaves the file -- the
+        durable artefact, the one anybody reads afterwards -- saying the run
+        went fine while the exit code says it did not.
+        """
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: False)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        assert updater.run_update(apply_tools=True) == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_a_failed_tool_upgrade_after_a_real_update_is_also_recorded(
+        self, sandbox, monkeypatch
+    ):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 0)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _r: [])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: False)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+
+        assert updater.run_update(apply_tools=True) == 1
+        assert self._read(updater)["outcome"] == updater.FAILED
+
+    def test_the_record_is_swapped_in_never_written_over(
+        self, sandbox, monkeypatch
+    ):
+        """The menu bar reads this file while the CLI writes it.
+
+        `write_text` truncates first, so a read landing in that window gets a
+        partial document. Asserted by watching how the file is produced rather
+        than by racing a reader against it, which would be a flaky test of the
+        same thing.
+        """
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        replaced = []
+        real_replace = os.replace
+        monkeypatch.setattr(
+            updater.os, "replace",
+            lambda src, dst: replaced.append((str(src), str(dst))) or real_replace(src, dst),
+        )
+
+        updater.run_update()
+
+        assert replaced, "the record was written in place rather than swapped in"
+        src, dst = replaced[-1]
+        assert dst == str(updater.RESULT_FILE)
+        # Same directory, or the "move" is a copy and the window reopens.
+        assert Path(src).parent == updater.RESULT_FILE.parent
+        assert self._read(updater)["outcome"] == updater.NO_OP
+
+    def test_a_failed_swap_leaves_no_temporary_file_behind(
+        self, sandbox, monkeypatch
+    ):
+        updater = sandbox
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/x"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.16.1")
+
+        def boom(_src, _dst):
+            raise OSError(18, "Invalid cross-device link")
+
+        monkeypatch.setattr(updater.os, "replace", boom)
+
+        assert updater.run_update() == 0, "a lost record must not fail the update"
+        leftovers = list(updater.RESULT_FILE.parent.glob(".*tmp"))
+        assert leftovers == [], f"left behind: {leftovers}"
