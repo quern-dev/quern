@@ -693,3 +693,56 @@ async def test_state_writes_never_block_the_event_loop(monkeypatch):
         "update_state ran on the event loop thread; it must go through "
         "asyncio.to_thread"
     )
+
+
+class TestTlsRejectionsAreKeptAsObservations:
+    """#156 phase 1: record the event, claim nothing from it.
+
+    Deliberately not written back to any device's recorded trust. Doing that
+    here would let a single hostile client on the network mark a device
+    untrusted; turning this into a `TrustClaim` is #149's job.
+    """
+
+    def _adapter(self):
+        from server.sources.proxy import ProxyAdapter
+
+        return ProxyAdapter()
+
+    def test_a_rejection_is_recorded_with_who_and_what_and_when(self):
+        a = self._adapter()
+        a._handle_tls_rejected(
+            {"sni": "www.apple.com", "client_ip": "192.168.1.50",
+             "timestamp": 1789342844.95}
+        )
+        (entry,) = list(a._tls_rejections)
+        assert entry["sni"] == "www.apple.com"
+        assert entry["client_ip"] == "192.168.1.50"
+        assert entry["at"].startswith("2026-"), entry["at"]
+
+    def test_it_is_bounded(self):
+        # A retrying app produces one of these per attempt, and the proxy is a
+        # long-lived process.
+        a = self._adapter()
+        for i in range(120):
+            a._handle_tls_rejected({"sni": f"h{i}", "client_ip": "1.2.3.4"})
+        assert len(a._tls_rejections) == 50
+        assert list(a._tls_rejections)[-1]["sni"] == "h119", "newest must survive"
+
+    def test_a_missing_timestamp_does_not_lose_the_event(self):
+        a = self._adapter()
+        a._handle_tls_rejected({"sni": "h", "client_ip": None})
+        assert len(a._tls_rejections) == 1
+        assert list(a._tls_rejections)[0]["at"]
+
+    def test_nothing_is_written_to_the_cert_record(self, monkeypatch):
+        wrote = []
+        monkeypatch.setattr(
+            "server.proxy.cert_state.update_cert_state",
+            lambda *a, **k: wrote.append(a),
+        )
+        a = self._adapter()
+        a._handle_tls_rejected({"sni": "www.apple.com", "client_ip": "1.2.3.4"})
+        assert not wrote, (
+            "phase 1 recorded a verdict; a hostile client could mark a device "
+            "untrusted"
+        )

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -130,6 +131,9 @@ class ProxyAdapter(BaseSourceAdapter):
         # Intercept state (server-side mirror of addon state)
         self._intercept_pattern: str | None = None
         self._held_flows: dict[str, dict] = {}  # flow_id -> {id, held_at, request}
+        #: Clients that refused our certificate, newest last. Bounded because a
+        #: retrying app produces one per attempt and this process is long-lived.
+        self._tls_rejections: deque[dict] = deque(maxlen=50)
         self._intercept_event: asyncio.Event = asyncio.Event()
 
         # Mock state (server-side mirror)
@@ -332,6 +336,10 @@ class ProxyAdapter(BaseSourceAdapter):
         self._held_flows.clear()
         self._mock_rules.clear()
         self._bypass_patterns.clear()
+        # Rejections too. Restarting the proxy is what someone does *after*
+        # installing the cert, so carrying them across would report a problem
+        # they have just fixed.
+        self._tls_rejections.clear()
 
         logger.info("Proxy adapter stopped")
 
@@ -538,6 +546,8 @@ class ProxyAdapter(BaseSourceAdapter):
                     await self._handle_mock_hit(data)
                 elif msg_type == "status":
                     await self._handle_status_event(data)
+                elif msg_type == "tls_rejected":
+                    self._handle_tls_rejected(data)
                 elif msg_type == "error":
                     logger.warning("Addon error: %s", data)
         except asyncio.CancelledError:
@@ -562,6 +572,32 @@ class ProxyAdapter(BaseSourceAdapter):
             raise
         except Exception:
             pass
+
+    def _handle_tls_rejected(self, data: dict) -> None:
+        """A client refused our certificate.
+
+        Kept as an observation, deliberately: it is not yet allowed to change
+        any device's recorded trust. Writing it back is the `TrustClaim` work
+        in #149, and doing it here would mean a single hostile client on the
+        network could mark a device untrusted. Recording and reporting is the
+        whole of phase 1.
+
+        Bounded, because an app retrying a rejected handshake produces one of
+        these per attempt and this is a long-lived process.
+        """
+        entry = {
+            "sni": data.get("sni"),
+            "client_ip": data.get("client_ip"),
+            "at": datetime.fromtimestamp(
+                data.get("timestamp") or time.time(), tz=UTC,
+            ).isoformat(),
+        }
+        self._tls_rejections.append(entry)
+        logger.warning(
+            "Client %s refused our certificate for %s -- that device does not "
+            "trust the mitmproxy CA",
+            entry["client_ip"] or "?", entry["sni"] or "?",
+        )
 
     async def _handle_flow(self, data: dict) -> None:
         """Process a flow event from the addon."""

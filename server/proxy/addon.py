@@ -428,6 +428,50 @@ class IOSDebugAddon:
         if sni and self._is_bypassed(sni):
             data.ignore_connection = True
 
+    def tls_failed_client(self, data: Any) -> None:
+        """A client refused the certificate we offered it.
+
+        The most direct evidence there is that a device does not trust our CA,
+        and until now the only hook that saw it was absent -- `error` fires for
+        an `http.HTTPFlow`, and a handshake the client aborts never becomes
+        one. So a rejection left no trace anywhere: no flow, no error, nothing
+        in the log, and `proxy_status` still reporting no warnings.
+
+        Measured: a simulator refused `www.apple.com`, said so on its own screen
+        in plain language, and quern recorded nothing at all. See #156.
+
+        Worth more than it looks for a *physical* device, which cannot be asked
+        the way a simulator's TrustStore can. A client that rejects our
+        certificate has demonstrated the answer.
+
+        Bypassed hosts are skipped: their TLS is never terminated by us
+        (`tls_clienthello` sets `ignore_connection`), so a failure there is
+        between the client and the real server and says nothing about our CA.
+        """
+        try:
+            conn = getattr(data, "conn", None)
+            sni = getattr(conn, "sni", None) or getattr(
+                data.context.client, "sni", None
+            )
+            if isinstance(sni, bytes):
+                sni = sni.decode("utf-8", errors="replace")
+            if sni and self._is_bypassed(sni):
+                return
+
+            peer = getattr(data.context.client, "peername", None)
+            _write_json({
+                "type": "tls_rejected",
+                "sni": sni,
+                "client_ip": peer[0] if peer else None,
+                "error": str(getattr(conn, "error", None) or ""),
+                "timestamp": time.time(),
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            # Never raise out of a hook: an exception here would take down TLS
+            # handling for every connection, to report a diagnostic.
+            _write_json({"type": "error", "where": "tls_failed_client",
+                         "detail": str(exc)})
+
     def request(self, flow: http.HTTPFlow) -> None:
         """Called when a request is received. Check mocks first, then intercept."""
         # Apply host filter

@@ -568,3 +568,113 @@ class TestAlwaysBypass:
         data.ignore_connection = False
         addon.tls_clienthello(data)
         assert data.ignore_connection is False
+
+
+# ---------------------------------------------------------------------------
+# A client refusing our certificate (#156)
+# ---------------------------------------------------------------------------
+
+
+class TestTlsRejectionIsRecorded:
+    """`error` fires for an http.HTTPFlow, and a handshake the client aborts
+    never becomes one -- so a rejection used to leave no trace at all.
+
+    Verified against a real mitmdump before these were written: an untrusting
+    client produced one event naming the SNI, the client IP and "tlsv1 alert
+    unknown ca"; a trusting client produced none; a bypassed host produced none.
+    These pin the logic that decides which of those three it is.
+    """
+
+    def _data(self, sni="example.com", peer=("10.0.0.5", 51234), error="unknown ca"):
+        data = MagicMock()
+        data.conn.sni = sni
+        data.conn.error = error
+        data.context.client.sni = sni
+        data.context.client.peername = peer
+        return data
+
+    def test_a_rejection_names_the_device_and_the_host(self):
+        addon = IOSDebugAddon()
+        captured = CapturedOutput()
+        captured.install()
+        try:
+            addon.tls_failed_client(self._data())
+        finally:
+            captured.restore()
+
+        events = captured.of_type("tls_rejected")
+        assert len(events) == 1, "a client refusing our cert recorded nothing"
+        assert events[0]["sni"] == "example.com"
+        assert events[0]["client_ip"] == "10.0.0.5", (
+            "without the client IP the event cannot be attributed to a device"
+        )
+        assert events[0]["timestamp"]
+
+    def test_a_bypassed_host_is_not_reported(self):
+        """Its TLS is never terminated by us, so a failure there is between the
+        client and the real server and says nothing about our CA."""
+        addon = IOSDebugAddon()
+        captured = CapturedOutput()
+        captured.install()
+        try:
+            addon.tls_failed_client(self._data(sni="quern.dev"))
+        finally:
+            captured.restore()
+
+        assert not captured.of_type("tls_rejected")
+
+    def test_a_bytes_sni_is_decoded_not_stringified(self):
+        """b"example.com" must reach the report as `example.com`.
+
+        Asserted on the *recorded value*, not on the absence of an event. An
+        earlier version of this test checked that a bytes bypassed host emitted
+        nothing -- which passed without the decode too, because `fnmatch` raises
+        on bytes-vs-str and the defensive handler swallowed it into an `error`
+        event. Green, for the wrong reason, twice over.
+        """
+        addon = IOSDebugAddon()
+        captured = CapturedOutput()
+        captured.install()
+        try:
+            addon.tls_failed_client(self._data(sni=b"example.com"))
+        finally:
+            captured.restore()
+
+        assert not captured.of_type("error"), "the hook fell into its handler"
+        (event,) = captured.of_type("tls_rejected")
+        assert event["sni"] == "example.com", (
+            "a bytes SNI reached the report as its repr"
+        )
+
+    def test_a_bytes_sni_is_still_matched_against_the_bypass_list(self):
+        addon = IOSDebugAddon()
+        captured = CapturedOutput()
+        captured.install()
+        try:
+            addon.tls_failed_client(self._data(sni=b"quern.dev"))
+        finally:
+            captured.restore()
+
+        assert not captured.of_type("tls_rejected"), (
+            "a bytes SNI slipped past the bypass check"
+        )
+        assert not captured.of_type("error"), (
+            "it was 'bypassed' by raising, not by matching"
+        )
+
+    def test_the_hook_never_raises(self):
+        """An exception out of a TLS hook would take down handling for every
+        connection, to report a diagnostic."""
+        addon = IOSDebugAddon()
+        broken = MagicMock()
+        type(broken).conn = property(lambda _self: (_ for _ in ()).throw(RuntimeError("boom")))
+        captured = CapturedOutput()
+        captured.install()
+        try:
+            addon.tls_failed_client(broken)  # must not raise
+        finally:
+            captured.restore()
+
+        assert captured.of_type("error"), (
+            "the failure was swallowed without a word"
+        )

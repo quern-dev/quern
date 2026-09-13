@@ -511,6 +511,12 @@ class ProxyStatusResponse(BaseModel):
     active_filter: str | None = None
     active_intercept: str | None = None
     held_flows_count: int = 0
+    tls_rejections: list[dict] = Field(default_factory=list)
+    """Clients that refused our certificate since the proxy started.
+
+    An observation, not a verdict: it says a device rejected the CA at a time,
+    not what any device's recorded trust should become. Newest last, bounded.
+    """
     mock_rules_count: int = 0
     bypass_patterns: list[str] = Field(default_factory=list)
     error: str | None = None
