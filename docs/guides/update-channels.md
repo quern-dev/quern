@@ -87,3 +87,8 @@ to report it — beta is genuinely useful, and switching back takes two commands
 
 The daily update notice respects your channel, so on beta it tells you about
 beta releases rather than nagging you toward stable.
+
+You do not have to wait for it. `quern check-updates` asks now, and the
+menu-bar app has **Check for Updates** for the same thing — worth knowing on
+beta, where releases land closer together than the once-a-day check. Both keep
+working even if you turn the automatic check off.

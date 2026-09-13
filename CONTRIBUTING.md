@@ -172,6 +172,17 @@ The proxy follows an **opt-in capture** model:
 
 Never auto-configure the system proxy. Never leave it configured when not actively testing.
 
+**The proxy never intercepts quern's own traffic.** `ALWAYS_BYPASS` in
+`server/proxy/addon.py` passes `quern.dev` through at `tls_clienthello`, before
+TLS is terminated, so no certificate is replaced and there is nothing to fail.
+Without it, configuring the system proxy made quern man-in-the-middle its own
+update check: urllib honours the macOS system proxy, the certificate stopped
+verifying, and the update check failed on precisely the machines running quern.
+It is deliberately *not* seeded into the user's bypass list — `clear_bypass`
+empties that, so a seed there would be silently removable, which is the same
+failure with one more step in front of it. The cost is that quern's own site
+cannot be captured through quern, which is not what this proxy is for.
+
 **The same rule governs the CA.** Installing a MITM root certificate authority
 is a *larger* commitment than a system-proxy toggle, not a smaller one: it
 persists across sessions, outlives the capture window that motivated it, and

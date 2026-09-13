@@ -90,6 +90,13 @@ not own the daemon, it asks.
 restarts into the new version. This is the Ollama pattern — no separate
 updater, no second update path.
 
+**Check for Updates.** Shown instead, when nothing is staged. The hint the
+item above depends on comes from a cache the server refreshes at most once a
+day, so a release landing this afternoon would not be offered until tomorrow
+and there was no way to ask. This asks now. A check that finds nothing says
+so, because a menu identical before and after is indistinguishable from a
+dead item.
+
 **Screen mirror.** Opens a live view of connected devices. Windows fit the
 device's own proportions, open when you plug a phone in, and close when you
 unplug it. See [Live Video Preview](ios-preview.md) for the detail.
@@ -98,7 +105,7 @@ This item is hidden if the screen-mirror app could not be built, which happens
 when Xcode Command Line Tools are missing. `quern setup` will tell you, and
 offer to open the installer.
 
-**Settings.** Three things you would otherwise reach for the CLI to change.
+**Settings.** Things you would otherwise reach for the CLI to change.
 
 *Network capture* carries "Install the capture certificate automatically". Off
 by default: capturing HTTPS needs each device to trust Quern's certificate
@@ -107,8 +114,14 @@ so Quern asks the first time. Turn this on to answer once instead. The same
 setting is `quern set-auto-install-cert`, and it is shown here so a standing
 policy is visible and reversible rather than buried in a config file.
 
-*Updates* carries the channel picker, stable or beta, the same setting as
+*Updates* carries "Check for updates automatically" and the channel picker,
+stable or beta — the same settings as `quern set-update-check` and
 `quern set-channel`.
+
+The checkbox governs the *automatic* check alone. **Check for Updates** and
+`quern check-updates` keep working when it is off, the way every updater
+leaves Check Now working when the box is unticked. Turning it off says "do
+not call home unprompted"; asking is a prompt.
 
 There are also two launch toggles, and a read-only view of the server's
 address, version and uptime, plus the full UDID of the active device — which

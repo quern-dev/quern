@@ -128,7 +128,10 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the menu-bar app reads |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
-| `config.json` | Local capture settings and other configuration |
+| `config.json` | Local capture processes, update channel, and the automatic-update-check and certificate-install settings |
+| `update-info.json` | The last update check's result — what the menu bar reads to offer an update |
+| `last-update-check` | When the automatic check last ran, so it runs at most once a day |
+| `last-update.json` | What `quern update` last did — updated, nothing to do, or failed |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
@@ -185,7 +188,9 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 ## Update Checks
 
-When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored. To disable, add `"update_check": false` to `~/.quern/config.json`.
+When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored.
+
+To turn the automatic check off, untick **Check for updates automatically** in the menu-bar app's Settings, or run `quern set-update-check off`. That governs the automatic check alone — `quern check-updates` and the menu bar's **Check for Updates** keep working, so turning it off means "do not call home unprompted" rather than "never check". The underlying setting is `"update_check": false` in `~/.quern/config.json`.
 
 ### Update channels
 
