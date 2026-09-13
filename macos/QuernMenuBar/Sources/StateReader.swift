@@ -35,6 +35,12 @@ struct UpdateInfo {
     var latestVersion: String?
     var message: String?
     var channel: String?
+    /// Whether quern checks for updates on its own.
+    ///
+    /// Defaults to true, matching the server: this is the "check
+    /// automatically" box and it starts ticked. It governs the automatic check
+    /// alone -- Check for Updates… keeps working when it is off.
+    var autoCheck = true
 }
 
 struct ActiveDevice {
@@ -201,6 +207,7 @@ final class StateReader {
     private static func readUpdateInfo() -> UpdateInfo {
         var u = UpdateInfo()
         u.channel = readChannel()
+        u.autoCheck = readAutoCheck()
         guard let d = json("update-info.json") else { return u }
         u.updateAvailable = d["update_available"] as? Bool ?? false
         u.currentVersion = d["current_version"] as? String
@@ -229,6 +236,37 @@ final class StateReader {
     ///
     /// Anything other than a real boolean reads as off. A malformed config
     /// should mean "ask me", never consent to installing a root CA.
+    /// The automatic update check, read from config.json where the server
+    /// keeps it. Not from update-info.json, which caches only a check's result.
+    ///
+    /// Note the asymmetry with `readAutoInstallCert` below, which insists on a
+    /// literal `true`. Here only a literal `false` turns it off, because that
+    /// is the rule the server applies (`is not False` in server/config.py) and
+    /// the two must not disagree -- a config the app showed as unticked while
+    /// the server kept checking would be worse than either behaviour alone.
+    /// The defaults differ for the same reason the rules do: the cost of
+    /// guessing wrong there is a root CA installed without consent, and here it
+    /// is one HTTPS request a day.
+    private static func readAutoCheck() -> Bool {
+        autoCheck(from: json("config.json")?["update_check"])
+    }
+
+    /// The rule, separated from the file so it can be tested.
+    ///
+    /// It has to match `get_update_check` in server/config.py exactly. A config
+    /// the app showed as unticked while the server carried on checking is worse
+    /// than either behaviour on its own, and nothing else would catch the two
+    /// drifting apart.
+    static func autoCheck(from raw: Any?) -> Bool {
+        guard let raw else { return true }
+        // A literal JSON `false`, not merely something falsy. JSONSerialization
+        // hands back NSNumber for both booleans and numbers, and `as? Bool`
+        // accepts a numeric 0 -- so without this check a config holding 0 would
+        // show checking disabled here while the server carried on checking.
+        guard CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID() else { return true }
+        return (raw as? Bool) != false
+    }
+
     private static func readAutoInstallCert() -> Bool {
         guard let d = json("config.json"), let raw = d["auto_install_cert"] else {
             return false

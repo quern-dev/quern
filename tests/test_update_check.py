@@ -7,9 +7,11 @@ call so test runs are deterministic.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 import urllib.error
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -63,7 +65,7 @@ def test_check_for_updates_persists_when_update_available(
 ):
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.13.4")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
 
@@ -94,7 +96,7 @@ def test_check_for_updates_persists_when_no_update(
     the system API can report when the last check ran."""
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.13.4")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
 
@@ -135,7 +137,7 @@ def test_check_for_updates_sends_the_configured_channel(
     """
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: "abc123")
     monkeypatch.setattr("server.config.get_update_channel", lambda: channel)
@@ -166,7 +168,7 @@ def test_a_channel_switch_mid_check_discards_the_result(
     """
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
 
@@ -191,7 +193,7 @@ def test_an_unchanged_channel_still_writes_the_result(
     would silently disable update notifications altogether."""
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
     monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
@@ -224,7 +226,6 @@ def test_a_switch_during_the_commit_cannot_leave_a_stale_verdict(
     from server.lifecycle import update_check
 
     config: dict = {}
-    monkeypatch.setattr(update_check, "read_user_config", lambda: config)
     monkeypatch.setattr("server.config.read_user_config", lambda: config)
     monkeypatch.setattr("server.config.USER_CONFIG_FILE",
                         isolated_update_files / "config.json")
@@ -319,7 +320,7 @@ def test_message_names_the_version_when_the_endpoint_supplies_one(
 ):
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
     monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
@@ -342,7 +343,7 @@ def test_message_falls_back_when_endpoint_omits_the_version(
     """Older quern.dev deployments returned only update_available."""
     from server.lifecycle import update_check
 
-    monkeypatch.setattr(update_check, "read_user_config", lambda: {})
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
     monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
     monkeypatch.setattr("server.config.get_update_channel", lambda: "stable")
@@ -494,7 +495,8 @@ class TestForcingACheck:
         monkeypatch.setattr(update_check, "CONFIG_DIR", tmp_path)
         monkeypatch.setattr(update_check, "UPDATE_INFO_FILE", tmp_path / "update-info.json")
         monkeypatch.setattr(update_check, "CHANNEL_LOCK_FILE", tmp_path / "channel.lock")
-        monkeypatch.setattr(update_check, "read_user_config", dict)
+        monkeypatch.setattr(update_check, "get_update_check", lambda: True)
+        monkeypatch.setattr(update_check, "get_update_check", lambda: True)
         # The request itself, which was reaching quern.dev for real. It passed
         # either way -- check_for_updates swallows the failure -- so offline it
         # went green after burning the timeout, and online it made a network
@@ -534,8 +536,10 @@ class TestForcingACheck:
     def test_the_automatic_check_respects_the_opt_out(self, monkeypatch, tmp_path):
         """What the setting is actually for: no unattended calls."""
         update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
-        monkeypatch.setattr(update_check, "read_user_config",
-                            lambda: {"update_check": False})
+        # The seam the code actually consults. The opt-out moved behind
+        # server.config.get_update_check so the CLI, the menu bar and the
+        # background check cannot disagree about what the default is.
+        monkeypatch.setattr(update_check, "get_update_check", lambda: False)
         looked = []
         monkeypatch.setattr(update_check, "_get_local_version",
                             lambda: looked.append(True) or "0.16.1")
@@ -555,8 +559,10 @@ class TestForcingACheck:
         satisfied too.
         """
         update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
-        monkeypatch.setattr(update_check, "read_user_config",
-                            lambda: {"update_check": False})
+        # The seam the code actually consults. The opt-out moved behind
+        # server.config.get_update_check so the CLI, the menu bar and the
+        # background check cannot disagree about what the default is.
+        monkeypatch.setattr(update_check, "get_update_check", lambda: False)
         looked = []
         monkeypatch.setattr(update_check, "_get_local_version",
                             lambda: looked.append(True) or "0.16.1")
@@ -732,7 +738,8 @@ def check_updates_cmd(isolated_update_files, monkeypatch):
     # Not the developer's real ~/.quern/config.json: a machine with checking
     # turned off would otherwise take every one of these down a path the test
     # is not about.
-    monkeypatch.setattr(update_check, "read_user_config", dict)
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
     from server.main import _cmd_check_updates
     return _cmd_check_updates
 
@@ -790,9 +797,7 @@ def test_the_command_still_checks_when_automatic_checking_is_off(
     # answer must come from the network, not from the cache the last check
     # before the opt-out happened to leave behind.
     from server.lifecycle import update_check
-    monkeypatch.setattr(
-        update_check, "read_user_config", lambda: {"update_check": False}
-    )
+    monkeypatch.setattr(update_check, "get_update_check", lambda: False)
     _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
     fake_resp = MagicMock()
     fake_resp.read.return_value = json.dumps(
@@ -962,3 +967,162 @@ def test_a_record_with_no_timestamp_is_not_trusted(
 
     assert check_updates_cmd() == 1
     assert "Up to date" not in capsys.readouterr().out
+
+
+# --- The automatic-check setting --------------------------------------------
+
+
+class TestTheAutomaticCheckSetting:
+    """`update_check` in config.json, and the two readers that must agree.
+
+    The menu bar reads this file itself rather than asking the server, so the
+    rule lives in two places -- `get_update_check` here and
+    `StateReader.autoCheck` in Swift. A config the app showed as unticked while
+    the server carried on checking is worse than either behaviour alone, and
+    nothing else would catch them drifting apart, so the rule is pinned here
+    value by value and mirrored in `AutoCheckReadingTests`.
+    """
+
+    @pytest.fixture
+    def config(self, tmp_path, monkeypatch):
+        from server import config as cfg
+        monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(cfg, "USER_CONFIG_FILE", tmp_path / "config.json")
+        return cfg
+
+    def _write(self, cfg, value):
+        (cfg.USER_CONFIG_FILE).write_text(json.dumps({"update_check": value}))
+
+    def test_a_missing_key_means_checking_is_on(self, config):
+        # A fresh install has no update_check key at all, and defaulting to off
+        # would silently stop checking for everyone who never set it.
+        assert config.get_update_check() is True
+
+    def test_only_a_literal_false_turns_it_off(self, config):
+        self._write(config, False)
+        assert config.get_update_check() is False
+        self._write(config, True)
+        assert config.get_update_check() is True
+
+    @pytest.mark.parametrize("value", [0, 1, "false", "off", "", None, []])
+    def test_nothing_else_counts_as_off(self, config, value):
+        # The asymmetry with auto_install_cert is deliberate. There, anything
+        # unclear must read as "ask me", because guessing wrong installs a root
+        # CA without consent. Here guessing wrong costs one HTTPS request a
+        # day, so a typo leaves checking on rather than silently disabling it.
+        self._write(config, value)
+        assert config.get_update_check() is True, f"{value!r} read as off"
+
+    def test_setting_it_round_trips(self, config):
+        config.set_update_check(False)
+        assert config.get_update_check() is False
+        config.set_update_check(True)
+        assert config.get_update_check() is True
+
+    def test_setting_it_leaves_the_rest_of_the_config_alone(self, config):
+        config.USER_CONFIG_FILE.write_text(json.dumps({
+            "auto_install_cert": True,
+            "local_capture": ["Safari"],
+        }))
+        config.set_update_check(False)
+        written = json.loads(config.USER_CONFIG_FILE.read_text())
+        assert written["auto_install_cert"] is True
+        assert written["local_capture"] == ["Safari"]
+        assert written["update_check"] is False
+
+    def test_the_config_is_swapped_in_never_written_over(self, config, monkeypatch):
+        # The menu bar polls this file while the CLI writes it, and write_text
+        # truncates first -- so a read landing in that window gets a partial
+        # document and the app's parse fails.
+        replaced = []
+        real = os.replace
+        monkeypatch.setattr(
+            config.os, "replace",
+            lambda a, b: replaced.append((str(a), str(b))) or real(a, b),
+        )
+        config.set_update_check(False)
+        assert replaced, "written in place rather than swapped in"
+        src, dst = replaced[-1]
+        assert dst == str(config.USER_CONFIG_FILE)
+        # Same directory, or the move is a copy and the window reopens.
+        assert Path(src).parent == config.USER_CONFIG_FILE.parent
+
+    def test_a_failed_write_leaves_no_temporary_behind(self, config, monkeypatch):
+        def boom(_a, _b):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(config.os, "replace", boom)
+        with pytest.raises(OSError):
+            config.set_update_check(False)
+        assert list(config.USER_CONFIG_FILE.parent.glob(".*tmp")) == []
+
+
+class TestTheSetUpdateCheckCommand:
+    """`quern set-update-check` — what the menu-bar toggle shells out to."""
+
+    @pytest.fixture
+    def run(self, tmp_path, monkeypatch):
+        from server import config as cfg
+        from server.__main__ import _cmd_set_update_check
+        monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(cfg, "USER_CONFIG_FILE", tmp_path / "config.json")
+        return _cmd_set_update_check, cfg
+
+    def test_it_reports_the_current_setting_with_no_argument(self, run, capsys):
+        cmd, cfg = run
+        assert cmd([]) == 0
+        assert "on" in capsys.readouterr().out
+        assert not cfg.USER_CONFIG_FILE.exists(), "reading wrote the config"
+
+    def test_turning_it_off_says_how_to_still_check(self, run, capsys):
+        # The one thing a reader might get wrong: unticking this does not mean
+        # they can never check again. The command says so; the checkbox does
+        # not need to, because "automatically" carries it.
+        cmd, cfg = run
+        assert cmd(["off"]) == 0
+        assert cfg.get_update_check() is False
+        assert "check-updates" in capsys.readouterr().out
+
+    def test_turning_it_back_on(self, run, capsys):
+        cmd, cfg = run
+        cmd(["off"])
+        capsys.readouterr()
+        assert cmd(["on"]) == 0
+        assert cfg.get_update_check() is True
+        assert "on" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("word", ["on", "true", "yes", "1"])
+    def test_the_affirmative_spellings(self, run, word):
+        cmd, cfg = run
+        cmd(["off"])
+        assert cmd([word]) == 0
+        assert cfg.get_update_check() is True
+
+    @pytest.mark.parametrize("word", ["off", "false", "no", "0"])
+    def test_the_negative_spellings(self, run, word):
+        cmd, cfg = run
+        assert cmd([word]) == 0
+        assert cfg.get_update_check() is False
+
+    def test_an_unrecognised_value_changes_nothing_and_says_so(self, run, capsys):
+        # Not silently treated as off. A typo must not disable checking, and a
+        # command that prints nothing and exits 0 tells a script it worked.
+        cmd, cfg = run
+        assert cmd(["sideways"]) == 2
+        assert cfg.get_update_check() is True
+        assert "Use 'on' or 'off'" in capsys.readouterr().err
+
+    def test_it_is_reachable_from_the_command_line(self, monkeypatch, tmp_path):
+        # The dispatch arm, which nothing else covers: deleting it would leave
+        # the menu-bar toggle shelling out to a command that does nothing and
+        # exits 0, and the checkbox would appear to work.
+        import server.__main__ as entry
+        called = []
+        monkeypatch.setattr(
+            entry, "_cmd_set_update_check", lambda args: called.append(args) or 0
+        )
+        monkeypatch.setattr("sys.argv", ["quern", "set-update-check", "off"])
+        with pytest.raises(SystemExit) as exit_info:
+            entry.main()
+        assert called == [["off"]]
+        assert exit_info.value.code == 0

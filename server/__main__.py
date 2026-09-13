@@ -465,6 +465,47 @@ def _cmd_set_auto_install_cert(args: list[str]) -> int:
     return 2
 
 
+def _cmd_set_update_check(args: list[str]) -> int:
+    """Read or set whether quern checks for updates on its own.
+
+    Usage:
+        quern set-update-check on|off
+        quern set-update-check          # print the current setting
+
+    Governs the *automatic* check alone. `quern check-updates` and the menu
+    bar's Check for Updates keep working when this is off, the way every other
+    updater leaves Check Now working when the box is unticked: turning off
+    automatic checking says "do not call home unprompted", and asking is a
+    prompt.
+
+    On by default, unlike `set-auto-install-cert`. The asymmetry is deliberate
+    -- the cost of guessing wrong there is a root CA installed without consent,
+    and here it is one HTTPS request a day.
+    """
+    from server.config import get_update_check, set_update_check
+
+    if not args:
+        state = "on" if get_update_check() else "off"
+        print(f"Automatic update check: {state}")
+        if state == "off":
+            print("Run `quern check-updates` to check now.")
+        return 0
+
+    target = args[0].lower()
+    if target in ("on", "true", "yes", "1"):
+        set_update_check(True)
+        print("Automatic update check: on")
+        return 0
+    if target in ("off", "false", "no", "0"):
+        set_update_check(False)
+        print("Automatic update check: off")
+        print("Run `quern check-updates` to check now.")
+        return 0
+
+    print(f"Unknown value {args[0]!r}. Use 'on' or 'off'.", file=sys.stderr)
+    return 2
+
+
 def _cmd_set_channel(args: list[str]) -> int:
     """Persist the update channel preference (``stable`` or ``beta``).
 
@@ -690,6 +731,9 @@ def main() -> None:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-auto-install-cert":
         sys.exit(_cmd_set_auto_install_cert(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-update-check":
+        sys.exit(_cmd_set_update_check(sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
         from server.device.tunneld import cli_tunneld

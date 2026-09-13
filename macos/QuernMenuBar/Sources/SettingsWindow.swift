@@ -14,6 +14,7 @@ final class SettingsModel: ObservableObject {
     @Published var startOnLaunch = StartOnLaunch.isEnabled
     @Published var channel: String = "stable"
     @Published var autoInstallCert: Bool = false
+    @Published var autoCheckUpdates: Bool = true
     /// What the version row knows, which is not the same as what it can show.
     ///
     /// Three states, because two were not enough. The row used to fall back to
@@ -111,6 +112,7 @@ final class SettingsModel: ObservableObject {
         snapshot = snap
         if let c = snap.update.channel { channel = c }
         autoInstallCert = snap.proxy.autoInstallCert
+        autoCheckUpdates = snap.update.autoCheck
     }
 }
 
@@ -230,6 +232,38 @@ struct SettingsView: View {
 
             GroupBox("Updates") {
                 VStack(alignment: .leading, spacing: 8) {
+                    // Above the channel, because it is the more general
+                    // setting: whether quern looks at all, then what it looks
+                    // against, then what it last found.
+                    //
+                    // No explanatory line under it, unlike the certificate
+                    // toggle. That one describes a security cost. This one
+                    // describes a convention -- an automatic check and a
+                    // manual one are different things in every updater -- and
+                    // a sentence explaining a convention the reader already
+                    // holds reads as the app being unsure of itself. The
+                    // adverb carries it.
+                    Toggle(isOn: $model.autoCheckUpdates) {
+                        Text("Check for updates automatically")
+                    }
+                    .onChange(of: model.autoCheckUpdates) { newValue in
+                        // Same guard as the channel picker below. `apply()`
+                        // assigns this on every fresh snapshot, and writing
+                        // back on that path would shell out on each refresh.
+                        guard newValue != model.snapshot.update.autoCheck else { return }
+                        QuernCLI.setUpdateCheck(newValue) { code, _ in
+                            // Unlike its neighbours at the bottom of this
+                            // window, this one writes a file the server owns,
+                            // so it can fail. Snap back rather than leave the
+                            // checkbox showing a setting that was never
+                            // written -- the next refresh would silently undo
+                            // it anyway, which looks like the app forgetting.
+                            guard code != 0 else { return }
+                            model.autoCheckUpdates = model.snapshot.update.autoCheck
+                        }
+                    }
+                    .accessibilityLabel("Check for updates automatically")
+
                     HStack(alignment: .firstTextBaseline) {
                         // Same 90pt label column as grid(), so this row lines
                         // up with every other label in the window. A Picker

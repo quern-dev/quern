@@ -1499,6 +1499,7 @@ def cli() -> None:
             "  set-channel [name]            Show or set the update channel (stable / beta)\n"
             "  set-auto-install-cert [on|off]\n"
             "                                Show or set automatic capture-certificate install\n"
+            "  set-update-check [on|off]     Show or set the automatic update check\n"
             "  install-precommit-hook        Install the pre-commit checklist hook\n"
             "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
         ),

@@ -248,4 +248,8 @@ enum QuernCLI {
     static func setAutoInstallCert(_ enabled: Bool, completion: ((Int32, String) -> Void)? = nil) {
         run(["set-auto-install-cert", enabled ? "on" : "off"], completion: completion)
     }
+
+    static func setUpdateCheck(_ enabled: Bool, completion: ((Int32, String) -> Void)? = nil) {
+        run(["set-update-check", enabled ? "on" : "off"], completion: completion)
+    }
 }

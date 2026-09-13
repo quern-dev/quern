@@ -134,6 +134,26 @@ def get_auto_install_cert() -> bool:
     return read_user_config().get("auto_install_cert") is True
 
 
+def _write_user_config(config: dict) -> None:
+    """Persist the whole config, swapping it in rather than writing over it.
+
+    The menu-bar app reads this file on a poll while the CLI writes it, and
+    ``write_text`` truncates before it writes -- so a read landing in that
+    window gets a partial document, and the app's parse fails. ``os.replace``
+    is atomic within a filesystem, so a reader sees either the old file or the
+    new one. The temporary lives in the same directory for that reason: a move
+    across filesystems is a copy, and the window comes back.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = USER_CONFIG_FILE.with_name(f".{USER_CONFIG_FILE.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(config, indent=2) + "\n")
+        os.replace(tmp, USER_CONFIG_FILE)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def set_auto_install_cert(enabled: bool) -> None:
     """Persist the auto-install policy.
 
@@ -141,10 +161,33 @@ def set_auto_install_cert(enabled: bool) -> None:
     on purpose: a silent, persistent CA-install policy would be worse than the
     failure it exists to prevent.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config = read_user_config()
     config["auto_install_cert"] = bool(enabled)
-    USER_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    _write_user_config(config)
+
+
+def get_update_check() -> bool:
+    """Whether quern checks for updates on its own.
+
+    Defaults to True: this is the "check automatically" box, and it starts
+    ticked. Note the asymmetry with ``auto_install_cert``, which requires a
+    literal ``true`` -- there, anything unclear must read as "ask me", because
+    the cost of guessing wrong is a root CA installed without consent. Here the
+    cost of guessing wrong is one HTTPS request a day, so only an explicit
+    ``false`` turns it off and a typo leaves checking on.
+
+    Governs the *automatic* check alone. ``quern check-updates`` and the menu
+    bar's Check for Updates ignore it, the way every other updater leaves Check
+    Now working when the box is unticked.
+    """
+    return read_user_config().get("update_check") is not False
+
+
+def set_update_check(enabled: bool) -> None:
+    """Persist whether the automatic update check runs."""
+    config = read_user_config()
+    config["update_check"] = bool(enabled)
+    _write_user_config(config)
 
 
 def channel_to_release_branch(channel: str) -> str:
