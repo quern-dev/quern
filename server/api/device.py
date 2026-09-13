@@ -412,7 +412,11 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
     controller = _get_controller(request)
     try:
         await controller.erase(udid=body.udid)
-        _invalidate_cert_record(body.udid)
+        # In a thread: the helper does blocking reads, an exclusive flock and a
+        # write, and a contended lock would stall every other request on the
+        # loop. It swallows its own exceptions, so the best-effort contract is
+        # unchanged.
+        await asyncio.to_thread(_invalidate_cert_record, body.udid)
         return {"status": "erased", "udid": body.udid}
     except DeviceError as e:
         raise _handle_device_error(e)
