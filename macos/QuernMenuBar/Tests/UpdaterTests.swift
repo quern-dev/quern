@@ -48,6 +48,8 @@ enum UpdaterTests {
 
         var deps = Updater.Dependencies()
         deps.scheduler = clock
+        deps.log = { _ in }
+        deps.logError = { _ in }
         // Injected, or the default reads the real ~/.quern/last-update.json and
         // the developer's own last update decides what these tests see. Left as
         // "no record", which is the pre-existing behaviour: fall back to the
@@ -282,6 +284,8 @@ enum UpdaterTests {
             let record = Rig.Record()
             var deps = Updater.Dependencies()
             deps.scheduler = clock
+        deps.log = { _ in }
+        deps.logError = { _ in }
             deps.readResult = { record.result }
             deps.readVersion = { done in
                 record.versionCalls += 1

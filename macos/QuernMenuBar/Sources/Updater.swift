@@ -54,6 +54,12 @@ final class Updater {
         var relaunch: ((String) -> Void)?
         /// What the update recorded about itself. See UpdateResult.
         var readResult: () -> UpdateResult? = { UpdateResult.read() }
+        /// Where the account goes. Injected for the same reason
+        /// LifecycleController injects its own: without it the test binary
+        /// writes into the real system log, and those lines are
+        /// indistinguishable from the app's when read back.
+        var log: (String) -> Void = { Log.updater.notice("\($0, privacy: .public)") }
+        var logError: (String) -> Void = { Log.updater.error("\($0, privacy: .public)") }
     }
 
     private let deps: Dependencies
@@ -116,7 +122,7 @@ final class Updater {
                 // was on, what it skipped, which external tools are behind --
                 // and throwing it away on success left no record anywhere of a
                 // successful or no-op update.
-                NSLog("quern update exited \(code):\n\(output)")
+                self.deps.log("quern update exited \(code): \(output)")
                 if code != 0 {
                     // `quern update` runs the whole update synchronously, so
                     // this completion does not arrive for a minute or more and
@@ -126,7 +132,7 @@ final class Updater {
                     // rather than paraphrasing it.
                     self.inProgress = false
                     status(.finished("Update failed"))
-                    NSLog("quern update failed (\(code)): \(output)")
+                    self.deps.logError("quern update failed (\(code)): \(output)")
                     failure("The update did not complete", output)
                     return
                 }
@@ -249,7 +255,7 @@ final class Updater {
         config.createsNewApplicationInstance = true
         NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { [weak self] _, error in
             if let error {
-                NSLog("Relaunch failed: \(error.localizedDescription)")
+                self?.deps.logError("Relaunch failed: \(error.localizedDescription)")
                 // Same reasoning as the missing-bundle path: without this the
                 // status stays on "Restarting…" forever after a launch that
                 // never happened.

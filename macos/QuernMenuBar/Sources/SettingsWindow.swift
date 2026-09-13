@@ -77,38 +77,52 @@ final class SettingsModel: ObservableObject {
     /// snaps the checkbox back rather than leaving it showing a setting that
     /// was never written -- the next refresh would undo it anyway, which reads
     /// as the app forgetting.
-    var writeChannel: (String, @escaping (Int32) -> Void) -> Void = { value, done in
-        QuernCLI.setChannel(value) { code, _ in done(code) }
+    var writeChannel: (String, @escaping (Int32, String) -> Void) -> Void = { value, done in
+        QuernCLI.setChannel(value) { code, output in done(code, output) }
     }
 
-    var writeAutoInstallCert: (Bool, @escaping (Int32) -> Void) -> Void = { value, done in
-        QuernCLI.setAutoInstallCert(value) { code, _ in done(code) }
+    var writeAutoInstallCert: (Bool, @escaping (Int32, String) -> Void) -> Void = { value, done in
+        QuernCLI.setAutoInstallCert(value) { code, output in done(code, output) }
     }
 
     lazy var channelWriter: SettingWriter<String> = {
-        let writer = SettingWriter<String> { [weak self] value, done in
+        let writer = SettingWriter<String>(name: "the update channel") { [weak self] value, done in
             self?.writeChannel(value, done)
         }
         writer.onFailure = { [weak self] in
             guard let self, let persisted = self.snapshot.update.channel else { return }
             self.reconcileChannel(persisted)
         }
+        writer.log = { [weak self] in self?.logSettings($0) }
         return writer
     }()
 
     lazy var certWriter: SettingWriter<Bool> = {
-        let writer = SettingWriter<Bool> { [weak self] value, done in
+        let writer = SettingWriter<Bool>(
+            name: "automatic certificate install"
+        ) { [weak self] value, done in
             self?.writeAutoInstallCert(value, done)
         }
         writer.onFailure = { [weak self] in
             guard let self else { return }
             self.reconcileCert(self.snapshot.proxy.autoInstallCert)
         }
+        writer.log = { [weak self] in self?.logSettings($0) }
         return writer
     }()
 
     private func reconcileChannel(_ value: String) { channel = value }
     private func reconcileCert(_ value: Bool) { autoInstallCert = value }
+
+    /// Where the settings writers send their account.
+    ///
+    /// Injected at the model rather than on each writer so a test can silence
+    /// all three at once. Without it the test binary writes into the real
+    /// system log, which is both noise in someone's Console and a trap: a run
+    /// of the suite leaves lines that look exactly like the app's, and reading
+    /// them back as evidence of the app working is a mistake I made while
+    /// verifying this feature.
+    var logSettings: (String) -> Void = { Log.settings.notice("\($0, privacy: .public)") }
 
     /// Runs the CLI. Injected only so a test can stand in for the subprocess.
     ///
@@ -116,12 +130,14 @@ final class SettingsModel: ObservableObject {
     /// the failure handler, would leave the production wiring untested -- and
     /// measured: two regressions survived their own mutations that way,
     /// because the mutation landed in code the test had substituted out.
-    var writeAutoCheck: (Bool, @escaping (Int32) -> Void) -> Void = { value, done in
-        QuernCLI.setUpdateCheck(value) { code, _ in done(code) }
+    var writeAutoCheck: (Bool, @escaping (Int32, String) -> Void) -> Void = { value, done in
+        QuernCLI.setUpdateCheck(value) { code, output in done(code, output) }
     }
 
     lazy var autoCheckWriter: SettingWriter<Bool> = {
-        let writer = SettingWriter { [weak self] value, done in
+        let writer = SettingWriter<Bool>(
+            name: "the automatic update check"
+        ) { [weak self] value, done in
             self?.writeAutoCheck(value, done)
         }
         writer.onFailure = { [weak self] in
@@ -132,6 +148,7 @@ final class SettingsModel: ObservableObject {
             guard let self else { return }
             self.reconcile(self.snapshot.update.autoCheck)
         }
+        writer.log = { [weak self] in self?.logSettings($0) }
         return writer
     }()
     /// What the version row knows, which is not the same as what it can show.
@@ -304,7 +321,7 @@ enum LoginItem {
             }
             return true
         } catch {
-            NSLog("Login item toggle failed: \(error.localizedDescription)")
+            Log.settings.error("Login item toggle failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }

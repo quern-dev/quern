@@ -497,7 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
             guard let error else { return }
-            NSLog("Screen mirror launch failed: \(error.localizedDescription)")
+            Log.ui.error("Screen mirror launch failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

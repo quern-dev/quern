@@ -11,20 +11,21 @@ enum SettingWriterTests {
         /// Completions the CLI has not answered yet. A test decides when -- and
         /// whether -- each one comes back, which is the state the snapshot
         /// comparison could not see and every defect here lived in.
-        private(set) var pending: [(Int32) -> Void] = []
+        private(set) var pending: [(Int32, String) -> Void] = []
         private(set) var fellBackTo: [Bool] = []
         var writer: SettingWriter<Bool>!
 
         /// `answersImmediately: nil` parks each completion instead.
         init(answersImmediately: Int32? = 0) {
-            writer = SettingWriter { [unowned self] value, done in
+            writer = SettingWriter(name: "a test setting") { [unowned self] value, done in
                 self.requested.append(value)
                 if let code = answersImmediately {
-                    done(code)
+                    done(code, "")
                 } else {
                     self.pending.append(done)
                 }
             }
+            writer.log = { _ in }
             writer.onFailure = { [unowned self] in self.fellBackTo.append(true) }
         }
     }
@@ -54,7 +55,7 @@ enum SettingWriterTests {
             rig.writer.set(true, persisted: true)
             Harness.expect(rig.requested, [false], "only the first has run")
 
-            rig.pending[0](0)   // the `off` write returns
+            rig.pending[0](0, "")   // the `off` write returns
             Harness.expect(rig.requested, [false, true], "the `on` write followed")
         }
 
@@ -72,7 +73,7 @@ enum SettingWriterTests {
             rig.writer.set(false, persisted: true)
             rig.writer.set(true, persisted: true)
             rig.writer.set(false, persisted: true)
-            rig.pending[0](0)
+            rig.pending[0](0, "")
             // Not three writes: the middle answer was superseded before it ran.
             Harness.expect(rig.requested, [false, false], "writes")
         }
@@ -89,7 +90,7 @@ enum SettingWriterTests {
             rig.writer.set(true, persisted: true)
             rig.writer.set(true, persisted: true)
             rig.writer.set(false, persisted: true)
-            rig.pending[0](0)
+            rig.pending[0](0, "")
             // Not [false, true, false]: the repeat was recognised as already
             // queued, so the last distinct answer replaced it rather than
             // stacking behind it.
@@ -115,7 +116,7 @@ enum SettingWriterTests {
             let rig = Rig(answersImmediately: nil)
             rig.writer.set(false, persisted: true)
             rig.writer.set(true, persisted: true)
-            rig.pending[0](1)   // the `off` write failed
+            rig.pending[0](1, "")   // the `off` write failed
             Harness.expect(rig.fellBackTo.isEmpty, "reverted despite a newer request")
             Harness.expect(rig.requested, [false, true], "the newer write ran")
         }
@@ -124,7 +125,7 @@ enum SettingWriterTests {
             let rig = Rig(answersImmediately: nil)
             rig.writer.set(false, persisted: true)
             Harness.expect(rig.writer.isBusy, true, "busy during the write")
-            rig.pending[0](0)
+            rig.pending[0](0, "")
             Harness.expect(rig.writer.isBusy, false, "still busy afterwards")
         }
     }
@@ -168,13 +169,14 @@ enum SettingsModelWritingTests {
     private final class Rig {
         let model = SettingsModel()
         private(set) var requested: [Bool] = []
-        private var pending: [(Int32) -> Void] = []
+        private var pending: [(Int32, String) -> Void] = []
         var persisted: Bool
 
         init(persisted: Bool) {
             self.persisted = persisted
             // Only the subprocess is replaced. The writer, its failure handler
             // and the model's guards are all the shipped ones.
+            model.logSettings = { _ in }
             model.writeAutoCheck = { [unowned self] value, done in
                 self.requested.append(value)
                 self.pending.append(done)
@@ -194,7 +196,7 @@ enum SettingsModelWritingTests {
         func completeFirst(_ code: Int32, persisting: Bool? = nil) {
             let done = pending.removeFirst()
             if code == 0, let persisting { persisted = persisting }
-            done(code)
+            done(code, "")
         }
     }
 
@@ -271,6 +273,7 @@ enum ReconcileInvariantTests {
             // the value it already holds -- three times a second.
             let model = SettingsModel()
             var wrote: [Bool] = []
+            model.logSettings = { _ in }
             model.writeAutoCheck = { value, _ in wrote.append(value) }
 
             for value in [false, true, false, false, true] {
@@ -297,14 +300,15 @@ enum OtherSettingsWritingTests {
         let model = SettingsModel()
         private(set) var channels: [String] = []
         private(set) var certs: [Bool] = []
-        private var pendingChannel: [(Int32) -> Void] = []
-        private var pendingCert: [(Int32) -> Void] = []
+        private var pendingChannel: [(Int32, String) -> Void] = []
+        private var pendingCert: [(Int32, String) -> Void] = []
         var channel: String
         var cert: Bool
 
         init(channel: String = "stable", cert: Bool = false) {
             self.channel = channel
             self.cert = cert
+            model.logSettings = { _ in }
             model.writeChannel = { [unowned self] value, done in
                 self.channels.append(value)
                 self.pendingChannel.append(done)
@@ -328,13 +332,13 @@ enum OtherSettingsWritingTests {
         func completeChannel(_ code: Int32, persisting: String? = nil) {
             let done = pendingChannel.removeFirst()
             if code == 0, let persisting { channel = persisting }
-            done(code)
+            done(code, "")
         }
 
         func completeCert(_ code: Int32, persisting: Bool? = nil) {
             let done = pendingCert.removeFirst()
             if code == 0, let persisting { cert = persisting }
-            done(code)
+            done(code, "")
         }
     }
 
@@ -428,6 +432,86 @@ enum OtherSettingsWritingTests {
             rig.refresh()
             Harness.expect(rig.model.channel, "beta", "channel settled")
             Harness.expect(rig.model.autoInstallCert, true, "cert settled")
+        }
+    }
+}
+
+// What the log says about a settings write.
+//
+// Asserted because it is the only account there is. Forty-odd settings changes
+// during one session of hand-testing left no trace anywhere: a write that
+// failed reverted the control with nothing to look at, and a write that
+// succeeded could not be told from one that never ran.
+enum SettingWriteLoggingTests {
+    private final class Rig {
+        private(set) var lines: [String] = []
+        private var pending: [(Int32, String) -> Void] = []
+        var writer: SettingWriter<Bool>!
+
+        init() {
+            writer = SettingWriter(name: "the thing") { [unowned self] _, done in
+                self.pending.append(done)
+            }
+            writer.log = { [unowned self] in self.lines.append($0) }
+        }
+
+        func complete(_ code: Int32, _ output: String = "") {
+            pending.removeFirst()(code, output)
+        }
+    }
+
+    static func all() {
+        Harness.test("a successful write is logged") {
+            let rig = Rig()
+            rig.writer.set(true, persisted: false)
+            rig.complete(0)
+            Harness.expect(rig.lines.count, 1, "lines")
+            Harness.expect(rig.lines.first?.contains("the thing") == true,
+                           "the line does not say what was written")
+            Harness.expect(rig.lines.first?.contains("true") == true,
+                           "the line does not say what it was set to")
+        }
+
+        Harness.test("a failed write logs the exit code and the CLI's reason") {
+            // The reason is the whole point. "Could not set it" with no cause
+            // is the dead end this project keeps removing.
+            let rig = Rig()
+            rig.writer.set(true, persisted: false)
+            rig.complete(1, "Error: could not find project root")
+            Harness.expect(rig.lines.count, 1, "lines")
+            let line = rig.lines.first ?? ""
+            Harness.expect(line.contains("exit 1"), "no exit code: \(line)")
+            Harness.expect(line.contains("could not find project root"),
+                           "the CLI's reason was dropped: \(line)")
+        }
+
+        Harness.test("a failure with no output still names the exit code") {
+            // A process killed by the watchdog prints nothing. The line must
+            // not trail off into an empty colon.
+            let rig = Rig()
+            rig.writer.set(true, persisted: false)
+            rig.complete(-3, "   \n  ")
+            let line = rig.lines.first ?? ""
+            Harness.expect(line.contains("exit -3"), "no exit code: \(line)")
+            Harness.expect(line.hasSuffix(":") == false, "trailing colon: \(line)")
+        }
+
+        Harness.test("every write in a queue is logged, not just the last") {
+            // Two clicks, two writes, two lines. Logging only the settled value
+            // would hide a first write that failed on its way to a second that
+            // worked.
+            let rig = Rig()
+            rig.writer.set(true, persisted: false)
+            rig.writer.set(false, persisted: false)
+            rig.complete(0)
+            rig.complete(0)
+            Harness.expect(rig.lines.count, 2, "lines")
+        }
+
+        Harness.test("a write that was never made is not logged") {
+            let rig = Rig()
+            rig.writer.set(false, persisted: false)
+            Harness.expect(rig.lines.isEmpty, "logged a write it did not make")
         }
     }
 }
