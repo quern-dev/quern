@@ -557,16 +557,33 @@ async def setup_guide(request: Request) -> dict:
         controller = request.app.state.device_controller
         if controller:
             all_devices = await controller.list_devices()
-            from server.models import DeviceState
+            from server.models import DeviceState, DeviceType
 
             booted_devices = [d for d in all_devices if d.state == DeviceState.BOOTED]
 
-            # Load cached cert states from persistent cert-state.json
-            device_certs = read_cert_state()
-
+            # Verified, not cached. This renders a per-device tick or cross in
+            # a setup guide, and a tick against an erased simulator tells
+            # someone they are ready when every HTTPS request from that device
+            # will fail. `is_cert_installed` keeps an hour-long cache and falls
+            # through to the TrustStore after that, so this stays cheap without
+            # believing a record indefinitely.
             for device in booted_devices:
-                cached = device_certs.get(device.udid, {})
-                cert_installed = cached.get("cert_installed", False)
+                # Simulators verify against their TrustStore; physical devices
+                # cannot, and asking would both answer `false` wrongly and
+                # overwrite the record their own traffic-based verification
+                # reads. See the note in device.py's list endpoint.
+                if device.device_type == DeviceType.SIMULATOR:
+                    # `verify=True`: the guide tells someone what to do next,
+                    # so a cached "already installed" sends them away from the
+                    # one step that would fix it.
+                    cert_installed = await cert_manager.is_cert_installed(
+                        controller, device.udid, verify=True,
+                        device_name=device.name,
+                    )
+                else:
+                    cert_installed = read_cert_state().get(device.udid, {}).get(
+                        "cert_installed", False
+                    )
                 cert_status_by_device[device.udid] = {
                     "name": device.name,
                     "cert_installed": cert_installed,

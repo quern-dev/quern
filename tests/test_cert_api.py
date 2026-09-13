@@ -758,3 +758,339 @@ class TestCertInstall:
         assert response.status_code == 400
         assert "Physical devices are not eligible" in response.json()["detail"]
         mock_install.assert_not_called()
+
+
+class TestCertStatusIsVerifiedNotRecalled:
+    """The two endpoints that rendered a stored record as current fact.
+
+    Erasing a simulator recreates its TrustStore empty and leaves quern's
+    record saying the cert is installed. A field report read that record,
+    reasonably believed it, and spent the next hour concluding that staging
+    authentication was down.
+
+    Driven through the real endpoints, because the bug was in the call site
+    rather than in anything underneath it -- a test that stubs the decision and
+    asserts on the stub cannot see it.
+    """
+
+    def _erased(self, monkeypatch):
+        """A device quern recorded as trusting the CA, that no longer does."""
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state",
+            lambda: {"AAAA": {"name": "iPhone 16 Pro", "cert_installed": True}},
+        )
+
+        async def not_trusted(_c, _udid, verify=False, *, device_name=None):
+            return False
+
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.is_cert_installed", not_trusted
+        )
+
+    def test_the_device_filter_excludes_an_erased_simulator(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """`?cert_installed=true` both labels and filters.
+
+        Getting an erased device back from that query is the answer being
+        wrong, not merely stale — the caller asked which devices trust the CA.
+        """
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        booted = DeviceInfo(
+            udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[booted])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        self._erased(monkeypatch)
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["devices"] == [], "an erased simulator was reported as trusting the CA"
+
+    def test_the_device_filter_still_finds_a_trusting_simulator(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        # The other direction, so the fix cannot be "always report false".
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        booted = DeviceInfo(
+            udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[booted])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state", lambda: {}
+        )
+
+        async def trusted(_c, _udid, verify=False, *, device_name=None):
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.is_cert_installed", trusted)
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert [d["udid"] for d in r.json()["devices"]] == ["AAAA"]
+
+    def test_a_fresh_record_does_not_shield_an_erased_simulator(
+        self, client, auth_headers, app, monkeypatch, tmp_path
+    ):
+        """The filter must ask the TrustStore, not the hour-long cache.
+
+        Every other test in this class patches `is_cert_installed` outright,
+        so none of them can see the cache at all -- and the cache is the
+        defect: without `verify=True` a record written minutes ago is returned
+        unchecked, and `?cert_installed=true` hands back a device erased since.
+        Same bug as the preflight had, in the endpoint that *filters* on it.
+
+        Seam is `verify_cert_in_truststore`, the ground-truth oracle.
+        """
+        from datetime import UTC, datetime
+
+        from server.models import DeviceCertState, DeviceInfo, DeviceState, DeviceType
+        from server.proxy.cert_manager import update_cert_state
+
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("contents unread: the fingerprint is stubbed")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_fingerprint", lambda _p: "a" * 64,
+        )
+
+        # What quern recorded minutes ago, before the erase.
+        update_cert_state("AAAA", DeviceCertState(
+            name="iPhone 16 Pro", cert_installed=True, fingerprint="a" * 64,
+            verified_at=datetime.now(UTC).isoformat(),
+        ).model_dump())
+
+        booted = DeviceInfo(
+            udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[booted])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        app.state.device_controller._is_android = lambda _u: False
+
+        truststore = MagicMock(return_value=False)  # the erase
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.verify_cert_in_truststore", truststore
+        )
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["devices"] == [], (
+            "a record minutes old shielded an erased simulator from the filter"
+        )
+        assert truststore.called, "the TrustStore was never consulted"
+
+    def test_a_physical_device_is_never_truststore_verified(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Verifying a phone against a simulator path answers false, then saves it.
+
+        `is_cert_installed` looks in
+        `CoreSimulator/Devices/<udid>/.../TrustStore.sqlite3`, which does not
+        exist for a physical device — so it returns `false` for a phone that
+        genuinely trusts the CA, and writes that false into cert-state.json,
+        destroying the record `_verify_physical_device` reads to check traffic.
+
+        Physical devices are proxied by their own per-network WiFi config, not
+        the host's, so a network change matters for them and is irrelevant to a
+        simulator. That asymmetry is why the two cannot share a verifier.
+        """
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        phone = DeviceInfo(
+            udid="PHONE", name="iPhone 15 Pro", state=DeviceState.BOOTED,
+            device_type=DeviceType.DEVICE, os_version="iOS 26.6", runtime="",
+        )
+        app.state.device_controller.list_devices = AsyncMock(return_value=[phone])
+        app.state.device_controller.check_tools = AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state",
+            lambda: {"PHONE": {"name": "iPhone 15 Pro", "cert_installed": True}},
+        )
+
+        asked = []
+
+        async def should_not_be_called(_c, udid, verify=False, *, device_name=None):
+            asked.append(udid)
+            return False
+
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.is_cert_installed", should_not_be_called
+        )
+
+        r = client.get("/api/v1/device/list?cert_installed=true", headers=auth_headers)
+        assert asked == [], "a physical device was sent to the simulator verifier"
+        assert [d["udid"] for d in r.json()["devices"]] == ["PHONE"], (
+            "the recorded value should stand for a physical device"
+        )
+
+
+class TestLocalCaptureIsGatedToo:
+    """`local_capture` routed traffic with no cert guard at all.
+
+    The field report's reproduction: capture a simulator via local_capture,
+    erase it, and every HTTPS request fails with a generic in-app error while
+    quern reports the certificate installed. `configure_system` refuses in that
+    situation; this path had nothing, so `auto_install_cert` had no code to fire
+    in either — which is why the setting looked broken rather than absent.
+    """
+
+    def _no_trust(self, monkeypatch):
+        async def missing(_controller):
+            return [{"udid": "AAAA", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", missing
+        )
+
+    def _app_with_proxy(self, app):
+        """A proxy adapter real enough to build a status response from.
+
+        The attributes matter: a bare MagicMock hands pydantic mock objects
+        where it wants strings, and the resulting validation error looks like
+        the endpoint failing rather than the fixture being thin.
+        """
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_enabling_capture_is_refused_when_the_ca_is_not_trusted(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"]},
+            headers=auth_headers,
+        )
+        assert r.status_code == 428, "capture was enabled into a state that cannot work"
+
+    def test_the_string_false_does_not_switch_the_gate_off(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """`bool("false")` is `True`.
+
+        With an untyped `body: dict` this endpoint read `skip_cert_check` with
+        `bool(...)`, so a JSON string `"false"` disabled the cert gate --
+        meaning the exact opposite of what was sent. Every other value a client
+        might reasonably use for false does the same: "no", "0", "False".
+        """
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        for falsey in ("false", "False", "no", "0", 0, False):
+            r = client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": ["MobileSafari"], "skip_cert_check": falsey},
+                headers=auth_headers,
+            )
+            assert r.status_code == 428, (
+                f"skip_cert_check={falsey!r} disabled the gate"
+            )
+
+    def test_a_genuine_skip_still_works(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        # The converse, so the test above cannot be satisfied by an endpoint
+        # that ignores the field entirely.
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"], "skip_cert_check": True},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+
+    def test_a_malformed_body_is_rejected_not_coerced(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        for body in ({}, {"processes": "MobileSafari"},
+                     {"processes": ["X"], "skip_cert_check": "banana"}):
+            r = client.post(
+                "/api/v1/proxy/local-capture", json=body, headers=auth_headers,
+            )
+            assert r.status_code == 422, f"{body!r} was accepted"
+
+    def test_auto_install_fires_here_too(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """The setting's whole promise is "handled from now on"."""
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+        installed = []
+
+        async def fake_install(_c, udid, device_name=None, **kw):
+            installed.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", fake_install)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"]},
+            headers=auth_headers,
+        )
+        assert installed == ["AAAA"], "auto_install_cert did not fire on this path"
+        assert r.status_code == 200
+
+    def test_disabling_capture_is_never_refused(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Clearing the list stops capture, so it cannot create the broken state.
+
+        Refusing it would trap someone in exactly the situation they are trying
+        to leave.
+        """
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": []},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+
+    def test_the_escape_hatch_still_works(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MobileSafari"], "skip_cert_check": True},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200

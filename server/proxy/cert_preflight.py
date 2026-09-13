@@ -28,6 +28,16 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
     A device absent from cert-state.json has never had a cert installed, so
     absence and ``cert_installed: false`` mean the same thing here.
 
+    Queries the TrustStore every time, and never quern's own record of what it
+    last installed. Erasing a simulator recreates its TrustStore empty while
+    leaving that record saying the cert is installed, so the record is exactly
+    wrong in the one case this function exists to catch -- reported from the
+    field with a record 10.5 hours older than the erase that invalidated it.
+    The hour-long cache inside ``is_cert_installed`` is not good enough either:
+    it merely shrinks the window to an hour, and an erase is most often
+    followed by going straight back to work. The query costs 0.6 ms against a
+    local SQLite file, which is not a latency worth trading truth for.
+
     Never raises. A preflight that fails closed would block capture over its
     own bug, which is worse than the failure it prevents; on any error it
     reports nothing missing and lets the call proceed.
@@ -37,22 +47,63 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
 
     try:
         from server.models import DeviceState, DeviceType
-        from server.proxy.cert_state import read_cert_state
+        from server.proxy import cert_manager
 
         devices = await controller.list_devices()
-        certs = read_cert_state()
 
         missing = []
         for d in devices:
             if d.device_type != DeviceType.SIMULATOR or d.state != DeviceState.BOOTED:
                 continue
-            entry = certs.get(d.udid)
-            if not entry or not entry.get("cert_installed"):
+            # `verify=True`: ask the TrustStore every time, never the cache.
+            # The cache is there to save a query that costs 0.6 ms against a
+            # local SQLite file, and the hour it holds an answer for is an hour
+            # in which an erase goes unnoticed -- measured here, three minutes
+            # after `simctl erase`, with the TrustStore empty and this preflight
+            # reporting nothing missing. That is the field report's exact
+            # scenario and the case this function exists to catch, so the cache
+            # cannot be consulted on this path at any TTL.
+            # Per device, not around the loop. A single failing TrustStore
+            # query used to reach the outer handler and return `[]`, throwing
+            # away every device already *confirmed* untrusted -- so one
+            # unreadable device silently un-refused capture for all the others,
+            # and the gate opened on exactly the state it exists to catch.
+            # Failing open is the right call for a device we could not check;
+            # it is never right for one we could.
+            try:
+                trusted = await cert_manager.is_cert_installed(
+                    controller, d.udid, verify=True, device_name=d.name,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Could not check the CA on %s (%s), skipping it: %s",
+                    d.name, d.udid[:8], e,
+                )
+                continue
+            if not trusted:
                 missing.append({"udid": d.udid, "name": d.name})
         return missing
     except Exception as e:
         logger.debug("Cert preflight could not run, allowing the call: %s", e)
         return []
+
+
+def trust_is_stale(udid: str, cert_data: dict, untrusted_udids: set[str]) -> bool:
+    """Whether a stored `cert_installed: true` is contradicted by a live check.
+
+    A function rather than an expression inline in the endpoint, because an
+    expression inside a response builder is not reachable by any test. Both
+    conditions matter and inverting either is silent:
+
+    - Only for a device actually checked and found wanting. `untrusted_udids`
+      comes from `simulators_without_cert`, which covers booted simulators; a
+      shutdown one is never checked, so absence means "not contradicted"
+      rather than "verified".
+    - Only when we recorded it installed. A device that never had a cert is
+      not *stale*, and saying so would send someone looking for an erase that
+      never happened.
+    """
+    return udid in untrusted_udids and bool(cert_data.get("cert_installed"))
 
 
 def refusal_detail(missing: list[dict[str, str]]) -> dict:

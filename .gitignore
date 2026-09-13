@@ -40,3 +40,8 @@ local.properties
 
 # macOS menu-bar app build output
 macos/QuernMenuBar/build/
+
+# Scratch file for `gh release create --notes-file` (docs/release-channels.md).
+# Written per release and not part of the tree; the published notes live on the
+# GitHub release. It reached a PR once by way of `git add -A`.
+RELEASE_NOTES.md

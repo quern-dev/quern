@@ -30,6 +30,7 @@ from server.models import (
     FlowRecord,
     FlowSummaryResponse,
     InterfaceInfo,
+    LocalCaptureRequest,
     ProxyStatusResponse,
     SystemProxyInfo,
     SystemProxyRestoreInfo,
@@ -105,11 +106,19 @@ async def _get_proxy_status(
     # The diagnostic path for the cases the preflight cannot reach: an app
     # launched by tapping its icon, or capture enabled before the device booted.
     from server.config import get_auto_install_cert
-    from server.proxy.cert_preflight import simulators_without_cert
+    from server.proxy.cert_preflight import simulators_without_cert, trust_is_stale
 
     auto_install_cert = get_auto_install_cert()
-    if await simulators_without_cert(getattr(request.app.state, "device_controller", None)):
+    untrusted = await simulators_without_cert(
+        getattr(request.app.state, "device_controller", None)
+    )
+    if untrusted:
         warnings.append("capture_without_cert")
+    # Which of those contradict what we recorded. The warning above says capture
+    # would fail; this says which device's stored `cert_installed: true` is no
+    # longer true, so a reader looking at one device does not have to correlate
+    # it with a list somewhere else in the response.
+    untrusted_udids = {d["udid"] for d in untrusted}
     try:
         from server.proxy.cert_state import read_cert_state, strip_noncanonical_fields
         device_certs = read_cert_state()
@@ -150,6 +159,9 @@ async def _get_proxy_status(
                         } if configs else None,
                         wifi_proxy_stale=wifi_proxy_stale,
                         active_wifi_network=active_network,
+                        cert_trust_stale=trust_is_stale(
+                            udid, cert_data, untrusted_udids
+                        ),
                     )
                 except Exception:
                     _proxy_logger.warning(
@@ -170,6 +182,9 @@ async def _get_proxy_status(
                         } if configs else None,
                         wifi_proxy_stale=wifi_proxy_stale,
                         active_wifi_network=active_network,
+                        cert_trust_stale=trust_is_stale(
+                            udid, canonical, untrusted_udids
+                        ),
                     )
 
                 cert_setup[udid] = entry
@@ -406,6 +421,58 @@ async def stop_proxy(request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
+async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None:
+    """Refuse to start capture that would silently fail, or fix it if allowed.
+
+    Called from both paths that begin routing a device's traffic through the
+    proxy. Capture through a device that does not trust the CA fails every HTTPS
+    request, and the symptom -- a blank screen, an app with no network -- points
+    nowhere near the proxy. Both halves of that state are ours, so refuse to
+    create it rather than let it be discovered later.
+
+    One function rather than the same block in two endpoints. `local_capture`
+    had no guard at all, which is how a field report reached exactly this
+    failure: a simulator erased mid-session, every HTTPS request failing, and an
+    hour spent concluding that staging authentication was down. A second copy
+    would be a second place to forget.
+
+    Raises 428 when the user has not opted into automatic installation, and 500
+    when they have and it failed -- proceeding anyway would recreate the state
+    they opted out of.
+    """
+    if skip:
+        return
+
+    from server.config import get_auto_install_cert
+    from server.proxy.cert_preflight import refusal_detail, simulators_without_cert
+
+    controller = getattr(request.app.state, "device_controller", None)
+    missing = await simulators_without_cert(controller)
+    if not missing:
+        return
+
+    if not get_auto_install_cert():
+        # 428: the request is fine, the world is not ready for it yet.
+        raise HTTPException(status_code=428, detail=refusal_detail(missing))
+
+    from server.proxy.cert_manager import install_cert
+
+    for dev in missing:
+        try:
+            await install_cert(controller, dev["udid"], device_name=dev["name"])
+            _proxy_logger.info(
+                "Auto-installed the CA on %s (%s)", dev["name"], dev["udid"][:8],
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"auto_install_cert is set but installing the CA on "
+                    f"{dev['name']} failed: {e}"
+                ),
+            ) from e
+
+
 @router.post("/configure-system", response_model=SystemProxyInfo)
 async def configure_system(
     request: Request, body: ConfigureSystemProxyRequest | None = None,
@@ -426,42 +493,7 @@ async def configure_system(
     interface_override = body.interface if body else None
     skip_cert_check = body.skip_cert_check if body else False
 
-    # Preflight: capture through a device that does not trust the CA fails
-    # every HTTPS request, and the symptom -- a blank screen, an app with no
-    # network -- points nowhere near the proxy. Both halves of that state are
-    # ours, so refuse to create it rather than let it be discovered later.
-    if not skip_cert_check:
-        from server.config import get_auto_install_cert
-        from server.proxy.cert_preflight import refusal_detail, simulators_without_cert
-
-        controller = getattr(request.app.state, "device_controller", None)
-        missing = await simulators_without_cert(controller)
-        if missing:
-            if get_auto_install_cert():
-                from server.proxy.cert_manager import install_cert
-
-                for dev in missing:
-                    try:
-                        await install_cert(
-                            controller, dev["udid"], device_name=dev["name"],
-                        )
-                        _proxy_logger.info(
-                            "Auto-installed the CA on %s (%s)", dev["name"], dev["udid"][:8],
-                        )
-                    except Exception as e:
-                        # Report the failure rather than configuring anyway: the
-                        # user opted into having this handled, and silently
-                        # proceeding recreates exactly the state they opted out of.
-                        raise HTTPException(
-                            status_code=500,
-                            detail=(
-                                f"auto_install_cert is set but installing the CA on "
-                                f"{dev['name']} failed: {e}"
-                            ),
-                        ) from e
-            else:
-                # 428: the request is fine, the world is not ready for it yet.
-                raise HTTPException(status_code=428, detail=refusal_detail(missing))
+    await _ensure_ca_is_trusted(request, skip=skip_cert_check)
 
     try:
         snap = await asyncio.to_thread(
@@ -826,22 +858,38 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
 
 
 @router.post("/local-capture", response_model=ProxyStatusResponse)
-async def set_local_capture(request: Request, body: dict) -> ProxyStatusResponse:
+async def set_local_capture(
+    request: Request, body: LocalCaptureRequest,
+) -> ProxyStatusResponse:
     """Set the local capture process list. Restarts the proxy to apply.
 
-    Body: {"processes": ["Metatext", "MobileSafari"]}
+    Body: {"processes": ["Metatext", "MobileSafari"], "skip_cert_check": false}
     Empty list disables local capture.
+
+    Refuses with 428 when a booted simulator does not trust the mitmproxy CA,
+    matching `configure_system`: capturing in that state fails every HTTPS
+    request from the device with no indication the proxy is the cause. With
+    `auto_install_cert` set, it installs instead of refusing. Disabling capture
+    is never refused.
     """
-    processes = body.get("processes")
-    if processes is None:
-        raise HTTPException(status_code=400, detail="Missing 'processes' field")
-    if not isinstance(processes, list):
-        raise HTTPException(status_code=400, detail="'processes' must be a list of strings")
-    processes = [str(p) for p in processes if p]
+    # FastAPI rejects a missing or non-list `processes` with 422 before this
+    # runs; only the empty-string filtering is left to do.
+    processes = [p for p in body.processes if p]
 
     adapter = request.app.state.proxy_adapter
     if adapter is None:
         raise HTTPException(status_code=503, detail="Proxy adapter not configured")
+
+    # The same gate `configure_system` has had. This path had none, and it is
+    # the one the field report used: local capture routes a process's traffic
+    # through the proxy just as surely, so a device that does not trust the CA
+    # fails every HTTPS request with nothing pointing at the proxy.
+    #
+    # Only when enabling. Clearing the list stops capture, which cannot create
+    # the broken state and must never be refused because of it -- that would
+    # trap someone in exactly the situation they are trying to leave.
+    if processes:
+        await _ensure_ca_is_trusted(request, skip=body.skip_cert_check)
 
     # Update app state
     request.app.state.local_capture_processes = processes
