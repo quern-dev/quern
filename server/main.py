@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -1073,6 +1074,137 @@ def _fetch_device_tools() -> tuple[dict | None, str]:
     return tools, ""
 
 
+@contextlib.contextmanager
+def _update_check_logged_to_file() -> Iterator[bool]:
+    """Send the update check's own log lines to server.log, not the terminal.
+
+    The daemon gets this for free: `daemonize()` redirects its stderr into
+    server.log, so a `logger.warning` lands there. A CLI command has no such
+    redirection and no handler, so logging falls back to stderr -- which would
+    print the raw exception on screen directly underneath the one-line summary
+    that exists to replace it, and would make "the full error is in
+    server.log" a false promise in the same breath.
+    """
+    log = logging.getLogger("quern-debug-server.update-check")
+    from server.lifecycle.daemon import LOG_FILE
+
+    handler = None
+    previous = log.propagate
+    # Off first, and regardless of whether the handler opens. Leaving it on in
+    # the failure case sends the record to the CLI's root handler, which prints
+    # it to stderr -- the raw exception, directly underneath the one-line
+    # summary that exists to replace it.
+    log.propagate = False
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(LOG_FILE)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        log.addHandler(handler)
+    except OSError:
+        # An unwritable log directory must not stop the check. The summary and
+        # the remedy still reach the reader; only the detail is lost -- and the
+        # caller is told, so it does not point at a file nothing was written to.
+        handler = None
+    try:
+        yield handler is not None
+    finally:
+        log.propagate = previous
+        if handler is not None:
+            log.removeHandler(handler)
+            handler.close()
+
+
+def _is_from_this_run(info: dict, started: datetime) -> bool:
+    """Whether this update-info record was written by the check just made.
+
+    Compared rather than assumed, because "the file exists" and "the file
+    answers the question I just asked" are different claims and only the second
+    one is safe to print. A record with no readable timestamp is not trusted:
+    there is no way to tell which run it belongs to, and guessing in the
+    optimistic direction is what reports a stale "up to date".
+    """
+    stamp = info.get("checked_at")
+    if not isinstance(stamp, str):
+        return False
+    try:
+        checked_at = datetime.fromisoformat(stamp)
+    except ValueError:
+        return False
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=UTC)
+    # A second of slack: the record's timestamp is taken inside the check, a
+    # moment after `started`, but a filesystem with coarse clock granularity --
+    # or a record written by a process whose clock is a hair behind -- should
+    # not read as stale.
+    return checked_at >= started - timedelta(seconds=1)
+
+
+def _cmd_check_updates() -> int:
+    """Ask now, rather than waiting for the daily check.
+
+    The cached answer in update-info.json is refreshed at most once a day, so
+    a release landing this afternoon is not offered until tomorrow. The CLI has
+    never had this problem -- `quern update` checks when you run it -- but
+    anything reading the cache does, the menu bar included.
+    """
+    from server.lifecycle.update_check import (
+        CheckFailure,
+        check_for_updates,
+        read_update_info,
+    )
+
+    failures: list[CheckFailure] = []
+    # Before the check, so the cache it leaves can be told apart from the one
+    # that was already there. See the freshness test below.
+    started = datetime.now(UTC)
+    with _update_check_logged_to_file() as detail_was_logged:
+        # force=True: someone asked. That skips the once-a-day rate limit and
+        # the "update_check": false opt-out alike, because the opt-out governs
+        # the automatic check and this is not one.
+        message = check_for_updates(force=True, on_error=failures.append)
+
+    if failures:
+        # Before the cache is consulted, deliberately. read_update_info()
+        # returns whatever the last *successful* check left behind, so asking
+        # it first lets a stale "update available" answer a question the
+        # network never got to.
+        for line in failures[0].lines():
+            print(line, file=sys.stderr)
+        # Where the raw error went. The screen gets a summary now, so this is
+        # the pointer to the thing that actually happened.
+        if detail_was_logged:
+            from server.lifecycle.daemon import LOG_FILE
+            print(f"The full error is in {LOG_FILE}", file=sys.stderr)
+
+        return 1
+
+    info = read_update_info() or {}
+
+    # The cache only answers for this run if this run wrote it. A raised
+    # exception is not the only way to learn nothing: check_for_updates returns
+    # None silently when it cannot read a local version or a HEAD sha, and
+    # _write_update_info swallows its own write errors -- so the check can come
+    # back having produced no result at all while a record from days ago sits
+    # on disk. Reporting that as today's answer is the same false all-clear the
+    # failure ordering above exists to prevent, arrived at down a quieter path.
+    if not _is_from_this_run(info, started):
+        print("Could not check for updates: the check produced no result.",
+              file=sys.stderr)
+        print("Try again. If it keeps happening, run `quern capture-env` and "
+              "open an issue.", file=sys.stderr)
+        return 1
+
+    if info.get("update_available"):
+        print(message or f"Update available: v{info.get('latest_version')}")
+        return 0
+
+    current = info.get("current_version") or "unknown"
+    print(f"Up to date (v{current}, channel '{info.get('channel', 'stable')}').")
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Read-only diagnostics: device tools, venv, tool versions, service health.
 
@@ -1422,6 +1554,10 @@ def cli() -> None:
         "output", nargs="?",
         help="File to write (default: print to stdout)",
     )
+    subparsers.add_parser(
+        "check-updates",
+        help="Check for a new release now, ignoring the once-a-day rate limit",
+    )
     subparsers.add_parser("setup", help="Check environment and install dependencies")
 
     # uninstall
@@ -1486,6 +1622,8 @@ def cli() -> None:
     elif args.command == "capture-env":
         from server.lifecycle.capture_env import run
         sys.exit(run(getattr(args, "output", None)))
+    elif args.command == "check-updates":
+        sys.exit(_cmd_check_updates())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup())

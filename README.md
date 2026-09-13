@@ -386,6 +386,7 @@ quern doctor --fix           # ...and reconcile the venv with pyproject.toml (ve
 quern capture-env            # Write an environment report to attach to a bug report
 quern help                   # Show the command list
 quern version                # Print the installed version
+quern check-updates          # Ask now, ignoring the once-a-day rate limit
 quern update                 # Update to the latest release on your channel and rebuild
 quern update --tools         # Also upgrade external tools quern installed (pipx, brew)
 quern set-channel [name]     # Show or set the update channel (stable / beta)

@@ -125,6 +125,16 @@ the copy to trust, and the one to update.
     right. This is not hypothetical. The uninstall tests patched six things and
     not `Path.home`, so every full run deleted the developer's own `quern`
     command, and it presented as the CLI working intermittently for months.
+
+    **A branch that predates the fix still has the bug.** The guard lives in
+    `tests/conftest.py`, so it only protects branches that contain it, and
+    running an older branch's suite deletes the wrapper exactly as before --
+    silently, with every test passing. Merge or rebase `main` into a branch
+    *before* running its full suite, and especially before handing it to
+    review agents, which run the suite many times over. Measured: three
+    passing uninstall tests on a branch forked one commit early removed
+    `~/.local/bin/quern`, and the first sign of it was the menu-bar app
+    reporting it could not find the command.
   - **Tests inject every external lookup.** A test that reaches PyPI, brew or the network is a bug — slow, nondeterministic, broken offline. Pass the fetcher in, the way `probe_container` takes `describe_point`. When a call site moves, re-audit every test that reaches it; moving one report ahead of a return turned two passing tests into network calls.
   - **Mutation-test the guard.** Revert the fix and confirm a test actually fails. Two tests here passed against the bug they claimed to cover — one injected a fake at the wrong layer, one asserted on empty input.
 - **A stacked PR is never auto-reviewed.** CodeRabbit skips any pull request whose base is not the default branch — it posts "Auto reviews are disabled on base/target branches other than the default branch" and does nothing else. Retargeting does not wake it up either: measured twice, a PR retargeted to `main` when its parent merged sat 13–14 minutes with no review and no bot activity until asked explicitly. So on a stack, the `@coderabbitai review` that `merge-pr.sh --ask` sends is not a belt-and-braces re-check, it is the *only* review that will ever happen. #108 sat open for 15 hours with 968 unreviewed lines because of this, and the first look it got found a real bug. Ask at every level, or don't stack.

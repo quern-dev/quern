@@ -20,13 +20,16 @@ import asyncio
 import fcntl
 import json
 import logging
+import ssl
 import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from server.config import CONFIG_DIR, read_user_config
 
@@ -139,21 +142,126 @@ def _is_ahead_of(latest_sha: str | None) -> bool:
         return False
 
 
-def check_for_updates() -> str | None:
+#: What the reader is told, and what the log keeps.
+#:
+#: Two audiences, so two levels. On screen there are three outcomes, the same
+#: three every other updater has: an update is available, you are up to date,
+#: or the check could not be made. The third gets one short reason and one
+#: instruction, and that is all -- eight different wordings for "the network
+#: did not work" is a taxonomy of our exception handling, not information.
+#:
+#: The full exception text still goes to ~/.quern/server.log on every failure,
+#: because when the short answer is not enough the raw error is the only thing
+#: that is, and it costs a line to keep.
+#:
+#: Three remedies, because there are three things a person can actually do:
+#: fix their connection, wait for someone else to fix theirs, or report it.
+_CHECK_CONNECTION = "Check your internet connection, then try again."
+_WAIT = "Nothing to fix here — the update service is having trouble. Try again later."
+_REPORT = "Try again. If it keeps happening, run `quern capture-env` and open an issue."
+
+
+class CheckFailure(NamedTuple):
+    summary: str
+    """One short line naming the kind of failure. Shown."""
+
+    remedy: str
+    """What to do about it. Shown."""
+
+    detail: str
+    """The raw error, in the words of the thing that failed. Logged, not shown."""
+
+    def lines(self) -> list[str]:
+        """The surfaced form: a reason and an instruction, never the raw error."""
+        return [f"Could not check for updates: {self.summary}", self.remedy]
+
+
+def describe_failure(exc: BaseException) -> CheckFailure:
+    """Sort an exception into one of three things the reader can do."""
+    endpoint = ENDPOINT.split("//", 1)[-1].split("/", 1)[0]
+    detail = f"{type(exc).__name__}: {exc}"
+    # urllib wraps the real cause in a URLError whose str() is
+    # "<urlopen error ...>" -- the wrapper's own name, with the type of the
+    # thing that actually failed nowhere in it. The log is the only place the
+    # exception survives now, so it keeps the cause.
+    reason = getattr(exc, "reason", None)
+    if reason is not None and not isinstance(reason, str):
+        detail += f" (cause: {type(reason).__name__}: {reason})"
+
+    # Ordered most-specific first. HTTPError is a URLError is an OSError, so
+    # the reverse order would swallow the two specific cases whole.
+    if isinstance(exc, urllib.error.HTTPError):
+        return CheckFailure(f"{endpoint} answered {exc.code}.", _WAIT, detail)
+
+    # Certificate verification specifically, not the whole ssl.SSLError family.
+    # A handshake reset is a network failure and wants the network remedy; only
+    # a rejected certificate means something is reading the traffic.
+    #
+    # quern used to be the usual cause of this, because configuring the system
+    # proxy made it intercept its own update check. It no longer can -- see
+    # ALWAYS_BYPASS in server/proxy/addon.py -- so reaching here now means
+    # something else on the network is doing it.
+    cert_error = exc if isinstance(exc, ssl.SSLCertVerificationError) else None
+    if cert_error is None and isinstance(
+        getattr(exc, "reason", None), ssl.SSLCertVerificationError
+    ):
+        cert_error = exc.reason  # type: ignore[attr-defined]
+    if cert_error is not None:
+        return CheckFailure(
+            "something on this network is intercepting HTTPS.",
+            _REPORT,
+            f"{type(cert_error).__name__}: {cert_error}",
+        )
+
+    # Every network failure, in one bucket, keyed on the OS error family rather
+    # than on a list of the ones we have seen. urlopen wraps connection-phase
+    # errors in URLError, but a connection dropped while reading the response
+    # arrives raw from http.client -- and both mean the same thing to a reader.
+    if isinstance(exc, OSError):
+        return CheckFailure(f"could not reach {endpoint}.", _CHECK_CONNECTION, detail)
+
+    if isinstance(exc, ValueError):
+        # json.JSONDecodeError is a ValueError.
+        return CheckFailure(f"{endpoint} sent something unreadable.", _WAIT, detail)
+
+    return CheckFailure("the check did not complete.", _REPORT, detail)
+
+
+def check_for_updates(
+    force: bool = False,
+    on_error: Callable[[CheckFailure], None] | None = None,
+) -> str | None:
     """Return a message if updates are available, None otherwise.
 
     Rate-limited to once per CHECK_INTERVAL seconds. Never blocks server
     startup — returns None on any error. Respects "update_check": false
     in ~/.quern/config.json.
+
+    `force` means a person asked for this, right now, and it skips both gates.
+
+    The rate limit exists so a running server does not hit the network every
+    few minutes. It is the wrong answer for someone who has just asked: without
+    a way past it, a release landing this afternoon would not be offered until
+    tomorrow, and the menu bar -- which only knows what the cache last recorded
+    -- had no way to ask.
+
+    The opt-out is skipped for the same reason, though it took a second look to
+    see it. "update_check": false turns off the *automatic* check, which is the
+    only kind that happens without anyone asking; it is the checkbox every
+    other updater has, and every one of them leaves Check Now working. Refusing
+    an explicit request on the strength of it answers a question the setting
+    was never asked. If the motivation for turning it off was to stop quern
+    talking to the network unattended, that still holds -- clicking Check for
+    Updates is not unattended, and is consent for the call it makes.
     """
     try:
-        # Respect opt-out
-        config = read_user_config()
-        if config.get("update_check") is False:
+        # Respect the opt-out -- but only for the automatic check, which is the
+        # only one it governs. See the docstring.
+        if not force and read_user_config().get("update_check") is False:
             return None
 
         # Check rate limit
-        if LAST_CHECK_FILE.exists():
+        if not force and LAST_CHECK_FILE.exists():
             last_check = LAST_CHECK_FILE.stat().st_mtime
             if time.time() - last_check < CHECK_INTERVAL:
                 return None
@@ -253,7 +361,23 @@ def check_for_updates() -> str | None:
             })
         return message
 
-    except Exception:
+    except Exception as exc:
+        failure = describe_failure(exc)
+        # The raw error goes to the log every time, including the background
+        # check nobody asked for. It is one line, and it is the only place the
+        # exception survives now that the screen shows a summary -- so "show me
+        # what actually happened" has an answer.
+        logger.warning("Update check failed: %s", failure.detail)
+        # Quiet on screen by default: this runs on every server start, where a
+        # failed update check is not worth startup noise. `on_error` is how a
+        # caller who *asked* gets told -- see `_cmd_check_updates`.
+        if on_error is not None:
+            try:
+                on_error(failure)
+            except Exception:
+                # The docstring promises this never raises into a server start
+                # path. A caller's reporting bug must not become quern's.
+                logger.exception("Update check error handler raised")
         return None
 
 

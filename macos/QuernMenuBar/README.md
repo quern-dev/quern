@@ -18,6 +18,14 @@ manager with a **Restart to Update** action.
 - **Start / Stop / Restart** — shells out to the installed `quern` CLI.
 - **Restart to Update** — appears only when `~/.quern/update-info.json` reports
   `update_available`; runs `quern update`, then relaunches into the new build.
+- **Check for Updates…** — shown instead, when nothing is staged. That cache is
+  refreshed at most once a day, so without this a release landing in the
+  afternoon would not be offered until tomorrow and there was no way to ask.
+  Runs `quern check-updates`, which skips the once-a-day rate limit and the
+  `update_check: false` opt-out alike: that setting turns off the *automatic*
+  check, and clicking this is not one.
+  A check that finds nothing says so, because a menu identical before and after
+  is indistinguishable from a dead item.
 - **Start on launch** — launching the app starts the daemon, unless it is
   already running or you turn it off in Settings. On by default: you opened the
   Quern app, and a menu that greets you with "stopped" and a button to press is
@@ -43,6 +51,17 @@ manager with a **Restart to Update** action.
   from days earlier under a heading saying "Server". It read 0.15.0 for an
   0.16.1 install and was believed.
 - **Quit** — exits only the menu bar; ⌥ reveals "Quit and Stop Server".
+
+Every CLI call carries `QUERN_INVOKED_BY=menubar`, so the CLI can word its
+advice for someone who clicked a menu item — "Open a terminal and run: …"
+rather than "there is no terminal to ask on". It never decides what the CLI is
+*able* to do: whether a password can be asked for is settled by looking for a
+terminal, which cannot be forgotten the way a caller can forget to identify
+itself. When a failure alert carries a command, **Copy** puts it on the
+clipboard; the app does not launch a terminal itself, because running a `sudo`
+command on one menu click is a larger commitment than it makes anywhere else,
+it would pick a terminal on your behalf, and driving one needs an Automation
+permission prompt.
 
 It starts the daemon but does not own it: quitting the menu bar leaves the
 server running (⌥ reveals "Quit and Stop Server" for when you mean both), and

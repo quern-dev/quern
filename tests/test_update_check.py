@@ -7,7 +7,9 @@ call so test runs are deterministic.
 from __future__ import annotations
 
 import json
+import socket
 import time
+import urllib.error
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -470,3 +472,493 @@ def test_the_guard_never_fetches(monkeypatch, tmp_path):
     monkeypatch.setattr(uc.subprocess, "run", run)
     uc._is_ahead_of(SHA)
     assert not any("fetch" in c for c in seen), f"guard fetched: {seen}"
+
+
+class TestForcingACheck:
+    """The cache is refreshed at most once a day, so a release landing this
+    afternoon is not offered until tomorrow. The CLI never had that problem --
+    `quern update` checks when you run it -- but the menu bar reads the cache
+    and had no way to ask."""
+
+    def _patched(self, monkeypatch, tmp_path, *, checked_recently: bool):
+        from server.lifecycle import update_check
+
+        last = tmp_path / "last-check"
+        last.touch()
+        if not checked_recently:
+            old = time.time() - update_check.CHECK_INTERVAL - 60
+            import os
+
+            os.utime(last, (old, old))
+        monkeypatch.setattr(update_check, "LAST_CHECK_FILE", last)
+        monkeypatch.setattr(update_check, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(update_check, "UPDATE_INFO_FILE", tmp_path / "update-info.json")
+        monkeypatch.setattr(update_check, "CHANNEL_LOCK_FILE", tmp_path / "channel.lock")
+        monkeypatch.setattr(update_check, "read_user_config", dict)
+        # The request itself, which was reaching quern.dev for real. It passed
+        # either way -- check_for_updates swallows the failure -- so offline it
+        # went green after burning the timeout, and online it made a network
+        # call from the test suite. CHANNEL_LOCK_FILE above is the same class
+        # of leak: harmless only while the request failed before the lock was
+        # taken, and now that it succeeds it would contend with a running
+        # server's real ~/.quern/channel.lock.
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            MagicMock(side_effect=AssertionError(
+                "a test reached the network; inject the response instead"
+            )),
+        )
+        return update_check
+
+    def test_the_rate_limit_holds_for_an_ordinary_check(self, monkeypatch, tmp_path):
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=True)
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+
+        update_check.check_for_updates()
+
+        assert not looked, "an ordinary check must not hit the network every few minutes"
+
+    def test_force_goes_past_the_rate_limit(self, monkeypatch, tmp_path):
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=True)
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+        monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+        update_check.check_for_updates(force=True)
+
+        assert looked, "someone who just asked should not be told tomorrow"
+
+    def test_the_automatic_check_respects_the_opt_out(self, monkeypatch, tmp_path):
+        """What the setting is actually for: no unattended calls."""
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
+        monkeypatch.setattr(update_check, "read_user_config",
+                            lambda: {"update_check": False})
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+
+        assert update_check.check_for_updates() is None
+        assert not looked, "the automatic check ignored the opt-out"
+
+    def test_asking_directly_still_works_with_the_opt_out_set(
+        self, monkeypatch, tmp_path
+    ):
+        """"update_check": false turns off the *automatic* check.
+
+        It is the checkbox every other updater has, and every one of them
+        leaves Check Now working. Refusing an explicit request answers a
+        question the setting was never asked -- and clicking Check for Updates
+        is not an unattended call, so the privacy reading of the setting is
+        satisfied too.
+        """
+        update_check = self._patched(monkeypatch, tmp_path, checked_recently=False)
+        monkeypatch.setattr(update_check, "read_user_config",
+                            lambda: {"update_check": False})
+        looked = []
+        monkeypatch.setattr(update_check, "_get_local_version",
+                            lambda: looked.append(True) or "0.16.1")
+        monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+        update_check.check_for_updates(force=True)
+
+        assert looked, "someone who asked was refused on the strength of a setting"
+
+
+# --- What a failure tells the reader ------------------------------------
+#
+# Three outcomes on screen, the same three every updater has: an update is
+# available, you are up to date, or the check could not be made. The third gets
+# one reason and one instruction. The raw exception goes to the log, because
+# when the short answer is not enough it is the only thing that is.
+#
+# So these tests assert the *action*, not the wording. There are three things a
+# person can do -- fix their connection, wait, or report it -- and the only
+# thing that matters is that each failure is sorted into the right one.
+
+
+def _describe(exc):
+    from server.lifecycle.update_check import describe_failure
+    return describe_failure(exc)
+
+
+def _remedy_for(exc):
+    return _describe(exc).remedy
+
+
+def test_network_failures_all_say_check_your_connection():
+    import ssl
+    # One bucket, keyed on the OS error family rather than a list of the
+    # failures we happened to think of. The last two are the ones a
+    # branch-per-exception version got wrong: a connection dropped while
+    # reading the response arrives raw from http.client rather than wrapped in
+    # URLError, and a handshake reset is a network fault, not a certificate
+    # one.
+    for exc in [
+        urllib.error.URLError(socket.gaierror(8, "nodename nor servname")),
+        urllib.error.URLError(TimeoutError("timed out")),
+        urllib.error.URLError(ConnectionRefusedError(61, "refused")),
+        urllib.error.URLError(OSError(51, "Network is unreachable")),
+        ConnectionResetError(54, "Connection reset by peer"),
+        ssl.SSLEOFError(8, "EOF occurred in violation of protocol"),
+    ]:
+        assert "internet connection" in _remedy_for(exc), type(exc).__name__
+
+
+def test_service_failures_say_wait_rather_than_asking_the_reader_to_act():
+    import json as _json
+    # The distinction worth keeping. "Check your connection" and "wait" are
+    # different instructions to a person: one says act, the other says don't.
+    for exc in [
+        urllib.error.HTTPError("https://quern.dev/x", 503, "Busy", {}, None),
+        urllib.error.HTTPError("https://quern.dev/x", 500, "Boom", {}, None),
+        _json.JSONDecodeError("Expecting value", "<html>", 0),
+    ]:
+        remedy = _remedy_for(exc)
+        assert "Nothing to fix here" in remedy, type(exc).__name__
+        assert "internet connection" not in remedy
+
+
+def test_a_rejected_certificate_says_the_network_is_intercepting_https():
+    import ssl
+    inner = ssl.SSLCertVerificationError(
+        1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1010)"
+    )
+    failure = _describe(urllib.error.URLError(inner))
+    assert "intercepting HTTPS" in failure.summary
+    # Not "turn off quern's proxy" any more. quern cannot be the cause: it
+    # never intercepts its own update traffic -- see ALWAYS_BYPASS in
+    # server/proxy/addon.py -- so that advice would send the reader to a
+    # setting that is already correct.
+    assert "quern stop" not in failure.remedy
+
+
+def test_an_unrecognised_failure_is_reported_rather_than_guessed_at():
+    failure = _describe(RuntimeError("something odd"))
+    assert "capture-env" in failure.remedy
+    assert "RuntimeError" in failure.detail
+    assert "something odd" in failure.detail
+
+
+def test_the_raw_error_is_kept_but_never_shown():
+    # The whole point of the collapse. The detail survives for the log; the
+    # lines a reader sees carry the summary and the instruction instead.
+    failure = _describe(urllib.error.URLError(socket.gaierror(8, "nodename")))
+    assert "gaierror" in failure.detail
+    shown = "\n".join(failure.lines())
+    assert "gaierror" not in shown
+    assert "Could not check for updates" in shown
+
+
+def test_every_failure_carries_one_of_the_three_instructions():
+    import ssl
+
+    from server.lifecycle.update_check import (
+        _CHECK_CONNECTION,
+        _REPORT,
+        _WAIT,
+    )
+    cases = [
+        urllib.error.HTTPError("https://quern.dev/x", 500, "Boom", {}, None),
+        urllib.error.URLError(ssl.SSLCertVerificationError(1, "bad cert")),
+        urllib.error.URLError(socket.gaierror(8, "no")),
+        urllib.error.URLError(TimeoutError("timed out")),
+        urllib.error.URLError(ConnectionRefusedError(61, "refused")),
+        ConnectionResetError(54, "reset"),
+        ValueError("not json"),
+        RuntimeError("unknown"),
+    ]
+    for exc in cases:
+        failure = _describe(exc)
+        # The pet peeve this exists to satisfy: no error without an
+        # instruction, and only instructions someone can actually follow.
+        assert failure.remedy in {_CHECK_CONNECTION, _WAIT, _REPORT}, (
+            f"{type(exc).__name__} invented a fourth instruction"
+        )
+        assert failure.summary.strip()
+        assert failure.detail.strip()
+
+
+def test_check_for_updates_reports_the_failure_to_its_caller(isolated_update_files):
+    from server.lifecycle.update_check import check_for_updates
+    seen = []
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError(socket.gaierror(8, "nodename nor servname")),
+    ):
+        result = check_for_updates(force=True, on_error=seen.append)
+    assert result is None
+    assert len(seen) == 1
+    assert "internet connection" in seen[0].remedy
+
+
+def test_check_for_updates_logs_the_raw_error(isolated_update_files, caplog):
+    # The log is now the only place the exception survives, so it is load
+    # bearing rather than incidental.
+    from server.lifecycle.update_check import check_for_updates
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        with caplog.at_level("WARNING"):
+            check_for_updates(force=True)
+    assert any("boom" in r.message for r in caplog.records)
+
+
+def test_check_for_updates_survives_a_caller_with_no_error_handler(isolated_update_files):
+    from server.lifecycle.update_check import check_for_updates
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        assert check_for_updates(force=True) is None
+
+
+def test_a_raising_error_handler_does_not_escape(isolated_update_files):
+    # The docstring promises this never raises into a server start path, and a
+    # caller's reporting bug must not become quern's.
+    from server.lifecycle.update_check import check_for_updates
+
+    def explode(_failure):
+        raise RuntimeError("handler is broken")
+
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        assert check_for_updates(force=True, on_error=explode) is None
+
+
+# --- The check-updates command ----------------------------------------------
+
+
+@pytest.fixture
+def check_updates_cmd(isolated_update_files, monkeypatch):
+    """The command, with every external lookup redirected or injected."""
+    from server.lifecycle import update_check
+    # Not the developer's real ~/.quern/config.json: a machine with checking
+    # turned off would otherwise take every one of these down a path the test
+    # is not about.
+    monkeypatch.setattr(update_check, "read_user_config", dict)
+    from server.main import _cmd_check_updates
+    return _cmd_check_updates
+
+
+def _cache(path, **fields):
+    payload = {
+        "checked_at": "2026-09-12T05:01:35+00:00",
+        "current_version": "0.16.1",
+        "latest_version": "0.16.1",
+        "update_available": False,
+    }
+    payload.update(fields)
+    (path / "update-info.json").write_text(json.dumps(payload))
+
+
+def test_command_reports_the_failure_rather_than_a_stale_update(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # The regression the ordering exists for. A cache left saying "update
+    # available" by a check that succeeded yesterday must not be printed as
+    # today's answer when today's check never left the machine.
+    _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError(socket.gaierror(8, "nodename")),
+    ):
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "0.17.0" not in captured.out
+    assert "Could not check for updates" in captured.err
+    assert "internet connection" in captured.err
+
+
+def test_command_points_at_the_log_without_printing_the_raw_error(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError(socket.gaierror(8, "nodename nor servname")),
+    ):
+        check_updates_cmd()
+    captured = capsys.readouterr()
+    assert "server.log" in captured.err
+    # The detail belongs in the log, not on screen -- otherwise the collapse
+    # bought nothing and the pointer is redundant.
+    assert "gaierror" not in captured.err
+
+
+def test_the_command_still_checks_when_automatic_checking_is_off(
+    check_updates_cmd, isolated_update_files, capsys, monkeypatch
+):
+    # Running `quern check-updates` is asking. The setting governs the
+    # unattended check, so it must not turn this into a refusal -- and the
+    # answer must come from the network, not from the cache the last check
+    # before the opt-out happened to leave behind.
+    from server.lifecycle import update_check
+    monkeypatch.setattr(
+        update_check, "read_user_config", lambda: {"update_check": False}
+    )
+    _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.18.0", "update_available": True}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp) as urlopen:
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert urlopen.called, "an explicit check was refused by the opt-out"
+    assert code == 0
+    assert "Update available" in captured.out
+
+
+def test_command_sends_failures_to_stderr_not_stdout(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+        check_updates_cmd()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+
+
+def test_command_asks_even_though_the_rate_limit_is_current(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # The feature's entire premise: the cached answer refreshes at most once a
+    # day, and this command exists to ignore that. With the stamp fresh, a call
+    # without force=True would return without ever reaching the network.
+    (isolated_update_files / "last-update-check").write_text("")
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.17.0", "update_available": True}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp) as urlopen:
+        code = check_updates_cmd()
+    assert urlopen.called, "the rate limit was allowed to skip the request"
+    assert code == 0
+    assert "Update available" in capsys.readouterr().out
+
+
+def test_command_reports_up_to_date_without_claiming_a_check_it_did_not_make(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.16.1", "update_available": False}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        code = check_updates_cmd()
+    assert code == 0
+    assert "Up to date" in capsys.readouterr().out
+
+
+def test_command_does_not_call_a_silent_no_result_up_to_date(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    with patch(
+        "server.lifecycle.update_check.check_for_updates", return_value=None
+    ), patch("server.lifecycle.update_check.read_update_info", return_value=None):
+        code = check_updates_cmd()
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Up to date" not in captured.out
+    assert "no result" in captured.err
+
+
+# --- The command is actually reachable --------------------------------------
+
+
+def test_check_updates_is_wired_into_the_cli_dispatch(monkeypatch, capsys):
+    """Deleting the dispatch arm used to leave the whole suite green.
+
+    Everything else here calls `_cmd_check_updates` directly, and the only
+    other thing that mentioned the command was the README sync check, which
+    reads the subparser registration. So `quern check-updates` could have
+    stopped running the check entirely -- falling through to exit 0, doing
+    nothing, looking exactly like "up to date" -- and nothing would have said
+    so. That is the branch's whole user-facing deliverable.
+    """
+    import server.main as main
+
+    called = []
+    monkeypatch.setattr(main, "_cmd_check_updates", lambda: called.append(True) or 0)
+    monkeypatch.setattr("sys.argv", ["quern", "check-updates"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main.cli()
+
+    assert called, "`quern check-updates` did not reach the check"
+    assert exit_info.value.code == 0
+
+
+def test_the_commands_exit_code_reaches_the_shell(monkeypatch):
+    # A failed check that exits 0 tells a script the opposite of what happened.
+    import server.main as main
+
+    monkeypatch.setattr(main, "_cmd_check_updates", lambda: 1)
+    monkeypatch.setattr("sys.argv", ["quern", "check-updates"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main.cli()
+
+    assert exit_info.value.code == 1
+
+
+def test_a_check_that_learned_nothing_does_not_report_the_old_cache(
+    check_updates_cmd, isolated_update_files, capsys, monkeypatch
+):
+    """The quiet sibling of the stale-cache bug.
+
+    A raised exception is not the only way to learn nothing. check_for_updates
+    returns None silently when it cannot read a local version or a HEAD sha,
+    and _write_update_info swallows its own write errors -- so the check can
+    come back having produced no result while a record from days ago sits on
+    disk. Printing that as today's answer is the same false all-clear.
+    """
+    from server.lifecycle import update_check
+    _cache(isolated_update_files, update_available=True, latest_version="0.17.0")
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: None)
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+    code = check_updates_cmd()
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "0.17.0" not in captured.out
+    assert "no result" in captured.err
+
+
+def test_a_cache_this_run_wrote_is_reported(
+    check_updates_cmd, isolated_update_files, capsys
+):
+    # The other side: a record written by this very check must be trusted, or
+    # the freshness test would reject every answer and the command could never
+    # report anything.
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = json.dumps(
+        {"latest_version": "0.17.0", "update_available": True}
+    ).encode()
+    fake_resp.__enter__ = lambda self: self
+    fake_resp.__exit__ = lambda self, *a: False
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        code = check_updates_cmd()
+
+    assert code == 0
+    assert "Update available" in capsys.readouterr().out
+
+
+def test_a_record_with_no_timestamp_is_not_trusted(
+    check_updates_cmd, isolated_update_files, capsys, monkeypatch
+):
+    # No way to tell which run it belongs to, and guessing optimistically is
+    # what reports a stale "up to date".
+    from server.lifecycle import update_check
+    (isolated_update_files / "update-info.json").write_text(
+        json.dumps({"current_version": "0.16.1", "update_available": False})
+    )
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: None)
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: None)
+
+    assert check_updates_cmd() == 1
+    assert "Up to date" not in capsys.readouterr().out

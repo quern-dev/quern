@@ -147,6 +147,54 @@ class TestTheLookupFindsTheCLI:
         assert without == with_venv
 
 
+class TestUpgradingWhatTheCapturedMachineHasInstalled:
+    """The captured machine is the one that hit this, so it is the one to plan
+    against.
+
+    `quern update --tools` on it failed with "Package is not installed.
+    Expected to find ~/.local/pipx/venvs/pymobiledevice3, but it does not
+    exist" -- for a tool sitting in /opt/pipx and working fine. Hand-built
+    sites would have proved the same thing, but this proves it about a real
+    configuration rather than one I invented to match the code.
+    """
+
+    async def test_the_upgrade_command_matches_where_it_is_installed(
+        self, home_on_external
+    ):
+        from server.device.tool_updates import plan_updates
+        from server.device.tool_versions import ToolSite
+
+        install = next(
+            i for i in home_on_external.data["pymobiledevice3_installs"]
+            if i["kind"] == "pipx-global"
+        )
+        site = ToolSite(
+            name="pymobiledevice3", role="cli", available=True,
+            version="9.15.1", path=install["path"], source="pipx",
+            package="pymobiledevice3",
+        )
+
+        async def pypi(_name):
+            return "11.12.4"
+
+        async def brew():
+            return {}
+
+        updates = await plan_updates([site], pypi=pypi, brew=brew)
+        update = next(u for u in updates if u.name == "pymobiledevice3")
+
+        assert update.command == [
+            "sudo", "pipx", "upgrade", "--global", "pymobiledevice3"
+        ], f"`{' '.join(update.command)}` is the command that failed on this machine"
+        assert update.needs_root is True
+
+    def test_the_capture_still_records_a_global_install(self, home_on_external):
+        """If the fixture is ever re-captured on a machine without one, the test
+        above silently stops testing anything."""
+        kinds = {i["kind"] for i in home_on_external.data["pymobiledevice3_installs"]}
+        assert "pipx-global" in kinds
+
+
 class TestTheExclusionCoversBothShadowingRoots:
     """The `sys.prefix` half had no coverage at all: deleting it left 230 tests
     green. It is the half that matters most -- setup identifies the shadowing

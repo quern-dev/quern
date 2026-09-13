@@ -11,13 +11,18 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
+from server.config import CONFIG_DIR
+from server.lifecycle.invocation import run_it_yourself
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
@@ -475,6 +480,27 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     return failures
 
 
+def _can_ask_for_a_password() -> bool:
+    """Whether there is a terminal sudo could prompt on.
+
+    Same test `setup._prompt_yn` makes, and for the same reason: a GUI-launched
+    process has no controlling terminal, so /dev/tty cannot be opened.
+
+    Deliberately not "was I run by the menu bar". That is a different question,
+    answered separately by `invoked_by()`, and using identity where capability
+    is meant gets it wrong in both directions: a caller that forgets to
+    identify itself still cannot prompt, and `quern update --tools | tee log`
+    has no tty while the user sits right in front of one.
+    """
+    if sys.stdin.isatty():
+        return True
+    try:
+        open("/dev/tty").close()
+    except OSError:
+        return False
+    return True
+
+
 def _report_tool_updates(apply: bool = False) -> bool:
     """Show external tools that have moved on, and optionally move them.
 
@@ -520,7 +546,17 @@ def _report_tool_updates(apply: bool = False) -> bool:
 
     failures: list[str] = []
     for update in todo:
+        if update.needs_root and not _can_ask_for_a_password():
+            # sudo with nowhere to prompt either hangs or fails with a message
+            # about a terminal, neither of which tells the reader what to do.
+            print(f"\n{update.name} needs sudo, which cannot be asked for here.")
+            for line in run_it_yourself(update.command):
+                print(f"  {line}")
+            failures.append(update.name)
+            continue
         print(f"\nUpgrading {update.name}...")
+        if update.needs_root:
+            print("  This needs sudo; you may be asked for your password.")
         try:
             result = subprocess.run(update.command, timeout=600)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -536,6 +572,69 @@ def _report_tool_updates(apply: bool = False) -> bool:
     return not failures
 
 
+#: Where `quern update` records what it did.
+#:
+#: The exit code cannot carry this. "Already up to date" has to stay 0 or every
+#: script that treats nonzero as failure breaks, so success and did-nothing
+#: arrive at a caller looking identical -- and the menu bar, seeing 0, waited
+#: thirty seconds for a version to change that was never going to, then
+#: reported that an update had finished when none was attempted.
+#:
+#: A file rather than a flag on stdout: it outlives the run, so "what happened
+#: last time I updated?" has an answer at all. Nothing else did -- the menu bar
+#: logged the CLI's output only on failure, so a successful or no-op update
+#: left no record anywhere.
+RESULT_FILE = CONFIG_DIR / "last-update.json"
+
+#: The outcomes. `no_op` is the one the exit code could not express.
+UPDATED = "updated"
+NO_OP = "no_op"
+FAILED = "failed"
+
+
+def _clear_result() -> None:
+    """Drop any previous result, so a stale one cannot answer for this run."""
+    try:
+        RESULT_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _installed_version() -> str | None:
+    """The version on disk now that the update has finished, or None."""
+    root = _find_project_root()
+    return _read_local_version(root) if root is not None else None
+
+
+def _write_result(outcome: str, detail: str, version: str | None = None) -> None:
+    """Record the outcome. Best-effort: a failed write must not fail the update."""
+    payload = json.dumps({
+        "outcome": outcome,
+        "detail": detail,
+        "version": version,
+        "finished_at": datetime.now(UTC).isoformat(),
+    }, indent=2)
+    try:
+        RESULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Written aside and moved into place, not written over. The menu bar
+        # reads this file while the CLI writes it, and `write_text` truncates
+        # first -- so a read landing in that window gets a partial document.
+        # `os.replace` is atomic within a filesystem, so a reader sees either
+        # the old file or the new one. Same directory for that reason: a move
+        # across filesystems is a copy, and the window comes back.
+        tmp = RESULT_FILE.with_name(f".{RESULT_FILE.name}.{os.getpid()}.tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, RESULT_FILE)
+    except OSError:
+        # Best-effort. Losing the record costs a caller its shortcut and it
+        # falls back to the version poll; failing here would cost the user the
+        # update.
+        try:
+            tmp.unlink(missing_ok=True)
+        except (OSError, NameError, UnboundLocalError):
+            pass
+
+
 def run_update(apply_tools: bool = False) -> int:
     """Pull latest changes and rebuild.
 
@@ -545,9 +644,15 @@ def run_update(apply_tools: bool = False) -> int:
 
     Returns 0 on success, 1 on failure.
     """
+    # Cleared first, on every path. A stale result from the last run is worse
+    # than none: the menu bar would read a previous "updated" as this run's
+    # answer and relaunch into a version nothing just installed.
+    _clear_result()
+
     project_root = _find_project_root()
     if project_root is None:
         print("Error: could not find project root")
+        _write_result(FAILED, "could not find project root")
         return 1
 
     if _is_git_install(project_root):
@@ -556,10 +661,22 @@ def run_update(apply_tools: bool = False) -> int:
         rc = _update_via_tarball(project_root)
 
     if rc == 1:
+        _write_result(FAILED, "the update could not be applied")
         return 1  # Error
     if rc == 2:
-        # Nothing to rebuild, but external tools age independently of quern.
-        return 0 if _report_tool_updates(apply_tools) else 1
+        # Nothing was pulled, so there is nothing to rebuild and nothing for a
+        # caller to wait for. External tools age independently of quern, so
+        # they are still reported.
+        tools_ok = _report_tool_updates(apply_tools)
+        if not tools_ok:
+            # A success marker must not survive a failure. Recording "nothing
+            # to do" and then returning 1 leaves the file saying the run went
+            # fine while the exit code says it did not, and the file is the
+            # durable one -- it is what anybody reads afterwards.
+            _write_result(FAILED, "a tool upgrade failed")
+            return 1
+        _write_result(NO_OP, "already up to date", version=_installed_version())
+        return 0
 
     failures = _rebuild_and_restart(project_root)
 
@@ -575,6 +692,16 @@ def run_update(apply_tools: bool = False) -> int:
         # naming the step matters: "dependencies could not be installed" after
         # a failed restart sends the reader to the wrong place.
         print(f"Update incomplete: {', '.join(failures)} failed.")
+        _write_result(FAILED, f"{', '.join(failures)} failed")
         return 1
 
-    return 0 if tools_ok else 1
+    if not tools_ok:
+        # quern itself updated, but a tool upgrade the caller asked for did
+        # not, and that is what the exit code reports. The record agrees rather
+        # than claiming the whole run succeeded.
+        _write_result(FAILED, "quern updated, but a tool upgrade failed",
+                      version=_installed_version())
+        return 1
+
+    _write_result(UPDATED, "update applied", version=_installed_version())
+    return 0

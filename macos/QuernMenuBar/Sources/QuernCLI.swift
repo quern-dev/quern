@@ -6,6 +6,33 @@
 
 import Foundation
 
+/// A boolean two queues can share.
+///
+/// Small on purpose: the one thing `QuernCLI.run` needs to hand from its
+/// watchdog back to the thread waiting on the process is "did we kill it".
+///
+/// Set-once and never cleared, so there is no read-modify-write to get wrong;
+/// the lock is here for the memory model, not for arithmetic. A narrow window
+/// remains where a process exits microseconds before the watchdog fires and
+/// still reports as timed out. That is inherent in asking the question at a
+/// deadline, and both answers are defensible at that instant.
+final class Flag {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 enum QuernCLI {
     /// Where the installer puts a release install. Not derived from this
     /// bundle's location: the app is installed to ~/Applications (so Spotlight
@@ -122,6 +149,13 @@ enum QuernCLI {
             var env = ProcessInfo.processInfo.environment
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             env["PATH"] = searchPath(home: home).joined(separator: ":")
+            // Who is asking, so the CLI can word its advice for someone who
+            // clicked a menu item. Never what decides whether it may prompt --
+            // that is a capability, and the CLI works it out by looking for a
+            // terminal, which cannot be forgotten the way a caller can forget
+            // to identify itself. Same convention as
+            // QUERN_UPDATE_TRIGGERED_BY on the HTTP path.
+            env["QUERN_INVOKED_BY"] = "menubar"
             proc.environment = env
 
             let pipe = Pipe()
@@ -130,14 +164,19 @@ enum QuernCLI {
 
             var status: Int32 = -1
             var output = ""
-            var timedOut = false
+            // Written by the watchdog on a global queue, read here on the run
+            // queue. A plain `var` captured by both is a data race -- not a
+            // theoretical one, since `cancel()` does not stop a work item that
+            // has already begun executing, so the write and the read really can
+            // overlap at the deadline.
+            let timedOut = Flag()
             do {
                 try proc.run()
                 // Terminating the child closes the pipe, which is what releases
                 // the blocking read below.
                 let watchdog = DispatchWorkItem {
                     guard proc.isRunning else { return }
-                    timedOut = true
+                    timedOut.set()
                     proc.terminate()
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
@@ -145,7 +184,7 @@ enum QuernCLI {
                 proc.waitUntilExit()
                 watchdog.cancel()
                 output = String(data: data, encoding: .utf8) ?? ""
-                if timedOut {
+                if timedOut.isSet {
                     status = timedOutStatus
                     let mins = Int(timeout / 60)
                     output += "\n\nquern \(args.first ?? "") did not finish within "
@@ -177,6 +216,26 @@ enum QuernCLI {
 
     static func restart(_ completion: ((Int32, String) -> Void)? = nil) {
         run(["restart"], timeout: 180, completion: completion)
+    }
+
+    static func checkForUpdates(_ completion: ((Int32, String) -> Void)? = nil) {
+        // A backstop, not the user-facing timeout. That one lives in the
+        // server -- a 5s cap on the HTTP request -- and it is the one that
+        // produces a real message, because it knows what failed. This watchdog
+        // only kills the process, and a killed process has nothing to say.
+        //
+        // So it has to sit above the worst case the check can legitimately
+        // take, and 15s did not. The 5s is `urlopen`'s timeout, which is
+        // per socket operation rather than a total, and `create_connection`
+        // applies it to each resolved address in turn -- quern.dev has two.
+        // On a git install the check also shells out to git three times, at
+        // 5s, 10s and 10s. Measured end to end at about half a second in the
+        // normal case; the legitimate worst case is north of forty seconds.
+        //
+        // At 15s a slow network killed the process *before* the inner request
+        // could time out and say why, throwing away the reason the user is
+        // being shown. 45s means the inner timeout wins every race it should.
+        run(["check-updates"], timeout: 45, completion: completion)
     }
 
     static func update(_ completion: ((Int32, String) -> Void)? = nil) {

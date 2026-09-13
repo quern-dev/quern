@@ -16,10 +16,14 @@ enum UpdaterTests {
 
         final class Record {
             var statuses: [String] = []
+            var progress: [UpdateProgress] = []
             var failures: [(String, String)] = []
             var relaunchedInto: String?
             var versionCalls = 0
             var parked: [(String?, String) -> Void] = []
+            /// What `quern update` recorded. nil means "no record", which is
+            /// how this behaved before the CLI wrote one.
+            var result: UpdateResult?
             /// Holds the updater alive for the length of the test.
             ///
             /// Not bookkeeping. The poll body captures `[weak self]` and cancels
@@ -35,7 +39,8 @@ enum UpdaterTests {
         baseline: String?,
         thenVersions: [String?],
         updateResult: (Int32, String) = (0, ""),
-        versionHangs: Bool = false
+        versionHangs: Bool = false,
+        recorded: UpdateResult? = nil
     ) -> (Updater, TestScheduler, Rig.Record) {
         let clock = TestScheduler()
         let record = Rig.Record()
@@ -43,6 +48,12 @@ enum UpdaterTests {
 
         var deps = Updater.Dependencies()
         deps.scheduler = clock
+        // Injected, or the default reads the real ~/.quern/last-update.json and
+        // the developer's own last update decides what these tests see. Left as
+        // "no record", which is the pre-existing behaviour: fall back to the
+        // version poll. The no-op path has its own cases below.
+        record.result = recorded
+        deps.readResult = { record.result }
         deps.readVersion = { done in
             record.versionCalls += 1
             if versionHangs && record.versionCalls > 1 {
@@ -63,7 +74,7 @@ enum UpdaterTests {
         let updater = Updater(deps)
         record.updater = updater
         updater.restartToUpdate(
-            status: { record.statuses.append($0) },
+            status: { record.progress.append($0); record.statuses.append($0.text) },
             failure: { record.failures.append(($0, $1)) }
         )
         return (updater, clock, record)
@@ -82,6 +93,76 @@ enum UpdaterTests {
     }
 
     static func all() {
+        Harness.test("a no-op update stops at once instead of polling") {
+            // The reported bug. `quern update` on a branch with nothing to pull
+            // exits 0 in about two seconds having done nothing, and exit 0 used
+            // to mean "poll for the version to change" -- so the menu bar sat
+            // on "Updating…" for the full thirty seconds and then announced
+            // that an update had finished.
+            let (_, _, r) = run(
+                baseline: "0.16.1", thenVersions: ["0.16.1"],
+                updateResult: (0, "Already up to date."),
+                recorded: UpdateResult(outcome: .noOp, detail: "already up to date",
+                                       version: "0.16.1", finishedAt: Date.distantFuture)
+            )
+            Harness.expect(r.progress.last?.isWorking, false, "should have finished")
+            Harness.expect(r.statuses.last ?? "", "Already up to date", "status")
+            Harness.expect(r.relaunchedInto == nil, "a no-op must not relaunch")
+        }
+
+        Harness.test("a no-op update leaves no timer waiting out the deadline") {
+            let (_, clock, r) = run(
+                baseline: "0.16.1", thenVersions: ["0.16.1"],
+                updateResult: (0, "Already up to date."),
+                recorded: UpdateResult(outcome: .noOp, detail: "already up to date",
+                                       version: "0.16.1", finishedAt: Date.distantFuture)
+            )
+            let callsAtFinish = r.versionCalls
+            clock.advance(by: 60)
+            // The thirty seconds are gone rather than relabelled.
+            Harness.expect(clock.liveTimerCount, 0, "timers left running")
+            Harness.expect(r.versionCalls, callsAtFinish, "kept polling after finishing")
+        }
+
+        Harness.test("a real update still polls for the new version") {
+            // The other half of the same decision. An update that did pull must
+            // keep the poll: the restart is still settling and a version read
+            // taken during it can fail.
+            let (_, clock, r) = run(
+                baseline: "0.16.1", thenVersions: ["0.17.0"],
+                recorded: UpdateResult(outcome: .updated, detail: "applied",
+                                       version: "0.17.0", finishedAt: Date.distantFuture)
+            )
+            clock.advance(by: 4)
+            Harness.expect(r.relaunchedInto, "0.17.0", "relaunch target")
+        }
+
+        Harness.test("a stale no-op record does not short-circuit a real update") {
+            // The mechanism only works if the flow consults the timestamp, not
+            // just if UpdateResult knows how to compare one. Dropping the
+            // staleness check here left every isolated test on `describes`
+            // green while a leftover record from the last run skipped the
+            // relaunch after an update that genuinely happened.
+            let (_, clock, r) = run(
+                baseline: "0.16.1", thenVersions: ["0.17.0"],
+                recorded: UpdateResult(outcome: .noOp, detail: "already up to date",
+                                       version: "0.16.1", finishedAt: Date.distantPast)
+            )
+            clock.advance(by: 4)
+            Harness.expect(r.relaunchedInto, "0.17.0",
+                           "a stale record answered for this run")
+        }
+
+        Harness.test("an unreadable record falls back to the version poll") {
+            // An old menu bar against a newer CLI, or a write that failed. It
+            // must be no worse off than before the record existed, not wrong.
+            let (_, clock, r) = run(
+                baseline: "0.16.1", thenVersions: ["0.17.0"], recorded: nil
+            )
+            clock.advance(by: 4)
+            Harness.expect(r.relaunchedInto, "0.17.0", "relaunch target")
+        }
+
         Harness.test("a changed version relaunches into it") {
             let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.17.0"])
             clock.advance(by: 4)
@@ -103,6 +184,20 @@ enum UpdaterTests {
             let (_, clock, r) = run(baseline: nil, thenVersions: ["0.16.1", "0.16.1"])
             clock.advance(by: 10)
             Harness.expect(r.relaunchedInto == nil, "relaunched off a nil baseline")
+        }
+
+        Harness.test("the deadline is short, because the update has already finished") {
+            // `quern update` is synchronous, so the poll is only waiting for a
+            // version read to start working again after the daemon restart.
+            // Sizing it for a background update left "Updating…" on screen for
+            // three minutes after the work was done.
+            let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.16.1", "0.16.1"])
+            clock.advance(by: 25)
+            Harness.expect(r.progress.last?.isWorking == true,
+                           "25s in, it should still be waiting")
+            clock.advance(by: 10)
+            Harness.expect(r.progress.last?.isWorking == false,
+                           "by 35s it should have given up and said so")
         }
 
         Harness.test("a hung version check still reaches the deadline") {
@@ -131,7 +226,7 @@ enum UpdaterTests {
             // Without the skip every 2s tick spawns another subprocess for the
             // whole 180s, against a venv being rebuilt -- 90 of them.
             let (_, clock, r) = run(baseline: "0.16.1", thenVersions: [], versionHangs: true)
-            clock.advance(by: 40)
+            clock.advance(by: 20)
             Harness.expect(r.versionCalls, 2,
                            "expected the baseline read plus one outstanding poll, "
                                + "got \(r.versionCalls)")
@@ -139,7 +234,7 @@ enum UpdaterTests {
 
         Harness.test("an unchanged version is not reported as a timeout") {
             let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.16.1", "0.16.1"])
-            clock.advance(by: 200)
+            clock.advance(by: 60)
             Harness.expect(r.relaunchedInto == nil, "nothing changed, so nothing to relaunch into")
             Harness.expect(r.statuses.last?.contains("timed out") == false,
                            "`quern update` exited 0; calling that a timeout reports a "
@@ -156,11 +251,38 @@ enum UpdaterTests {
             expectRetryable(u, r, "a failed update")
         }
 
+        Harness.test("progress is reported as working until there is an answer") {
+            // The menu closes the instant you click an item, so a status that
+            // only reaches a menu line is invisible for the whole run. The
+            // status item shows `working`, and stops the moment there is an
+            // answer so the menu bar is not permanently wider.
+            let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.16.1", "0.16.1"])
+            Harness.expect(r.progress.first?.isWorking == true,
+                           "the first thing reported must be that work started")
+            clock.advance(by: 60)
+            Harness.expect(r.progress.last?.isWorking == false,
+                           "running out of time is an answer, not work in progress")
+        }
+
+        Harness.test("a failure is an answer, not continuing work") {
+            let (_, clock, r) = run(baseline: "0.16.1", thenVersions: ["0.17.0"],
+                                    updateResult: (1, "git pull failed"))
+            clock.advance(by: 10)
+            Harness.expect(r.progress.last?.isWorking == false,
+                           "a failed update must not leave the icon saying it is working")
+        }
+
+        Harness.test("an unreadable baseline stops reporting work immediately") {
+            let (_, _, r) = run(baseline: nil, thenVersions: [])
+            Harness.expect(r.progress.last?.isWorking == false, "reading")
+        }
+
         Harness.test("a second click while one is running is ignored") {
             let clock = TestScheduler()
             let record = Rig.Record()
             var deps = Updater.Dependencies()
             deps.scheduler = clock
+            deps.readResult = { record.result }
             deps.readVersion = { done in
                 record.versionCalls += 1
                 done("0.16.1", "quern 0.16.1")
@@ -170,13 +292,58 @@ enum UpdaterTests {
 
             let updater = Updater(deps)
             record.updater = updater
-            let go = { updater.restartToUpdate(status: { record.statuses.append($0) },
+            let go = { updater.restartToUpdate(status: {
+                record.progress.append($0); record.statuses.append($0.text) },
                                                failure: { record.failures.append(($0, $1)) }) }
             go()
             let afterFirst = record.versionCalls
             go()
             Harness.expect(record.versionCalls, afterFirst,
                            "a second click started a second update")
+        }
+    }
+}
+
+// The record's own parsing and staleness rule, away from the update flow.
+enum UpdateResultTests {
+    static func all() {
+        Harness.test("a stale record does not answer for this run") {
+            // The upgrade path onto this feature: the CLI doing the work is the
+            // old one and writes nothing, so whatever the previous run left is
+            // still on disk. Reading it would skip the relaunch after an update
+            // that really happened.
+            let start = Date(timeIntervalSince1970: 2_000_000)
+            let stale = UpdateResult(outcome: .noOp, detail: "", version: nil,
+                                     finishedAt: start.addingTimeInterval(-60))
+            Harness.expect(stale.describes(runStartedAt: start), false, "stale accepted")
+        }
+
+        Harness.test("a record from this run is accepted") {
+            let start = Date(timeIntervalSince1970: 2_000_000)
+            let fresh = UpdateResult(outcome: .noOp, detail: "", version: nil,
+                                     finishedAt: start.addingTimeInterval(2))
+            Harness.expect(fresh.describes(runStartedAt: start), true, "fresh rejected")
+        }
+
+        Harness.test("a record with no timestamp is never trusted") {
+            // Written by something that did not include one, so there is no way
+            // to tell which run it belongs to. Falling back to the poll is the
+            // behaviour that existed before the record did.
+            let none = UpdateResult(outcome: .noOp, detail: "", version: nil,
+                                    finishedAt: nil)
+            Harness.expect(none.describes(runStartedAt: Date()), false, "trusted")
+        }
+
+        Harness.test("the CLI's timestamp format parses") {
+            // Python writes datetime.now(UTC).isoformat(), with fractional
+            // seconds. ISO8601DateFormatter rejects those by default, and a
+            // timestamp that will not parse turns every record into "no
+            // timestamp" -- which silently disables the whole mechanism.
+            let real = "2026-09-12T23:27:55.434444+00:00"
+            Harness.expect(UpdateResult.parse(real) != nil, "fractional seconds")
+            Harness.expect(UpdateResult.parse("2026-09-12T23:27:55+00:00") != nil,
+                           "whole seconds")
+            Harness.expect(UpdateResult.parse("not a date") == nil, "garbage")
         }
     }
 }

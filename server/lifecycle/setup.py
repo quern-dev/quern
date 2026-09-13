@@ -23,6 +23,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.device._xcode import xcode_available
+from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself
 
 # ── Result types ──────────────────────────────────────────────────────────
 
@@ -2100,6 +2101,8 @@ def run_setup() -> int:
     if not _can_prompt():
         print("  No terminal attached, so nothing can be asked. Setup will do")
         print("  what it can and decline the rest rather than answer for you.")
+        if invoked_by() == MENUBAR:
+            print("  To answer them, open a terminal and run: quern setup")
         print()
 
     report = SetupReport()
@@ -2667,7 +2670,8 @@ def run_setup() -> int:
         for question in _UNASKED:
             print(f"    • {question}")
         print()
-        print("  Re-run `quern setup` in a terminal to answer them.")
+        for line in run_it_yourself(["quern", "setup"]):
+            print(f"  {line}")
         print()
 
     return 1 if report.has_errors else 0
