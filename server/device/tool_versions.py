@@ -176,13 +176,29 @@ async def _run(args: list[str], timeout: float) -> tuple[int, str]:
 
 
 async def binary_version(path: str, args: list[str], timeout: float = 5.0) -> str | None:
-    """Run a binary's version command and pull the version out of it."""
+    """Run a binary's version command and pull the version out of it.
+
+    The two streams are kept apart and stdout is asked first. Merging them let
+    a version-shaped token in a *warning* outrank the tool's own version:
+    pymobiledevice3 prints a `RequestsDependencyWarning` naming urllib3's
+    version to stderr before its own version reaches stdout, and
+    `parse_version` returns the first match, so quern reported urllib3's
+    `2.6.3` as pymobiledevice3's version -- and offered an upgrade that no
+    amount of upgrading could ever clear, because the tool was already current.
+    Reported in #154 on a machine where Python 3.14 pulled in a chardet that
+    `requests` rejects.
+
+    stderr is still read, because printing a version there is a real shape and
+    merging was presumably meant to catch it. It is only consulted when stdout
+    yielded nothing, so it can no longer outrank a real answer. `_run` directly
+    above has always used DEVNULL; this is the only place that merged.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             path, *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         # Kill it: communicate() leaves the child running, and a version
         # command that hangs would otherwise stay alive across requests.
@@ -192,7 +208,10 @@ async def binary_version(path: str, args: list[str], timeout: float = 5.0) -> st
         return None
     except OSError:
         return None
-    return parse_version(out.decode(errors="replace"))
+    return (
+        parse_version(out.decode(errors="replace"))
+        or parse_version(err.decode(errors="replace"))
+    )
 
 
 async def brew_provenance(formula: str) -> tuple[bool | None, list[str]]:

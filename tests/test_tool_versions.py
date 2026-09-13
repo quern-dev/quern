@@ -335,3 +335,73 @@ async def _no_provenance(_formula):
 
 async def _no_version(*_a, **_kw):
     return None
+
+
+class TestAWarningOnStderrCannotOutrankTheVersion:
+    """#154: quern reported urllib3's version as pymobiledevice3's.
+
+    `binary_version` merged stderr into stdout and `parse_version` returns the
+    first match, so a `RequestsDependencyWarning` naming three dependency
+    versions arrived first and won. Doctor then showed a perpetual
+    `2.6.3 -> 11.12.4` upgrade that `pipx upgrade` could never clear, because
+    the tool was already at 11.12.4.
+
+    These run a real subprocess. The bug is in stream plumbing, so mocking
+    `create_subprocess_exec` would test the mock's idea of the streams rather
+    than the code's.
+    """
+
+    WARNING = (
+        "RequestsDependencyWarning: urllib3 (2.6.3) or chardet (7.6.0)"
+        "/charset_normalizer (3.4.4) doesn't match a supported version!"
+    )
+
+    def _tool(self, tmp_path, *, stdout: str = "", stderr: str = ""):
+        """A stand-in binary that writes exactly what we tell it to."""
+        import json as _json
+
+        script = tmp_path / "fake_tool.py"
+        script.write_text(
+            "import sys\n"
+            f"sys.stderr.write({_json.dumps(stderr)})\n"
+            f"sys.stdout.write({_json.dumps(stdout)})\n"
+        )
+        return str(script)
+
+    async def test_the_real_version_on_stdout_wins(self, tmp_path):
+        import sys
+
+        from server.device.tool_versions import binary_version
+
+        tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.WARNING + "\n")
+        assert await binary_version(sys.executable, [tool]) == "11.12.4"
+
+    async def test_stderr_is_still_read_when_stdout_has_no_version(self, tmp_path):
+        # Printing a version to stderr is a real shape, and merging was
+        # presumably meant to catch it. The fallback keeps that working, so
+        # this cannot be "fixed" by ignoring stderr altogether.
+        import sys
+
+        from server.device.tool_versions import binary_version
+
+        tool = self._tool(tmp_path, stdout="", stderr="tool version 3.2.1\n")
+        assert await binary_version(sys.executable, [tool]) == "3.2.1"
+
+    async def test_no_version_anywhere_is_none(self, tmp_path):
+        import sys
+
+        from server.device.tool_versions import binary_version
+
+        tool = self._tool(tmp_path, stdout="nothing here\n", stderr="nor here\n")
+        assert await binary_version(sys.executable, [tool]) is None
+
+    def test_the_merged_stream_is_what_produced_the_wrong_answer(self):
+        """Pins the mechanism, so the cause stays legible if this regresses.
+
+        `parse_version` is unchanged and still returns the first match; it is
+        the merge that was wrong.
+        """
+        from server.device.tool_versions import parse_version
+
+        assert parse_version(self.WARNING + "\n11.12.4\n") == "2.6.3"
+        assert parse_version("11.12.4\n") == "11.12.4"
