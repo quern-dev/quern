@@ -470,3 +470,143 @@ class TestGetDeviceCertState:
 
         assert state.cert_installed is False
         assert state.fingerprint is None
+
+
+class TestVerificationDoesNotClobberTheRecord:
+    """A read-shaped call was erasing fields it had no opinion about.
+
+    `is_cert_installed` rebuilt the entry from the four things it had just
+    learned and wrote that over the whole record, and `update_cert_state`
+    replaced rather than merged. So every verification erased `installed_at`
+    and `wifi_proxy_configs`.
+
+    Found by running the real thing: after an auto-install and an erase on a
+    live simulator, `installed_at` read `None` — the field the erase path's own
+    docstring claims is "what tells a later reader it *had* the CA".
+    """
+
+    @pytest.mark.asyncio
+    async def test_installed_at_survives_a_verification(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "iPhone 16 Pro", "cert_installed": True,
+            "fingerprint": "abc123",
+            "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        assert read_cert_state_for_device("test-udid")["installed_at"] == (
+            "2026-09-14T09:00:00+00:00"
+        ), "verification erased when the CA was installed"
+
+    @pytest.mark.asyncio
+    async def test_a_phones_proxy_config_survives_a_verification(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        """`wifi_proxy_configs` holds the recorded proxy host and `client_ip`.
+
+        It is what `_verify_physical_device` reads to find that device's
+        traffic at all, so losing it makes a phone unverifiable.
+        """
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "iPhone 11", "cert_installed": True,
+            "wifi_proxy_configs": {"MonaLisaOverdrive": {
+                "proxy_host": "192.168.1.189", "proxy_port": 9101,
+                "client_ip": "192.168.1.50",
+                "set_at": "2026-09-14T09:00:00+00:00",
+            }},
+        })
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        after = read_cert_state_for_device("test-udid")
+        assert list(after.get("wifi_proxy_configs") or {}) == ["MonaLisaOverdrive"]
+        assert after["wifi_proxy_configs"]["MonaLisaOverdrive"]["client_ip"] == (
+            "192.168.1.50"
+        )
+
+    @pytest.mark.asyncio
+    async def test_verification_still_updates_what_it_learned(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        # The converse: preserving must not become "never writes anything".
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "iPhone 16 Pro", "cert_installed": True,
+            "fingerprint": "abc123", "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=False,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        after = read_cert_state_for_device("test-udid")
+        assert after["cert_installed"] is False, "the erase was not recorded"
+        assert after["fingerprint"] is None, "a named field must still be cleared"
+        assert after["installed_at"] == "2026-09-14T09:00:00+00:00"
+
+    def test_naming_a_field_none_clears_it(self, clean_cert_state):
+        """Omission preserves; naming overwrites, including with None.
+
+        Without that, the erase path could not withdraw a trust claim.
+        """
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "x", "cert_installed": True, "fingerprint": "abc123",
+            "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+        update_cert_state("test-udid", {"cert_installed": False, "fingerprint": None})
+
+        after = read_cert_state_for_device("test-udid")
+        assert after["cert_installed"] is False
+        assert after["fingerprint"] is None
+        assert after["installed_at"] == "2026-09-14T09:00:00+00:00"
+
+    def test_other_devices_are_still_untouched(self, clean_cert_state):
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("aaa", {"name": "A", "cert_installed": True})
+        update_cert_state("bbb", {"name": "B", "cert_installed": True})
+        update_cert_state("aaa", {"cert_installed": False})
+
+        assert read_cert_state_for_device("bbb")["cert_installed"] is True
+        assert read_cert_state_for_device("aaa")["cert_installed"] is False

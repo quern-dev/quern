@@ -213,14 +213,15 @@ async def is_cert_installed(
     # Update persistent cache
     if device_name is None:
         device_name = await _get_device_name(controller, udid)
-    cert_state = DeviceCertState(
-        name=device_name,
-        cert_installed=is_installed,
-        fingerprint=expected_fingerprint if is_installed else None,
-        verified_at=datetime.now(UTC).isoformat(),
-    )
-
-    update_cert_state(udid, cert_state.model_dump())
+    # Exactly what this call learned, and nothing else. A full `model_dump()`
+    # names every field -- including `installed_at` and `wifi_proxy_configs`,
+    # which verification has no opinion about -- and naming them clears them.
+    update_cert_state(udid, {
+        "name": device_name,
+        "cert_installed": is_installed,
+        "fingerprint": expected_fingerprint if is_installed else None,
+        "verified_at": datetime.now(UTC).isoformat(),
+    })
 
     return is_installed
 
@@ -244,13 +245,12 @@ async def _is_cert_installed_android(
         device_name = await _get_device_name(controller, udid)
     fingerprint = get_cert_fingerprint(cert_path) if is_installed else None
 
-    cert_state = DeviceCertState(
-        name=device_name,
-        cert_installed=is_installed,
-        fingerprint=fingerprint,
-        verified_at=datetime.now(UTC).isoformat(),
-    )
-    update_cert_state(udid, cert_state.model_dump())
+    update_cert_state(udid, {
+        "name": device_name,
+        "cert_installed": is_installed,
+        "fingerprint": fingerprint,
+        "verified_at": datetime.now(UTC).isoformat(),
+    })
 
     return is_installed
 
