@@ -407,40 +407,6 @@ def _write_update_info(info: dict) -> None:
         logger.debug("Failed to persist update info: %s", e)
 
 
-def record_up_to_date(version: str | None) -> None:
-    """Record that this install is current, without asking the network.
-
-    For the paths that already know the answer: an update that pulled the
-    channel tip, or one that found nothing to pull. Both leave the install at
-    the newest version its channel offers, so `update_available` is False and
-    the version is whatever is now installed.
-
-    Deleting the cache instead would also stop it being *wrong*, and the next
-    check refills it -- but only if there is a next check. With the automatic
-    check opted out, nothing refills it, and `quern update` would destroy
-    information the user's own setting prevents regenerating. Correcting it
-    costs no request and works either way.
-
-    The rate-limit stamp is refreshed too: this *is* a fresh answer about the
-    version, so an automatic check a minute later has nothing to add.
-    """
-    from server.config import get_update_channel
-
-    _write_update_info({
-        "checked_at": datetime.now(UTC).isoformat(),
-        "current_version": version,
-        "latest_version": version,
-        "update_available": False,
-        "message": None,
-        "channel": get_update_channel(),
-    })
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        LAST_CHECK_FILE.touch()
-    except OSError as e:
-        logger.debug("Failed to stamp the update check: %s", e)
-
-
 @contextmanager
 def _channel_lock():
     """Hold the channel lock, or proceed without it if it cannot be taken.

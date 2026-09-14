@@ -23,11 +23,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.lifecycle.invocation import run_it_yourself
-from server.lifecycle.update_check import (
-    ENDPOINT,
-    invalidate_update_check,
-    record_up_to_date,
-)
+from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
 GITHUB_REPO = "quern-dev/quern"
@@ -651,6 +647,44 @@ def _write_result(outcome: str, detail: str, version: str | None = None) -> None
             pass
 
 
+def _refresh_update_check() -> None:
+    """Ask, rather than infer, whether an update is still available.
+
+    Called on the paths where the run completed, so the cached answer is
+    stale: the version may have changed, and the 24-hour stamp would otherwise
+    keep serving the pre-update answer -- which is the reported bug, a menu bar
+    offering an update that had already been applied.
+
+    A real check, forced, for two reasons. `rc == 2` does not mean "at the
+    channel tip": `_update_via_git` also returns it when you are on a feature
+    branch *and the release branch is ahead*, where it prints "switch and
+    rerun". Writing `update_available: false` there would hide a real update --
+    worse than the stale cache, because the stale one at least erred towards
+    offering. And `_check_via_quern_dev` omits `channel=`, so its answer is a
+    stable answer even on beta.
+
+    Forced also skips the opt-out, deliberately and consistently with
+    `check-updates`: the user ran an update command, which is an explicit
+    request, and that setting governs the *automatic* check. It is also what
+    stops an opted-out user being left with no record at all.
+
+    Never raises, and on failure leaves the previous record alone rather than
+    removing it -- `UpdateInfo` in the menu bar defaults `updateAvailable` to
+    false, so a missing file reads as "Up to date". An absent record is not a
+    neutral state.
+    """
+    try:
+        from server.lifecycle.update_check import check_for_updates
+
+        check_for_updates(force=True)
+    except Exception:
+        import logging
+
+        logging.getLogger("quern-debug-server.updater").debug(
+            "Could not refresh the update check", exc_info=True,
+        )
+
+
 def run_update(apply_tools: bool = False) -> int:
     """Pull latest changes and rebuild.
 
@@ -664,28 +698,6 @@ def run_update(apply_tools: bool = False) -> int:
     # than none: the menu bar would read a previous "updated" as this run's
     # answer and relaunch into a version nothing just installed.
     _clear_result()
-
-    # And the cached update *check*, for the same reason and at the same point.
-    # It records a version and an `update_available` computed before this run;
-    # the moment an update begins, that answer is suspect. Nothing here wrote
-    # it, so after updating 0.16.1 -> 0.17.0 the cache still said 0.16.1 with an
-    # update available, and `last-update-check` suppressed a fresh check for 24
-    # hours -- so the menu bar kept offering an update that had already been
-    # applied. Reported from a real machine: three update runs left both files
-    # untouched, and one `check-updates` fixed it.
-    #
-    # Up front rather than at each completion, because `run_update` has seven
-    # exits and the `no_op` branch -- "already up to date", the one people land
-    # on repeatedly -- is exactly the one a per-exit fix would forget. Clearing
-    # costs one HTTP request the next time someone asks.
-    try:
-        invalidate_update_check()
-    except Exception:
-        import logging
-
-        logging.getLogger("quern-debug-server.updater").debug(
-            "Could not clear the cached update check", exc_info=True,
-        )
 
     project_root = _find_project_root()
     if project_root is None:
@@ -713,11 +725,7 @@ def run_update(apply_tools: bool = False) -> int:
             # durable one -- it is what anybody reads afterwards.
             _write_result(FAILED, "a tool upgrade failed")
             return 1
-        # Knows the answer: nothing to pull means this install is at its
-        # channel's tip. Correct the cache rather than leave it empty, so an
-        # opted-out user -- for whom nothing will refill it -- still gets a
-        # true answer instead of none.
-        record_up_to_date(_installed_version())
+        _refresh_update_check()
         _write_result(NO_OP, "already up to date", version=_installed_version())
         return 0
 
@@ -746,6 +754,6 @@ def run_update(apply_tools: bool = False) -> int:
                       version=_installed_version())
         return 1
 
-    record_up_to_date(_installed_version())
+    _refresh_update_check()
     _write_result(UPDATED, "update applied", version=_installed_version())
     return 0

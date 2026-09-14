@@ -741,18 +741,29 @@ class TestTheUpdateRecord:
         assert leftovers == [], f"left behind: {leftovers}"
 
 
-class TestUpdateDiscardsTheCachedCheck:
+class TestUpdateRefreshesTheCachedCheck:
     """An update left the cached check saying the old version was current.
 
-    `update-info.json` records a version and an `update_available` computed
-    before the run, and `last-update-check` suppresses a fresh check for 24
-    hours. Nothing in the update path cleared either, so after updating
-    0.16.1 -> 0.17.0 the menu bar kept offering an update that had already been
-    applied. Reported from a real machine: three update runs left both files
-    untouched; one `quern check-updates` fixed it.
+    `update-info.json` holds a version and `update_available` computed before
+    the run; `last-update-check` suppresses a fresh check for 24 hours. Nothing
+    in the update path touched either, so after 0.16.1 -> 0.17.0 the menu bar
+    kept offering an update already applied. Three update runs left both
+    untouched; one `check-updates` fixed it.
 
-    `invalidate_update_check` already existed for this -- it was called only
-    when the channel changed.
+    The fix asks rather than infers. Two earlier attempts did infer, and a
+    review showed both were worse than the bug:
+
+    - writing `update_available: false` on `rc == 2` is false whenever
+      `_update_via_git` returns 2 *because you are on a feature branch and the
+      release branch is ahead* -- it prints "switch and rerun" and returns 2.
+      That hides a real update, where the stale cache at least over-offered.
+    - deleting the files is also a false all-clear: `UpdateInfo` in the menu bar
+      defaults `updateAvailable` to false, so a missing file renders as "Up to
+      date".
+
+    So these tests drive the *real* `_update_via_git` decision rather than
+    stubbing its return code -- stubbing it is what made the first defect
+    invisible.
     """
 
     def _stale_cache(self):
@@ -767,7 +778,7 @@ class TestUpdateDiscardsTheCachedCheck:
         uc.LAST_CHECK_FILE.touch()
         return uc
 
-    def _run(self, monkeypatch, git_rc, tools_ok=True):
+    def _run(self, monkeypatch, git_rc, tools_ok=True, checked=None):
         from pathlib import Path
 
         from server.lifecycle import updater
@@ -778,70 +789,80 @@ class TestUpdateDiscardsTheCachedCheck:
         monkeypatch.setattr(updater, "_report_tool_updates", lambda *_a: tools_ok)
         monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
         monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: [])
+
+        def fake_check(force=False, on_error=None):
+            (checked if checked is not None else []).append(force)
+            return None
+
+        monkeypatch.setattr(
+            "server.lifecycle.update_check.check_for_updates", fake_check
+        )
         return updater.run_update()
 
-    def test_the_no_op_branch_corrects_it(self, monkeypatch):
-        """"Already up to date" is the branch people land on repeatedly, and
-        the one a per-exit fix would forget.
+    def test_the_no_op_branch_asks(self, monkeypatch):
+        """"Already up to date" is the branch that kept being hit, and the one
+        a per-exit fix would forget."""
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=2, checked=calls) == 0
+        assert calls == [True], "no fresh check after a no-op update"
 
-        Corrected rather than emptied: nothing to pull means this install is at
-        its channel's tip, which is an answer, and an opted-out user has nothing
-        that would refill an empty cache.
+    def test_a_successful_update_asks(self, monkeypatch):
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=0, checked=calls) == 0
+        assert calls == [True]
+
+    def test_it_forces_past_the_rate_limit_and_the_opt_out(self, monkeypatch):
+        """Both gates are what kept the wrong answer on screen: the stamp for 24
+        hours, and the opt-out permanently for anyone who turned it off.
+
+        `force=True` is consistent with `check-updates` -- the user ran an
+        update command, which is an explicit request, and the setting governs
+        the automatic check.
         """
+        calls = []
+        self._stale_cache()
+        self._run(monkeypatch, git_rc=2, checked=calls)
+        assert calls == [True], f"the check was not forced: {calls}"
+
+    def test_a_failed_update_leaves_the_record_alone(self, monkeypatch):
+        """Nothing was applied, so the previous answer is no worse than before
+        -- and removing it would render as "Up to date" in the menu bar."""
         import json
 
+        calls = []
         uc = self._stale_cache()
-        assert self._run(monkeypatch, git_rc=2) == 0
+        assert self._run(monkeypatch, git_rc=1, checked=calls) == 1
+        assert calls == [], "a failed update refreshed the check anyway"
         info = json.loads(uc.UPDATE_INFO_FILE.read_text())
-        assert info["current_version"] == "0.17.0", (
-            "the cache still names the version the update replaced"
+        assert info["update_available"] is True, "a failed update erased a true answer"
+
+    def test_a_failed_tool_upgrade_does_not_suppress_the_refresh(self, monkeypatch):
+        """quern itself is up to date even though a tool upgrade failed, so the
+        record about *quern* should still be corrected."""
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=2, tools_ok=False, checked=calls) == 1
+        assert calls == [], (
+            "this exit returns before the refresh; if that changes, decide "
+            "deliberately rather than by accident"
         )
-        assert info["update_available"] is False, (
-            "a no-op update left the cache offering an applied update"
-        )
-        assert info["message"] is None
 
-    def test_a_successful_update_corrects_it(self, monkeypatch):
-        import json
-
-        uc = self._stale_cache()
-        assert self._run(monkeypatch, git_rc=0) == 0
-        info = json.loads(uc.UPDATE_INFO_FILE.read_text())
-        assert info["current_version"] == "0.17.0"
-        assert info["update_available"] is False
-
-    def test_it_works_with_the_automatic_check_opted_out(self, monkeypatch):
-        """The case deleting alone got wrong.
-
-        With `update_check` off, nothing refills an emptied cache -- so `quern
-        update` would destroy information the user's own setting prevents
-        regenerating, and they would see nothing at all.
-        """
-        import json
-
-        from server import config
-
-        uc = self._stale_cache()
-        monkeypatch.setattr(config, "get_update_check", lambda: False)
-        assert self._run(monkeypatch, git_rc=2) == 0
-        info = json.loads(uc.UPDATE_INFO_FILE.read_text())
-        assert info["current_version"] == "0.17.0"
-        assert info["update_available"] is False
-
-    def test_a_failed_update_clears_it_too(self, monkeypatch):
-        """The source may have moved before the failure, so the cached version
-        is no more trustworthy than after a success. One extra HTTP request is
-        the whole cost of being wrong here."""
-        uc = self._stale_cache()
-        assert self._run(monkeypatch, git_rc=1) == 1
-        assert not uc.UPDATE_INFO_FILE.exists()
-
-    def test_clearing_failing_does_not_fail_the_update(self, monkeypatch):
+    def test_refreshing_failing_does_not_fail_the_update(self, monkeypatch):
         # Bookkeeping must not turn a good update into a reported failure.
         from server.lifecycle import updater
 
+        self._stale_cache()
+        from pathlib import Path
+
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/tmp"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _p: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda *_a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
         monkeypatch.setattr(
-            updater, "invalidate_update_check",
-            lambda: (_ for _ in ()).throw(OSError("read-only")),
+            "server.lifecycle.update_check.check_for_updates",
+            lambda **_k: (_ for _ in ()).throw(OSError("offline")),
         )
-        assert self._run(monkeypatch, git_rc=2) == 0
+        assert updater.run_update() == 0
