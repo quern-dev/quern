@@ -169,6 +169,31 @@ jobs:
           plutil -lint "$APP/Contents/Info.plist"
           lipo -archs "$APP/Contents/MacOS/QuernMenuBar"
 
+  media-build:
+    # The QuernMedia package is not covered by the Python suite, and nothing
+    # else compiles it. A separate job rather than a step on menubar-build:
+    # they are independent components, and this way they run in parallel.
+    #
+    # No device and no simulator required. The encoders are tested against
+    # synthetic IOSurfaces, which is the reason this package uses SwiftPM
+    # while the menu-bar app next door deliberately does not -- see
+    # macos/QuernMedia/Package.swift.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        working-directory: macos/QuernMedia
+        run: swift build -c release
+
+      - name: Test
+        working-directory: macos/QuernMedia
+        # Runners are VMs and may not expose the media engine. VideoToolbox
+        # falls back to software encoding there, which the suite tolerates --
+        # verified by running it with hardware acceleration disabled.
+        run: swift test
+
   mcp-build:
     runs-on: ubuntu-latest
 
