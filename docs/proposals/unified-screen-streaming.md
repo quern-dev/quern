@@ -480,6 +480,54 @@ time varies with activity — this recording got keyframes at 0.0s, 5.6s and
 13.2s. Anchoring keyframes to test actions rather than a frame count is the
 fix, and it is the same `ForceKeyFrame` call already wired up.
 
+### Clock skew: unsolved for physical devices, a non-issue for simulators
+
+The video-anchored timeline idea rests on being able to place device logs
+against video frames. Measured before building anything on it.
+
+The device exposes its own clock (`TimeIntervalSince1970` from lockdown),
+so the offset can be bounded NTP-style by bracketing each read between two
+host timestamps. Six samples:
+
+```
+offset in [ -94.6, +513.9] ms   (round trip 609 ms)
+offset in [ -93.3, +394.7] ms   (round trip 488 ms)
+offset in [ -93.0, +395.0] ms   (round trip 488 ms)
+offset in [ -93.2, +400.0] ms   (round trip 493 ms)
+offset in [ -88.9, +389.6] ms   (round trip 478 ms)
+offset in [ -93.1, +392.6] ms   (round trip 486 ms)
+
+tightest bound: [-88.9, +389.6] ms  -> 478 ms of uncertainty
+```
+
+**478 ms is not good enough.** A UI transition is ~300 ms, so at this
+precision you cannot say whether a log line landed before or after a visual
+change — and a timeline that gets causality backwards is worse than no
+timeline.
+
+The window is dominated by method, not by the clock: each sample spawns a
+`pymobiledevice3` process that does a full lockdown connect, hence ~490 ms
+round trips. The lower bound sits at a suspiciously stable ~-90 ms across
+every sample, which hints the real offset is near there, but that is a
+hunch and not a measurement.
+
+Options, none tried:
+
+1. Hold a persistent lockdown connection and read the clock repeatedly.
+   Cheap reads shrink the round trip and therefore the bound directly.
+2. Stop trying to measure absolute offset. Align the streams instead on an
+   event observable in both — quern already knows the host time it issued
+   every tap, and those taps produce device-side log effects. That trades
+   clock error for actuation latency, which may be no better.
+3. Accept the uncertainty and *render* it, so a viewer shows log events with
+   an error bar rather than a false precise position.
+
+**Simulators are exempt.** A simulator is a host process and its logs carry
+host time, so video and logs already share one clock with no offset to
+measure. The timeline is trustworthy there today; only physical devices
+need this solved. Given most test runs are simulators, that is a reasonable
+place to start and a known gap to carry.
+
 ### Still CPU, still worth moving
 
 - **Downscaling** is `CGContext.draw`, on the cores. Either hand it to
