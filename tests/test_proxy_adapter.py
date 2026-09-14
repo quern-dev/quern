@@ -4,7 +4,7 @@ import json
 import signal
 from datetime import UTC
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -708,41 +708,227 @@ class TestTlsRejectionsAreKeptAsObservations:
 
         return ProxyAdapter()
 
+    def _event(self, **kw):
+        base = {"sni": "www.apple.com", "client_ip": "192.168.1.50",
+                "error": "tlsv1 alert unknown ca", "timestamp": 1789342844.95}
+        base.update(kw)
+        return base
+
     def test_a_rejection_is_recorded_with_who_and_what_and_when(self):
         a = self._adapter()
-        a._handle_tls_rejected(
-            {"sni": "www.apple.com", "client_ip": "192.168.1.50",
-             "timestamp": 1789342844.95}
-        )
+        a._handle_tls_rejected(self._event())
         (entry,) = list(a._tls_rejections)
-        assert entry["sni"] == "www.apple.com"
-        assert entry["client_ip"] == "192.168.1.50"
-        assert entry["at"].startswith("2026-"), entry["at"]
+        assert entry.sni == "www.apple.com"
+        assert entry.client_ip == "192.168.1.50"
+        # The exact instant, not merely "some time this year". `startswith
+        # ("2026-")` was satisfied by `now()`, so ignoring the event's own
+        # timestamp -- the whole "when" -- passed.
+        assert entry.first_at == "2026-09-13T23:40:44.950000+00:00", entry.first_at
+        assert entry.last_at == entry.first_at
 
-    def test_it_is_bounded(self):
-        # A retrying app produces one of these per attempt, and the proxy is a
-        # long-lived process.
+    def test_the_tls_alert_is_kept_verbatim(self):
+        """The only thing separating "does not trust the CA" from "this app
+        pins". `tls_failed_client` fires for both, and dropping the alert made
+        them identical -- then the log asserted the first, sending someone to
+        reinstall a certificate that was never the problem.
+        """
+        a = self._adapter()
+        a._handle_tls_rejected(self._event(error="tlsv1 alert unknown ca"))
+        assert list(a._tls_rejections)[0].alert == "tlsv1 alert unknown ca"
+
+    def test_a_pinning_style_refusal_is_not_called_a_ca_problem(self, caplog):
+        import logging
+
+        a = self._adapter()
+        with caplog.at_level(logging.WARNING):
+            a._handle_tls_rejected(
+                self._event(error="tlsv1 alert certificate unknown")
+            )
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "certificate unknown" in logged, "the alert was not surfaced"
+        assert "does not trust the mitmproxy CA" not in logged, (
+            "a pinned app was reported as an untrusted CA"
+        )
+
+    def test_a_retrying_client_does_not_evict_other_devices(self):
+        """One loop used to consume all 50 slots with copies of itself, and the
+        single rejection from the device you were debugging was the casualty.
+        """
+        a = self._adapter()
+        a._handle_tls_rejected(self._event(sni="ipad.example", client_ip="10.0.0.9"))
+        for _ in range(200):
+            a._handle_tls_rejected(self._event())
+
+        by_ip = {e.client_ip: e for e in a._tls_rejections}
+        assert "10.0.0.9" in by_ip, "the one-off rejection was evicted by a retry storm"
+        assert by_ip["192.168.1.50"].count == 200
+        assert len(a._tls_rejections) == 2
+
+    def test_repeats_update_the_last_seen_time(self):
+        a = self._adapter()
+        a._handle_tls_rejected(self._event(timestamp=1789342844.0))
+        a._handle_tls_rejected(self._event(timestamp=1789349999.0))
+        (entry,) = list(a._tls_rejections)
+        assert entry.first_at == "2026-09-13T23:40:44+00:00", entry.first_at
+        assert entry.last_at == "2026-09-14T01:39:59+00:00", entry.last_at
+        assert entry.count == 2
+
+    def test_it_is_still_bounded(self):
         a = self._adapter()
         for i in range(120):
-            a._handle_tls_rejected({"sni": f"h{i}", "client_ip": "1.2.3.4"})
+            a._handle_tls_rejected(self._event(sni=f"h{i}"))
         assert len(a._tls_rejections) == 50
-        assert list(a._tls_rejections)[-1]["sni"] == "h119", "newest must survive"
+        assert list(a._tls_rejections)[-1].sni == "h119", "newest must survive"
 
     def test_a_missing_timestamp_does_not_lose_the_event(self):
         a = self._adapter()
         a._handle_tls_rejected({"sni": "h", "client_ip": None})
         assert len(a._tls_rejections) == 1
-        assert list(a._tls_rejections)[0]["at"]
+        assert list(a._tls_rejections)[0].first_at
 
-    def test_nothing_is_written_to_the_cert_record(self, monkeypatch):
-        wrote = []
-        monkeypatch.setattr(
-            "server.proxy.cert_state.update_cert_state",
-            lambda *a, **k: wrote.append(a),
-        )
+    def test_nothing_is_written_to_the_cert_record(self):
+        """Asserted against the file, not a patched symbol.
+
+        The first version patched `server.proxy.cert_state.update_cert_state`.
+        That catches nothing if the writer does `from ... import
+        update_cert_state` at module scope -- the dominant idiom here -- because
+        the name is bound before the patch runs. Demonstrated: a verdict landed
+        on disk and this test reported all-clear.
+        """
+        from server.proxy.cert_state import read_cert_state
+
+        before = read_cert_state()
         a = self._adapter()
-        a._handle_tls_rejected({"sni": "www.apple.com", "client_ip": "1.2.3.4"})
-        assert not wrote, (
+        a._handle_tls_rejected(self._event())
+        assert read_cert_state() == before, (
             "phase 1 recorded a verdict; a hostile client could mark a device "
             "untrusted"
         )
+
+
+class TestRejectionsDoNotOutliveTheirSubprocess:
+    """The field says "since the proxy started", and `stop()` is not always
+    what ended the last run.
+
+    If mitmdump exits on its own, `_read_loop` falls out of its loop and sets
+    `_running = False` without `stop()` ever running -- so `is_running` goes
+    false, the 409 guard on `POST /proxy/start` passes, a fresh subprocess is
+    spawned, and the dead one's rejections are reported against it. Which is
+    precisely the "told about a problem you just fixed" case the clearing was
+    added to prevent.
+    """
+
+    def _adapter(self):
+        from server.sources.proxy import ProxyAdapter
+
+        return ProxyAdapter()
+
+    async def test_starting_clears_what_the_last_run_saw(self, monkeypatch):
+        a = self._adapter()
+        a._handle_tls_rejected({"sni": "www.apple.com", "client_ip": "1.2.3.4"})
+        assert len(a._tls_rejections) == 1
+
+        # Stand in for mitmdump so start() gets far enough to clear.
+        async def fake_exec(*args, **kwargs):
+            proc = MagicMock()
+            proc.returncode = None
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdin = MagicMock()
+            return proc
+
+        monkeypatch.setattr(
+            "asyncio.create_subprocess_exec", fake_exec,
+        )
+        monkeypatch.setattr(a, "_read_loop", AsyncMock())
+        monkeypatch.setattr(a, "_drain_stderr", AsyncMock())
+        await a.start()
+        try:
+            assert not a._tls_rejections, (
+                "a new proxy run reported the previous run's rejections"
+            )
+        finally:
+            a._running = False
+
+    def test_stopping_clears_them_too(self):
+        # The orderly path, which already worked -- kept so a fix to one does
+        # not quietly become a replacement for the other.
+        a = self._adapter()
+        a._handle_tls_rejected({"sni": "h", "client_ip": "1.2.3.4"})
+        import asyncio
+
+        asyncio.run(a.stop())
+        assert not a._tls_rejections
+
+
+class TestTheWiringItself:
+    """Two whole seams had no test: the addon->adapter dispatch, and the
+    reporting.
+
+    Both were provably dead-able -- renaming the dispatch branch to
+    `tls_rejected_NEVER_MATCHES`, or deleting `tls_rejections=` from the API,
+    left the entire suite green. The feature could ship doing nothing.
+    """
+
+    async def test_a_line_from_the_addon_reaches_the_store(self):
+        """Driven through `_read_loop`, so the `msg_type` branch is exercised
+        rather than the handler being called directly."""
+        import json
+
+        from server.sources.proxy import ProxyAdapter
+
+        a = ProxyAdapter()
+        line = json.dumps({
+            "type": "tls_rejected", "sni": "www.apple.com",
+            "client_ip": "192.168.1.50", "error": "tlsv1 alert unknown ca",
+            "timestamp": 1789342844.95,
+        }).encode() + b"\n"
+
+        class _Stdout:
+            def __aiter__(self):
+                async def gen():
+                    yield line
+                return gen()
+
+        proc = MagicMock()
+        proc.stdout = _Stdout()
+        a._process = proc
+        a._running = True
+        await a._read_loop()
+
+        assert [e.sni for e in a._tls_rejections] == ["www.apple.com"], (
+            "the addon emitted a rejection and the dispatch dropped it"
+        )
+
+    def test_proxy_status_reports_them(self):
+        """The symptom #156 names is `proxy_status` saying nothing."""
+        from unittest.mock import MagicMock as _MM
+
+        from fastapi.testclient import TestClient
+
+        from server.main import ServerConfig, create_app
+        from server.sources.proxy import ProxyAdapter
+
+        adapter = ProxyAdapter()
+        adapter._handle_tls_rejected({
+            "sni": "www.apple.com", "client_ip": "192.168.1.50",
+            "error": "tlsv1 alert unknown ca",
+        })
+
+        app = create_app(
+            config=ServerConfig(api_key="test-key-12345"),
+            enable_oslog=False, enable_crash=False, enable_proxy=False,
+        )
+        app.state.device_controller = _MM()
+        app.state.device_controller._active_udid = None
+        app.state.proxy_adapter = adapter
+        client = TestClient(app)
+        r = client.get(
+            "/api/v1/proxy/status",
+            headers={"Authorization": "Bearer test-key-12345"},
+        )
+        assert r.status_code == 200, r.text
+        reported = r.json().get("tls_rejections")
+        assert reported, "a recorded rejection never reached proxy_status"
+        assert reported[0]["sni"] == "www.apple.com"
+        assert reported[0]["alert"] == "tlsv1 alert unknown ca"

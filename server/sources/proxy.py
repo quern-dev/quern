@@ -35,6 +35,7 @@ from server.models import (
     LogEntry,
     LogLevel,
     LogSource,
+    TlsRejection,
 )
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -131,9 +132,10 @@ class ProxyAdapter(BaseSourceAdapter):
         # Intercept state (server-side mirror of addon state)
         self._intercept_pattern: str | None = None
         self._held_flows: dict[str, dict] = {}  # flow_id -> {id, held_at, request}
-        #: Clients that refused our certificate, newest last. Bounded because a
-        #: retrying app produces one per attempt and this process is long-lived.
-        self._tls_rejections: deque[dict] = deque(maxlen=50)
+        #: Clients that refused our certificate, newest last. Collapsed by
+        #: (host, device) and bounded, so a retrying app cannot crowd out the
+        #: other devices' rejections.
+        self._tls_rejections: deque[TlsRejection] = deque(maxlen=50)
         self._intercept_event: asyncio.Event = asyncio.Event()
 
         # Mock state (server-side mirror)
@@ -295,6 +297,12 @@ class ProxyAdapter(BaseSourceAdapter):
 
         self._running = True
         self.started_at = self._now()
+        # Cleared here as well as in `stop()`, because the field says "since the
+        # proxy started" and `stop()` is not always what ended the last run: if
+        # mitmdump exits on its own, `_read_loop` just falls out of its loop and
+        # sets `_running = False`, so the next `start()` would report the dead
+        # subprocess's rejections against the new one.
+        self._tls_rejections.clear()
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
@@ -585,18 +593,42 @@ class ProxyAdapter(BaseSourceAdapter):
         Bounded, because an app retrying a rejected handshake produces one of
         these per attempt and this is a long-lived process.
         """
-        entry = {
-            "sni": data.get("sni"),
-            "client_ip": data.get("client_ip"),
-            "at": datetime.fromtimestamp(
-                data.get("timestamp") or time.time(), tz=UTC,
-            ).isoformat(),
-        }
-        self._tls_rejections.append(entry)
+        sni = data.get("sni")
+        client_ip = data.get("client_ip")
+        at = datetime.fromtimestamp(
+            data.get("timestamp") or time.time(), tz=UTC,
+        ).isoformat()
+        # The alert, verbatim and uninterpreted. `unknown ca` means the device
+        # does not trust our CA; a certificate-pinned app on a device that
+        # trusts it perfectly well refuses too, with a different alert. Dropping
+        # this left both looking identical, and the log then asserted the first
+        # -- sending someone to reinstall a certificate that was never wrong.
+        alert = (data.get("error") or "").strip() or None
+
+        # Collapsed by (host, device). A retrying app produces one of these per
+        # attempt, so appending blindly let one loop evict every other device's
+        # rejection inside a second -- and the single rejection from the device
+        # you were actually debugging is the one that mattered.
+        for existing in self._tls_rejections:
+            if existing.sni == sni and existing.client_ip == client_ip and (
+                existing.simulator_udid == data.get("simulator_udid")
+            ):
+                existing.count += 1
+                existing.last_at = at
+                if alert and not existing.alert:
+                    existing.alert = alert
+                return
+
+        self._tls_rejections.append(TlsRejection(
+            sni=sni, client_ip=client_ip, alert=alert,
+            source_process=data.get("source_process"),
+            source_pid=data.get("source_pid"),
+            simulator_udid=data.get("simulator_udid"),
+            count=1, first_at=at, last_at=at,
+        ))
         logger.warning(
-            "Client %s refused our certificate for %s -- that device does not "
-            "trust the mitmproxy CA",
-            entry["client_ip"] or "?", entry["sni"] or "?",
+            "Client %s refused the certificate we offered for %s (%s)",
+            client_ip or "?", sni or "?", alert or "no alert reported",
         )
 
     async def _handle_flow(self, data: dict) -> None:

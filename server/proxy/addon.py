@@ -193,6 +193,28 @@ def _resolve_simulator_udid(pid: int) -> str | None:
 # Maximum body size to include inline (100KB)
 MAX_BODY_SIZE = 100 * 1024
 
+#: How much of a TLS alert to keep. mitmproxy puts the raw receive buffer in
+#: this string for an unparseable ClientHello -- two hex characters per byte
+#: buffered, and it buffers until the hello is complete or the client gives up.
+#: A client streaming junk produced a single 1.95 MB stdout line, which is past
+#: the parent's 1 MB reader limit: `async for line in ...` then raises and
+#: `_read_loop` exits for good, so all capture stops while mitmdump keeps
+#: running. Every other writer here is capped for the same reason.
+MAX_ALERT_LEN = 200
+
+#: Alerts that mean the client rejected our *certificate*. `tls_failed_client`
+#: fires for every client-side handshake failure, and most of them say nothing
+#: about trust: a suspended app, a cancelled request or a flaky network all
+#: abort a handshake, and mitmproxy's own triage logs those at INFO or not at
+#: all. Reporting them as refusals would bury the real signal in noise from
+#: ordinary traffic -- and name no host, since a connection that dies before
+#: its ClientHello has no SNI.
+_CERT_REJECTION_ALERTS = (
+    "unknown ca", "bad certificate", "certificate unknown",
+    "certificate expired", "certificate revoked", "unsupported certificate",
+    "certificate required",
+)
+
 # Default timeout for held (intercepted) flows
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
@@ -449,23 +471,44 @@ class IOSDebugAddon:
         between the client and the real server and says nothing about our CA.
         """
         try:
-            conn = getattr(data, "conn", None)
-            sni = getattr(conn, "sni", None) or getattr(
-                data.context.client, "sni", None
-            )
+            client = data.context.client
+            sni = getattr(client, "sni", None)
             if isinstance(sni, bytes):
                 sni = sni.decode("utf-8", errors="replace")
             if sni and self._is_bypassed(sni):
                 return
+            # Same filter every other emitter applies. Without it this reports
+            # hosts the user explicitly excluded from capture, and publishes
+            # their names through `proxy_status`.
+            if self._host_filter and sni != self._host_filter:
+                return
 
-            peer = getattr(data.context.client, "peername", None)
-            _write_json({
+            alert = str(getattr(client, "error", None) or "")
+            if not any(a in alert.lower() for a in _CERT_REJECTION_ALERTS):
+                return
+
+            event = {
                 "type": "tls_rejected",
                 "sni": sni,
-                "client_ip": peer[0] if peer else None,
-                "error": str(getattr(conn, "error", None) or ""),
+                "error": alert[:MAX_ALERT_LEN],
                 "timestamp": time.time(),
-            })
+            }
+            # Identify the client the way `_serialize_flow` does. For a
+            # simulator the peer address is 127.0.0.1 -- it shares the host's
+            # network stack -- so the IP alone cannot say which device refused,
+            # which is the case this hook exists for.
+            client_id = getattr(client, "id", None)
+            if client_id and client_id in _client_process_info:
+                info = _client_process_info[client_id]
+                pid = info.get("pid")
+                event["source_process"] = info.get("process_name")
+                event["source_pid"] = pid
+                if pid is not None:
+                    event["simulator_udid"] = _resolve_simulator_udid(pid)
+            peername = getattr(client, "peername", None)
+            if isinstance(peername, (tuple, list)) and len(peername) >= 1:
+                event["client_ip"] = peername[0]
+            _write_json(event)
         except Exception as exc:  # pragma: no cover - defensive
             # Never raise out of a hook: an exception here would take down TLS
             # handling for every connection, to report a diagnostic.

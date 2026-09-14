@@ -275,6 +275,11 @@ async def _get_proxy_status(
         local_capture=local_capture,
         local_ip=local_ip,
         local_ips=local_ips,
+        # Reported on the stopped branch too. The others here mirror addon state
+        # and are meaningless once the addon is gone; a rejection history is not,
+        # and this branch is reachable with data in it when mitmdump died on its
+        # own -- which is exactly when there is no other trace to go on.
+        tls_rejections=list(adapter._tls_rejections),
         warnings=warnings,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,

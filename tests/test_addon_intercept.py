@@ -585,12 +585,25 @@ class TestTlsRejectionIsRecorded:
     These pin the logic that decides which of those three it is.
     """
 
-    def _data(self, sni="example.com", peer=("10.0.0.5", 51234), error="unknown ca"):
+    def _data(self, sni="example.com", peer=("10.0.0.5", 51234),
+              error="The client does not trust the proxy's certificate for "
+                    "example.com (tlsv1 alert unknown ca)",
+              client_id="c1"):
+        """`data.conn` *is* `data.context.client` for a client-side failure.
+
+        mitmproxy only yields this hook when `self.conn == self.context.client`,
+        so a fixture that sets them to two different mocks can let the code read
+        one while the test configures the other -- which is how the first
+        version of these tests passed while the hook was looking elsewhere.
+        """
+        client = MagicMock()
+        client.sni = sni
+        client.error = error
+        client.peername = peer
+        client.id = client_id
         data = MagicMock()
-        data.conn.sni = sni
-        data.conn.error = error
-        data.context.client.sni = sni
-        data.context.client.peername = peer
+        data.conn = client
+        data.context.client = client
         return data
 
     def test_a_rejection_names_the_device_and_the_host(self):
@@ -667,7 +680,9 @@ class TestTlsRejectionIsRecorded:
         connection, to report a diagnostic."""
         addon = IOSDebugAddon()
         broken = MagicMock()
-        type(broken).conn = property(lambda _self: (_ for _ in ()).throw(RuntimeError("boom")))
+        type(broken).context = property(
+            lambda _self: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
         captured = CapturedOutput()
         captured.install()
         try:
@@ -678,3 +693,100 @@ class TestTlsRejectionIsRecorded:
         assert captured.of_type("error"), (
             "the failure was swallowed without a word"
         )
+
+
+class TestOnlyRealCertificateRejectionsAreReported:
+    """`tls_failed_client` fires for every client-side handshake failure.
+
+    Most say nothing about trust: a suspended app, a cancelled request or a
+    flaky network all abort a handshake, and those are routine on iOS. Reported
+    as refusals they would bury the real signal in noise from ordinary traffic
+    -- and name no host, because a connection that dies before its ClientHello
+    has no SNI. mitmproxy's own triage logs them at INFO or not at all.
+    """
+
+    def _fire(self, addon, **kw):
+        base = {"sni": "example.com", "peername": ("10.0.0.5", 1),
+                "error": "unknown ca", "id": "c1"}
+        base.update(kw)
+        client = MagicMock()
+        for k, v in base.items():
+            setattr(client, k, v)
+        data = MagicMock()
+        data.conn = client
+        data.context.client = client
+        captured = CapturedOutput()
+        captured.install()
+        try:
+            addon.tls_failed_client(data)
+        finally:
+            captured.restore()
+        return captured
+
+    def test_an_abandoned_handshake_is_not_called_a_refusal(self):
+        out = self._fire(
+            IOSDebugAddon(), sni=None,
+            error="The client disconnected during the handshake. This may "
+                  "indicate that the client does not trust the certificate.",
+        )
+        assert not out.of_type("tls_rejected"), (
+            "an app being suspended was reported as refusing our certificate"
+        )
+
+    def test_an_unparseable_hello_is_not_called_a_refusal(self):
+        out = self._fire(IOSDebugAddon(), sni=None,
+                         error="Cannot parse ClientHello: 160301...")
+        assert not out.of_type("tls_rejected")
+
+    def test_a_real_rejection_still_gets_through(self):
+        out = self._fire(IOSDebugAddon(),
+                         error="tlsv1 alert unknown ca")
+        assert len(out.of_type("tls_rejected")) == 1
+
+    def test_the_alert_is_capped(self):
+        """mitmproxy puts the raw receive buffer in this string for an
+        unparseable hello. One client streaming junk produced a 1.95 MB line,
+        past the parent's 1 MB reader limit -- which raises, ends `_read_loop`
+        for good, and stops all capture while mitmdump keeps running.
+        """
+        from server.proxy.addon import MAX_ALERT_LEN
+
+        huge = "unknown ca " + ("ab" * 1_000_000)
+        out = self._fire(IOSDebugAddon(), error=huge)
+        (event,) = out.of_type("tls_rejected")
+        assert len(event["error"]) <= MAX_ALERT_LEN
+        assert len(json.dumps(event)) < 100_000, "the emitted line is unbounded"
+
+    def test_a_filtered_host_is_not_reported(self):
+        """Same filter every other emitter applies. Without it this names hosts
+        the user excluded from capture, and publishes them via proxy_status."""
+        addon = IOSDebugAddon()
+        addon._host_filter = "api.example.com"
+        out = self._fire(addon, sni="tracker.example.com")
+        assert not out.of_type("tls_rejected")
+
+    def test_the_filtered_host_itself_is_still_reported(self):
+        addon = IOSDebugAddon()
+        addon._host_filter = "api.example.com"
+        out = self._fire(addon, sni="api.example.com")
+        assert len(out.of_type("tls_rejected")) == 1
+
+    def test_a_simulator_is_identified_by_process_not_by_ip(self):
+        """A simulator shares the host's network stack, so its peer address is
+        127.0.0.1 and the IP alone cannot say which device refused -- which is
+        the case this hook exists for."""
+        from server.proxy import addon as addon_mod
+
+        addon_mod._client_process_info["c1"] = {
+            "pid": 4242, "process_name": "MobileSafari",
+        }
+        try:
+            with patch.object(addon_mod, "_resolve_simulator_udid",
+                              return_value="F5AF3736"):
+                out = self._fire(IOSDebugAddon(), peername=("127.0.0.1", 1))
+        finally:
+            addon_mod._client_process_info.pop("c1", None)
+
+        (event,) = out.of_type("tls_rejected")
+        assert event["source_process"] == "MobileSafari"
+        assert event["simulator_udid"] == "F5AF3736"
