@@ -11,6 +11,8 @@
 //   ios-preview --interactive # JSON Lines protocol on stdin/stdout
 //   ios-preview --sim-udid <UDID>  # preview a booted simulator (headless)
 //   ios-preview --sim-udid <UDID> --serve 8422 [--bind-all] [--no-window]
+//   ios-preview --device "iPhone 11" --serve 8424 --no-window
+//                            # ... or stream a USB-connected device
 //                            # ... and stream it as MJPEG over HTTP
 //
 // Build: swiftc -o tools/ios-preview tools/ios-preview.swift -framework AVFoundation -framework CoreMediaIO -framework AppKit
@@ -144,11 +146,7 @@ func traceDeviceEvent(_ kind: String, _ device: AVCaptureDevice) {
 /// Everything the simulator preview path needs. A struct rather than more
 /// enum payload because the flag list is already past the point where
 /// positional associated values stay readable.
-struct SimOptions {
-    let udid: String
-    /// Use the CGImage copy-through render path instead of handing the
-    /// IOSurface to CALayer directly.
-    let viaCGImage: Bool
+struct StreamTuning {
     let window: Bool
     let serve: Bool
     let port: UInt16
@@ -158,11 +156,26 @@ struct SimOptions {
     let quality: Double
 }
 
+struct SimOptions {
+    let udid: String
+    /// Use the CGImage copy-through render path instead of handing the
+    /// IOSurface to CALayer directly.
+    let viaCGImage: Bool
+    let tuning: StreamTuning
+}
+
+struct DeviceStreamOptions {
+    /// Case-insensitive substring of the capture device's localized name.
+    let match: String
+    let tuning: StreamTuning
+}
+
 enum FilterMode {
     case all
     case listOnly
     case interactive
     case simUDID(SimOptions)
+    case deviceStream(DeviceStreamOptions)
     case byArgs([String])
 }
 
@@ -171,15 +184,13 @@ func parseArgs() -> FilterMode {
     if args.isEmpty { return .all }
     if args.contains("--list") || args.contains("-l") { return .listOnly }
     if args.contains("--interactive") { return .interactive }
-    if let i = args.firstIndex(of: "--sim-udid"), i + 1 < args.count {
+    if args.contains("--sim-udid") || args.contains("--device") {
         func value(_ flag: String) -> String? {
             guard let j = args.firstIndex(of: flag), j + 1 < args.count else { return nil }
             let next = args[j + 1]
             return next.hasPrefix("--") ? nil : next
         }
-        return .simUDID(SimOptions(
-            udid: args[i + 1],
-            viaCGImage: args.contains("--cgimage"),
+        let tuning = StreamTuning(
             window: !args.contains("--no-window"),
             serve: args.contains("--serve"),
             port: value("--serve").flatMap(UInt16.init) ?? 8422,
@@ -187,7 +198,15 @@ func parseArgs() -> FilterMode {
             fps: value("--fps").flatMap(Double.init) ?? 15,
             maxDimension: value("--max-dim").flatMap(Int.init) ?? 900,
             quality: value("--quality").flatMap(Double.init) ?? 0.6
-        ))
+        )
+        if let udid = value("--sim-udid") {
+            return .simUDID(SimOptions(
+                udid: udid, viaCGImage: args.contains("--cgimage"), tuning: tuning
+            ))
+        }
+        if let match = value("--device") {
+            return .deviceStream(DeviceStreamOptions(match: match, tuning: tuning))
+        }
     }
     return .byArgs(args)
 }
@@ -572,7 +591,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             break
         case .byArgs(let args):
             guard !filterDevices([device], args: args).isEmpty else { return }
-        case .listOnly, .interactive, .simUDID:
+        case .listOnly, .interactive, .simUDID, .deviceStream:
             // Simulator mode never runs through AppDelegate -- it has no
             // capture devices to hot-plug -- but the switch must cover it.
             return
@@ -1563,6 +1582,10 @@ final class MJPEGServer {
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "quern.sim-preview.http")
+    /// Guards `clients` and the counters. Frames arrive on whichever queue
+    /// the source uses -- the simulator's framebuffer queue or the capture
+    /// output's -- so this is no longer single-queue state.
+    private let lock = NSLock()
     private var clients: [ObjectIdentifier: MJPEGClient] = [:]
     private var lastEncode = Date.distantPast
 
@@ -1623,7 +1646,9 @@ final class MJPEGServer {
 
     private func accept(_ conn: NWConnection) {
         let client = MJPEGClient(connection: conn)
+        lock.lock()
         clients[ObjectIdentifier(conn)] = client
+        lock.unlock()
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
@@ -1637,7 +1662,9 @@ final class MJPEGServer {
     }
 
     private func drop(_ conn: NWConnection) {
+        lock.lock()
         clients.removeValue(forKey: ObjectIdentifier(conn))
+        lock.unlock()
     }
 
     private func readRequest(_ client: MJPEGClient) {
@@ -1672,8 +1699,11 @@ final class MJPEGServer {
                 content: header.data(using: .utf8),
                 completion: .contentProcessed { _ in }
             )
+            self.lock.lock()
             client.streaming = true
-            simLogErr("[sim-preview] client attached (\(self.clients.count) total)")
+            let total = self.clients.count
+            self.lock.unlock()
+            simLogErr("[preview] client attached (\(total) total)")
         } else {
             let html = """
             <!doctype html><meta charset=utf-8><title>Quern sim preview</title>
@@ -1697,26 +1727,31 @@ final class MJPEGServer {
 
     // MARK: publishing
 
-    /// Called from the framebuffer callback for every composited frame.
+    /// Called by the frame source for every frame it produces.
+    ///
+    /// Encodes synchronously, on the caller's queue, and hands only the
+    /// finished JPEG to the server queue. That is not a micro-optimisation:
+    /// the IOSurface behind an AVCaptureVideoDataOutput sample buffer belongs
+    /// to a recycling pool and may be reused the moment the delegate returns.
+    /// Deferring the pixel read to another queue would encode whichever frame
+    /// the pool handed out next, or a tear between two of them. Encoding here
+    /// also gives the capture path real backpressure, since
+    /// alwaysDiscardsLateVideoFrames drops while we are busy.
     func publish(_ surface: IOSurface) {
-        queue.async { [weak self] in self?.encodeAndFanOut(surface) }
-    }
-
-    private func encodeAndFanOut(_ surface: IOSurface) {
-        let watchers = clients.values.filter { $0.streaming }
-        guard !watchers.isEmpty else { return }
-
-        // Encode at most fps times a second. The framebuffer happily emits 60
-        // fps during an animation; JPEG at that rate is a lot of CPU for
-        // frames nobody can see the difference between.
         let now = Date()
-        guard now.timeIntervalSince(lastEncode) >= 1.0 / fps else { return }
-        lastEncode = now
+        lock.lock()
+        let watching = clients.values.contains { $0.streaming }
+        // Encode at most fps times a second. Sources happily emit 60 fps
+        // during animation; JPEG at that rate is a lot of CPU for frames
+        // nobody can tell apart.
+        let due = now.timeIntervalSince(lastEncode) >= 1.0 / fps
+        if watching && due { lastEncode = now }
+        lock.unlock()
+        guard watching, due else { return }
 
-        guard let jpeg = encodeJPEG(from: surface, maxDimension: maxDimension, quality: quality) else {
-            return
-        }
-        framesEncoded += 1
+        guard let jpeg = encodeJPEG(
+            from: surface, maxDimension: maxDimension, quality: quality
+        ) else { return }
 
         var part = Data()
         part.append("--\(mjpegBoundary)\r\n".data(using: .utf8)!)
@@ -1725,26 +1760,42 @@ final class MJPEGServer {
         part.append(jpeg)
         part.append("\r\n".data(using: .utf8)!)
 
-        for client in watchers where !client.inFlight {
-            client.inFlight = true
-            bytesSent += part.count
-            client.connection.send(content: part, completion: .contentProcessed { [weak client] _ in
-                client?.inFlight = false
-            })
-        }
-        report(now)
+        queue.async { [weak self] in self?.fanOut(part) }
     }
 
-    private func report(_ now: Date) {
+    private func fanOut(_ part: Data) {
+        lock.lock()
+        let watchers = clients.values.filter { $0.streaming && !$0.inFlight }
+        for client in watchers { client.inFlight = true }
+        framesEncoded += 1
+        bytesSent += part.count * max(watchers.count, 1)
+        let active = clients.values.filter { $0.streaming }.count
+        lock.unlock()
+
+        for client in watchers {
+            client.connection.send(content: part, completion: .contentProcessed {
+                [weak self, weak client] _ in
+                guard let self, let client else { return }
+                self.lock.lock()
+                client.inFlight = false
+                self.lock.unlock()
+            })
+        }
+        report(Date(), active: active)
+    }
+
+    private func report(_ now: Date, active: Int) {
+        lock.lock()
         let elapsed = now.timeIntervalSince(lastReport)
-        guard elapsed >= 2.0 else { return }
+        guard elapsed >= 2.0 else { lock.unlock(); return }
         let fps = Double(framesEncoded) / elapsed
         let kbps = Double(bytesSent) * 8.0 / elapsed / 1000.0
-        simLogErr(String(format: "[sim-preview] served %.1f fps, %.0f kbps, %d client(s)",
-                         fps, kbps, clients.values.filter { $0.streaming }.count))
         framesEncoded = 0
         bytesSent = 0
         lastReport = now
+        lock.unlock()
+        simLogErr(String(format: "[preview] served %.1f fps, %.0f kbps, %d client(s)",
+                         fps, kbps, active))
     }
 }
 
@@ -1764,24 +1815,24 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
         loadAppIcon()
         // With no window there is nothing to put in the Dock, and a bouncing
         // Dock tile for a headless streamer is just noise.
-        if !opts.window { NSApp.setActivationPolicy(.accessory) }
+        if !opts.tuning.window { NSApp.setActivationPolicy(.accessory) }
 
-        if opts.serve {
+        if opts.tuning.serve {
             let server = MJPEGServer(
-                port: opts.port, bindAll: opts.bindAll, fps: opts.fps,
-                maxDimension: opts.maxDimension, quality: opts.quality
+                port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
+                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality
             )
             do {
                 try server.start()
                 self.server = server
             } catch {
-                simLogErr("[sim-preview] could not bind port \(opts.port): \(error)")
+                simLogErr("[sim-preview] could not bind port \(opts.tuning.port): \(error)")
                 NSApplication.shared.terminate(nil)
                 return
             }
         }
 
-        if opts.window {
+        if opts.tuning.window {
             let preview = SimPreviewWindow(udid: opts.udid, viaCGImage: opts.viaCGImage)
             preview.onWindowClosed = { _ in NSApplication.shared.terminate(nil) }
             self.preview = preview
@@ -1811,7 +1862,260 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
-        opts.window
+        opts.tuning.window
+    }
+}
+
+// MARK: - Physical device frame source
+
+func fourCC(_ value: OSType) -> String {
+    let bytes = [
+        UInt8((value >> 24) & 0xff), UInt8((value >> 16) & 0xff),
+        UInt8((value >> 8) & 0xff), UInt8(value & 0xff),
+    ]
+    return String(bytes: bytes, encoding: .ascii) ?? "\(value)"
+}
+
+enum CaptureError: Error, CustomStringConvertible {
+    case deviceNotFound(String)
+    case cannotAddInput
+    case cannotAddOutput
+    case noIOSurface
+
+    var description: String {
+        switch self {
+        case .deviceNotFound(let m): return "no connected capture device matching \"\(m)\""
+        case .cannotAddInput: return "session rejected the device input"
+        case .cannotAddOutput: return "session rejected the video data output"
+        case .noIOSurface: return "sample buffers are not IOSurface-backed"
+        }
+    }
+}
+
+/// Frames from a USB-connected iOS device.
+///
+/// The shipping preview attaches only an `AVCaptureVideoPreviewLayer`, which
+/// draws to the screen and hands back no pixels -- fine for a local window,
+/// useless for streaming. Adding an `AVCaptureVideoDataOutput` to the *same*
+/// session yields sample buffers without disturbing the layer: one session,
+/// one device, two consumers.
+///
+/// The pixel format is pinned to 32BGRA so these buffers match the
+/// simulator's framebuffer layout byte for byte and both sources can share
+/// one encoder. Left alone, a DAL device negotiates YUV, which `encodeJPEG`
+/// would happily misread as BGRA and render as garbage.
+final class CaptureFrameSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    let session = AVCaptureSession()
+
+    private let device: AVCaptureDevice
+    private let output = AVCaptureVideoDataOutput()
+    private let queue = DispatchQueue(label: "quern.capture.frames", qos: .userInteractive)
+    private let onSurface: (IOSurface) -> Void
+    private var describedFormat = false
+    private var warnedNoSurface = false
+
+    init(device: AVCaptureDevice, onSurface: @escaping (IOSurface) -> Void) {
+        self.device = device
+        self.onSurface = onSurface
+        super.init()
+    }
+
+    func start() throws {
+        session.beginConfiguration()
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                session.commitConfiguration()
+                throw CaptureError.cannotAddInput
+            }
+            session.addInput(input)
+        } catch let error as CaptureError {
+            throw error
+        } catch {
+            session.commitConfiguration()
+            throw error
+        }
+
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        // Drop rather than queue. A slow encoder must cost frames, not
+        // latency -- a preview that is correct but ten seconds late is worse
+        // than one that skips.
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: queue)
+
+        guard session.canAddOutput(output) else {
+            session.commitConfiguration()
+            throw CaptureError.cannotAddOutput
+        }
+        session.addOutput(output)
+        session.commitConfiguration()
+        session.startRunning()
+    }
+
+    func stop() {
+        session.stopRunning()
+        output.setSampleBufferDelegate(nil, queue: nil)
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        if !describedFormat {
+            describedFormat = true
+            simLogErr("[device-preview] \(CVPixelBufferGetWidth(pixels))"
+                + "x\(CVPixelBufferGetHeight(pixels)) px, "
+                + "format \(fourCC(CVPixelBufferGetPixelFormatType(pixels)))")
+        }
+
+        // The whole reason both sources can share an encoder: a CVPixelBuffer
+        // from this output is IOSurface-backed, so it arrives as the same
+        // type the simulator framebuffer hands over.
+        guard let ref = CVPixelBufferGetIOSurface(pixels)?.takeUnretainedValue() else {
+            if !warnedNoSurface {
+                warnedNoSurface = true
+                simLogErr("[device-preview] \(CaptureError.noIOSurface)")
+            }
+            return
+        }
+        onSurface(unsafeBitCast(ref, to: IOSurface.self))
+    }
+}
+
+/// Window for a physical device. Unlike the simulator window this does not
+/// push frames itself -- it shares the capture session with the data output
+/// and lets AVFoundation drive the layer, which is strictly better than
+/// re-rendering surfaces we already handed to the encoder.
+final class CaptureStreamWindow: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    var onWindowClosed: (() -> Void)?
+
+    init(title: String, session: AVCaptureSession) {
+        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let w: CGFloat = 400
+        let h: CGFloat = 710
+        window = NSWindow(
+            contentRect: NSRect(x: 50, y: screenFrame.height - h - 80, width: w, height: h),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = title
+        window.isReleasedWhenClosed = false
+
+        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer.videoGravity = .resizeAspect
+        previewLayer.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        previewLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        view.wantsLayer = true
+        view.layer?.addSublayer(previewLayer)
+        window.contentView = view
+
+        super.init()
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onWindowClosed?()
+    }
+}
+
+// MARK: - Physical device mode app delegate
+
+class DeviceStreamAppDelegate: NSObject, NSApplicationDelegate {
+    private let opts: DeviceStreamOptions
+    private var source: CaptureFrameSource?
+    private var server: MJPEGServer?
+    private var previewWindow: CaptureStreamWindow?
+
+    init(opts: DeviceStreamOptions) {
+        self.opts = opts
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        loadAppIcon()
+        if !opts.tuning.window { NSApp.setActivationPolicy(.accessory) }
+
+        enableScreenCaptureDevices()
+        // Same 3s settle the shipping path uses: the DAL plugin publishes
+        // its devices asynchronously after the opt-in, so enumerating
+        // immediately finds nothing.
+        simLogErr("[device-preview] waiting for capture devices...")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.begin()
+        }
+    }
+
+    private func begin() {
+        let devices = discoverDevices()
+        let match = opts.match.lowercased()
+        let device = devices.first { $0.localizedName.lowercased().contains(match) }
+        guard let device else {
+            simLogErr("[device-preview] \(CaptureError.deviceNotFound(opts.match))")
+            if devices.isEmpty {
+                simLogErr("[device-preview] no capture devices at all -- is the "
+                    + "device connected by USB, unlocked and trusted?")
+            } else {
+                simLogErr("[device-preview] available: "
+                    + devices.map { $0.localizedName }.joined(separator: ", "))
+            }
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        simLogErr("[device-preview] using \(device.localizedName)")
+
+        if opts.tuning.serve {
+            let server = MJPEGServer(
+                port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
+                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality
+            )
+            do {
+                try server.start()
+                self.server = server
+            } catch {
+                simLogErr("[device-preview] could not bind port \(opts.tuning.port): \(error)")
+                NSApplication.shared.terminate(nil)
+                return
+            }
+        }
+
+        let source = CaptureFrameSource(device: device) { [weak self] surface in
+            self?.server?.publish(surface)
+        }
+        do {
+            try source.start()
+            self.source = source
+        } catch {
+            simLogErr("[device-preview] failed: \(error)")
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
+        if opts.tuning.window {
+            let win = CaptureStreamWindow(
+                title: device.localizedName, session: source.session
+            )
+            win.onWindowClosed = { NSApplication.shared.terminate(nil) }
+            previewWindow = win
+        }
+        simLogErr("[device-preview] streaming \(device.localizedName)")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        source?.stop()
+        server?.stop()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
+        opts.tuning.window
     }
 }
 
@@ -1830,6 +2134,8 @@ case .interactive:
     delegate = InteractiveDelegate()
 case .simUDID(let opts):
     delegate = SimAppDelegate(opts: opts)
+case .deviceStream(let opts):
+    delegate = DeviceStreamAppDelegate(opts: opts)
 default:
     delegate = AppDelegate(mode: mode)
 }
