@@ -15,6 +15,7 @@
 import AVFoundation
 import AppKit
 import CoreMediaIO
+import ImageIO
 import Foundation
 
 // MARK: - Enable iOS screen capture device discovery
@@ -635,8 +636,272 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
 // MARK: - Interactive mode: PreviewSession
 
-class PreviewSession: NSObject, NSWindowDelegate {
+// MARK: - Session kinds
+
+/// What the controller needs of a preview, whatever is behind it.
+///
+/// Two kinds exist. A `PreviewSession` mirrors a CoreMediaIO capture device;
+/// a `StreamPreviewSession` displays an MJPEG stream served by `quern-media`.
+/// The second exists because a simulator is not a capture device and never
+/// appears in a `DiscoverySession`, so it cannot be previewed the first way
+/// at all.
+///
+/// `sessionKey` is deliberately opaque here. Capture devices are filed under
+/// their `localizedName` because that is what the wire protocol has always
+/// addressed them by; streams are filed under a udid. The controller and the
+/// server only ever echo the key back, so the two can coexist -- and moving
+/// capture devices onto udids later is a change to one line of derivation
+/// rather than to every message.
+protocol PreviewSessionKind: AnyObject {
+    var sessionKey: String { get }
+    var onWindowClosed: ((String) -> Void)? { get set }
+    func start()
+    func stop()
+}
+
+// MARK: - MJPEG stream client
+
+/// Reads an MJPEG stream and hands back one image per frame.
+///
+/// Frames are found by scanning for JPEG start- and end-of-image markers
+/// rather than by splitting on the multipart boundary. URLSession parses
+/// `multipart/x-mixed-replace` itself and yields part bodies with the framing
+/// already stripped, so a boundary parser would find nothing to split on;
+/// marker scanning works whether the framing survives or not. FF bytes inside
+/// entropy-coded data are byte-stuffed as FF00, so FFD9 appears only as a
+/// real EOI -- an embedded EXIF thumbnail would break that assumption, and
+/// VideoToolbox does not write one.
+final class MJPEGClient: NSObject, URLSessionDataDelegate {
+    private static let soi = Data([0xFF, 0xD8])
+    private static let eoi = Data([0xFF, 0xD9])
+    /// Past this, the far end is not sending anything we can parse.
+    private static let maxBuffer = 8 << 20
+
+    private let url: URL
+    private let onConnected: () -> Void
+    private let onFrame: (CGImage) -> Void
+    private let onError: (String) -> Void
+
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var buffer = Data()
+    private var stopped = false
+    /// `multipart/x-mixed-replace` is a sequence of responses as far as
+    /// URLSession is concerned, so this delegate call arrives once per *frame*,
+    /// not once per stream. Measured: the acknowledgement fired on every frame
+    /// until this gate went in.
+    private var announced = false
+
+    init(
+        url: URL,
+        onConnected: @escaping () -> Void,
+        onFrame: @escaping (CGImage) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        self.url = url
+        self.onConnected = onConnected
+        self.onFrame = onFrame
+        self.onError = onError
+        super.init()
+    }
+
+    func start() {
+        let config = URLSessionConfiguration.default
+        // An MJPEG response never completes, so the default resource timeout
+        // would cut a perfectly healthy stream off mid-watch.
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = .greatestFiniteMagnitude
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        self.session = session
+        let task = session.dataTask(with: url)
+        self.task = task
+        task.resume()
+    }
+
+    func stop() {
+        stopped = true
+        task?.cancel()
+        session?.invalidateAndCancel()
+        session = nil
+        task = nil
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        // The acknowledgement signal. Deliberately not "first frame": the
+        // simulator framebuffer is event-driven and costs nothing while idle,
+        // so a simulator sitting on a static screen sends no frames at all and
+        // an add waiting for one would time out on a working preview.
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 200 {
+            if !announced {
+                announced = true
+                onConnected()
+            }
+            completionHandler(.allow)
+        } else {
+            onError("stream returned HTTP \(code)")
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
+    ) {
+        buffer.append(data)
+        extractFrames()
+        if buffer.count > Self.maxBuffer {
+            buffer.removeAll(keepingCapacity: false)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
+    ) {
+        guard !stopped else { return }
+        onError(error?.localizedDescription ?? "stream ended")
+    }
+
+    private func extractFrames() {
+        while true {
+            guard let start = buffer.range(of: Self.soi) else {
+                // Nothing that could begin a frame; keep none of it.
+                buffer.removeAll(keepingCapacity: true)
+                return
+            }
+            guard let end = buffer.range(
+                of: Self.eoi, options: [], in: start.upperBound..<buffer.endIndex
+            ) else {
+                // A partial frame. Drop only what precedes it.
+                if start.lowerBound > buffer.startIndex {
+                    buffer.removeSubrange(buffer.startIndex..<start.lowerBound)
+                }
+                return
+            }
+            let jpeg = Data(buffer[start.lowerBound..<end.upperBound])
+            buffer.removeSubrange(buffer.startIndex..<end.upperBound)
+            if let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                onFrame(image)
+            }
+        }
+    }
+}
+
+// MARK: - Stream-backed preview window
+
+/// A preview window fed by an MJPEG stream instead of a capture device.
+///
+/// The window opens at the same default size as a capture preview and takes
+/// the stream's own proportions from the first frame that arrives -- the
+/// stream advertises no dimensions before then, which is the same problem
+/// `StreamAspectSizer` solves for capture devices by polling the input port.
+final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
+    let sessionKey: String
+    let window: NSWindow
+    var onWindowClosed: ((String) -> Void)?
+
+    private let url: URL
+    private let imageLayer = CALayer()
+    private var client: MJPEGClient?
+    private var haveSized = false
+
+    init(sessionKey: String, title: String, url: URL, position: Int) {
+        self.sessionKey = sessionKey
+        self.url = url
+
+        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let windowWidth: CGFloat = 400
+        let windowHeight: CGFloat = 710
+        let xOffset = CGFloat(position) * (windowWidth + 20) + 50
+        let yOffset = screenFrame.height - windowHeight - 80
+
+        window = NSWindow(
+            contentRect: NSRect(x: xOffset, y: yOffset, width: windowWidth, height: windowHeight),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = title
+        window.isReleasedWhenClosed = false
+
+        imageLayer.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+        imageLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        // Matches AVCaptureVideoPreviewLayer's .resizeAspect, so a stream
+        // whose window has not been sized yet letterboxes rather than stretches.
+        imageLayer.contentsGravity = .resizeAspect
+        imageLayer.backgroundColor = NSColor.black.cgColor
+
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
+        view.wantsLayer = true
+        view.layer?.addSublayer(imageLayer)
+        window.contentView = view
+
+        super.init()
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Called once the stream's HTTP response arrives, on the main queue.
+    var onConnected: (() -> Void)?
+
+    func start() {
+        let client = MJPEGClient(
+            url: url,
+            onConnected: { [weak self] in
+                DispatchQueue.main.async { self?.onConnected?() }
+            },
+            onFrame: { [weak self] image in
+                DispatchQueue.main.async { self?.show(image) }
+            },
+            onError: { [weak self] message in
+                guard let self else { return }
+                fputs("  stream \(self.sessionKey): \(message)\n", stderr)
+            }
+        )
+        self.client = client
+        client.start()
+    }
+
+    func stop() {
+        client?.stop()
+        client = nil
+        window.delegate = nil
+        window.close()
+    }
+
+    private func show(_ image: CGImage) {
+        // Layer contents are not animatable here; without this every frame
+        // cross-fades into the last and the preview smears.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageLayer.contents = image
+        CATransaction.commit()
+
+        guard !haveSized, image.width > 0, image.height > 0 else { return }
+        haveSized = true
+        fputs("  stream \(sessionKey): first frame \(image.width)x\(image.height)\n", stderr)
+        let aspect = CGFloat(image.width) / CGFloat(image.height)
+        let contentHeight = window.contentView?.frame.height ?? 710
+        window.setContentSize(NSSize(width: (contentHeight * aspect).rounded(), height: contentHeight))
+        window.contentAspectRatio = NSSize(width: image.width, height: image.height)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        client?.stop()
+        client = nil
+        onWindowClosed?(sessionKey)
+    }
+}
+
+class PreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
     let deviceName: String
+    /// Capture devices are filed under their name; see `PreviewSessionKind`.
+    var sessionKey: String { deviceName }
     let window: NSWindow
     let session: AVCaptureSession
     var onWindowClosed: ((String) -> Void)?
@@ -714,7 +979,7 @@ class PreviewSession: NSObject, NSWindowDelegate {
 // MARK: - Interactive delegate
 
 class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
-    var sessions: [String: PreviewSession] = [:]
+    var sessions: [String: any PreviewSessionKind] = [:]
     var allDevices: [AVCaptureDevice] = []
     var positions: Set<Int> = []
     var stdinConnected = true
@@ -804,6 +1069,22 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             let position = json["position"] as? Int ?? nextPosition()
             handleAdd(name: name, position: position, id: id)
 
+        case "add_stream":
+            guard let name = json["name"] as? String else {
+                emit(["event": "error", "message": "add_stream requires 'name'"])
+                return
+            }
+            guard let urlString = json["url"] as? String, let url = URL(string: urlString) else {
+                emit([
+                    "event": "add_failed", "name": name,
+                    "error": "add_stream requires a valid 'url'", "id": id as Any,
+                ])
+                return
+            }
+            let position = json["position"] as? Int ?? nextPosition()
+            let title = json["title"] as? String ?? name
+            handleAddStream(name: name, title: title, url: url, position: position, id: id)
+
         case "remove":
             guard let name = json["name"] as? String else {
                 emit(["event": "error", "message": "remove requires 'name'"])
@@ -864,7 +1145,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         session.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak session] in
             guard let self else { return }
-            guard let session, self.sessions[name] === session else {
+            guard let session, self.sessions[name] as AnyObject === session else {
                 self.emit([
                     "event": "add_failed",
                     "name": name,
@@ -909,6 +1190,45 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             allDevices.append(device)
         }
         emit(["event": "connected", "name": device.localizedName, "id": device.uniqueID])
+    }
+
+    /// Opens a window on an MJPEG stream rather than a capture device.
+    ///
+    /// How a simulator reaches the screen: `quern-media` captures its
+    /// framebuffer and serves it, the server passes the URL here. Filed under
+    /// the caller's key -- a udid in practice -- which every event about it
+    /// echoes back, exactly as a capture device echoes its name.
+    func handleAddStream(name: String, title: String, url: URL, position: Int, id: String? = nil) {
+        if sessions[name] != nil {
+            emit([
+                "event": "add_failed", "name": name,
+                "error": "Already previewing", "id": id as Any,
+            ])
+            return
+        }
+
+        let session = StreamPreviewSession(
+            sessionKey: name, title: title, url: url, position: position
+        )
+        session.onWindowClosed = { [weak self] closedKey in
+            self?.onWindowClosed(name: closedKey)
+        }
+
+        // Acknowledged when the stream's response arrives, not after a fixed
+        // delay: a capture device is ready on a timer because CoreMediaIO
+        // offers nothing better, whereas a stream says so itself. The same
+        // identity re-check applies -- the window can be closed inside the
+        // wait, and acknowledging anyway would have the server record a
+        // preview with no window and then refuse to open a fresh one.
+        session.onConnected = { [weak self, weak session] in
+            guard let self else { return }
+            guard let session, self.sessions[name] === session else { return }
+            self.emit(["event": "added", "name": name, "id": id as Any])
+        }
+
+        sessions[name] = session
+        positions.insert(position)
+        session.start()
     }
 
     func handleRemove(name: String, id: String? = nil) {

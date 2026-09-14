@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections import deque
 
 import pytest
 
@@ -208,3 +209,157 @@ class TestAddAcknowledgement:
             assert mgr._active == {}
         finally:
             loop.close()
+
+
+class _FakeStreamProcess:
+    """A stand-in for quern-media that never touches a simulator."""
+
+    def __init__(self, stderr_lines=(), exit_code=2):
+        self._lines = list(stderr_lines)
+        self._exit_code = exit_code
+        self._eof = False
+        self.terminated = False
+        self.killed = False
+        self.stderr = self
+
+    @property
+    def returncode(self):
+        # Only reports an exit once its output has been drained, so a test
+        # sees the same ordering as a real process: the reason arrives before
+        # the exit is observable.
+        return self._exit_code if self._eof else None
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0).encode() + b"\n"
+        self._eof = True
+        return b""
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        return self._exit_code
+
+
+class _LiveStreamProcess(_FakeStreamProcess):
+    """One that stays up until something stops it."""
+
+    def __init__(self):
+        super().__init__(exit_code=0)
+        self._stopped = False
+
+    @property
+    def returncode(self):
+        return -15 if self._stopped else None
+
+    async def readline(self) -> bytes:
+        await asyncio.sleep(3600)
+        return b""
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._stopped = True
+
+
+class TestSimulatorStreams:
+    """A simulator is not a CoreMediaIO device, so its preview is an MJPEG
+    stream from quern-media. The window and that subprocess have to live and
+    die together."""
+
+    @staticmethod
+    def _manager(monkeypatch, process):
+        from server.device import preview
+
+        mgr = PreviewManager()
+
+        async def _no_process():
+            return None
+
+        async def _spawn(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview, "build_media_engine", lambda: "/tmp/quern-media")
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        return mgr
+
+    def test_a_stream_that_dies_before_serving_reports_why(self, monkeypatch):
+        """A dead subprocess and a slow one look identical from the port. A
+        timeout for a simulator that was never booted sends the reader
+        somewhere the fault is not, so the exit is reported with its output."""
+        process = _FakeStreamProcess(
+            stderr_lines=["[capture] no such simulator"], exit_code=2
+        )
+        mgr = self._manager(monkeypatch, process)
+
+        with pytest.raises(RuntimeError, match="no such simulator"):
+            asyncio.run(mgr.add_simulator("F5AF3736-DEAD-BEEF"))
+
+    def test_a_failed_add_leaves_no_quern_media_behind(self, monkeypatch):
+        """A survivor would hold both the port and the framebuffer
+        subscription against the next attempt, which would then fail for a
+        reason that has nothing to do with why this one did."""
+        process = _FakeStreamProcess(stderr_lines=["boom"], exit_code=2)
+        mgr = self._manager(monkeypatch, process)
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(mgr.add_simulator("F5AF3736-DEAD-BEEF"))
+
+        assert mgr._streams == {}, "a failed add kept its stream"
+        assert mgr._active == {}, "a failed add recorded a preview"
+
+    def test_removing_a_preview_stops_its_stream(self, monkeypatch):
+        """Otherwise quern-media keeps encoding frames for a window that has
+        gone, holding the simulator framebuffer open."""
+        process = _LiveStreamProcess()
+
+        async def run():
+            from server.device import preview
+
+            mgr = PreviewManager()
+            mgr._streams["SIM"] = preview._StreamProcess(
+                process=process, port=8422, log=deque(maxlen=20)
+            )
+            await mgr._stop_stream("SIM")
+
+        asyncio.run(run())
+        assert process.terminated, "the stream outlived its preview"
+
+    def test_a_window_closed_by_the_user_stops_its_stream(self, monkeypatch):
+        """Nothing else notices a window the user closed, so the stream would
+        run until the server stopped."""
+        process = _LiveStreamProcess()
+
+        async def run():
+            from server.device import preview
+
+            mgr = PreviewManager()
+            mgr._streams["SIM"] = preview._StreamProcess(
+                process=process, port=8422, log=deque(maxlen=20)
+            )
+            mgr._dispatch_event({"event": "window_closed", "name": "SIM"})
+            # The handler is synchronous and schedules the teardown.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert process.terminated, "closing the window left the stream running"
+
+    def test_a_second_stream_does_not_reuse_the_first_port(self, monkeypatch):
+        """Both would bind the same port and the second would fail to serve."""
+        from server.device import preview
+
+        mgr = PreviewManager()
+        mgr._streams["A"] = preview._StreamProcess(
+            process=_LiveStreamProcess(), port=preview.STREAM_BASE_PORT,
+            log=deque(maxlen=20),
+        )
+        chosen = preview.find_available_port(
+            preview.STREAM_BASE_PORT,
+            exclude={s.port for s in mgr._streams.values()},
+        )
+        assert chosen != preview.STREAM_BASE_PORT
