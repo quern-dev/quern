@@ -144,3 +144,24 @@ func stopIsIdempotent() throws {
     server.stop()
     server.stop()
 }
+
+
+@Test("start does not return until the port is actually accepting")
+func startMeansListening() async throws {
+    // NWListener.start is asynchronous. Returning before .ready made every
+    // caller race the bind, which a developer machine wins and a loaded CI
+    // runner does not -- it read an empty response from a socket nothing was
+    // on yet. No sleep here on purpose: the connect is the assertion.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    // Asserted on the listener's own state rather than on a timed connect:
+    // a connect only fails where the race is lost, so on a fast machine it
+    // passes just as happily against the bug.
+    #expect(server.isListening, "start() returned before the listener was ready")
+
+    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 3)
+    #expect(!page.isEmpty, "start() returned before the listener was accepting")
+}

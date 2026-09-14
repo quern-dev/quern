@@ -40,7 +40,9 @@ func recordsWallClockDuration() async throws {
         recorder.append(out.frame)
         t += 1.0 / 30.0
     }
-    let summary = try #require(recorder.finish())
+    let summary = try #require(
+        recorder.finish(), "finish reported: \(String(describing: recorder.failure))"
+    )
     #expect(summary.framesWritten > 140, "expected ~150 frames, got \(summary.framesWritten)")
     #expect(summary.framesDropped == 0)
 
@@ -122,4 +124,27 @@ func appendAfterFinishIsRefused() throws {
 
     let later = try #require(encoder.encode(captured(surface, at: 1), forceKeyframe: true))
     #expect(recorder.append(later.frame) == false)
+}
+
+
+@Test("a finish that times out reports no summary, and says why")
+func finishTimeoutIsNotSilentSuccess() throws {
+    // The file has no moov atom until finishWriting completes, so a Summary
+    // here would describe a recording that cannot be opened. Measured on CI,
+    // where the write lost a race it always won on a developer machine.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let out = try #require(encoder.encode(captured(surface, at: 0)))
+    #expect(recorder.append(out.frame))
+
+    #expect(recorder.finish(timeout: 0) == nil)
+    guard case .finishTimedOut = try #require(recorder.failure) else {
+        Issue.record("expected finishTimedOut, got \(String(describing: recorder.failure))")
+        return
+    }
 }
