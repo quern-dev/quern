@@ -256,6 +256,52 @@ A hand-written Annex-B → AVCC remuxer avoids it and gives direct control
 of flush timing, which is where the latency actually lives. baguette does
 its own AVCC conversion for the same reason.
 
+## Android is not actually blocked — correcting the framing above
+
+Everything in the screenrecord section is a property of **screenrecord**,
+not of Android. Framing Android as "a transport, not a frame source" was a
+conclusion about one tool, generalised too far.
+
+Quern already installs `quern-driver.apk` (a patched uiautomator2 build,
+`server/device/u2_client.py`), so on-device presence and an APK build and
+install pipeline already exist — normally the expensive part of shipping a
+custom streamer.
+
+With our own on-device encoder, every documented constraint disappears:
+
+| screenrecord | own MediaCodec encoder |
+|---|---|
+| 180 s hard cap | none |
+| one IDR per session | `PARAMETER_KEY_REQUEST_SYNC_FRAME`, on demand |
+| undocumented `--output-format=h264` | our own output format |
+| restart is the only keyframe lever (~290 ms, glitches every viewer) | keyframe without interruption |
+
+That is parity with VideoToolbox: H.264, keyframes on demand, real
+timestamps.
+
+Two routes, and the obvious one is not the right one:
+
+- **APK + `MediaProjection`.** A normal app can capture, but Android shows
+  a user consent dialog per session. Acceptable for a demo, unusable for
+  automation.
+- **`app_process` server, the scrcpy model.** Push a jar, run it under the
+  **shell UID** via adb, use hidden `SurfaceControl` / `DisplayManager`
+  APIs. No dialog. uiautomator2's instrumentation runs as the target app's
+  UID rather than shell, so the capture path likely wants this route
+  regardless of the APK. scrcpy is Apache 2.0 and already does exactly
+  this — worth reading before writing anything.
+
+**Design consequence, and the reason this is recorded before the
+extraction rather than after:** do not encode "Android is a dumb stream
+with no keyframe control" into the source abstraction. The protocol needs
+to admit an already-encoded source that still supports keyframe requests
+and carries timestamps. Designing around screenrecord's limits would bake
+in a constraint we have a clear route to removing.
+
+Not investigated: whether the streamer belongs inside `quern-driver.apk` or
+as a separate `app_process` jar, and what the shell-UID hidden-API surface
+costs to maintain across Android versions.
+
 ## Consequences for the design
 
 1. The frame-source protocol covers the two iOS sources cleanly. Android
