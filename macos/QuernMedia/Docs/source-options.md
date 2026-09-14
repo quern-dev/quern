@@ -85,8 +85,27 @@ xcrun devicectl device info details --device <hw-udid>
 There are two independent RemoteXPC tunnel providers, and
 `server/device/wda_client.py` only consults tunneld — it tries the tunneld
 address, finds nothing for a wifi device, and falls through to a usbmux
-forward that cannot work without a cable. Reading `tunnelIPAddress` from
-devicectl as a fallback appears to be the whole gap.
+forward that cannot work without a cable.
+
+**Reading `tunnelIPAddress` from devicectl is not the fix, though it looked
+like it.** Measured 2026-09-14: that tunnel lives only as long as the
+`devicectl` process. Each `device info details` call mints a fresh address
+(`fd31:…`, then `fd12:…`, then different again) and tears it down on exit —
+probing one from another process immediately afterwards gives `No route to
+host`, and the `utun` interface is gone seconds later. An address read this
+way is dead before a caller can use it.
+
+The real gap is elsewhere. tunneld *does* discover wifi devices and build
+tunnels for them (`start-tunnel-task-usbmux-<udid>-Network` in the log), but
+those tunnels have a **median lifetime of 2.0 seconds** across 11,587 of
+them, against 32s for USB and 13+ hours for the one live wired tunnel. So
+tunneld advertises an address that is usually already dead, `GET /status`
+fails, and the caller falls through to the usbmux path. One Network tunnel
+in the log did last 13.7 hours, so this is churn rather than a hard limit —
+finding out why is the open work. See #163.
+
+Both providers *can* hold tunnels to the same device at once, each with its
+own address; they do not contend.
 
 One prerequisite: the device must be discoverable to usbmux over the
 network. Before that was enabled, `pymobiledevice3 developer dvt xcuitest`

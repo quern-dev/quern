@@ -152,7 +152,7 @@ public final class Recorder {
 
         localInput?.markAsFinished()
         let done = DispatchSemaphore(value: 0)
-        writer.finishWriting { done.signal() }
+        finishWriting { done.signal() }
 
         // The wait's result is the whole reason for waiting. Until
         // `finishWriting` lands the moov atom the file holds samples nothing
@@ -181,6 +181,21 @@ public final class Recorder {
         lock.lock()
         defer { lock.unlock() }
         failureReason = reason
+    }
+
+    /// Test seam: stands in for `AVAssetWriter.finishWriting`. The real one
+    /// completes on its own schedule, so a test for the timeout path would be
+    /// racing it -- and on a fast machine it wins, which makes the test pass
+    /// for the wrong reason. Withhold the completion to make the deadline
+    /// deterministic.
+    var finishWritingOverride: ((@escaping () -> Void) -> Void)?
+
+    private func finishWriting(_ completion: @escaping () -> Void) {
+        if let finishWritingOverride {
+            finishWritingOverride(completion)
+            return
+        }
+        writer.finishWriting(completionHandler: completion)
     }
 
     /// Non-nil when the writer refused to start, or could not be finished --

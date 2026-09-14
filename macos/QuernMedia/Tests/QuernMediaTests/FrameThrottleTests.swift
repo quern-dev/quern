@@ -67,6 +67,11 @@ func idleGapDoesNotBurst() {
     }
     // Half a second at 30 fps is ~15 frames. A naive deadline loop would
     // fire on every frame until it caught up on 60 seconds of arrears.
+    //
+    // Bounded on both sides: with only the ceiling, a throttle that dropped
+    // every frame after the gap scored zero and passed. The resync has to
+    // resume output, not merely stop bursting.
+    #expect(encoded >= 13, "output did not resume after the gap, got \(encoded)")
     #expect(encoded <= 17, "expected ~15 frames after the gap, got \(encoded)")
 }
 

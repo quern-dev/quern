@@ -42,9 +42,13 @@ public final class SimulatorFramebuffer: FrameSource {
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
 
+    /// Marks `queue`, so `stop()` can tell whether it is already on it.
+    private static let queueKey = DispatchSpecificKey<Void>()
+
     public init(udid: String, onFrame: @escaping (CapturedFrame) -> Void) {
         self.udid = udid
         self.onFrame = onFrame
+        queue.setSpecific(key: Self.queueKey, value: ())
     }
 
     public func start() throws {
@@ -102,7 +106,7 @@ public final class SimulatorFramebuffer: FrameSource {
         queue.async { [weak self] in self?.captureLatest() }
     }
 
-    /// Not safe to call from the capture queue -- it waits on it.
+    /// Safe from any thread, including from inside `onFrame`.
     public func stop() {
         // The flag goes up first, so a `captureLatest` already sitting in the
         // queue behind this returns without touching anything.
@@ -116,16 +120,26 @@ public final class SimulatorFramebuffer: FrameSource {
         // `descriptors` there. Clearing it from the caller's thread raced a
         // callback that had already been enqueued: a torn read at best, a
         // frame delivered after stop() returned at worst.
-        queue.sync {
+        let cleanup = {
             let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
-            for desc in descriptors {
-                if let uuid = callbackUUIDs[ObjectIdentifier(desc)], desc.responds(to: unregSel) {
+            for desc in self.descriptors {
+                if let uuid = self.callbackUUIDs[ObjectIdentifier(desc)],
+                   desc.responds(to: unregSel) {
                     desc.perform(unregSel, with: uuid)
                 }
             }
-            descriptors.removeAll()
-            callbackUUIDs.removeAll()
-            ioClient = nil
+            self.descriptors.removeAll()
+            self.callbackUUIDs.removeAll()
+            self.ioClient = nil
+        }
+
+        // `onFrame` runs on this queue, so a consumer that stops the source
+        // from inside its own frame callback is already here -- and
+        // `queue.sync` onto the serial queue you are standing on deadlocks.
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            cleanup()
+        } else {
+            queue.sync(execute: cleanup)
         }
     }
 
