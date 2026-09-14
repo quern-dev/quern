@@ -24,6 +24,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "QuernMedia", targets: ["QuernMedia"]),
+        .executable(name: "quern-media", targets: ["quern-media"]),
     ],
     targets: [
         .target(
@@ -31,6 +32,14 @@ let package = Package(
             // The spike this is extracted from was written in Swift 5 mode.
             // Porting it and adopting strict concurrency in one step would
             // conflate two jobs; tighten this once the port is complete.
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // Deliberately thin: argument parsing, wiring and lifetime, all of
+        // which the library provides tested pieces for. Logic that lands here
+        // is logic that cannot be tested.
+        .executableTarget(
+            name: "quern-media",
+            dependencies: ["QuernMedia"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
