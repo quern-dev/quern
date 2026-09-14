@@ -1440,8 +1440,18 @@ class TestSettingCaptureSaysWhatItDropped:
                 headers=auth_headers,
             )
         assert r.status_code == 200
-        logged = " ".join(rec.getMessage() for rec in caplog.records)
-        assert "Metatext" in logged, "a process was dropped with nothing said"
+        # Assert on the record, not a substring. Coupling to wording let a
+        # mutation that reworded the message *and* warned on every change pass.
+        warnings = [
+            rec for rec in caplog.records
+            if rec.levelno >= logging.WARNING and "local_capture" in rec.getMessage()
+        ]
+        assert len(warnings) == 1, "a process was dropped with nothing said"
+        msg = warnings[0].getMessage()
+        assert "Metatext" in msg
+        assert "MobileSafari" not in msg.split("replaced by")[0], (
+            "the warning named a process that is still being captured"
+        )
 
     def test_adding_one_says_nothing(
         self, client, auth_headers, app, monkeypatch, caplog
@@ -1462,8 +1472,12 @@ class TestSettingCaptureSaysWhatItDropped:
                 json={"processes": ["MobileSafari", "Metatext"]},
                 headers=auth_headers,
             )
-        logged = " ".join(rec.getMessage() for rec in caplog.records)
-        assert "no longer includes" not in logged
+        # No warning at all, rather than "no warning containing this phrase" --
+        # which a reworded message satisfies while warning on every change.
+        assert not [
+            rec for rec in caplog.records
+            if rec.levelno >= logging.WARNING and "local_capture" in rec.getMessage()
+        ], "a pure addition warned; that noise is why warnings stop being read"
 
     def test_disabling_capture_names_everything_it_stops(
         self, client, auth_headers, app, monkeypatch, caplog
@@ -1477,5 +1491,10 @@ class TestSettingCaptureSaysWhatItDropped:
                 json={"processes": []},
                 headers=auth_headers,
             )
-        logged = " ".join(rec.getMessage() for rec in caplog.records)
-        assert "Metatext" in logged and "MobileSafari" in logged
+        warnings = [
+            rec for rec in caplog.records
+            if rec.levelno >= logging.WARNING and "local_capture" in rec.getMessage()
+        ]
+        assert len(warnings) == 1
+        dropped = warnings[0].getMessage().split("replaced by")[0]
+        assert "Metatext" in dropped and "MobileSafari" in dropped

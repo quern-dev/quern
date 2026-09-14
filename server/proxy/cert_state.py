@@ -121,7 +121,17 @@ def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
         else:
             state = {}
 
-        existing = state.get(udid) or {}
+        # Filtered on the way in *and* out. `cert_data` is already stripped
+        # above; without stripping what is on disk too, the merge preserves
+        # legacy and computed fields forever -- where the old wholesale replace
+        # quietly healed them on the next write. Flat `proxy_host`/`proxy_port`
+        # are the bad case: `DeviceCertState` ignores extras, so they construct
+        # cleanly, nothing raises, `strip_noncanonical_fields` never fires, and
+        # they persist for good.
+        existing = {
+            k: v for k, v in (state.get(udid) or {}).items()
+            if k in _CANONICAL_FIELDS
+        }
         state[udid] = {**existing, **cert_data}
 
         fd.seek(0)

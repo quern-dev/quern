@@ -217,7 +217,7 @@ async def is_cert_installed(
     # names every field -- including `installed_at` and `wifi_proxy_configs`,
     # which verification has no opinion about -- and naming them clears them.
     update_cert_state(udid, {
-        "name": device_name,
+        **({"name": device_name} if device_name else {}),
         "cert_installed": is_installed,
         "fingerprint": expected_fingerprint if is_installed else None,
         "verified_at": datetime.now(UTC).isoformat(),
@@ -246,7 +246,7 @@ async def _is_cert_installed_android(
     fingerprint = get_cert_fingerprint(cert_path) if is_installed else None
 
     update_cert_state(udid, {
-        "name": device_name,
+        **({"name": device_name} if device_name else {}),
         "cert_installed": is_installed,
         "fingerprint": fingerprint,
         "verified_at": datetime.now(UTC).isoformat(),
@@ -306,15 +306,13 @@ async def install_cert(
         device_name = await _get_device_name(controller, udid)
     now = datetime.now(UTC).isoformat()
 
-    cert_state = DeviceCertState(
-        name=device_name,
-        cert_installed=True,
-        fingerprint=fingerprint,
-        installed_at=now,
-        verified_at=now,
-    )
-
-    update_cert_state(udid, cert_state.model_dump())
+    update_cert_state(udid, {
+        **({"name": device_name} if device_name else {}),
+        "cert_installed": True,
+        "fingerprint": fingerprint,
+        "installed_at": now,
+        "verified_at": now,
+    })
 
     logger.info(f"Installed mitmproxy CA cert on {udid}")
     return True  # Newly installed
@@ -357,13 +355,15 @@ async def _install_cert_android(
         if device_name is None:
             device_name = await _get_device_name(controller, udid)
         fingerprint = get_cert_fingerprint(cert_path)
-        cert_state = DeviceCertState(
-            name=device_name,
-            cert_installed=True,
-            fingerprint=fingerprint,
-            verified_at=datetime.now(UTC).isoformat(),
-        )
-        update_cert_state(udid, cert_state.model_dump())
+        # No `installed_at`: this branch did not install anything, it found the
+        # cert already present. Naming the field here is what reset it to None
+        # on a second `install_cert` call against the same Android device.
+        update_cert_state(udid, {
+            **({"name": device_name} if device_name else {}),
+            "cert_installed": True,
+            "fingerprint": fingerprint,
+            "verified_at": datetime.now(UTC).isoformat(),
+        })
         return False
 
     # Install system cert
@@ -378,14 +378,13 @@ async def _install_cert_android(
         device_name = await _get_device_name(controller, udid)
     now = datetime.now(UTC).isoformat()
 
-    cert_state = DeviceCertState(
-        name=device_name,
-        cert_installed=True,
-        fingerprint=fingerprint,
-        installed_at=now,
-        verified_at=now,
-    )
-    update_cert_state(udid, cert_state.model_dump())
+    update_cert_state(udid, {
+        **({"name": device_name} if device_name else {}),
+        "cert_installed": True,
+        "fingerprint": fingerprint,
+        "installed_at": now,
+        "verified_at": now,
+    })
 
     # Also set HTTP proxy for emulators (10.0.2.2 = host loopback)
     if controller._device_type(udid) == DeviceType.ANDROID_EMULATOR:
@@ -415,6 +414,12 @@ async def get_device_cert_state(
     cert_path = get_cert_path()
     if device_name is None:
         device_name = await _get_device_name(controller, udid)
+    if device_name is None:
+        # The model requires a name. Prefer what was recorded over a
+        # placeholder, so a failed lookup does not present as a rename.
+        device_name = (read_cert_state_for_device(udid) or {}).get(
+            "name"
+        ) or "Unknown Device"
 
     if not cert_path.exists():
         # Cert file doesn't exist
@@ -442,7 +447,7 @@ async def get_device_cert_state(
     )
 
 
-async def _get_device_name(controller, udid: str) -> str:
+async def _get_device_name(controller, udid: str) -> str | None:
     """Get device name from DeviceController.
 
     Args:
@@ -450,14 +455,19 @@ async def _get_device_name(controller, udid: str) -> str:
         udid: Device UDID
 
     Returns:
-        Device name or "Unknown Device" if not found
+        The device's name, or None when it could not be determined.
+
+        None rather than "Unknown Device", so a caller can tell "this device is
+        called Unknown Device" from "the lookup failed" and decline to write the
+        second over a good recorded name. `list_devices` raising -- adb down,
+        simctl slow, no Xcode -- used to be indistinguishable from an answer.
     """
     try:
         devices = await controller.list_devices()
         for device in devices:
             if device.udid == udid:
                 return device.name
-        return "Unknown Device"
+        return None
     except Exception as e:
         logger.warning(f"Failed to get device name for {udid}: {e}")
-        return "Unknown Device"
+        return None
