@@ -187,6 +187,11 @@ public final class RecordingSink: FrameSink {
         self.recorder = recorder
     }
 
+    /// Why the recording could not be started or completed, if it could not.
+    /// Forwarded because the recorder itself is private here, and a nil from
+    /// `finish()` is only actionable with the reason attached.
+    public var failure: Recorder.Failure? { recorder.failure }
+
     public var wantsFrames: Bool {
         lock.lock()
         defer { lock.unlock() }

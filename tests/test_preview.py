@@ -297,12 +297,22 @@ class TestSimulatorStreams:
         async def _spawn(*_args, **_kwargs):
             return process
 
-        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
         async def _build():
             return "/tmp/quern-media"
 
+        async def _refuse(*_args, **_kwargs):
+            # Stubbed, because _wait_until_serving otherwise dials
+            # 127.0.0.1:8422 for real. Anything already listening on that port
+            # -- including a quern-media left over from a manual test -- makes
+            # the connect succeed, and the test then fails inside _send with
+            # "Preview process not running", which has nothing to do with the
+            # behaviour under test.
+            raise ConnectionRefusedError("nothing is listening (stubbed)")
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
         monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", _refuse)
         return mgr
 
     def test_a_stream_that_dies_before_serving_reports_why(self, monkeypatch):
@@ -368,7 +378,12 @@ class TestSimulatorStreams:
         assert process.terminated, "closing the window left the stream running"
 
     def test_a_second_stream_does_not_reuse_the_first_port(self, monkeypatch):
-        """Both would bind the same port and the second would fail to serve."""
+        """Both would bind the same port and the second would fail to serve.
+
+        Driven through add_simulator rather than by calling the port helper
+        directly: the thing that can regress is add_simulator forgetting to
+        pass the exclude set, which a direct call cannot catch.
+        """
         from server.device import preview
 
         mgr = PreviewManager()
@@ -376,11 +391,43 @@ class TestSimulatorStreams:
             process=_LiveStreamProcess(), port=preview.STREAM_BASE_PORT,
             log=deque(maxlen=20),
         )
-        chosen = preview.find_available_port(
-            preview.STREAM_BASE_PORT,
-            exclude={s.port for s in mgr._streams.values()},
-        )
-        assert chosen != preview.STREAM_BASE_PORT
+
+        launched: dict = {}
+
+        async def _no_process():
+            return None
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        async def _spawn(*args, **_kwargs):
+            launched["port"] = int(args[-1])
+            return _LiveStreamProcess()
+
+        async def _connect(*_args, **_kwargs):
+            class _Writer:
+                def close(self):
+                    pass
+
+                async def wait_closed(self):
+                    pass
+
+            return None, _Writer()
+
+        async def _send(cmd):
+            mgr._dispatch_event(
+                {"event": "added", "key": cmd["key"], "id": cmd["id"]}
+            )
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", _connect)
+        monkeypatch.setattr(mgr, "_send", _send)
+
+        record = asyncio.run(mgr.add_simulator("SIM2"))
+        assert launched["port"] != preview.STREAM_BASE_PORT
+        assert record.stream_port == launched["port"]
 
 
 class TestIdentityResolution:

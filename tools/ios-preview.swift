@@ -684,6 +684,11 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
     private let onFrame: (CGImage) -> Void
     private let onError: (String) -> Void
 
+    /// Guards `session`, `task` and `stopped`, which `stop()` writes from the
+    /// main queue while the delegate callbacks read them on URLSession's.
+    /// `buffer` and `announced` are not guarded: both are touched only from
+    /// the delegate queue, which is serial.
+    private let lock = NSLock()
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var buffer = Data()
@@ -709,23 +714,46 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
 
     func start() {
         let config = URLSessionConfiguration.default
-        // An MJPEG response never completes, so the default resource timeout
-        // would cut a perfectly healthy stream off mid-watch.
-        config.timeoutIntervalForRequest = 15
+        // Both timeouts are effectively off, and they have to be.
+        // `timeoutIntervalForRequest` is an inactivity timeout that keeps
+        // running while a response is open, and the server sends only when a
+        // frame arrives -- there is no keepalive. An idle simulator composites
+        // nothing, so at 15s a preview of a still screen died exactly 15
+        // seconds after its first frame. Measured: "The request timed out."
+        // followed by window_closed at 21.6s against a first frame at 6.6s.
+        //
+        // Nothing is lost by waiting forever. A stream that really has gone
+        // closes the connection, and that arrives as didCompleteWithError.
+        config.timeoutIntervalForRequest = .greatestFiniteMagnitude
         config.timeoutIntervalForResource = .greatestFiniteMagnitude
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        self.session = session
         let task = session.dataTask(with: url)
+        lock.lock()
+        self.session = session
         self.task = task
+        lock.unlock()
         task.resume()
     }
 
+    /// Safe from any queue. `stop()` is called on the main queue, while the
+    /// delegate callbacks below run on URLSession's own queue.
     func stop() {
+        lock.lock()
         stopped = true
+        let task = self.task
+        let session = self.session
+        self.session = nil
+        self.task = nil
+        lock.unlock()
+
         task?.cancel()
         session?.invalidateAndCancel()
-        session = nil
-        task = nil
+    }
+
+    private var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
     }
 
     func urlSession(
@@ -764,7 +792,7 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
     func urlSession(
         _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
     ) {
-        guard !stopped else { return }
+        guard !isStopped else { return }
         onError(error?.localizedDescription ?? "stream ended")
     }
 

@@ -122,6 +122,16 @@ public enum OptionsParser {
             throw OptionsError.badValue(flag: "--fps", value: values["--fps"] ?? "\(fps)")
         }
 
+        // Documented as 0...1, and passed straight to VTSessionSetProperty,
+        // whose result nothing checks -- so an out-of-range value is accepted
+        // in silence and simply does not do what was asked.
+        let quality: Double = try number("--quality", default: 0.6)
+        guard quality.isFinite, (0...1).contains(quality) else {
+            throw OptionsError.badValue(
+                flag: "--quality", value: values["--quality"] ?? "\(quality)"
+            )
+        }
+
         let record = values["--record"]
         let options = Options(
             source: source,
@@ -133,7 +143,7 @@ public enum OptionsParser {
             recordPath: record,
             fps: fps,
             maxDimension: try number("--max-dim", default: 900),
-            quality: try number("--quality", default: 0.6),
+            quality: quality,
             bitrate: try number("--bitrate", default: 2_000_000)
         )
 

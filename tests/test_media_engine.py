@@ -225,11 +225,11 @@ class TestFailures:
 
 
 class TestAsyncBuildWrapper:
-    def test_the_build_does_not_run_on_the_event_loop(self, monkeypatch) -> None:
+    @pytest.mark.asyncio
+    async def test_the_build_does_not_run_on_the_event_loop(self, monkeypatch) -> None:
         """A cold build takes up to BUILD_TIMEOUT. Called straight from a
         request path that is three minutes of stalled server, so the wrapper
         has to hand the blocking half to a thread."""
-        import asyncio
         import threading
 
         from server.device import media_engine
@@ -243,10 +243,7 @@ class TestAsyncBuildWrapper:
 
         monkeypatch.setattr(media_engine, "build_media_engine_sync", fake_sync)
 
-        async def run():
-            seen["loop_thread"] = threading.current_thread().name
-            return await media_engine.build_media_engine(force=True)
-
-        assert asyncio.run(run()) == Path("/tmp/quern-media")
+        seen["loop_thread"] = threading.current_thread().name
+        assert await media_engine.build_media_engine(force=True) == Path("/tmp/quern-media")
         assert seen["force"] is True
         assert seen["thread"] != seen["loop_thread"], "the build blocked the loop"

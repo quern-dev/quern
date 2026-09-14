@@ -168,9 +168,14 @@ public final class H264Encoder {
         // A periodic IDR bounds join latency without an explicit request.
         // Note this counts *frames*, not seconds: on an event-driven source
         // the interval in wall time stretches whenever the screen is idle.
-        // Clamped, not trusted. This is a public initialiser and the value
-        // reaches it from argv: `Int(1e308 * 2)` traps rather than failing.
-        let interval = max(1, min(Int((expectedFPS * 2).rounded()), 600))
+        // Normalized before conversion, not after. `min` cannot rescue
+        // `Int(infinity)` -- the conversion traps first. The parser rejects
+        // these from argv, but this initialiser is public and a library
+        // caller can pass anything.
+        let doubled = (expectedFPS * 2).rounded()
+        // Clamped as a Double, then converted: the clamp has to happen on
+        // the side of the conversion that cannot trap.
+        let interval = doubled.isFinite ? Int(min(max(doubled, 1), 600)) : 30
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
                              value: NSNumber(value: interval))
         VTCompressionSessionPrepareToEncodeFrames(created)

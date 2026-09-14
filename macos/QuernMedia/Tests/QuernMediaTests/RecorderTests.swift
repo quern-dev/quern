@@ -142,7 +142,13 @@ func finishTimeoutIsNotSilentSuccess() throws {
     let out = try #require(encoder.encode(captured(surface, at: 0)))
     #expect(recorder.append(out.frame))
 
-    #expect(recorder.finish(timeout: 0) == nil)
+    // Completion is withheld rather than raced. A zero-second deadline
+    // against the real writer is decided by whichever wins, and on a fast
+    // machine that is the writer -- so the test passed without exercising
+    // the timeout at all.
+    recorder.finishWritingOverride = { _ in }
+
+    #expect(recorder.finish(timeout: 0.2) == nil)
     guard case .finishTimedOut = try #require(recorder.failure) else {
         Issue.record("expected finishTimedOut, got \(String(describing: recorder.failure))")
         return
