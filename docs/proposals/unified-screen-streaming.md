@@ -480,53 +480,48 @@ time varies with activity — this recording got keyframes at 0.0s, 5.6s and
 13.2s. Anchoring keyframes to test actions rather than a frame count is the
 fix, and it is the same `ForceKeyFrame` call already wired up.
 
-### Clock skew: unsolved for physical devices, a non-issue for simulators
+### Clock skew: solved, by holding the connection open
 
-The video-anchored timeline idea rests on being able to place device logs
-against video frames. Measured before building anything on it.
+The video-anchored timeline rests on placing device logs against video
+frames, so this was measured before building on it.
 
-The device exposes its own clock (`TimeIntervalSince1970` from lockdown),
-so the offset can be bounded NTP-style by bracketing each read between two
-host timestamps. Six samples:
+The device exposes its own clock (`TimeIntervalSince1970` via lockdown), so
+the offset can be bounded NTP-style by bracketing each read between two
+host timestamps. **How you read it dominates the result:**
+
+| method | round trip | offset bound | uncertainty |
+|---|---|---|---|
+| `pymobiledevice3` CLI, one process per read | ~490 ms | [-88.9, +389.6] ms | 478 ms |
+| persistent lockdown connection, library API | **2.2 ms** | **[-7.0, -6.1] ms** | **0.9 ms** |
+
+Spawning a process per sample makes the bound useless — 478 ms is wider
+than a UI transition, so it could not order a log line against a visual
+change. Holding one connection and reading repeatedly bounds the same
+offset to **under a millisecond**, a ~530x improvement. The stable -90 ms
+lower bound the CLI produced was pure method artifact; the real offset is
+about -6.5 ms.
+
+Stability over 45 s, sampled every 3 s:
 
 ```
-offset in [ -94.6, +513.9] ms   (round trip 609 ms)
-offset in [ -93.3, +394.7] ms   (round trip 488 ms)
-offset in [ -93.0, +395.0] ms   (round trip 488 ms)
-offset in [ -93.2, +400.0] ms   (round trip 493 ms)
-offset in [ -88.9, +389.6] ms   (round trip 478 ms)
-offset in [ -93.1, +392.6] ms   (round trip 486 ms)
-
-tightest bound: [-88.9, +389.6] ms  -> 478 ms of uncertainty
+offset range -6.82 .. -5.26 ms  (spread 1.57 ms)
+drift        -0.69 ms over 42s  (-0.99 ms/min)
 ```
 
-**478 ms is not good enough.** A UI transition is ~300 ms, so at this
-precision you cannot say whether a log line landed before or after a visual
-change — and a timeline that gets causality backwards is worse than no
-timeline.
+Drift of ~1 ms/min means a ten-minute run accumulates ~10 ms, so sampling
+the offset every 30 s and interpolating between samples keeps alignment
+inside a couple of milliseconds for any realistic test length. The noisiest
+two samples were also the two slowest round trips, which is what a midpoint
+estimator should do.
 
-The window is dominated by method, not by the clock: each sample spawns a
-`pymobiledevice3` process that does a full lockdown connect, hence ~490 ms
-round trips. The lower bound sits at a suspiciously stable ~-90 ms across
-every sample, which hints the real offset is near there, but that is a
-hunch and not a measurement.
+**Recipe for the timeline:** hold a lockdown connection for the life of a
+recording, sample the offset every ~30 s, and store the (host time, offset)
+series alongside the video. Any device timestamp then converts to host time
+by interpolation, and the residual error is small enough to ignore next to
+frame duration at 30-60 fps.
 
-Options, none tried:
-
-1. Hold a persistent lockdown connection and read the clock repeatedly.
-   Cheap reads shrink the round trip and therefore the bound directly.
-2. Stop trying to measure absolute offset. Align the streams instead on an
-   event observable in both — quern already knows the host time it issued
-   every tap, and those taps produce device-side log effects. That trades
-   clock error for actuation latency, which may be no better.
-3. Accept the uncertainty and *render* it, so a viewer shows log events with
-   an error bar rather than a false precise position.
-
-**Simulators are exempt.** A simulator is a host process and its logs carry
-host time, so video and logs already share one clock with no offset to
-measure. The timeline is trustworthy there today; only physical devices
-need this solved. Given most test runs are simulators, that is a reasonable
-place to start and a known gap to carry.
+**Simulators need none of this.** A simulator is a host process and its logs
+carry host time, so video and logs already share one clock.
 
 ### Still CPU, still worth moving
 
