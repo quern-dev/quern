@@ -617,6 +617,12 @@ class ProxyAdapter(BaseSourceAdapter):
                 existing.last_at = at
                 if alert and not existing.alert:
                     existing.alert = alert
+                # Move it to the end. Updating in place left an actively
+                # retrying device leftmost, so 50 unique keys would evict the
+                # one that was seen most recently -- while its own `last_at`
+                # said so. Also what "newest last" means.
+                self._tls_rejections.remove(existing)
+                self._tls_rejections.append(existing)
                 return
 
         self._tls_rejections.append(TlsRejection(

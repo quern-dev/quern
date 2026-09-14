@@ -764,6 +764,27 @@ class TestTlsRejectionsAreKeptAsObservations:
         assert by_ip["192.168.1.50"].count == 200
         assert len(a._tls_rejections) == 2
 
+    def test_a_repeat_moves_to_the_end(self):
+        """Updating in place left an actively retrying device leftmost, so the
+        next 50 unique keys evicted the one seen most recently -- while its own
+        `last_at` said it had just been seen."""
+        a = self._adapter()
+        a._handle_tls_rejected(self._event(sni="retrying", client_ip="10.0.0.1"))
+        a._handle_tls_rejected(self._event(sni="quiet", client_ip="10.0.0.2"))
+        a._handle_tls_rejected(self._event(sni="retrying", client_ip="10.0.0.1"))
+
+        assert [e.sni for e in a._tls_rejections] == ["quiet", "retrying"], (
+            "the most recently seen rejection was not newest-last"
+        )
+
+        # And it survives pressure, which is the consequence that matters.
+        for i in range(60):
+            a._handle_tls_rejected(self._event(sni=f"filler{i}", client_ip="9.9.9.9"))
+            a._handle_tls_rejected(self._event(sni="retrying", client_ip="10.0.0.1"))
+        assert any(e.sni == "retrying" for e in a._tls_rejections), (
+            "a device still actively refusing was evicted"
+        )
+
     def test_repeats_update_the_last_seen_time(self):
         a = self._adapter()
         a._handle_tls_rejected(self._event(timestamp=1789342844.0))
@@ -840,6 +861,12 @@ class TestRejectionsDoNotOutliveTheirSubprocess:
         monkeypatch.setattr(
             "asyncio.create_subprocess_exec", fake_exec,
         )
+        # `start()` runs these before it reaches the mocked subprocess, and
+        # they shell out for real: `_kill_stale_mitmdump` finds whatever holds
+        # the proxy port and terminates it. Unmocked, this test killed the
+        # developer's own running proxy on 9101 -- which it did, once.
+        monkeypatch.setattr(a, "_find_mitmdump", lambda: "/fake/mitmdump")
+        monkeypatch.setattr(a, "_kill_stale_mitmdump", MagicMock())
         monkeypatch.setattr(a, "_read_loop", AsyncMock())
         monkeypatch.setattr(a, "_drain_stderr", AsyncMock())
         await a.start()
