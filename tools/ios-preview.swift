@@ -157,6 +157,8 @@ struct StreamTuning {
     /// but costs the bare-<img> client -- the stream needs a decoder.
     let useH264: Bool
     let bitrate: Int
+    /// Record to this path. Implies H.264 — an mp4 wants a video codec.
+    let recordPath: String?
 }
 
 struct SimOptions {
@@ -265,8 +267,9 @@ func parseArgs() -> FilterMode {
             maxDimension: value("--max-dim").flatMap(Int.init) ?? 900,
             quality: value("--quality").flatMap(Double.init) ?? 0.6,
             useImageIO: args.contains("--imageio"),
-            useH264: args.contains("--h264"),
-            bitrate: value("--bitrate").flatMap(Int.init) ?? 2_000_000
+            useH264: args.contains("--h264") || value("--record") != nil,
+            bitrate: value("--bitrate").flatMap(Int.init) ?? 2_000_000,
+            recordPath: value("--record")
         )
         if let udid = value("--sim-udid") {
             return .simUDID(SimOptions(
@@ -1254,6 +1257,26 @@ func simResolveDevice(udid: String) -> NSObject? {
     return nil
 }
 
+/// One frame, and when it happened.
+///
+/// The timestamp is the reason this is a struct rather than a bare
+/// IOSurface. Streaming never needed it — frames go out as fast as they
+/// arrive and nobody asks when. Recording does, and the two sources differ
+/// in what they can honestly report:
+///
+/// - A capture sample buffer carries a real presentation timestamp from
+///   AVFoundation, already on the host clock.
+/// - The simulator framebuffer callback says only "a frame happened", so
+///   the best available answer is the host clock read on arrival. That is
+///   a slightly later and slightly noisier time than the real composite,
+///   and anything correlating video against logs should know it.
+struct CapturedFrame {
+    let surface: IOSurface
+    /// Host clock (`CMClockGetHostTimeClock`), so every source and the
+    /// recorder share one timebase.
+    let time: CMTime
+}
+
 enum SimFramebufferError: Error, CustomStringConvertible {
     case deviceNotFound(String)
     case notBooted(String)
@@ -1282,15 +1305,15 @@ enum SimFramebufferError: Error, CustomStringConvertible {
 final class SimFramebuffer {
     private let udid: String
     private let queue = DispatchQueue(label: "quern.sim-preview.frames", qos: .userInteractive)
-    private let onSurface: (IOSurface) -> Void
+    private let onFrame: (CapturedFrame) -> Void
 
     private var ioClient: NSObject?
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
 
-    init(udid: String, onSurface: @escaping (IOSurface) -> Void) {
+    init(udid: String, onFrame: @escaping (CapturedFrame) -> Void) {
         self.udid = udid
-        self.onSurface = onSurface
+        self.onFrame = onFrame
     }
 
     func start() throws {
@@ -1397,7 +1420,11 @@ final class SimFramebuffer {
                 bestArea = area
             }
         }
-        if let best { onSurface(best) }
+        // No timestamp is available from the framebuffer callback, so this
+        // is arrival time, not composite time.
+        if let best {
+            onFrame(CapturedFrame(surface: best, time: CMClockGetTime(CMClockGetHostTimeClock())))
+        }
     }
 }
 
@@ -1660,6 +1687,7 @@ final class MJPEGServer {
     /// late joiner decodes nothing until the next IDR -- rather than make it
     /// wait for the periodic one, mint a keyframe on demand.
     private var pendingKeyframe = false
+    private var recorder: Recorder?
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "quern.sim-preview.http")
@@ -1682,7 +1710,8 @@ final class MJPEGServer {
     private var lastReport = Date()
 
     init(port: UInt16, bindAll: Bool, fps: Double, maxDimension: Int, quality: Double,
-         useImageIO: Bool, useH264: Bool = false, bitrate: Int = 2_000_000) {
+         useImageIO: Bool, useH264: Bool = false, bitrate: Int = 2_000_000,
+         recorder: Recorder? = nil) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8422
         self.bindAll = bindAll
         self.fps = fps
@@ -1694,6 +1723,11 @@ final class MJPEGServer {
         self.h264 = HardwareH264Encoder(
             maxDimension: maxDimension, bitrate: bitrate, expectedFPS: fps
         )
+        self.recorder = recorder
+        // The writer must open on a keyframe. The first frame of a fresh
+        // compression session is one anyway, but ask explicitly rather than
+        // rely on that.
+        self.pendingKeyframe = recorder != nil
     }
 
     func start() throws {
@@ -1840,10 +1874,13 @@ final class MJPEGServer {
     /// the pool handed out next, or a tear between two of them. Encoding here
     /// also gives the capture path real backpressure, since
     /// alwaysDiscardsLateVideoFrames drops while we are busy.
-    func publish(_ surface: IOSurface) {
+    func publish(_ frame: CapturedFrame) {
+        let surface = frame.surface
         let now = Date()
         lock.lock()
-        let watching = clients.values.contains { $0.streaming }
+        // A recording is a consumer too: keep encoding when nobody is
+        // watching, or the file stops whenever the last viewer leaves.
+        let watching = clients.values.contains { $0.streaming } || recorder != nil
         // Encode at most fps times a second. Sources happily emit 60 fps
         // during animation; JPEG at that rate is a lot of CPU for frames
         // nobody can tell apart.
@@ -1866,7 +1903,8 @@ final class MJPEGServer {
             let wantKey = pendingKeyframe
             pendingKeyframe = false
             lock.unlock()
-            guard let out = h264.encode(surface, forceKeyframe: wantKey) else { return }
+            guard let out = h264.encode(frame, forceKeyframe: wantKey) else { return }
+            recorder?.append(out.sample, isKeyframe: out.isKeyframe)
             // Elementary stream: the NAL start codes are the framing, so
             // there is no per-frame envelope to add.
             queue.async { [weak self] in self?.fanOut(out.annexB) }
@@ -1930,6 +1968,47 @@ final class MJPEGServer {
     }
 }
 
+
+/// Builds the recorder and the server together, because the server owns the
+/// encoder and the recorder needs its output.
+///
+/// The server object is created when *either* serving or recording is
+/// wanted, but its listener only starts when serving. (The class is still
+/// called MJPEGServer and now also does H.264 and recording — that name is
+/// a leftover, and worth fixing when this gets extracted.)
+func makeRecordingAndServer(_ tuning: StreamTuning, label: String)
+    -> (Recorder?, MJPEGServer?, [DispatchSourceSignal])? {
+    var recorder: Recorder?
+    var signals: [DispatchSourceSignal] = []
+    if let path = tuning.recordPath {
+        do {
+            let r = try Recorder(url: URL(fileURLWithPath: path))
+            recorder = r
+            signals = installRecordingSignalHandlers(r)
+            simLogErr("[record] \(path) (H.264 \(tuning.bitrate / 1000) kbps, "
+                + "max \(tuning.fps) fps)")
+        } catch {
+            simLogErr("[record] could not open \(path): \(error)")
+            return nil
+        }
+    }
+    guard tuning.serve || recorder != nil else { return (nil, nil, signals) }
+
+    let server = MJPEGServer(
+        port: tuning.port, bindAll: tuning.bindAll, fps: tuning.fps,
+        maxDimension: tuning.maxDimension, quality: tuning.quality,
+        useImageIO: tuning.useImageIO, useH264: tuning.useH264,
+        bitrate: tuning.bitrate, recorder: recorder
+    )
+    if tuning.serve {
+        do { try server.start() } catch {
+            simLogErr("[preview] could not bind port \(tuning.port): \(error)")
+            return nil
+        }
+    }
+    return (recorder, server, signals)
+}
+
 // MARK: - Simulator mode app delegate
 
 class SimAppDelegate: NSObject, NSApplicationDelegate {
@@ -1937,6 +2016,8 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
     private var preview: SimPreviewWindow?
     private var server: MJPEGServer?
     private var framebuffer: SimFramebuffer?
+    private var recorder: Recorder?
+    private var signalSources: [DispatchSourceSignal] = []
 
     init(opts: SimOptions) {
         self.opts = opts
@@ -1948,22 +2029,14 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
         // Dock tile for a headless streamer is just noise.
         if !opts.tuning.window { NSApp.setActivationPolicy(.accessory) }
 
-        if opts.tuning.serve {
-            let server = MJPEGServer(
-                port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
-                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality,
-                useImageIO: opts.tuning.useImageIO, useH264: opts.tuning.useH264,
-                bitrate: opts.tuning.bitrate
-            )
-            do {
-                try server.start()
-                self.server = server
-            } catch {
-                simLogErr("[sim-preview] could not bind port \(opts.tuning.port): \(error)")
-                NSApplication.shared.terminate(nil)
-                return
-            }
+        guard let (recorder, server, signals) =
+            makeRecordingAndServer(opts.tuning, label: opts.udid) else {
+            NSApplication.shared.terminate(nil)
+            return
         }
+        self.recorder = recorder
+        self.server = server
+        self.signalSources = signals
 
         if opts.tuning.window {
             let preview = SimPreviewWindow(udid: opts.udid, viaCGImage: opts.viaCGImage)
@@ -1974,10 +2047,10 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
         // One source, two sinks. Both are optional and neither owns the
         // framebuffer, which is the shape the real frame-source protocol
         // will need anyway.
-        let framebuffer = SimFramebuffer(udid: opts.udid) { [weak self] surface in
+        let framebuffer = SimFramebuffer(udid: opts.udid) { [weak self] frame in
             guard let self else { return }
-            self.preview?.present(surface)
-            self.server?.publish(surface)
+            self.preview?.present(frame.surface)
+            self.server?.publish(frame)
         }
         do {
             try framebuffer.start()
@@ -1992,6 +2065,7 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         framebuffer?.stop()
         server?.stop()
+        recorder?.finish()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
@@ -2157,6 +2231,9 @@ final class HardwareJPEGEncoder {
 /// 3. Bitrate is a target we set, not an outcome of quality-per-frame.
 final class HardwareH264Encoder {
     struct Encoded {
+        /// The encoder's own sample buffer, timing intact. Recording takes
+        /// this; the Annex-B rendering is only for the wire.
+        let sample: CMSampleBuffer
         let annexB: Data
         let isKeyframe: Bool
     }
@@ -2195,7 +2272,8 @@ final class HardwareH264Encoder {
 
     /// Synchronous, for the same reason the JPEG encoder is: the IOSurface is
     /// wrapped, not copied, and both sources rewrite theirs in place.
-    func encode(_ surface: IOSurface, forceKeyframe: Bool) -> Encoded? {
+    func encode(_ frame: CapturedFrame, forceKeyframe: Bool) -> Encoded? {
+        let surface = frame.surface
         let sw = IOSurfaceGetWidth(surface), sh = IOSurfaceGetHeight(surface)
         guard sw > 0, sh > 0 else { return nil }
         let (tw, th) = target(sw, sh)
@@ -2214,8 +2292,12 @@ final class HardwareH264Encoder {
         }
 
         var out: Encoded?
-        let pts = CMTime(value: frameIndex, timescale: CMTimeScale(max(expectedFPS, 1)))
-        frameIndex += 1
+        // Real capture time, not frame_index/expectedFPS. The synthetic
+        // version was harmless for streaming and wrong for recording: a
+        // source running at 49fps against a 60fps nominal plays 22% fast,
+        // and an idle gap collapses to nothing instead of showing as a
+        // pause. Anything correlating video with logs needs the real clock.
+        let pts = frame.time
 
         let status = VTCompressionSessionEncodeFrame(
             session, imageBuffer: pixelBuffer, presentationTimeStamp: pts,
@@ -2276,7 +2358,7 @@ final class HardwareH264Encoder {
             outData.append(avcc.subdata(in: i..<(i + n)))
             i += n
         }
-        return Encoded(annexB: outData, isKeyframe: keyframe)
+        return Encoded(sample: sample, annexB: outData, isKeyframe: keyframe)
     }
 
     private func isKeyframe(_ sample: CMSampleBuffer) -> Bool {
@@ -2375,6 +2457,152 @@ final class HardwareH264Encoder {
     }
 }
 
+// MARK: - Recording
+
+/// Writes encoded frames to an .mp4 via `AVAssetWriter` passthrough.
+///
+/// Passthrough, not re-encode: the compression session already produced
+/// H.264 sample buffers with correct timing, so the writer only has to
+/// container them. That also means the Annex-B conversion is bypassed
+/// entirely — Annex-B carries no timestamps, so a recording built from it
+/// would have to invent them.
+final class Recorder {
+    private let writer: AVAssetWriter
+    /// Created on the first sample, not at init.
+    ///
+    /// A passthrough input (nil outputSettings) has no way to describe the
+    /// media it will carry, so `canAdd` refuses it unless given a
+    /// `sourceFormatHint`. That hint is the encoder's format description,
+    /// which does not exist until the first frame comes out.
+    private var input: AVAssetWriterInput?
+    private let lock = NSLock()
+
+    private var started = false
+    private var finished = false
+    private var firstPTS: CMTime = .invalid
+    private var lastPTS: CMTime = .invalid
+    private(set) var framesWritten = 0
+    private(set) var framesDropped = 0
+
+    init(url: URL) throws {
+        try? FileManager.default.removeItem(at: url)
+        writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+    }
+
+    /// Caller holds `lock`.
+    private func startIfNeeded(with sample: CMSampleBuffer) -> Bool {
+        if let input { return input.isReadyForMoreMediaData || true }
+        guard let hint = CMSampleBufferGetFormatDescription(sample) else {
+            simLogErr("[record] first sample has no format description")
+            return false
+        }
+        let created = AVAssetWriterInput(
+            mediaType: .video, outputSettings: nil, sourceFormatHint: hint
+        )
+        created.expectsMediaDataInRealTime = true
+        guard writer.canAdd(created) else {
+            simLogErr("[record] AVAssetWriter rejected the passthrough input")
+            return false
+        }
+        writer.add(created)
+        input = created
+        guard writer.startWriting() else {
+            simLogErr("[record] startWriting failed: "
+                + (writer.error?.localizedDescription ?? "?"))
+            return false
+        }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        // Session starts at the first frame's real timestamp, so the movie's
+        // timeline is the host clock rather than zero-based.
+        writer.startSession(atSourceTime: pts)
+        firstPTS = pts
+        return true
+    }
+
+    func append(_ sample: CMSampleBuffer, isKeyframe: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+
+        if !started {
+            // A file that opens on a non-keyframe is undecodable until the
+            // next IDR, which for a short recording can mean the whole thing.
+            guard isKeyframe else {
+                framesDropped += 1
+                return
+            }
+            guard startIfNeeded(with: sample) else {
+                finished = true
+                return
+            }
+            started = true
+        }
+
+        guard let input, input.isReadyForMoreMediaData else {
+            framesDropped += 1
+            return
+        }
+        if input.append(sample) {
+            framesWritten += 1
+            lastPTS = CMSampleBufferGetPresentationTimeStamp(sample)
+        } else {
+            framesDropped += 1
+            simLogErr("[record] append failed: \(writer.error?.localizedDescription ?? "?")")
+        }
+    }
+
+    /// Blocking. An mp4 whose moov atom was never written is not a shorter
+    /// recording, it is an unopenable file, so this has to complete before
+    /// the process exits.
+    func finish() {
+        lock.lock()
+        if finished || !started {
+            finished = true
+            lock.unlock()
+            simLogErr("[record] nothing recorded")
+            return
+        }
+        finished = true
+        let written = framesWritten, dropped = framesDropped
+        let duration = CMTimeGetSeconds(CMTimeSubtract(lastPTS, firstPTS))
+        lock.unlock()
+
+        input?.markAsFinished()
+        let done = DispatchSemaphore(value: 0)
+        writer.finishWriting { done.signal() }
+        _ = done.wait(timeout: .now() + 10)
+
+        let fps = duration > 0 ? Double(written) / duration : 0
+        simLogErr(String(
+            format: "[record] wrote %d frames over %.2fs wall (%.1f fps), %d dropped -> %@",
+            written, duration, fps, dropped, writer.outputURL.path))
+        if writer.status == .failed {
+            simLogErr("[record] FAILED: \(writer.error?.localizedDescription ?? "?")")
+        }
+    }
+}
+
+/// Finishes a recording on SIGINT/SIGTERM.
+///
+/// Without this, every recording ended with ^C or `kill` is a file with no
+/// moov atom — unopenable, not merely truncated. The default signal action
+/// has to be ignored first, or the process dies before the handler runs.
+func installRecordingSignalHandlers(_ recorder: Recorder) -> [DispatchSourceSignal] {
+    var sources: [DispatchSourceSignal] = []
+    for sig in [SIGINT, SIGTERM] {
+        signal(sig, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        source.setEventHandler {
+            simLogErr("[record] caught signal, finalising")
+            recorder.finish()
+            exit(0)
+        }
+        source.resume()
+        sources.append(source)
+    }
+    return sources
+}
+
 // MARK: - Physical device frame source
 
 func fourCC(_ value: OSType) -> String {
@@ -2419,13 +2647,13 @@ final class CaptureFrameSource: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private let device: AVCaptureDevice
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "quern.capture.frames", qos: .userInteractive)
-    private let onSurface: (IOSurface) -> Void
+    private let onFrame: (CapturedFrame) -> Void
     private var describedFormat = false
     private var warnedNoSurface = false
 
-    init(device: AVCaptureDevice, onSurface: @escaping (IOSurface) -> Void) {
+    init(device: AVCaptureDevice, onFrame: @escaping (CapturedFrame) -> Void) {
         self.device = device
-        self.onSurface = onSurface
+        self.onFrame = onFrame
         super.init()
     }
 
@@ -2492,7 +2720,12 @@ final class CaptureFrameSource: NSObject, AVCaptureVideoDataOutputSampleBufferDe
             }
             return
         }
-        onSurface(unsafeBitCast(ref, to: IOSurface.self))
+        // Real capture time from AVFoundation, already on the host clock —
+        // strictly better than stamping on arrival, so use it where it exists.
+        onFrame(CapturedFrame(
+            surface: unsafeBitCast(ref, to: IOSurface.self),
+            time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        ))
     }
 }
 
@@ -2544,6 +2777,8 @@ class DeviceStreamAppDelegate: NSObject, NSApplicationDelegate {
     private var source: CaptureFrameSource?
     private var server: MJPEGServer?
     private var previewWindow: CaptureStreamWindow?
+    private var recorder: Recorder?
+    private var signalSources: [DispatchSourceSignal] = []
 
     init(opts: DeviceStreamOptions) {
         self.opts = opts
@@ -2581,25 +2816,17 @@ class DeviceStreamAppDelegate: NSObject, NSApplicationDelegate {
         }
         simLogErr("[device-preview] using \(device.localizedName)")
 
-        if opts.tuning.serve {
-            let server = MJPEGServer(
-                port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
-                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality,
-                useImageIO: opts.tuning.useImageIO, useH264: opts.tuning.useH264,
-                bitrate: opts.tuning.bitrate
-            )
-            do {
-                try server.start()
-                self.server = server
-            } catch {
-                simLogErr("[device-preview] could not bind port \(opts.tuning.port): \(error)")
-                NSApplication.shared.terminate(nil)
-                return
-            }
+        guard let (recorder, server, signals) =
+            makeRecordingAndServer(opts.tuning, label: device.localizedName) else {
+            NSApplication.shared.terminate(nil)
+            return
         }
+        self.recorder = recorder
+        self.server = server
+        self.signalSources = signals
 
-        let source = CaptureFrameSource(device: device) { [weak self] surface in
-            self?.server?.publish(surface)
+        let source = CaptureFrameSource(device: device) { [weak self] frame in
+            self?.server?.publish(frame)
         }
         do {
             try source.start()
@@ -2623,6 +2850,7 @@ class DeviceStreamAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         source?.stop()
         server?.stop()
+        recorder?.finish()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {

@@ -421,6 +421,65 @@ Browser delivery needs fMP4 via MSE, or WebCodecs feeding a canvas. That is
 the remaining work, and the Android path needs exactly the same muxer, so
 it should be written once for both.
 
+### Recording, and what it forced
+
+`--record <path>` writes an .mp4 via `AVAssetWriter` passthrough. Implies
+H.264, works with or without `--serve`.
+
+Recording is what settled the frame-source signature. Streaming never
+needed a timestamp — frames go out as they arrive and nobody asks when. So
+the callback was `(IOSurface) -> Void`, and the encoder synthesised a PTS
+from a frame counter. That is wrong for a recording in two ways: a source
+running at 49 fps against a 60 fps nominal plays 22% fast, and an idle gap
+collapses to nothing instead of showing as a pause.
+
+The callback is now `(CapturedFrame) -> Void` carrying a host-clock time,
+and the two sources differ in what they can honestly report:
+
+- **Physical iOS** has a real presentation timestamp on the capture sample
+  buffer, already host-clock based. `CaptureFrameSource` was discarding it.
+- **Simulator** has none — the framebuffer callback says only "a frame
+  happened". Best available is the host clock read on arrival, which is
+  slightly later and noisier than the true composite. Anything correlating
+  video against logs should know that.
+
+That asymmetry is the thing worth carrying into any eventual protocol.
+
+Verified by recording a driven simulator run with a deliberate 6s idle in
+the middle, then reading the packet timestamps back:
+
+```
+138 frames, first 0.00s last 13.73s
+gaps > 0.5s: 2
+  5.57s gap starting at t=6.15s     <- the deliberate idle
+  3.56s gap starting at t=0.10s     <- startup before driving began
+median inter-frame gap while active: 33 ms (~30 fps)
+```
+
+Duration matches wall clock, the idle survives as real elapsed time, and
+active stretches sit at exactly the requested cap. Seeking to t=7s — inside
+the gap — decodes to the frozen screen, which is correct. 882 KB for 13.7s,
+so a ten-minute run is roughly 38 MB.
+
+Three implementation details that are easy to get wrong:
+
+- **The writer input must be created lazily.** A passthrough input (nil
+  `outputSettings`) cannot be added without a `sourceFormatHint`, and that
+  hint is the encoder's format description, which does not exist until the
+  first frame. Building it at init fails `canAdd` outright.
+- **Recording must start on a keyframe**, or the file is undecodable until
+  the next IDR — for a short recording, possibly forever.
+- **SIGINT/SIGTERM must be trapped.** An mp4 whose moov atom was never
+  written is not a truncated recording, it is an unopenable file. The
+  default signal action has to be ignored first or the process dies before
+  the handler runs.
+
+One caveat for the timeline work: `MaxKeyFrameInterval` counts **frames,
+not seconds**, so on an event-driven source the seek granularity in wall
+time varies with activity — this recording got keyframes at 0.0s, 5.6s and
+13.2s. Anchoring keyframes to test actions rather than a frame count is the
+fix, and it is the same `ForceKeyFrame` call already wired up.
+
 ### Still CPU, still worth moving
 
 - **Downscaling** is `CGContext.draw`, on the cores. Either hand it to
