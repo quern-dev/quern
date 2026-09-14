@@ -599,14 +599,34 @@ class TestVerificationDoesNotClobberTheRecord:
         assert after["installed_at"] == "2026-09-14T09:00:00+00:00"
 
     def test_other_devices_are_still_untouched(self, clean_cert_state):
+        """The merge is per device as well as per field.
+
+        An earlier version of this test wrote `aaa` first, so a merge that
+        took *any* device's record as its base still produced the right answer
+        for `aaa`. Now the device being updated is the second one written, and
+        the first carries a field it must not inherit.
+        """
         from server.proxy.cert_state import (
             read_cert_state_for_device,
             update_cert_state,
         )
 
+        update_cert_state("bbb", {
+            "name": "B", "cert_installed": True,
+            "installed_at": "2020-01-01T00:00:00+00:00",
+            "wifi_proxy_configs": {"B-only": {
+                "proxy_host": "10.0.0.1", "proxy_port": 9101,
+                "client_ip": "10.0.0.2", "set_at": "2020-01-01T00:00:00+00:00",
+            }},
+        })
         update_cert_state("aaa", {"name": "A", "cert_installed": True})
-        update_cert_state("bbb", {"name": "B", "cert_installed": True})
         update_cert_state("aaa", {"cert_installed": False})
 
-        assert read_cert_state_for_device("bbb")["cert_installed"] is True
-        assert read_cert_state_for_device("aaa")["cert_installed"] is False
+        a = read_cert_state_for_device("aaa")
+        assert a["cert_installed"] is False
+        assert a.get("installed_at") is None, "aaa inherited bbb's installed_at"
+        assert not a.get("wifi_proxy_configs"), "aaa inherited bbb's proxy config"
+
+        b = read_cert_state_for_device("bbb")
+        assert b["cert_installed"] is True, "updating aaa changed bbb"
+        assert list(b["wifi_proxy_configs"]) == ["B-only"]
