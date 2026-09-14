@@ -64,11 +64,14 @@ it as `Network` while a second iPhone was the only device on the USB bus.
 
 ```
 WDA /status  [fd42:f516:7d1d::1]:8100  -> 200, WebDriverAgent 11.4.0
+window/size                            -> 393x852 pt
+dragfromtoforduration x3               -> 200, screen content changed
 WDA MJPEG    [fd42:f516:7d1d::1]:9100  -> 47 frames / ~5s, 1178x2556, ~9.4 fps
 ```
 
-Both control and video, with no cable. CoreMediaIO cannot do either for
-this device.
+Session, **input injection** and video, all with no cable — the swipes were
+confirmed visually on the device, not just by status code. CoreMediaIO can
+do none of it for a device in this state.
 
 **The tunnel came from `devicectl`, not `tunneld`.** This is the part quern
 is missing. tunneld held no tunnel for the device at any point; the address
