@@ -12,6 +12,7 @@
 //   ios-preview --sim-udid <UDID>  # preview a booted simulator (headless)
 //   ios-preview --sim-udid <UDID> --serve 8422 [--bind-all] [--no-window]
 //   ios-preview --device "iPhone 11" --serve 8424 --no-window
+//                            # --imageio forces the CPU encoder
 //                            # ... or stream a USB-connected device
 //                            # ... and stream it as MJPEG over HTTP
 //
@@ -24,6 +25,7 @@ import Foundation
 import IOSurface
 import Network
 import ObjectiveC
+import VideoToolbox
 
 // MARK: - Enable iOS screen capture device discovery
 
@@ -154,6 +156,8 @@ struct StreamTuning {
     let fps: Double
     let maxDimension: Int
     let quality: Double
+    /// Force the CPU encoder. Diagnostic escape hatch and A/B lever.
+    let useImageIO: Bool
 }
 
 struct SimOptions {
@@ -197,7 +201,8 @@ func parseArgs() -> FilterMode {
             bindAll: args.contains("--bind-all"),
             fps: value("--fps").flatMap(Double.init) ?? 15,
             maxDimension: value("--max-dim").flatMap(Int.init) ?? 900,
-            quality: value("--quality").flatMap(Double.init) ?? 0.6
+            quality: value("--quality").flatMap(Double.init) ?? 0.6,
+            useImageIO: args.contains("--imageio")
         )
         if let udid = value("--sim-udid") {
             return .simUDID(SimOptions(
@@ -1496,12 +1501,16 @@ final class SimPreviewWindow: NSObject, NSWindowDelegate {
 // proof that frames can leave the box. H.264 is the bandwidth optimisation
 // after the pipeline is known good, not before.
 
-/// Encodes an IOSurface to JPEG, optionally downscaled.
+/// Encodes an IOSurface to JPEG on the CPU, optionally downscaled.
 ///
-/// Downscaling happens here rather than via kCGImageDestinationImageMaxPixelSize,
-/// which CGImageDestinationAddImage does not reliably honour -- only the
-/// AddImageFromSource variant does. An explicit redraw is predictable.
-func encodeJPEG(from surface: IOSurface, maxDimension: Int, quality: Double) -> Data? {
+/// Kept as the fallback behind `--imageio`, and as the reference the
+/// hardware path is measured against. Every step here runs on the cores:
+/// the surface read, the CGContext resize and the JPEG encode.
+///
+/// Downscaling happens explicitly rather than via
+/// kCGImageDestinationImageMaxPixelSize, which CGImageDestinationAddImage
+/// does not reliably honour -- only the AddImageFromSource variant does.
+func encodeJPEGWithImageIO(from surface: IOSurface, maxDimension: Int, quality: Double) -> Data? {
     IOSurfaceLock(surface, .readOnly, nil)
     let width = IOSurfaceGetWidth(surface)
     let height = IOSurfaceGetHeight(surface)
@@ -1579,6 +1588,8 @@ final class MJPEGServer {
     private let fps: Double
     private let maxDimension: Int
     private let quality: Double
+    private let useImageIO: Bool
+    private let hardware: HardwareJPEGEncoder
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "quern.sim-preview.http")
@@ -1593,12 +1604,15 @@ final class MJPEGServer {
     private var bytesSent = 0
     private var lastReport = Date()
 
-    init(port: UInt16, bindAll: Bool, fps: Double, maxDimension: Int, quality: Double) {
+    init(port: UInt16, bindAll: Bool, fps: Double, maxDimension: Int, quality: Double,
+         useImageIO: Bool) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8422
         self.bindAll = bindAll
         self.fps = fps
         self.maxDimension = maxDimension
         self.quality = quality
+        self.useImageIO = useImageIO
+        self.hardware = HardwareJPEGEncoder(maxDimension: maxDimension, quality: quality)
     }
 
     func start() throws {
@@ -1627,8 +1641,9 @@ final class MJPEGServer {
         self.listener = listener
 
         let host = bindAll ? "0.0.0.0" : "127.0.0.1"
-        simLogErr("[sim-preview] MJPEG on http://\(host):\(port.rawValue)/  "
-            + "(fps \(Int(fps)), max \(maxDimension)px, q\(quality))")
+        simLogErr("[preview] MJPEG on http://\(host):\(port.rawValue)/  "
+            + "(fps \(Int(fps)), max \(maxDimension)px, q\(quality), "
+            + "encoder \(useImageIO ? "ImageIO/CPU" : "VideoToolbox"))")
         if bindAll {
             simLogErr("[sim-preview] WARNING: bound to all interfaces, no auth -- "
                 + "anyone on this network can watch the screen")
@@ -1636,6 +1651,7 @@ final class MJPEGServer {
     }
 
     func stop() {
+        hardware.invalidate()
         listener?.cancel()
         listener = nil
         for client in clients.values { client.connection.cancel() }
@@ -1749,9 +1765,14 @@ final class MJPEGServer {
         lock.unlock()
         guard watching, due else { return }
 
-        guard let jpeg = encodeJPEG(
-            from: surface, maxDimension: maxDimension, quality: quality
-        ) else { return }
+        // Fall back rather than drop the frame: a VideoToolbox session can
+        // fail to create, and a preview that silently goes black is worse
+        // than one that quietly costs more CPU.
+        let encoded = useImageIO
+            ? encodeJPEGWithImageIO(from: surface, maxDimension: maxDimension, quality: quality)
+            : (hardware.encode(surface)
+                ?? encodeJPEGWithImageIO(from: surface, maxDimension: maxDimension, quality: quality))
+        guard let jpeg = encoded else { return }
 
         var part = Data()
         part.append("--\(mjpegBoundary)\r\n".data(using: .utf8)!)
@@ -1820,7 +1841,8 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
         if opts.tuning.serve {
             let server = MJPEGServer(
                 port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
-                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality
+                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality,
+                useImageIO: opts.tuning.useImageIO
             )
             do {
                 try server.start()
@@ -1863,6 +1885,146 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
         opts.tuning.window
+    }
+}
+
+// MARK: - Hardware JPEG encoder
+
+/// JPEG via VideoToolbox instead of ImageIO.
+///
+/// Same bytes on the wire, same `<img>` on the client. The difference is
+/// where the work happens: measured on an M4, ImageIO's CGImageDestination
+/// path runs at 99-100% CPU-to-wall, while this one runs at ~23% and about
+/// a sixth of the CPU time. See tools/encode-bench.swift.
+///
+/// Note that `UsingHardwareAcceleratedVideoEncoder` reports **false** for
+/// the JPEG codec even though the work plainly leaves the cores. Do not
+/// gate anything on that property here.
+///
+/// Scaling is the session's job: VideoToolbox resamples a mismatched input
+/// buffer down to the dimensions the session was created with, which keeps
+/// the resize on the media engine rather than in a CGContext.
+final class HardwareJPEGEncoder {
+    private let quality: Double
+    private let maxDimension: Int
+
+    private var session: VTCompressionSession?
+    private var sessionWidth = 0
+    private var sessionHeight = 0
+    /// Frames arrive on whichever queue the source uses, and `encode` is
+    /// called synchronously from there.
+    private let lock = NSLock()
+
+    init(maxDimension: Int, quality: Double) {
+        self.maxDimension = maxDimension
+        self.quality = quality
+    }
+
+    deinit { invalidate() }
+
+    func invalidate() {
+        lock.lock()
+        if let session {
+            VTCompressionSessionInvalidate(session)
+            self.session = nil
+        }
+        lock.unlock()
+    }
+
+    /// Synchronous on purpose.
+    ///
+    /// `CompleteFrames` after every frame gives up media-engine pipelining,
+    /// which costs wall time but not CPU. It buys the same contract the
+    /// ImageIO path had: the surface is fully read before returning. That
+    /// matters because a capture buffer's IOSurface can be rewritten in
+    /// place once we let go of it, and the simulator's framebuffer surface
+    /// is a single persistent surface that is always rewritten in place --
+    /// retaining it would not stop that.
+    func encode(_ surface: IOSurface) -> Data? {
+        let sourceWidth = IOSurfaceGetWidth(surface)
+        let sourceHeight = IOSurfaceGetHeight(surface)
+        guard sourceWidth > 0, sourceHeight > 0 else { return nil }
+
+        let (targetWidth, targetHeight) = target(sourceWidth, sourceHeight)
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard ensureSession(width: targetWidth, height: targetHeight) else { return nil }
+        guard let session else { return nil }
+
+        // Returns +1 through an Unmanaged out-param, hence takeRetainedValue.
+        // This wraps the surface, it does not copy it -- which is exactly why
+        // the encode below has to finish before we return.
+        var unmanaged: Unmanaged<CVPixelBuffer>?
+        guard CVPixelBufferCreateWithIOSurface(nil, surface, nil, &unmanaged) == kCVReturnSuccess,
+              let pixelBuffer = unmanaged?.takeRetainedValue() else { return nil }
+
+        var encoded: Data?
+        let status = VTCompressionSessionEncodeFrame(
+            session, imageBuffer: pixelBuffer,
+            presentationTimeStamp: CMTime(value: 0, timescale: 30),
+            duration: .invalid, frameProperties: nil, infoFlagsOut: nil
+        ) { status, _, sample in
+            guard status == noErr, let sample,
+                  let block = CMSampleBufferGetDataBuffer(sample) else { return }
+            let length = CMBlockBufferGetDataLength(block)
+            guard length > 0 else { return }
+            var data = Data(count: length)
+            let copied = data.withUnsafeMutableBytes { raw -> Bool in
+                guard let base = raw.baseAddress else { return false }
+                return CMBlockBufferCopyDataBytes(
+                    block, atOffset: 0, dataLength: length, destination: base
+                ) == kCMBlockBufferNoErr
+            }
+            if copied { encoded = data }
+        }
+        guard status == noErr else {
+            simLogErr("[preview] VT encode failed: \(status)")
+            return nil
+        }
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        return encoded
+    }
+
+    private func target(_ width: Int, _ height: Int) -> (Int, Int) {
+        let longest = max(width, height)
+        guard maxDimension > 0, longest > maxDimension else { return (width, height) }
+        let factor = Double(maxDimension) / Double(longest)
+        // Even dimensions: odd sizes are legal for JPEG but a reliable
+        // source of off-by-one chroma handling across decoders.
+        func even(_ v: Double) -> Int { max(2, Int(v.rounded()) & ~1) }
+        return (even(Double(width) * factor), even(Double(height) * factor))
+    }
+
+    /// Caller holds `lock`.
+    private func ensureSession(width: Int, height: Int) -> Bool {
+        if session != nil, sessionWidth == width, sessionHeight == height { return true }
+        if let existing = session {
+            VTCompressionSessionInvalidate(existing)
+            session = nil
+        }
+        var created: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: nil, width: Int32(width), height: Int32(height),
+            codecType: kCMVideoCodecType_JPEG, encoderSpecification: nil,
+            imageBufferAttributes: nil, compressedDataAllocator: nil,
+            outputCallback: nil, refcon: nil, compressionSessionOut: &created
+        )
+        guard status == noErr, let created else {
+            simLogErr("[preview] VTCompressionSessionCreate(JPEG) failed: \(status)")
+            return false
+        }
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime,
+                             value: kCFBooleanTrue)
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_Quality,
+                             value: NSNumber(value: quality))
+        VTCompressionSessionPrepareToEncodeFrames(created)
+        session = created
+        sessionWidth = width
+        sessionHeight = height
+        simLogErr("[preview] VideoToolbox JPEG session \(width)x\(height) q\(quality)")
+        return true
     }
 }
 
@@ -2075,7 +2237,8 @@ class DeviceStreamAppDelegate: NSObject, NSApplicationDelegate {
         if opts.tuning.serve {
             let server = MJPEGServer(
                 port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
-                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality
+                maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality,
+                useImageIO: opts.tuning.useImageIO
             )
             do {
                 try server.start()

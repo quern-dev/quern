@@ -195,6 +195,30 @@ That is pipeline latency in the media engine, not slowness, and it does
 not limit throughput — the cores are free during it, and concurrent
 streams overlap.
 
+### Result of doing (1)
+
+Swapped in and A/B'd on the same booted simulator under identical driven
+load, 15 fps cap, 900px, q0.6:
+
+| encoder | CPU | RSS | delivered |
+|---|---|---|---|
+| ImageIO (`--imageio`) | 10.0% | 129 MB | 13.5 fps |
+| VideoToolbox | **2.8%** | **66 MB** | 13.8 fps |
+
+3.6x less CPU and half the memory at the same frame rate, with the wire
+format unchanged — the client is still a bare `<img>`. Output verified by
+decoding frames back: same 414x900, correct content, no artifacts.
+
+Two things to know before tuning it:
+
+- **The quality scales are not equivalent.** Both were asked for 0.6;
+  ImageIO produced a 32 KB median frame and VideoToolbox 38 KB. Matching
+  byte size means re-tuning the number, not reusing it.
+- **Keep the CPU path.** A VTCompressionSession can fail to create, and
+  the implementation falls back per-frame rather than dropping the frame.
+  A preview that silently goes black is worse than one that quietly costs
+  more CPU.
+
 ### Still CPU, still worth moving
 
 - **Downscaling** is `CGContext.draw`, on the cores. Either hand it to
