@@ -10,6 +10,8 @@
 //   ios-preview 0 2          # preview devices by index
 //   ios-preview --interactive # JSON Lines protocol on stdin/stdout
 //   ios-preview --sim-udid <UDID>  # preview a booted simulator (headless)
+//   ios-preview --sim-udid <UDID> --serve 8422 [--bind-all] [--no-window]
+//                            # ... and stream it as MJPEG over HTTP
 //
 // Build: swiftc -o tools/ios-preview tools/ios-preview.swift -framework AVFoundation -framework CoreMediaIO -framework AppKit
 
@@ -18,6 +20,7 @@ import AppKit
 import CoreMediaIO
 import Foundation
 import IOSurface
+import Network
 import ObjectiveC
 
 // MARK: - Enable iOS screen capture device discovery
@@ -138,13 +141,28 @@ func traceDeviceEvent(_ kind: String, _ device: AVCaptureDevice) {
 
 // MARK: - Filter devices by args
 
+/// Everything the simulator preview path needs. A struct rather than more
+/// enum payload because the flag list is already past the point where
+/// positional associated values stay readable.
+struct SimOptions {
+    let udid: String
+    /// Use the CGImage copy-through render path instead of handing the
+    /// IOSurface to CALayer directly.
+    let viaCGImage: Bool
+    let window: Bool
+    let serve: Bool
+    let port: UInt16
+    let bindAll: Bool
+    let fps: Double
+    let maxDimension: Int
+    let quality: Double
+}
+
 enum FilterMode {
     case all
     case listOnly
     case interactive
-    /// Simulator framebuffer preview. `viaCGImage` selects the copy-through
-    /// render path instead of handing the IOSurface to CALayer directly.
-    case simUDID(udid: String, viaCGImage: Bool)
+    case simUDID(SimOptions)
     case byArgs([String])
 }
 
@@ -154,7 +172,22 @@ func parseArgs() -> FilterMode {
     if args.contains("--list") || args.contains("-l") { return .listOnly }
     if args.contains("--interactive") { return .interactive }
     if let i = args.firstIndex(of: "--sim-udid"), i + 1 < args.count {
-        return .simUDID(udid: args[i + 1], viaCGImage: args.contains("--cgimage"))
+        func value(_ flag: String) -> String? {
+            guard let j = args.firstIndex(of: flag), j + 1 < args.count else { return nil }
+            let next = args[j + 1]
+            return next.hasPrefix("--") ? nil : next
+        }
+        return .simUDID(SimOptions(
+            udid: args[i + 1],
+            viaCGImage: args.contains("--cgimage"),
+            window: !args.contains("--no-window"),
+            serve: args.contains("--serve"),
+            port: value("--serve").flatMap(UInt16.init) ?? 8422,
+            bindAll: args.contains("--bind-all"),
+            fps: value("--fps").flatMap(Double.init) ?? 15,
+            maxDimension: value("--max-dim").flatMap(Int.init) ?? 900,
+            quality: value("--quality").flatMap(Double.init) ?? 0.6
+        ))
     }
     return .byArgs(args)
 }
@@ -1300,8 +1333,6 @@ final class SimPreviewWindow: NSObject, NSWindowDelegate {
     private let udid: String
     private let viaCGImage: Bool
     private let contentLayer = CALayer()
-    private var framebuffer: SimFramebuffer?
-
     // Frames arrive faster than AppKit needs to draw them. Keep only the
     // newest and coalesce: an older frame is worthless the moment a newer
     // one exists, and queueing every callback onto main is how you build a
@@ -1345,28 +1376,19 @@ final class SimPreviewWindow: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    func start() throws {
-        let fb = SimFramebuffer(udid: udid) { [weak self] surface in
-            self?.present(surface)
-        }
-        try fb.start()
-        framebuffer = fb
-    }
-
     func stop() {
-        framebuffer?.stop()
-        framebuffer = nil
         window.delegate = nil
         window.close()
     }
 
     func windowWillClose(_ notification: Notification) {
-        framebuffer?.stop()
-        framebuffer = nil
         onWindowClosed?(udid)
     }
 
-    private func present(_ surface: IOSurface) {
+    /// Hand one frame to the window. The framebuffer is owned by the app
+    /// delegate now, because the server is a second consumer of the same
+    /// frames and neither consumer should own the source.
+    func present(_ surface: IOSurface) {
         lock.lock()
         pending = surface
         let alreadyScheduled = scheduled
@@ -1446,33 +1468,351 @@ final class SimPreviewWindow: NSObject, NSWindowDelegate {
     }
 }
 
+// MARK: - Remote streaming (spike)
+//
+// The local window hands the IOSurface straight to a CALayer, which is free
+// but only works on this machine. Getting a screen to a browser means
+// paying for a codec. MJPEG first: every browser renders it from an <img>
+// with no client-side JavaScript, which makes it the cheapest possible
+// proof that frames can leave the box. H.264 is the bandwidth optimisation
+// after the pipeline is known good, not before.
+
+/// Encodes an IOSurface to JPEG, optionally downscaled.
+///
+/// Downscaling happens here rather than via kCGImageDestinationImageMaxPixelSize,
+/// which CGImageDestinationAddImage does not reliably honour -- only the
+/// AddImageFromSource variant does. An explicit redraw is predictable.
+func encodeJPEG(from surface: IOSurface, maxDimension: Int, quality: Double) -> Data? {
+    IOSurfaceLock(surface, .readOnly, nil)
+    let width = IOSurfaceGetWidth(surface)
+    let height = IOSurfaceGetHeight(surface)
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(
+              data: IOSurfaceGetBaseAddress(surface),
+              width: width,
+              height: height,
+              bitsPerComponent: 8,
+              bytesPerRow: IOSurfaceGetBytesPerRow(surface),
+              space: colorSpace,
+              bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                  | CGImageAlphaInfo.premultipliedFirst.rawValue
+          ),
+          let full = ctx.makeImage() else {
+        IOSurfaceUnlock(surface, .readOnly, nil)
+        return nil
+    }
+    IOSurfaceUnlock(surface, .readOnly, nil)
+
+    var image = full
+    let longest = max(width, height)
+    if maxDimension > 0, longest > maxDimension {
+        let factor = Double(maxDimension) / Double(longest)
+        let tw = Int((Double(width) * factor).rounded())
+        let th = Int((Double(height) * factor).rounded())
+        if let scaleCtx = CGContext(
+            data: nil,
+            width: tw,
+            height: th,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) {
+            scaleCtx.interpolationQuality = .medium
+            scaleCtx.draw(full, in: CGRect(x: 0, y: 0, width: tw, height: th))
+            if let scaled = scaleCtx.makeImage() { image = scaled }
+        }
+    }
+
+    let out = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else {
+        return nil
+    }
+    CGImageDestinationAddImage(
+        dest, image,
+        [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+    )
+    guard CGImageDestinationFinalize(dest) else { return nil }
+    return out as Data
+}
+
+/// One connected browser.
+private final class MJPEGClient {
+    let connection: NWConnection
+    var streaming = false
+    /// Dropped-frame gate. A phone on wifi cannot absorb 60 fps of JPEG, and
+    /// queueing what it cannot take converts "slow" into "minutes behind".
+    /// One frame in flight at a time; newer frames replace nothing, they are
+    /// simply skipped.
+    var inFlight = false
+
+    init(connection: NWConnection) {
+        self.connection = connection
+    }
+}
+
+let mjpegBoundary = "quernframe"
+
+final class MJPEGServer {
+    private let port: NWEndpoint.Port
+    private let bindAll: Bool
+    private let fps: Double
+    private let maxDimension: Int
+    private let quality: Double
+
+    private var listener: NWListener?
+    private let queue = DispatchQueue(label: "quern.sim-preview.http")
+    private var clients: [ObjectIdentifier: MJPEGClient] = [:]
+    private var lastEncode = Date.distantPast
+
+    private var framesEncoded = 0
+    private var bytesSent = 0
+    private var lastReport = Date()
+
+    init(port: UInt16, bindAll: Bool, fps: Double, maxDimension: Int, quality: Double) {
+        self.port = NWEndpoint.Port(rawValue: port) ?? 8422
+        self.bindAll = bindAll
+        self.fps = fps
+        self.maxDimension = maxDimension
+        self.quality = quality
+    }
+
+    func start() throws {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+
+        // Loopback unless told otherwise. An unauthenticated live video feed
+        // of a device screen is not something to put on a shared network by
+        // default -- remote viewing has to be an explicit choice.
+        //
+        // requiredLocalEndpoint pins the bind address, and it is mutually
+        // exclusive with NWListener's `on:` port argument -- setting both is
+        // EINVAL, not a narrower bind.
+        let listener: NWListener
+        if bindAll {
+            listener = try NWListener(using: params, on: port)
+        } else {
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
+            listener = try NWListener(using: params)
+        }
+        listener.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
+        listener.stateUpdateHandler = { state in
+            if case .failed(let err) = state { simLogErr("[sim-preview] listener failed: \(err)") }
+        }
+        listener.start(queue: queue)
+        self.listener = listener
+
+        let host = bindAll ? "0.0.0.0" : "127.0.0.1"
+        simLogErr("[sim-preview] MJPEG on http://\(host):\(port.rawValue)/  "
+            + "(fps \(Int(fps)), max \(maxDimension)px, q\(quality))")
+        if bindAll {
+            simLogErr("[sim-preview] WARNING: bound to all interfaces, no auth -- "
+                + "anyone on this network can watch the screen")
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+        for client in clients.values { client.connection.cancel() }
+        clients.removeAll()
+    }
+
+    // MARK: connections
+
+    private func accept(_ conn: NWConnection) {
+        let client = MJPEGClient(connection: conn)
+        clients[ObjectIdentifier(conn)] = client
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                self?.queue.async { self?.drop(conn) }
+            default:
+                break
+            }
+        }
+        conn.start(queue: queue)
+        readRequest(client)
+    }
+
+    private func drop(_ conn: NWConnection) {
+        clients.removeValue(forKey: ObjectIdentifier(conn))
+    }
+
+    private func readRequest(_ client: MJPEGClient) {
+        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) {
+            [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if error != nil || isComplete {
+                client.connection.cancel()
+                return
+            }
+            guard let data, let head = String(data: data, encoding: .utf8) else {
+                client.connection.cancel()
+                return
+            }
+            let path = head.split(separator: "\r\n").first
+                .flatMap { $0.split(separator: " ").dropFirst().first }
+                .map(String.init) ?? "/"
+            self.route(client, path: path)
+        }
+    }
+
+    private func route(_ client: MJPEGClient, path: String) {
+        if path.hasPrefix("/stream") {
+            let header = """
+            HTTP/1.1 200 OK\r
+            Content-Type: multipart/x-mixed-replace; boundary=\(mjpegBoundary)\r
+            Cache-Control: no-store\r
+            Connection: close\r
+            \r\n
+            """
+            client.connection.send(
+                content: header.data(using: .utf8),
+                completion: .contentProcessed { _ in }
+            )
+            client.streaming = true
+            simLogErr("[sim-preview] client attached (\(self.clients.count) total)")
+        } else {
+            let html = """
+            <!doctype html><meta charset=utf-8><title>Quern sim preview</title>
+            <style>body{margin:0;background:#111;display:grid;place-items:center;
+            height:100vh}img{max-height:100vh;max-width:100vw}</style>
+            <img src="/stream">
+            """
+            let response = """
+            HTTP/1.1 200 OK\r
+            Content-Type: text/html; charset=utf-8\r
+            Content-Length: \(html.utf8.count)\r
+            Connection: close\r
+            \r
+            \(html)
+            """
+            client.connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                client.connection.cancel()
+            })
+        }
+    }
+
+    // MARK: publishing
+
+    /// Called from the framebuffer callback for every composited frame.
+    func publish(_ surface: IOSurface) {
+        queue.async { [weak self] in self?.encodeAndFanOut(surface) }
+    }
+
+    private func encodeAndFanOut(_ surface: IOSurface) {
+        let watchers = clients.values.filter { $0.streaming }
+        guard !watchers.isEmpty else { return }
+
+        // Encode at most fps times a second. The framebuffer happily emits 60
+        // fps during an animation; JPEG at that rate is a lot of CPU for
+        // frames nobody can see the difference between.
+        let now = Date()
+        guard now.timeIntervalSince(lastEncode) >= 1.0 / fps else { return }
+        lastEncode = now
+
+        guard let jpeg = encodeJPEG(from: surface, maxDimension: maxDimension, quality: quality) else {
+            return
+        }
+        framesEncoded += 1
+
+        var part = Data()
+        part.append("--\(mjpegBoundary)\r\n".data(using: .utf8)!)
+        part.append("Content-Type: image/jpeg\r\n".data(using: .utf8)!)
+        part.append("Content-Length: \(jpeg.count)\r\n\r\n".data(using: .utf8)!)
+        part.append(jpeg)
+        part.append("\r\n".data(using: .utf8)!)
+
+        for client in watchers where !client.inFlight {
+            client.inFlight = true
+            bytesSent += part.count
+            client.connection.send(content: part, completion: .contentProcessed { [weak client] _ in
+                client?.inFlight = false
+            })
+        }
+        report(now)
+    }
+
+    private func report(_ now: Date) {
+        let elapsed = now.timeIntervalSince(lastReport)
+        guard elapsed >= 2.0 else { return }
+        let fps = Double(framesEncoded) / elapsed
+        let kbps = Double(bytesSent) * 8.0 / elapsed / 1000.0
+        simLogErr(String(format: "[sim-preview] served %.1f fps, %.0f kbps, %d client(s)",
+                         fps, kbps, clients.values.filter { $0.streaming }.count))
+        framesEncoded = 0
+        bytesSent = 0
+        lastReport = now
+    }
+}
+
 // MARK: - Simulator mode app delegate
 
 class SimAppDelegate: NSObject, NSApplicationDelegate {
-    private let udid: String
-    private let viaCGImage: Bool
+    private let opts: SimOptions
     private var preview: SimPreviewWindow?
+    private var server: MJPEGServer?
+    private var framebuffer: SimFramebuffer?
 
-    init(udid: String, viaCGImage: Bool) {
-        self.udid = udid
-        self.viaCGImage = viaCGImage
+    init(opts: SimOptions) {
+        self.opts = opts
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadAppIcon()
-        let preview = SimPreviewWindow(udid: udid, viaCGImage: viaCGImage)
-        preview.onWindowClosed = { _ in NSApplication.shared.terminate(nil) }
-        do {
-            try preview.start()
+        // With no window there is nothing to put in the Dock, and a bouncing
+        // Dock tile for a headless streamer is just noise.
+        if !opts.window { NSApp.setActivationPolicy(.accessory) }
+
+        if opts.serve {
+            let server = MJPEGServer(
+                port: opts.port, bindAll: opts.bindAll, fps: opts.fps,
+                maxDimension: opts.maxDimension, quality: opts.quality
+            )
+            do {
+                try server.start()
+                self.server = server
+            } catch {
+                simLogErr("[sim-preview] could not bind port \(opts.port): \(error)")
+                NSApplication.shared.terminate(nil)
+                return
+            }
+        }
+
+        if opts.window {
+            let preview = SimPreviewWindow(udid: opts.udid, viaCGImage: opts.viaCGImage)
+            preview.onWindowClosed = { _ in NSApplication.shared.terminate(nil) }
             self.preview = preview
-            simLogErr("[sim-preview] streaming \(udid)")
+        }
+
+        // One source, two sinks. Both are optional and neither owns the
+        // framebuffer, which is the shape the real frame-source protocol
+        // will need anyway.
+        let framebuffer = SimFramebuffer(udid: opts.udid) { [weak self] surface in
+            guard let self else { return }
+            self.preview?.present(surface)
+            self.server?.publish(surface)
+        }
+        do {
+            try framebuffer.start()
+            self.framebuffer = framebuffer
+            simLogErr("[sim-preview] streaming \(opts.udid)")
         } catch {
             simLogErr("[sim-preview] failed: \(error)")
             NSApplication.shared.terminate(nil)
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) {
+        framebuffer?.stop()
+        server?.stop()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
+        opts.window
+    }
 }
 
 // MARK: - Main
@@ -1488,8 +1828,8 @@ let delegate: NSApplicationDelegate
 switch mode {
 case .interactive:
     delegate = InteractiveDelegate()
-case .simUDID(let udid, let viaCGImage):
-    delegate = SimAppDelegate(udid: udid, viaCGImage: viaCGImage)
+case .simUDID(let opts):
+    delegate = SimAppDelegate(opts: opts)
 default:
     delegate = AppDelegate(mode: mode)
 }
