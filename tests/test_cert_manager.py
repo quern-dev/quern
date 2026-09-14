@@ -321,10 +321,15 @@ class TestIsCertInstalled:
                 with patch(
                     "server.proxy.cert_manager.verify_cert_in_truststore",
                     return_value=True,
-                ):
+                ) as mock_verify:
                     assert await cert_manager.is_cert_installed(
                         mock_controller, "test-udid"
                     ) is True
+
+        # Not just the answer. Without this, an implementation that shortcuts a
+        # persisted `False` straight to `True` -- never asking the device --
+        # satisfies the assertion above.
+        assert mock_verify.called, "the device was never asked"
 
     @pytest.mark.asyncio
     async def test_is_cert_installed_cert_missing(

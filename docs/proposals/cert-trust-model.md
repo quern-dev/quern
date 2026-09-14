@@ -755,7 +755,7 @@ the failure in §0: capture silently fails, and the symptom points at the app.
 A field report lost an hour to it, and a live test here reproduced it three
 minutes after `simctl erase`.
 
-#151 records a second defect in the same branch: it computes
+Issue `#151` records a second defect in the same branch: it computes
 `expected_fingerprint` and never compares it to the recorded one, so
 regenerating the CA leaves every device reporting trusted — for the old CA —
 until the TTL expires.
