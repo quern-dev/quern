@@ -33,7 +33,8 @@ Local machine, headless throughout.
 | iPhone 16 Pro sim | 1206x2622 → 900px | 13.3 fps | 3.8–5.3 Mbps | 9–11% CPU, 25 MB |
 | iPad Pro 11" sim | → 900px | 13.1 fps | 5.2 Mbps | ~11% CPU, 25 MB |
 | iPhone 11 (USB) | 828x1792 → 900px | 12.8–13.4 fps | 4.2–4.4 Mbps | 20% CPU, 113 MB |
-| Android emulator | 720x1600 native | 21.9 fps | **1.75 Mbps** | negligible host CPU |
+| Android emulator | 720x1600 native | 21.9 fps | 1.75 Mbps | negligible host CPU |
+| Pixel 3 XL (USB) | 1440x2960 → 720x1480 | 29.5 fps | **requested** | negligible host CPU |
 
 MJPEG is the reason the iOS numbers are what they are. Android is ~2.5x
 cheaper at higher resolution and higher frame rate because the encode
@@ -43,19 +44,41 @@ Two devices on a LAN is comfortable. An 18-device farm at MJPEG rates is
 ~90 Mbps and a lot of host CPU, which is what makes H.264 a requirement
 for the stretch goal rather than a refinement.
 
+On real Android hardware the bitrate is not merely lower, it is *chosen*.
+Measured on the Pixel over USB, 4s each at a constant ~29.5 fps:
+
+| `--bit-rate` | actual |
+|---|---|
+| 1M | 945 kbps |
+| 2M | 2256 kbps |
+| 6M | 7087 kbps |
+
+Frame rate held at ~29.5 fps across all three, so rate and quality are
+independent knobs. That reframes the farm arithmetic: 18 devices at 1 Mbps
+is ~18 Mbps, which is a WAN-viable number, against ~81 Mbps for the same
+count over MJPEG. The emulator's 1.75 Mbps was not efficiency, it was the
+encoder under-running a 4M request because the emulated display produced
+fewer frames.
+
 ## screenrecord specifics
 
 - `--output-format=h264` is **undocumented** — absent from `screenrecord
-  --help` on v1.3 — but present and working. Treat it as load-bearing but
-  unsupported; pin a fallback.
+  --help` — but present and working on both v1.3 (emulator, Android 13)
+  and v1.2 (Pixel 3 XL, Android 10). Two versions three releases apart
+  both support it, so it is reasonably portable, but it is still an
+  unsupported flag: pin a fallback.
 - Output is Annex-B with a single SPS/PPS/IDR at the head.
 - **180 second hard cap.** Not configurable past it. Any long-lived stream
   must restart on a timer regardless of anything else.
-- **One IDR per session.** A 12s capture under continuous motion produced
-  262 non-IDR slices and exactly 1 IDR. There is no `force_idr`: we do not
-  own the encoder, unlike a VideoToolbox path.
-- Restart costs ~110 ms to first bytes, measured over three runs
-  (138/100/112 ms), and every restart begins with a fresh SPS/PPS/IDR.
+- **One IDR per session, confirmed on real hardware.** The emulator gave
+  262 non-IDR slices to 1 IDR over 12s; the Pixel gave 119 to 1 over 4s at
+  30 fps. There is no `force_idr`: we do not own the encoder, unlike a
+  VideoToolbox path. (The Pixel emits SPS/PPS twice at the head rather
+  than once — a duplicate parameter set, not a periodic one.)
+- Restart costs ~110 ms on the emulator (138/100/112 ms) and **~290 ms
+  over real USB** (291/298/284 ms). Every restart begins with a fresh
+  SPS/PPS/IDR. Budget the higher number: it is the join latency floor and
+  the glitch every existing viewer sees when someone new attaches.
 
 The IDR scarcity is the real constraint. A viewer joining mid-stream
 cannot decode until a keyframe arrives, and none will. The only lever is
@@ -103,6 +126,18 @@ its own AVCC conversion for the same reason.
 4. Capture changes what iOS reports. A device captured over CoreMediaIO
    shows a synthetic status bar — 9:41, full signal, full battery. Fine
    for demos, misleading for diagnosis. Android shows real state.
+
+## Verified on real hardware
+
+Everything in the screenrecord section was re-run against a Pixel 3 XL
+(Android 10, screenrecord v1.2, 1440x2960) over USB, not just the
+emulator. The flag, the single-IDR behaviour and the restart-mints-a-
+keyframe property all held. What changed was quantitative: real hardware
+sustains 30 fps where the emulator managed 22, restart costs ~2.6x more
+over USB, and bitrate turns out to be a dial rather than an outcome.
+
+A Pixel is close to AOSP. A Samsung or Xiaomi would be the real test of
+vendor divergence, and has not been done.
 
 ## Not investigated
 
