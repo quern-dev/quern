@@ -60,6 +60,30 @@ count over MJPEG. The emulator's 1.75 Mbps was not efficiency, it was the
 encoder under-running a 4M request because the emulated display produced
 fewer frames.
 
+### Static screens were flattering the numbers
+
+Every physical-device figure above was taken on a near-static screen —
+one capture produced 133 frames of which only 9 were distinct. Re-measured
+under sustained driven motion (Settings scrolled continuously via WDA, 30
+fps cap, 900px, q0.6, mean of 10 CPU samples):
+
+| encoder | CPU | RSS | delivered | bitrate |
+|---|---|---|---|---|
+| VideoToolbox | 11.7% | 71 MB | 21.8-23.5 fps | **8.7-10.8 Mbps** |
+| ImageIO | 28.0% | 116 MB | 22.6-22.7 fps | 6.2 Mbps |
+
+Bitrate roughly doubles against the static-screen measurement (4.2-4.4
+Mbps). For farm sizing that is the number to use: 18 devices under real
+interaction is ~160 Mbps of MJPEG, not ~80.
+
+Two things to read carefully here. VideoToolbox shows a *higher* bitrate
+than ImageIO at the same nominal q0.6 — that is the quality-scale
+mismatch noted above, not worse compression, and it inflates VT's Mbps
+against a CPU number that is still 2.4x better. And delivered rate tops
+out at ~23 fps against a 30 fps cap on both encoders, so something other
+than the encoder is the limit — either the device's change rate or the
+synchronous encode. Not chased.
+
 ## screenrecord specifics
 
 - `--output-format=h264` is **undocumented** — absent from `screenrecord
