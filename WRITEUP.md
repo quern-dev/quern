@@ -317,18 +317,36 @@ for JPEG, that a passthrough writer input needs a format hint, or that
 unaligned length loads trap. Every one of those cost a crash or a silent
 wrong answer.
 
-**Domain knowledge redirects; speed explores.** The turns that moved this
-forward were suggestions — offload to the media engine, use the Apple TV
-app for motion, can the device stream its clock. Each opened a direction
-that measurement could then settle quickly. Neither half gets there alone:
-fast wrong answers are only useful if something tells you which ones are
-lies.
+**Direction came from one side, momentum from the other.** Every turn that
+moved this forward was a suggestion: offload to the media engine, use the
+Apple TV app for motion, can the device stream its clock. What made them
+pay off was not that the agent worked fast — it was that **the cost of
+changing direction was close to zero.**
 
-**Be wrong cheaply and out loud.** Roughly a third of the confident
+When the GPU question landed, there was no context-switch penalty: no
+re-reading VideoToolbox documentation, no standing up new tooling, no
+reluctance to abandon an MJPEG thread three commits deep. `ioreg` for the
+media-engine hardware, a fresh benchmark harness, and a reorganised
+understanding of the whole project followed within minutes. Same again on
+the clock: from "this is unsolved" to a persistent-connection experiment in
+a single step, no re-approach.
+
+A human expert redirected mid-investigation pays real cost to switch. That
+asymmetry is what the pairing exploits — high-information redirections
+meeting near-zero pivot cost.
+
+**And that is the same property that produced the wrong answers.** Cheap to
+commit to a direction, cheap to abandon it. Roughly a third of the confident
 statements in this project were wrong: motion increases bitrate (backwards),
-USB contention kills the tunnel (disproved by controlled test), clock skew
-is unsolvable (method artifact), CPU is 5% (measurement artifact). None
-survived contact with an experiment designed to isolate them. The ones that
+USB contention kills the tunnel (disproved by a controlled test), clock skew
+is unsolvable (method artifact), CPU is 5% (measurement artifact). Clock
+skew was declared unsolved with exactly the same low friction that allowed
+it to be overturned twenty minutes later.
+
+That is not a flaw sitting beside the strength; it is one mechanism seen
+from two sides. Which is precisely why the measurement discipline and the
+course corrections were load-bearing rather than nice to have. None of those
+claims survived an experiment designed to isolate them. The ones that
 survived are in the table at the top.
 
 **Know when to stop.** The spike ends here, at 2,600 lines in one file with
