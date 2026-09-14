@@ -88,23 +88,31 @@ many frames we choose to encode, and the VT encode itself is ~1.7%. The
 path is decode-bound, so frame rate is nearly free. ImageIO is not: it
 triples to 30% because its encode is real CPU work per frame.
 
-### MJPEG bitrate tracks frame rate, not motion
+### MJPEG size tracks image complexity, not motion
 
-Frame size barely moves with content, because every JPEG is a full
-intra-coded image. Median frame was 43 KB on a static screen and 48 KB
-with the TV app playing video behind its onboarding sheet — about 12%.
-Compare that with H.264, where motion dominates.
+A clean A/B at a fixed 60 fps cap, with distinct-frame counts proving each
+run was what it claimed to be:
 
-The practical consequence is that MJPEG bandwidth is something you set,
-via fps and resolution, rather than something the content decides. The
-earlier "static screens flattered the numbers" worry was half right: the
-low figures came from a low *frame rate*, not from static content.
+| run | frames | distinct | median frame | bitrate |
+|---|---|---|---|---|
+| static Settings | 768 | 6 (0.8%) | 43 KB | 21.2 Mbps @ 60 fps |
+| scrolled Settings | 672 | 414 (61%) | **32 KB** | 13.6-21.2 Mbps @ 45-55 fps |
 
-Caveat on this measurement: an attempt to A/B static against scroll-driven
-motion at a fixed 60 fps was invalid — WDA died partway and both runs were
-actually static (30 distinct frames of ~770 in each). The 43 KB / 48 KB
-comparison above comes from the static run against the TV-app run, which
-had genuine motion (277 distinct of 903). Worth redoing cleanly.
+Motion frames came out *smaller*. That is not noise, it is the nature of
+an intra-only codec: every JPEG is a standalone image, so size follows how
+complex the picture is, not whether it changed. The static screen was the
+top of Settings -- dense text, colourful icons, the account card -- and
+scrolling moved through plainer rows.
+
+The practical rule is that MJPEG bandwidth is set by frame rate,
+resolution and quality, all of which we choose, plus how busy the UI
+looks, which we do not. Motion itself is not a term in it. H.264 behaves
+the opposite way, where motion is the dominant cost, so a farm sized for
+one codec cannot be resized for the other by scaling a number.
+
+Note also that the source rate *drops* under heavy UI work: 60 fps steady
+on a static screen, 49-59 while scrolling. The device gives fewer frames
+when it is busy compositing.
 
 ### Static screens were flattering the numbers
 
