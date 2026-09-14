@@ -69,3 +69,32 @@ func idleGapDoesNotBurst() {
     // fire on every frame until it caught up on 60 seconds of arrears.
     #expect(encoded <= 17, "expected ~15 frames after the gap, got \(encoded)")
 }
+
+
+@Test("a source at exactly the target rate loses no frames")
+func matchedRatesPassEverything() {
+    // Regression: the deadline accumulates by addition while frame times are
+    // computed independently, so without tolerance the two drift and frames
+    // fall a hair short of their deadline. This lost 2 frames in 30.
+    var throttle = FrameThrottle(fps: 60)
+    var encoded = 0
+    for i in 0..<600 {
+        if throttle.shouldEncode(at: Double(i) / 60.0) { encoded += 1 }
+    }
+    #expect(encoded == 600, "expected every frame, got \(encoded)")
+}
+
+@Test("tolerance does not let a faster source through", arguments: [61.0, 65.0, 90.0])
+func toleranceDoesNotLeak(sourceFPS: Double) {
+    // The slack must not become a loophole: a source above the target should
+    // still be held down to it.
+    var throttle = FrameThrottle(fps: 60)
+    var encoded = 0
+    var t = 0.0
+    while t < 10.0 {
+        if throttle.shouldEncode(at: t) { encoded += 1 }
+        t += 1.0 / sourceFPS
+    }
+    #expect(Double(encoded) / 10.0 <= 61.0,
+            "throttle leaked: \(Double(encoded) / 10.0) fps from a \(sourceFPS) source")
+}

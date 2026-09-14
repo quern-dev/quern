@@ -32,7 +32,13 @@ public struct FrameThrottle {
             nextDeadline = now + interval
             return true
         }
-        guard now >= deadline else { return false }
+        // A thousandth of an interval of slack. The deadline accumulates by
+        // repeated addition while frame times are computed independently, so
+        // over a long session the two drift by float rounding. The tolerance
+        // is far above that noise and far below anything perceptible, and it
+        // keeps a source running at exactly the target rate from shedding
+        // frames to comparisons that land a hair short.
+        guard now >= deadline - interval * 0.001 else { return false }
 
         nextDeadline = deadline + interval
         // Fallen more than a whole interval behind: the source went quiet, or
