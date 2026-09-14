@@ -31,11 +31,42 @@ func discoveryDoesNotRequireADevice() {
     }
 }
 
-@Test("resolving an unknown simulator udid returns nil rather than throwing")
-func unknownSimulatorResolvesToNil() {
-    MediaLog.silenced {
-        #expect(PrivateFrameworks.resolveDevice(udid: "00000000-0000-0000-0000-000000000000") == nil)
+/// Whether this machine has an Xcode with the private frameworks we need.
+/// Checked by looking for the file rather than by trying to load it, so the
+/// gate itself costs nothing.
+private var hasSimulatorFrameworks: Bool {
+    FileManager.default.fileExists(
+        atPath: "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator"
+    ) && PrivateFrameworks.hasSimulatorKit(at: PrivateFrameworks.developerDir())
+}
+
+@Test(
+    "the private-framework path still enumerates simulators",
+    .enabled(if: hasSimulatorFrameworks)
+)
+func enumerationActuallyWorks() {
+    // The early-warning test for the riskiest part of this package: everything
+    // in PrivateFrameworks is unsupported API reached by dlopen and selector
+    // name, and a toolchain update is what breaks it.
+    //
+    // It has to assert enumeration *succeeds*. An earlier version asserted
+    // only that an unknown udid resolves to nil -- which is true both when the
+    // frameworks work and when they fail to load entirely, so it passed while
+    // testing nothing and still paid the full CoreSimulator cost.
+    //
+    // Any machine with Xcode installed has simulator device types, so an empty
+    // list here means the private path is broken rather than that the machine
+    // is bare.
+    let devices = MediaLog.silenced { PrivateFrameworks.availableDevices() }
+    #expect(!devices.isEmpty,
+            "SimServiceContext returned no devices — the private API path is broken")
+
+    // And with enumeration known good, nil for an unknown udid means what it
+    // is supposed to mean.
+    let missing = MediaLog.silenced {
+        PrivateFrameworks.resolveDevice(udid: "00000000-0000-0000-0000-000000000000")
     }
+    #expect(missing == nil)
 }
 
 @Test("starting a framebuffer for an unknown udid reports device-not-found")
