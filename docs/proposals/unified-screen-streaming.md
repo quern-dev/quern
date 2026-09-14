@@ -224,11 +224,43 @@ Two things to know before tuning it:
 - **Downscaling** is `CGContext.draw`, on the cores. Either hand it to
   `VTPixelTransferSession` or let the encoder output the target size and
   skip the separate scale entirely.
-- **Physical iOS does a pointless round trip.** The device encodes H.264
-  in hardware, macOS decodes it in hardware, and we then software-encode
-  JPEG. Re-encoding with VideoToolbox keeps it on the media engine;
-  passthrough of the device's own H.264, if the DAL interface allows it,
-  would skip both conversions. Not investigated.
+- **Downscaling is solved** by the VideoToolbox swap: the session resizes
+  a mismatched input buffer, so the CGContext resize is gone.
+
+### Physical iOS passthrough: investigated, not worth it
+
+The device encodes H.264 in hardware, macOS decodes it in hardware, and we
+encode again. Skipping both conversions looked like the biggest remaining
+win. It is not reachable at acceptable cost.
+
+The DAL device exposes exactly one format:
+
+    mediaType=muxx  subType='isr '  0x0
+
+Muxed, not video, with no dimensions — an opaque "iOS screen recording"
+container. There is no `avc1` format to select, so AVFoundation demuxes
+and decodes it internally and there is nothing to ask for instead.
+
+`AVCaptureMovieFileOutput` was the obvious candidate for a passthrough
+recorder. It is not one: recording cost **more** CPU than decoding to
+BGRA (11.1% of a core against 8.3%) and produced H.264 Main profile at
+1.8 Mbps, i.e. a re-encode.
+
+Where the physical path's CPU actually goes, measured per device:
+
+| stage | cost |
+|---|---|
+| AVFoundation demux + hardware decode to BGRA | 8.3% of a core |
+| VideoToolbox JPEG encode | ~3.6% of a core |
+| **full pipeline (VideoToolbox)** | **11.9%, 69 MB** |
+| full pipeline (ImageIO, before the swap) | 24.4%, 115 MB |
+
+True passthrough means going under AVFoundation to CoreMediaIO, taking
+the stream's buffer queue directly, and demuxing `'isr '` ourselves — an
+undocumented Apple container. The prize is ~12% of one core per device,
+on a path where USB limits how many devices attach to one Mac anyway.
+The VideoToolbox swap already took half of it for a fraction of the risk.
+Not recommended unless the physical-device count ever gets large.
 
 ### MLX and v4l — neither applies
 
