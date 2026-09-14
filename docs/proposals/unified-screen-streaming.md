@@ -6,6 +6,72 @@ Goal: one preview/streaming path across iOS simulators, physical iOS
 devices and Android, with remote viewing as the stretch target (issue #127
 asks for the window-management half of the same problem).
 
+## Running it
+
+The spike builds to a standalone binary. Nothing in the Python server calls
+it yet — these are the pipelines as they exist, invoked by hand.
+
+```bash
+swiftc -O -o /tmp/ios-preview tools/ios-preview.swift \
+  -framework AVFoundation -framework CoreMediaIO \
+  -framework AppKit -framework VideoToolbox
+
+/tmp/ios-preview --help          # full flag reference
+```
+
+**iOS simulator, headless.** Boot with `simctl` (never `open -a Simulator`,
+which owns the device and shuts it down when it quits):
+
+```bash
+xcrun simctl boot <UDID>
+/tmp/ios-preview --sim-udid <UDID> --serve 8422 --no-window
+open http://127.0.0.1:8422/                      # MJPEG, no client code
+```
+
+**Physical iOS over USB.** Must be USB — a wifi-attached device does not
+appear as a CoreMediaIO capture device:
+
+```bash
+/tmp/ios-preview --list                          # confirm it enumerates
+/tmp/ios-preview --device "iPhone 11" --serve 8424 --no-window --fps 60
+```
+
+**H.264 instead of MJPEG**, ~12x less data, not browser-playable:
+
+```bash
+/tmp/ios-preview --sim-udid <UDID> --serve 8422 --no-window --h264 --bitrate 1500000
+ffplay -fflags nobuffer http://127.0.0.1:8422/stream
+ffprobe -v error -show_streams http://127.0.0.1:8422/stream
+```
+
+**Android.** No code yet — this is the raw pipeline the findings below are
+based on:
+
+```bash
+adb exec-out screenrecord --output-format=h264 \
+  --time-limit 180 --size 720x1600 --bit-rate 2M - > out.h264
+```
+
+`--output-format=h264` is undocumented but present on v1.2 and v1.3. The
+180s cap is hard; restart before it, which also mints the keyframe a late
+viewer needs.
+
+**Encoder A/B**, for reproducing the CPU numbers below:
+
+```bash
+swiftc -O -o /tmp/encbench tools/encode-bench.swift \
+  -framework AVFoundation -framework VideoToolbox \
+  -framework CoreGraphics -framework ImageIO
+/tmp/encbench /path/to/a/screenshot.png
+```
+
+Two flags exist only as diagnostics: `--imageio` forces the CPU JPEG
+encoder (~6x more CPU) and `--cgimage` renders the simulator window through
+a CGImage copy instead of handing the IOSurface to CALayer. Both are A/B
+levers, not things to turn on.
+
+`--bind-all` is **unauthenticated**. Loopback is the default for a reason.
+
 ## Where frames come from
 
 | Source | Mechanism | Frames today? |

@@ -1,23 +1,17 @@
 #!/usr/bin/env swift
-// ios-preview: Live preview of connected iOS device screens.
-// Uses CoreMediaIO opt-in to discover iPhone screen capture devices,
-// then opens an AVCaptureSession preview window per device.
+// ios-preview: live preview and streaming for iOS screens.
 //
-// Usage:
-//   ios-preview              # preview all connected devices
-//   ios-preview --list       # list devices and exit
-//   ios-preview "iPhone 11"  # preview devices matching a name substring
-//   ios-preview 0 2          # preview devices by index
-//   ios-preview --interactive # JSON Lines protocol on stdin/stdout
-//   ios-preview --sim-udid <UDID>  # preview a booted simulator (headless)
-//   ios-preview --sim-udid <UDID> --serve 8422 [--bind-all] [--no-window]
-//   ios-preview --device "iPhone 11" --serve 8424 --no-window
-//                            # --imageio forces the CPU encoder
-//   ... --h264 --bitrate 2000000   # H.264 elementary stream instead of MJPEG
-//                            # ... or stream a USB-connected device
-//                            # ... and stream it as MJPEG over HTTP
+// Three sources, one encoder. Simulators come from CoreSimulator's
+// framebuffer, physical devices from a CoreMediaIO capture device; both
+// arrive as IOSurface and share the same encode path.
 //
-// Build: swiftc -o tools/ios-preview tools/ios-preview.swift -framework AVFoundation -framework CoreMediaIO -framework AppKit
+// Run with --help for the full usage. The text lives in `usageText` below
+// rather than in this comment, so there is exactly one copy of it.
+//
+// Build:
+//   swiftc -O -o tools/ios-preview tools/ios-preview.swift \
+//     -framework AVFoundation -framework CoreMediaIO \
+//     -framework AppKit -framework VideoToolbox
 
 import AVFoundation
 import AppKit
@@ -188,8 +182,71 @@ enum FilterMode {
     case byArgs([String])
 }
 
+let usageText = """
+ios-preview: live preview and streaming for iOS screens.
+
+Three sources, one encoder. Simulators come from CoreSimulator's
+framebuffer, physical devices from a CoreMediaIO capture device; both
+arrive as IOSurface and share the same encode path.
+
+LOCAL WINDOW
+  ios-preview                        preview every connected device
+  ios-preview --list                 list capture devices and exit
+  ios-preview "iPhone 11"            preview devices matching a substring
+  ios-preview 0 2                    preview devices by index
+  ios-preview --interactive          JSON Lines protocol on stdin/stdout
+  ios-preview --sim-udid <UDID>      preview a booted simulator, headless
+
+STREAMING  (add --serve to either source; --no-window for headless)
+  ios-preview --sim-udid <UDID> --serve 8422 --no-window
+  ios-preview --device "iPhone 11" --serve 8424 --no-window
+
+  MJPEG by default: open http://127.0.0.1:<port>/ in any browser, or
+  curl http://127.0.0.1:<port>/stream. No client-side code needed.
+
+  With --h264 the /stream endpoint serves a raw Annex-B elementary
+  stream instead. Roughly 12x less data, but a browser cannot play it
+  directly -- use ffplay/ffprobe, or pipe it to ffmpeg.
+
+FLAGS
+  --serve <port>     start the HTTP server (default port 8422)
+  --bind-all         listen on all interfaces instead of loopback.
+                     UNAUTHENTICATED -- anyone on the network can watch.
+  --no-window        stream only, open no local window
+  --fps <n>          max frames encoded per second (default 15)
+  --max-dim <px>     downscale longest side (default 900, 0 = native)
+  --quality <0..1>   JPEG quality (default 0.6). Not comparable to
+                     ImageIO's scale -- VideoToolbox runs larger.
+  --h264             H.264 elementary stream instead of MJPEG
+  --bitrate <bps>    H.264 target bitrate (default 2000000)
+  --imageio          encode JPEG on the CPU via ImageIO instead of
+                     VideoToolbox. ~6x more CPU; diagnostic A/B lever.
+  --cgimage          simulator window only: render frames through a
+                     CGImage copy instead of handing the IOSurface to
+                     CALayer. Fallback if the direct path shows nothing.
+
+EXAMPLES
+  # headless simulator, H.264, watch with ffplay
+  ios-preview --sim-udid <UDID> --serve 8422 --no-window --h264 \
+    & ffplay -fflags nobuffer http://127.0.0.1:8422/stream
+
+  # physical device, MJPEG at 60fps, viewable in a browser
+  ios-preview --device "iPhone 11" --serve 8424 --no-window --fps 60
+
+Build:
+  swiftc -O -o tools/ios-preview tools/ios-preview.swift \
+    -framework AVFoundation -framework CoreMediaIO \
+    -framework AppKit -framework VideoToolbox
+"""
+
+func printUsageAndExit() -> Never {
+    print(usageText)
+    exit(0)
+}
+
 func parseArgs() -> FilterMode {
     let args = Array(CommandLine.arguments.dropFirst())
+    if args.contains("--help") || args.contains("-h") { printUsageAndExit() }
     if args.isEmpty { return .all }
     if args.contains("--list") || args.contains("-l") { return .listOnly }
     if args.contains("--interactive") { return .interactive }
