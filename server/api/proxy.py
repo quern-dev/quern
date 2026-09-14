@@ -232,6 +232,7 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
+            tls_rejections=list(adapter._tls_rejections),
             mock_rules_count=len(adapter._mock_rules),
             bypass_patterns=adapter.get_bypass_patterns(),
             local_capture=local_capture,
@@ -253,6 +254,7 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
+            tls_rejections=list(adapter._tls_rejections),
             mock_rules_count=len(adapter._mock_rules),
             bypass_patterns=adapter.get_bypass_patterns(),
             local_capture=local_capture,
@@ -273,6 +275,11 @@ async def _get_proxy_status(
         local_capture=local_capture,
         local_ip=local_ip,
         local_ips=local_ips,
+        # Reported on the stopped branch too. The others here mirror addon state
+        # and are meaningless once the addon is gone; a rejection history is not,
+        # and this branch is reachable with data in it when mitmdump died on its
+        # own -- which is exactly when there is no other trace to go on.
+        tls_rejections=list(adapter._tls_rejections),
         warnings=warnings,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,

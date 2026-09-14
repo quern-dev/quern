@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from server.models import (
     LogEntry,
     LogLevel,
     LogSource,
+    TlsRejection,
 )
 from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -130,6 +132,10 @@ class ProxyAdapter(BaseSourceAdapter):
         # Intercept state (server-side mirror of addon state)
         self._intercept_pattern: str | None = None
         self._held_flows: dict[str, dict] = {}  # flow_id -> {id, held_at, request}
+        #: Clients that refused our certificate, newest last. Collapsed by
+        #: (host, device) and bounded, so a retrying app cannot crowd out the
+        #: other devices' rejections.
+        self._tls_rejections: deque[TlsRejection] = deque(maxlen=50)
         self._intercept_event: asyncio.Event = asyncio.Event()
 
         # Mock state (server-side mirror)
@@ -291,6 +297,12 @@ class ProxyAdapter(BaseSourceAdapter):
 
         self._running = True
         self.started_at = self._now()
+        # Cleared here as well as in `stop()`, because the field says "since the
+        # proxy started" and `stop()` is not always what ended the last run: if
+        # mitmdump exits on its own, `_read_loop` just falls out of its loop and
+        # sets `_running = False`, so the next `start()` would report the dead
+        # subprocess's rejections against the new one.
+        self._tls_rejections.clear()
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
@@ -332,6 +344,10 @@ class ProxyAdapter(BaseSourceAdapter):
         self._held_flows.clear()
         self._mock_rules.clear()
         self._bypass_patterns.clear()
+        # Rejections too. Restarting the proxy is what someone does *after*
+        # installing the cert, so carrying them across would report a problem
+        # they have just fixed.
+        self._tls_rejections.clear()
 
         logger.info("Proxy adapter stopped")
 
@@ -538,6 +554,8 @@ class ProxyAdapter(BaseSourceAdapter):
                     await self._handle_mock_hit(data)
                 elif msg_type == "status":
                     await self._handle_status_event(data)
+                elif msg_type == "tls_rejected":
+                    self._handle_tls_rejected(data)
                 elif msg_type == "error":
                     logger.warning("Addon error: %s", data)
         except asyncio.CancelledError:
@@ -562,6 +580,62 @@ class ProxyAdapter(BaseSourceAdapter):
             raise
         except Exception:
             pass
+
+    def _handle_tls_rejected(self, data: dict) -> None:
+        """A client refused our certificate.
+
+        Kept as an observation, deliberately: it is not yet allowed to change
+        any device's recorded trust. Writing it back is the `TrustClaim` work
+        in #149, and doing it here would mean a single hostile client on the
+        network could mark a device untrusted. Recording and reporting is the
+        whole of phase 1.
+
+        Bounded, because an app retrying a rejected handshake produces one of
+        these per attempt and this is a long-lived process.
+        """
+        sni = data.get("sni")
+        client_ip = data.get("client_ip")
+        at = datetime.fromtimestamp(
+            data.get("timestamp") or time.time(), tz=UTC,
+        ).isoformat()
+        # The alert, verbatim and uninterpreted. `unknown ca` means the device
+        # does not trust our CA; a certificate-pinned app on a device that
+        # trusts it perfectly well refuses too, with a different alert. Dropping
+        # this left both looking identical, and the log then asserted the first
+        # -- sending someone to reinstall a certificate that was never wrong.
+        alert = (data.get("error") or "").strip() or None
+
+        # Collapsed by (host, device). A retrying app produces one of these per
+        # attempt, so appending blindly let one loop evict every other device's
+        # rejection inside a second -- and the single rejection from the device
+        # you were actually debugging is the one that mattered.
+        for existing in self._tls_rejections:
+            if existing.sni == sni and existing.client_ip == client_ip and (
+                existing.simulator_udid == data.get("simulator_udid")
+            ):
+                existing.count += 1
+                existing.last_at = at
+                if alert and not existing.alert:
+                    existing.alert = alert
+                # Move it to the end. Updating in place left an actively
+                # retrying device leftmost, so 50 unique keys would evict the
+                # one that was seen most recently -- while its own `last_at`
+                # said so. Also what "newest last" means.
+                self._tls_rejections.remove(existing)
+                self._tls_rejections.append(existing)
+                return
+
+        self._tls_rejections.append(TlsRejection(
+            sni=sni, client_ip=client_ip, alert=alert,
+            source_process=data.get("source_process"),
+            source_pid=data.get("source_pid"),
+            simulator_udid=data.get("simulator_udid"),
+            count=1, first_at=at, last_at=at,
+        ))
+        logger.warning(
+            "Client %s refused the certificate we offered for %s (%s)",
+            client_ip or "?", sni or "?", alert or "no alert reported",
+        )
 
     async def _handle_flow(self, data: dict) -> None:
         """Process a flow event from the addon."""

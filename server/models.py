@@ -500,6 +500,40 @@ class ConfigureSystemProxyRequest(BaseModel):
     caller sending the string would have silently skipped the check."""
 
 
+class TlsRejection(BaseModel):
+    """A client refused the certificate we offered it.
+
+    An observation, not a verdict. It records that a handshake was refused, by
+    whom and for which host -- not what any device's recorded trust should
+    become. `tls_failed_client` fires for *every* client-side rejection, and an
+    untrusted CA is only one of the reasons.
+
+    `alert` is why that distinction survives. A device that does not trust the
+    CA says `unknown ca`; a certificate-pinned app on a device that trusts it
+    perfectly well refuses too, and reporting that as "this device does not
+    trust the CA" sends someone to reinstall a certificate that was never the
+    problem. Pinning is L3 in docs/proposals/cert-trust-model.md and produces
+    the identical symptom, so the alert text is the only thing separating them
+    and is kept verbatim rather than interpreted.
+    """
+
+    sni: str | None = None
+    """The host the client was trying to reach."""
+    client_ip: str | None = None
+    """The peer address. `127.0.0.1` for a simulator, which shares the host's
+    network stack -- so this alone often cannot say which device refused."""
+    source_process: str | None = None
+    source_pid: int | None = None
+    simulator_udid: str | None = None
+    """Resolved the way flows are, and the only fields that name a simulator."""
+    alert: str | None = None
+    """The TLS alert, verbatim. `unknown ca` means the CA; others may not."""
+    count: int = 1
+    """Handshakes refused for this (host, device) pair."""
+    first_at: str | None = None
+    last_at: str | None = None
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -511,6 +545,8 @@ class ProxyStatusResponse(BaseModel):
     active_filter: str | None = None
     active_intercept: str | None = None
     held_flows_count: int = 0
+    tls_rejections: list[TlsRejection] = Field(default_factory=list)
+    """Clients that refused our certificate since the proxy started."""
     mock_rules_count: int = 0
     bypass_patterns: list[str] = Field(default_factory=list)
     error: str | None = None

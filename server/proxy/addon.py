@@ -193,6 +193,28 @@ def _resolve_simulator_udid(pid: int) -> str | None:
 # Maximum body size to include inline (100KB)
 MAX_BODY_SIZE = 100 * 1024
 
+#: How much of a TLS alert to keep. mitmproxy puts the raw receive buffer in
+#: this string for an unparseable ClientHello -- two hex characters per byte
+#: buffered, and it buffers until the hello is complete or the client gives up.
+#: A client streaming junk produced a single 1.95 MB stdout line, which is past
+#: the parent's 1 MB reader limit: `async for line in ...` then raises and
+#: `_read_loop` exits for good, so all capture stops while mitmdump keeps
+#: running. Every other writer here is capped for the same reason.
+MAX_ALERT_LEN = 200
+
+#: Alerts that mean the client rejected our *certificate*. `tls_failed_client`
+#: fires for every client-side handshake failure, and most of them say nothing
+#: about trust: a suspended app, a cancelled request or a flaky network all
+#: abort a handshake, and mitmproxy's own triage logs those at INFO or not at
+#: all. Reporting them as refusals would bury the real signal in noise from
+#: ordinary traffic -- and name no host, since a connection that dies before
+#: its ClientHello has no SNI.
+_CERT_REJECTION_ALERTS = (
+    "unknown ca", "bad certificate", "certificate unknown",
+    "certificate expired", "certificate revoked", "unsupported certificate",
+    "certificate required",
+)
+
 # Default timeout for held (intercepted) flows
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
@@ -427,6 +449,71 @@ class IOSDebugAddon:
         sni = data.context.client.sni
         if sni and self._is_bypassed(sni):
             data.ignore_connection = True
+
+    def tls_failed_client(self, data: Any) -> None:
+        """A client refused the certificate we offered it.
+
+        The most direct evidence there is that a device does not trust our CA,
+        and until now the only hook that saw it was absent -- `error` fires for
+        an `http.HTTPFlow`, and a handshake the client aborts never becomes
+        one. So a rejection left no trace anywhere: no flow, no error, nothing
+        in the log, and `proxy_status` still reporting no warnings.
+
+        Measured: a simulator refused `www.apple.com`, said so on its own screen
+        in plain language, and quern recorded nothing at all. See #156.
+
+        Worth more than it looks for a *physical* device, which cannot be asked
+        the way a simulator's TrustStore can. A client that rejects our
+        certificate has demonstrated the answer.
+
+        Bypassed hosts are skipped: their TLS is never terminated by us
+        (`tls_clienthello` sets `ignore_connection`), so a failure there is
+        between the client and the real server and says nothing about our CA.
+        """
+        try:
+            client = data.context.client
+            sni = getattr(client, "sni", None)
+            if isinstance(sni, bytes):
+                sni = sni.decode("utf-8", errors="replace")
+            if sni and self._is_bypassed(sni):
+                return
+            # Same filter every other emitter applies. Without it this reports
+            # hosts the user explicitly excluded from capture, and publishes
+            # their names through `proxy_status`.
+            if self._host_filter and sni != self._host_filter:
+                return
+
+            alert = str(getattr(client, "error", None) or "")
+            if not any(a in alert.lower() for a in _CERT_REJECTION_ALERTS):
+                return
+
+            event = {
+                "type": "tls_rejected",
+                "sni": sni,
+                "error": alert[:MAX_ALERT_LEN],
+                "timestamp": time.time(),
+            }
+            # Identify the client the way `_serialize_flow` does. For a
+            # simulator the peer address is 127.0.0.1 -- it shares the host's
+            # network stack -- so the IP alone cannot say which device refused,
+            # which is the case this hook exists for.
+            client_id = getattr(client, "id", None)
+            if client_id and client_id in _client_process_info:
+                info = _client_process_info[client_id]
+                pid = info.get("pid")
+                event["source_process"] = info.get("process_name")
+                event["source_pid"] = pid
+                if pid is not None:
+                    event["simulator_udid"] = _resolve_simulator_udid(pid)
+            peername = getattr(client, "peername", None)
+            if isinstance(peername, (tuple, list)) and len(peername) >= 1:
+                event["client_ip"] = peername[0]
+            _write_json(event)
+        except Exception as exc:  # pragma: no cover - defensive
+            # Never raise out of a hook: an exception here would take down TLS
+            # handling for every connection, to report a diagnostic.
+            _write_json({"type": "error", "where": "tls_failed_client",
+                         "detail": str(exc)})
 
     def request(self, flow: http.HTTPFlow) -> None:
         """Called when a request is received. Check mocks first, then intercept."""
