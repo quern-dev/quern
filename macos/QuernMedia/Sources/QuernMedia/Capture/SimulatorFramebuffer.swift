@@ -36,6 +36,8 @@ public final class SimulatorFramebuffer: FrameSource {
     private let queue = DispatchQueue(label: "quern.media.simulator", qos: .userInteractive)
     private let onFrame: (CapturedFrame) -> Void
 
+    private let stateLock = NSLock()
+    private var stopped = false
     private var ioClient: NSObject?
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
@@ -100,16 +102,31 @@ public final class SimulatorFramebuffer: FrameSource {
         queue.async { [weak self] in self?.captureLatest() }
     }
 
+    /// Not safe to call from the capture queue -- it waits on it.
     public func stop() {
-        let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
-        for desc in descriptors {
-            if let uuid = callbackUUIDs[ObjectIdentifier(desc)], desc.responds(to: unregSel) {
-                desc.perform(unregSel, with: uuid)
+        // The flag goes up first, so a `captureLatest` already sitting in the
+        // queue behind this returns without touching anything.
+        stateLock.lock()
+        let already = stopped
+        stopped = true
+        stateLock.unlock()
+        guard !already else { return }
+
+        // The rest runs on the capture queue, because `captureLatest` reads
+        // `descriptors` there. Clearing it from the caller's thread raced a
+        // callback that had already been enqueued: a torn read at best, a
+        // frame delivered after stop() returned at worst.
+        queue.sync {
+            let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
+            for desc in descriptors {
+                if let uuid = callbackUUIDs[ObjectIdentifier(desc)], desc.responds(to: unregSel) {
+                    desc.perform(unregSel, with: uuid)
+                }
             }
+            descriptors.removeAll()
+            callbackUUIDs.removeAll()
+            ioClient = nil
         }
-        descriptors.removeAll()
-        callbackUUIDs.removeAll()
-        ioClient = nil
     }
 
     private func register(on desc: NSObject) throws {
@@ -143,6 +160,11 @@ public final class SimulatorFramebuffer: FrameSource {
     }
 
     private func captureLatest() {
+        stateLock.lock()
+        let done = stopped
+        stateLock.unlock()
+        guard !done else { return }
+
         let surfSel = NSSelectorFromString("framebufferSurface")
         var best: IOSurface?
         var bestArea = 0

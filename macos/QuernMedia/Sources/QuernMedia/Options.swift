@@ -67,7 +67,14 @@ public enum OptionsParser {
                 guard i + 1 < args.count else { throw OptionsError.missingValue(arg) }
                 let next = args[i + 1]
                 // A flag where a value belongs is a typo, not an empty value.
-                guard !next.hasPrefix("--") else { throw OptionsError.missingValue(arg) }
+                // Checked by membership and not by a "--" prefix: `-h` is a
+                // recognised flag that the prefix test waves through, so
+                // `--record -h` stored "-h" as the output path and help was
+                // never reached.
+                guard !valueFlags.contains(next), !boolFlags.contains(next),
+                      !next.hasPrefix("--") else {
+                    throw OptionsError.missingValue(arg)
+                }
                 values[arg] = next
                 i += 2
             } else if boolFlags.contains(arg) {
@@ -107,6 +114,14 @@ public enum OptionsParser {
             servePort = parsed
         }
 
+        // Bounded here as well as clamped in the encoder: argv is where a
+        // value like 1e308 comes from, and the parser can say which flag was
+        // wrong while the encoder can only defend itself.
+        let fps: Double = try number("--fps", default: 15.0)
+        guard fps.isFinite, fps > 0, fps <= 240 else {
+            throw OptionsError.badValue(flag: "--fps", value: values["--fps"] ?? "\(fps)")
+        }
+
         let record = values["--record"]
         let options = Options(
             source: source,
@@ -116,7 +131,7 @@ public enum OptionsParser {
             servePort: servePort,
             bindAll: flags.contains("--bind-all"),
             recordPath: record,
-            fps: try number("--fps", default: 15.0),
+            fps: fps,
             maxDimension: try number("--max-dim", default: 900),
             quality: try number("--quality", default: 0.6),
             bitrate: try number("--bitrate", default: 2_000_000)

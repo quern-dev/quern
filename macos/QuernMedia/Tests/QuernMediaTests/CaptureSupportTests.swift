@@ -40,49 +40,75 @@ private var hasSimulatorFrameworks: Bool {
     ) && PrivateFrameworks.hasSimulatorKit(at: PrivateFrameworks.developerDir())
 }
 
-@Test(
-    "the private-framework path still enumerates simulators",
-    .enabled(if: hasSimulatorFrameworks)
-)
-func enumerationActuallyWorks() {
-    // The early-warning test for the riskiest part of this package: everything
-    // in PrivateFrameworks is unsupported API reached by dlopen and selector
-    // name, and a toolchain update is what breaks it.
-    //
-    // It has to assert enumeration *succeeds*. An earlier version asserted
-    // only that an unknown udid resolves to nil -- which is true both when the
-    // frameworks work and when they fail to load entirely, so it passed while
-    // testing nothing and still paid the full CoreSimulator cost.
-    //
-    // Any machine with Xcode installed has simulator device types, so an empty
-    // list here means the private path is broken rather than that the machine
-    // is bare.
-    let devices = MediaLog.silenced { PrivateFrameworks.availableDevices() }
-    #expect(!devices.isEmpty,
-            "SimServiceContext returned no devices — the private API path is broken")
 
-    // And with enumeration known good, nil for an unknown udid means what it
-    // is supposed to mean.
-    let missing = MediaLog.silenced {
-        PrivateFrameworks.resolveDevice(udid: "00000000-0000-0000-0000-000000000000")
+/// Everything that swaps `MediaLog.handler`, in one serialized suite.
+///
+/// Swift Testing runs tests concurrently by default, and a scoped override is
+/// save-replace-restore: interleaved, two of them restore each other's saved
+/// value and the one that saved `nil` wins, which silences logging for the
+/// rest of the run and loses a captured message here.
+@Suite(.serialized)
+struct LogHandlerTests {
+    /// Collects lines from a handler that Swift 6 requires to be Sendable.
+    private final class Captured: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
     }
-    #expect(missing == nil)
-}
 
-@Test("starting a framebuffer for an unknown udid reports device-not-found")
-func framebufferRejectsUnknownDevice() {
-    let source = SimulatorFramebuffer(udid: "not-a-real-udid") { _ in }
-    MediaLog.silenced {
-        #expect(throws: SimulatorFramebufferError.self) { try source.start() }
+    @Test(
+        "the private-framework path still enumerates simulators",
+        .enabled(if: hasSimulatorFrameworks)
+    )
+    func enumerationActuallyWorks() {
+        // The early-warning test for the riskiest part of this package: everything
+        // in PrivateFrameworks is unsupported API reached by dlopen and selector
+        // name, and a toolchain update is what breaks it.
+        //
+        // It has to assert enumeration *succeeds*. An earlier version asserted
+        // only that an unknown udid resolves to nil -- which is true both when the
+        // frameworks work and when they fail to load entirely, so it passed while
+        // testing nothing and still paid the full CoreSimulator cost.
+        //
+        // Any machine with Xcode installed has simulator device types, so an empty
+        // list here means the private path is broken rather than that the machine
+        // is bare.
+        let devices = MediaLog.silenced { PrivateFrameworks.availableDevices() }
+        #expect(!devices.isEmpty,
+                "SimServiceContext returned no devices — the private API path is broken")
+
+        // And with enumeration known good, nil for an unknown udid means what it
+        // is supposed to mean.
+        let missing = MediaLog.silenced {
+            PrivateFrameworks.resolveDevice(udid: "00000000-0000-0000-0000-000000000000")
+        }
+        #expect(missing == nil)
     }
-}
 
-@Test("the log handler can be replaced and restored")
-func logHandlerIsSwappable() {
-    var captured: [String] = []
-    let previous = MediaLog.handler
-    MediaLog.handler = { captured.append($0) }
-    MediaLog.log("hello")
-    MediaLog.handler = previous
-    #expect(captured == ["hello"])
+    @Test("starting a framebuffer for an unknown udid reports device-not-found")
+    func framebufferRejectsUnknownDevice() {
+        let source = SimulatorFramebuffer(udid: "not-a-real-udid") { _ in }
+        MediaLog.silenced {
+            #expect(throws: SimulatorFramebufferError.self) { try source.start() }
+        }
+    }
+
+    @Test("the log handler can be replaced and restored")
+    func logHandlerIsSwappable() {
+        let captured = Captured()
+        let previous = MediaLog.handler
+        MediaLog.handler = { captured.append($0) }
+        MediaLog.log("hello")
+        MediaLog.handler = previous
+        #expect(captured.all == ["hello"])
+        #expect(MediaLog.handler != nil, "the previous handler was not restored")
+    }
+
+    @Test("a silenced scope restores the handler it found")
+    func silencedRestores() {
+        let previous = MediaLog.handler
+        MediaLog.silenced { #expect(MediaLog.handler == nil) }
+        #expect((MediaLog.handler == nil) == (previous == nil))
+    }
 }

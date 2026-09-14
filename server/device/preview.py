@@ -480,7 +480,12 @@ class PreviewManager:
             # here: nothing else notices, and it keeps encoding frames for a
             # viewer that has gone.
             if name in self._streams:
-                asyncio.create_task(self._stop_stream(name))
+                task = asyncio.create_task(self._stop_stream(name))
+                # Nothing awaits this. Without a callback an exception inside
+                # it surfaces only as "Task exception was never retrieved" at
+                # collection time -- a line that names neither the stream nor
+                # the cause.
+                task.add_done_callback(self._report_teardown_failure)
 
         elif evt_type == "devices":
             devices = event.get("devices", [])
@@ -612,7 +617,7 @@ class PreviewManager:
             return self._active[udid]
 
         # Off the event loop: a cold build is several seconds.
-        binary = await asyncio.to_thread(build_media_engine)
+        binary = await build_media_engine()
 
         async with self._stagger_lock:
             position = self._next_position()
@@ -724,6 +729,15 @@ class PreviewManager:
             f"quern-media did not serve {udid[:8]} on port {stream.port} "
             f"within {STREAM_START_TIMEOUT}s"
         )
+
+    @staticmethod
+    def _report_teardown_failure(task: asyncio.Task) -> None:
+        """Retrieve and log the result of a teardown nobody is awaiting."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Stopping a preview stream failed", exc_info=error)
 
     async def _stop_stream(self, key: str) -> None:
         """Stop the quern-media behind a preview, if there is one."""

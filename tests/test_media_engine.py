@@ -71,7 +71,7 @@ class TestFreshness:
             patch.object(media_engine, "binary_path", return_value=installed),
             patch("subprocess.run") as run,
         ):
-            assert media_engine.build_media_engine() == installed
+            assert media_engine.build_media_engine_sync() == installed
             run.assert_not_called()
 
     def test_rebuilds_when_a_source_is_newer(self, package: Path, tmp_path: Path) -> None:
@@ -96,10 +96,15 @@ class TestFreshness:
             patch.object(media_engine, "_PACKAGE_CANDIDATES", [package]),
             patch.object(media_engine, "binary_path", return_value=installed),
             patch.object(media_engine, "QUERN_BIN_DIR", installed.parent),
+            # build_media_engine_sync still runs SCRATCH_DIR.mkdir, and
+            # unpatched that is CONFIG_DIR/build/QuernMedia -- a real path
+            # outside tmp_path, which the test would create on the developer's
+            # machine and fail on wherever it is not writable.
+            patch.object(media_engine, "SCRATCH_DIR", tmp_path / "scratch"),
             patch("shutil.which", return_value="/usr/bin/swift"),
             patch("subprocess.run", side_effect=fake_run),
         ):
-            media_engine.build_media_engine()
+            media_engine.build_media_engine_sync()
         assert installed.read_text() == "fresh"
 
 
@@ -121,10 +126,15 @@ class TestBuildInvocation:
             patch.object(media_engine, "_PACKAGE_CANDIDATES", [package]),
             patch.object(media_engine, "binary_path", return_value=installed),
             patch.object(media_engine, "QUERN_BIN_DIR", installed.parent),
+            # build_media_engine_sync still runs SCRATCH_DIR.mkdir, and
+            # unpatched that is CONFIG_DIR/build/QuernMedia -- a real path
+            # outside tmp_path, which the test would create on the developer's
+            # machine and fail on wherever it is not writable.
+            patch.object(media_engine, "SCRATCH_DIR", tmp_path / "scratch"),
             patch("shutil.which", return_value="/usr/bin/swift"),
             patch("subprocess.run", side_effect=fake_run),
         ):
-            return media_engine.build_media_engine(force=True)
+            return media_engine.build_media_engine_sync(force=True)
 
     def test_build_products_go_outside_the_repo(self, package: Path, tmp_path: Path) -> None:
         # SwiftPM writes ~116 MB next to Package.swift by default, and quern's
@@ -154,7 +164,7 @@ class TestFailures:
     def test_missing_sources_are_reported_clearly(self, tmp_path: Path) -> None:
         with patch.object(media_engine, "_PACKAGE_CANDIDATES", [tmp_path / "nope"]):
             with pytest.raises(RuntimeError, match="QuernMedia sources not found"):
-                media_engine.build_media_engine()
+                media_engine.build_media_engine_sync()
 
     def test_missing_toolchain_suggests_the_fix(self, package: Path, tmp_path: Path) -> None:
         with (
@@ -163,7 +173,7 @@ class TestFailures:
             patch("shutil.which", return_value=None),
         ):
             with pytest.raises(RuntimeError, match="xcode-select --install"):
-                media_engine.build_media_engine()
+                media_engine.build_media_engine_sync()
 
     def test_compile_errors_surface_the_compiler_output(
         self, package: Path, tmp_path: Path
@@ -178,7 +188,7 @@ class TestFailures:
             patch("subprocess.run", side_effect=fake_run),
         ):
             with pytest.raises(RuntimeError, match="no such module"):
-                media_engine.build_media_engine()
+                media_engine.build_media_engine_sync()
 
     def test_timeout_names_the_toolchain_check(self, package: Path, tmp_path: Path) -> None:
         with (
@@ -188,7 +198,7 @@ class TestFailures:
             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("swift", 180)),
         ):
             with pytest.raises(RuntimeError, match="xcode-select -p"):
-                media_engine.build_media_engine()
+                media_engine.build_media_engine_sync()
 
     def test_a_successful_build_with_no_binary_is_an_error(
         self, package: Path, tmp_path: Path
@@ -211,4 +221,32 @@ class TestFailures:
             patch("subprocess.run", side_effect=fake_run),
         ):
             with pytest.raises(RuntimeError, match="is missing"):
-                media_engine.build_media_engine()
+                media_engine.build_media_engine_sync()
+
+
+class TestAsyncBuildWrapper:
+    def test_the_build_does_not_run_on_the_event_loop(self, monkeypatch) -> None:
+        """A cold build takes up to BUILD_TIMEOUT. Called straight from a
+        request path that is three minutes of stalled server, so the wrapper
+        has to hand the blocking half to a thread."""
+        import asyncio
+        import threading
+
+        from server.device import media_engine
+
+        seen: dict = {}
+
+        def fake_sync(force: bool = False):
+            seen["thread"] = threading.current_thread().name
+            seen["force"] = force
+            return Path("/tmp/quern-media")
+
+        monkeypatch.setattr(media_engine, "build_media_engine_sync", fake_sync)
+
+        async def run():
+            seen["loop_thread"] = threading.current_thread().name
+            return await media_engine.build_media_engine(force=True)
+
+        assert asyncio.run(run()) == Path("/tmp/quern-media")
+        assert seen["force"] is True
+        assert seen["thread"] != seen["loop_thread"], "the build blocked the loop"
