@@ -1981,6 +1981,15 @@ def _is_cert_installed(udid: str) -> bool:
         finally:
             loop.close()
     except Exception:
+        # Still fail safe -- setup must not crash because a cert check did --
+        # but not silently. This swallowed a TypeError from a stale call
+        # signature, so a wrong argument reported "no cert installed" and setup
+        # cheerfully offered to reinstall one that was already there.
+        import logging
+
+        logging.getLogger("quern-debug-server.setup").warning(
+            "Could not check the CA on %s", udid, exc_info=True,
+        )
         return False
 
 

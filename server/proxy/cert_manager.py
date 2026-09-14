@@ -1,11 +1,16 @@
 """Certificate installation and verification for iOS simulators and Android devices.
 
-Hybrid verification approach:
-- Fast path: Check persistent cert-state.json cache (recent verification < 1 hour)
-- Slow path: Query simulator's TrustStore.sqlite3 via SQLite (iOS) or check system
-  cert store via adb (Android)
-- Always update cache after verification
-- Detects device erasure (cert was installed, now missing)
+Verification always asks the device:
+- iOS simulators: query the TrustStore.sqlite3 via SQLite
+- Android: check the system cert store via adb
+- The result is written to cert-state.json, and the previous record is read only
+  to notice a device that *had* the cert and no longer does (a probable erase)
+
+There was an hour-long cache in front of this, with a `verify` flag to skip it.
+Both are gone -- see ADR 1 in docs/proposals/cert-trust-model.md. It saved a
+0.11 ms SQLite query out of a ~9 ms call, Android returned above it and so could
+never use it, and the hour it held an answer for was an hour in which an erase
+went unnoticed.
 
 Android cert installation:
 - Rootable emulators (Google APIs / dev-keys): Automated system cert injection
@@ -29,7 +34,6 @@ from server.proxy.cert_state import read_cert_state_for_device, update_cert_stat
 
 logger = logging.getLogger(__name__)
 
-# Cache TTL: 1 hour (3600 seconds)
 
 
 def get_cert_path() -> Path:

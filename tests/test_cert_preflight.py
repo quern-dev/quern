@@ -57,7 +57,7 @@ def _trust(answers):
     that after an hour and re-checks the TrustStore. A test pinned to the file
     could not tell the two apart, which is why an erased simulator passed.
     """
-    async def fake(_controller, udid, verify=False, *, device_name=None):
+    async def fake(_controller, udid, *, device_name=None):
         return answers.get(udid, False)
 
     return patch("server.proxy.cert_manager.is_cert_installed", side_effect=fake)
@@ -365,7 +365,7 @@ class TestOneUncheckableDeviceDoesNotUnRefuseTheRest:
         )
 
     def _trust_raising_on(self, exploding_udid, answers):
-        async def fake(_controller, udid, verify=False, *, device_name=None):
+        async def fake(_controller, udid, *, device_name=None):
             if udid == exploding_udid:
                 raise OSError("TrustStore unreadable")
             return answers.get(udid, False)

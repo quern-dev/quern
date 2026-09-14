@@ -106,13 +106,13 @@ class TestCertInstallationIntegration:
         """Test full cycle: check → install → verify → check again."""
         # Step 1: Check current state (don't verify via SQLite, use cache)
         initial_state = await cert_manager.is_cert_installed(
-            controller, booted_simulator, verify=False
+            controller, booted_simulator
         )
         print(f"\nInitial cert state (cached): {initial_state}")
 
         # Step 2: Force SQLite verification
         verified_state = await cert_manager.is_cert_installed(
-            controller, booted_simulator, verify=True
+            controller, booted_simulator
         )
         print(f"Verified cert state (SQLite): {verified_state}")
 
@@ -122,13 +122,13 @@ class TestCertInstallationIntegration:
 
         # Step 4: Verify it's now installed
         final_state = await cert_manager.is_cert_installed(
-            controller, booted_simulator, verify=True
+            controller, booted_simulator
         )
         assert final_state is True, "Cert should be installed after install_cert()"
 
         # Step 5: Get full device cert state
         device_state = await cert_manager.get_device_cert_state(
-            controller, booted_simulator, verify=True
+            controller, booted_simulator
         )
         assert device_state.cert_installed is True
         assert device_state.fingerprint is not None
@@ -161,38 +161,9 @@ class TestCertInstallationIntegration:
 
         # Verify it's still installed after force reinstall
         is_installed = await cert_manager.is_cert_installed(
-            controller, booted_simulator, verify=True
+            controller, booted_simulator
         )
         assert is_installed is True
-
-    @pytest.mark.asyncio
-    async def test_cache_ttl_behavior(self, controller, booted_simulator):
-        """Test that cache is used within TTL window."""
-        from unittest.mock import patch
-
-        from server.lifecycle.state import STATE_FILE, write_state
-
-        # Ensure state.json exists so update_state can persist the cache
-        if not STATE_FILE.exists():
-            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            write_state({})
-
-        # Force a verification to populate the cache
-        await cert_manager.is_cert_installed(controller, booted_simulator, verify=True)
-
-        # Now check without verification (should hit cache)
-        # Mock the verify_cert_in_truststore to raise if called
-        with patch("server.proxy.cert_manager.verify_cert_in_truststore") as mock_verify:
-            mock_verify.side_effect = AssertionError("Should not call SQLite!")
-
-            # This should NOT call SQLite (cache hit)
-            result = await cert_manager.is_cert_installed(
-                controller, booted_simulator, verify=False
-            )
-
-            # Should return a result without calling SQLite
-            assert isinstance(result, bool)
-            mock_verify.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_multiple_devices(self, controller):
@@ -206,7 +177,7 @@ class TestCertInstallationIntegration:
         # Verify cert on all booted devices
         results = []
         for device in booted_devices[:2]:  # Test with first 2
-            state = await cert_manager.get_device_cert_state(controller, device.udid, verify=True)
+            state = await cert_manager.get_device_cert_state(controller, device.udid)
             results.append((device.name, state.cert_installed))
 
         print(f"\nMulti-device cert status: {results}")
@@ -234,7 +205,7 @@ class TestCertManagerErrorHandling:
 
         with patch("server.proxy.cert_manager.get_cert_path", return_value=nonexistent_cert):
             result = await cert_manager.is_cert_installed(
-                controller, booted_simulator, verify=False
+                controller, booted_simulator
             )
             assert result is False
 

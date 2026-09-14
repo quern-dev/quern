@@ -273,10 +273,35 @@ class TestIsCertInstalled:
                         mock_controller, "test-udid"
                     )
 
-        mock_verify.assert_called_once(), "a record was believed instead of the device"
+        assert mock_verify.called, "a record was believed instead of the device"
         assert result is False, (
             "a device erased since the record was written reported as trusting"
         )
+
+    @pytest.mark.asyncio
+    async def test_the_truststore_is_asked_about_the_current_ca(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        """Which CA is being asked about is now the only identity mechanism left.
+
+        ADR 1 closes #151 by deleting the cache rather than teaching it to
+        compare fingerprints -- so the comparison inside
+        `verify_cert_in_truststore` is what stops a device that trusts an *old*
+        CA reporting as trusting the current one. Nothing pinned it: passing a
+        constant instead of the real fingerprint left the whole suite green.
+        """
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch(
+                "server.proxy.cert_manager.get_cert_fingerprint",
+                return_value="current-ca-fingerprint",
+            ):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ) as mock_verify:
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        mock_verify.assert_called_once_with("test-udid", "current-ca-fingerprint")
 
     @pytest.mark.asyncio
     async def test_the_device_is_what_decides(

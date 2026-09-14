@@ -749,33 +749,43 @@ question in §6.2 as originally written, and narrows #151.
 
 #### Context
 
-`is_cert_installed` keeps an hour-long cache of each device's trust, and #151
-records a defect in it: the cache branch computes `expected_fingerprint` and
-never compares it to the recorded one, so regenerating the CA leaves every
-device reporting trusted — for the old CA — until the TTL expires.
+`is_cert_installed` kept an hour-long cache of each device's trust. **That hour
+is a window in which an erased simulator reports as trusting the CA**, which is
+the failure in §0: capture silently fails, and the symptom points at the app.
+A field report lost an hour to it, and a live test here reproduced it three
+minutes after `simctl erase`.
 
-The migration in §4.5 had this as phase 2, "fingerprint-aware cache
-invalidation", on the reasoning that simulator verification is cheap and should
-not cache while "Android is an `adb` round trip and genuinely wants one".
+#151 records a second defect in the same branch: it computes
+`expected_fingerprint` and never compares it to the recorded one, so
+regenerating the CA leaves every device reporting trusted — for the old CA —
+until the TTL expires.
 
-#### What measurement showed
+The migration had phase 2 as "fingerprint-aware cache invalidation", which
+would have fixed the second defect and left the first.
 
-That reasoning does not survive contact with the code.
+#### Why the cache is not worth its window
+
+The case for keeping it was latency. It does not survive contact with the code,
+and this is the supporting argument rather than the reason — a cache that made
+erasure invisible would be worth deleting even if it were free.
 
 1. **Android never reaches the cache.** `is_cert_installed` dispatches to
    `_is_cert_installed_android` and returns *before* the cache block. The one
    device kind whose verification is genuinely expensive cannot use it, so the
-   argument for keeping it was about a case that does not exist.
+   stated justification was about a case that does not exist.
 2. **The expensive call happens first regardless.** `get_cert_fingerprint`
-   shells out to `openssl` and runs *above* the cache check. A cache hit still
-   pays it.
-3. **The saving is about 1%.** Measured on this machine:
+   shells out to `openssl` and runs *above* the cache check, so a cache hit
+   pays it anyway.
+3. **The saving is about 1%**, and none of this is on a hot path: nothing polls
+   it. The menu bar's three-second timer reads `state.json` off disk; no
+   background loop touches cert state. These calls happen when an agent or the
+   CLI asks — session start, enabling capture, `doctor`.
 
    | step | cost | |
    |---|---|---|
-   | `get_cert_fingerprint` | **9.13 ms** | runs before the cache check |
+   | `get_cert_fingerprint` | 9.13 ms | runs before the cache check |
    | `read_cert_state_for_device` | 0.08 ms | the cache read itself |
-   | `verify_cert_in_truststore` | **0.11 ms** | what the cache skips |
+   | `verify_cert_in_truststore` | 0.11 ms | what the cache skips |
 
 4. **Nothing calls it.** After #152 and #153 every caller passes `verify=True`,
    including the single pass-through in `get_device_cert_state`. The branch is
@@ -809,6 +819,11 @@ same is true of a correct branch that is easy to reach by accident.
 - **§3.1's `fingerprint` field is unaffected.** A claim still records which CA
   it is about; that is what makes CA regeneration expressible. This removes a
   *time-based* cache, not the identity of the thing being claimed.
+- **The fingerprint comparison inside `verify_cert_in_truststore` is now the
+  only CA-identity mechanism in this path**, and #151 is closed without one
+  being added above it. It is pinned by a test asserting the *current* CA's
+  fingerprint is what gets asked about; before that, passing a constant left
+  the whole suite green.
 - **If speed matters later, cache the fingerprint** — 9 ms, CA-scoped, with no
   per-device staleness to get wrong. That is a different and much smaller
   change, and none of this risk attaches to it.

@@ -33,10 +33,9 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
     leaving that record saying the cert is installed, so the record is exactly
     wrong in the one case this function exists to catch -- reported from the
     field with a record 10.5 hours older than the erase that invalidated it.
-    The hour-long cache inside ``is_cert_installed`` is not good enough either:
-    it merely shrinks the window to an hour, and an erase is most often
-    followed by going straight back to work. The query costs 0.6 ms against a
-    local SQLite file, which is not a latency worth trading truth for.
+    There was an hour-long cache inside ``is_cert_installed``, which merely
+    shrank that window to an hour -- and an erase is most often followed by
+    going straight back to work. It has since been deleted outright (ADR 1).
 
     Never raises. A preflight that fails closed would block capture over its
     own bug, which is worse than the failure it prevents; on any error it

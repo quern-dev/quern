@@ -564,9 +564,9 @@ async def setup_guide(request: Request) -> dict:
             # Verified, not cached. This renders a per-device tick or cross in
             # a setup guide, and a tick against an erased simulator tells
             # someone they are ready when every HTTPS request from that device
-            # will fail. `is_cert_installed` keeps an hour-long cache and falls
-            # through to the TrustStore after that, so this stays cheap without
-            # believing a record indefinitely.
+            # will fail. `is_cert_installed` asks the TrustStore every time --
+            # 0.11 ms against a local SQLite file, so there is nothing to trade
+            # truth for.
             for device in booted_devices:
                 # Simulators verify against their TrustStore; physical devices
                 # cannot, and asking would both answer `false` wrongly and
