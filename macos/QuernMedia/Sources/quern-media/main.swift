@@ -125,17 +125,29 @@ case .device(let match):
 
 // MARK: - lifetime
 
-let shutdownOnce = ShutdownGuard {
+let shutdownOnce = ShutdownGuard { () -> Int32 in
     source.stop()
     server?.stop()
-    if let summary = recording?.finish() {
-        MediaLog.log(String(
-            format: "[record] %d frames over %.2fs, %d dropped -> %@",
-            summary.framesWritten, summary.duration,
-            summary.framesDropped, summary.url.path
-        ))
+
+    var status: Int32 = 0
+    if let recording {
+        if let summary = recording.finish() {
+            MediaLog.log(String(
+                format: "[record] %d frames over %.2fs, %d dropped -> %@",
+                summary.framesWritten, summary.duration,
+                summary.framesDropped, summary.url.path
+            ))
+        } else {
+            // A recording that could not be finalised is an unopenable file,
+            // not a shorter one. Saying nothing and exiting 0 told the caller
+            // it had a recording.
+            let reason = recording.failure.map(String.init(describing:)) ?? "unknown"
+            MediaLog.log("[record] could not finish the recording: \(reason)")
+            status = 1
+        }
     }
     pipeline.invalidate()
+    return status
 }
 
 /// Without this, a recording ended with ^C or `kill` is a file with no moov
@@ -146,31 +158,43 @@ for sig in [SIGINT, SIGTERM] {
     signal(sig, SIG_IGN)
     let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
     src.setEventHandler {
-        shutdownOnce.run()
-        exit(0)
+        // The recording's fate decides the exit code. ^C on a recording that
+        // could not be finalised is a failure, and it used to exit 0.
+        exit(shutdownOnce.run())
     }
     src.resume()
     signalSources.append(src)
 }
 
-/// Runs a closure at most once, however many ways the process can end.
+/// Runs a closure at most once, however many ways the process can end, and
+/// remembers the exit status it produced so every caller sees the same one.
 final class ShutdownGuard {
-    private let body: () -> Void
+    private let body: () -> Int32
     private var done = false
+    private var status: Int32 = 0
     private let lock = NSLock()
 
-    init(_ body: @escaping () -> Void) { self.body = body }
+    init(_ body: @escaping () -> Int32) { self.body = body }
 
-    func run() {
+    @discardableResult
+    func run() -> Int32 {
         lock.lock()
         let already = done
         done = true
+        let previous = status
         lock.unlock()
-        guard !already else { return }
-        body()
+        guard !already else { return previous }
+
+        let result = body()
+        lock.lock()
+        status = result
+        lock.unlock()
+        return result
     }
 }
 
+// Cleanup only. A callback here cannot change a status already being
+// returned, so the signal handlers above are what carry a failure out.
 atexit_b { shutdownOnce.run() }
 
 // A CFRunLoop rather than dispatchMain: CoreMediaIO publishes device changes

@@ -157,3 +157,23 @@ func sensibleFrameRateParses() throws {
     )
     #expect(options.fps == 60)
 }
+
+@Test("a quality outside the documented range is refused", arguments: [
+    "1.5", "-0.1", "nan", "inf", "1e308",
+])
+func qualityOutsideRangeIsRefused(raw: String) {
+    // Documented as 0...1 and passed straight to VTSessionSetProperty, whose
+    // result nothing checks — so out of range was accepted in silence and
+    // simply did not do what was asked.
+    #expect(throws: OptionsError.self) {
+        try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422", "--quality", raw])
+    }
+}
+
+@Test("the documented quality bounds are accepted", arguments: ["0", "0.6", "1"])
+func qualityInRangeIsAccepted(raw: String) throws {
+    let options = try OptionsParser.parse(
+        ["--sim-udid", "X", "--serve", "8422", "--quality", raw]
+    )
+    #expect(options.quality == Double(raw))
+}
