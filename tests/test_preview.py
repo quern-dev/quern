@@ -472,8 +472,8 @@ class TestTeardownFailureReporting:
             async def boom():
                 raise OSError("terminate failed")
 
-            task = asyncio.create_task(boom())
-            task.add_done_callback(mgr._report_teardown_failure)
+            task = asyncio.create_task(boom(), name="stop-stream[SIM]")
+            task.add_done_callback(mgr._report_background_failure)
             with contextlib.suppress(OSError):
                 await task
 
@@ -481,5 +481,5 @@ class TestTeardownFailureReporting:
             asyncio.run(run())
 
         assert any(
-            "Stopping a preview stream failed" in r.message for r in caplog.records
+            "stop-stream[SIM]" in r.getMessage() for r in caplog.records
         ), "the teardown failure was never reported"

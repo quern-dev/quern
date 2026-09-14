@@ -54,6 +54,10 @@ public final class StreamPipeline {
     private var throttle: FrameThrottle
     private var sinks: [FrameSink] = []
     private var pendingKeyframe = false
+    /// Bumped by every request. `consume` releases the lock to encode, so a
+    /// request can arrive while a frame is in flight; comparing the counter
+    /// afterwards is how that request is told apart from the one being served.
+    private var keyframeRequestID: UInt64 = 0
     private let lock = NSLock()
 
     public private(set) var framesOffered = 0
@@ -103,6 +107,7 @@ public final class StreamPipeline {
     public func requestKeyframe() {
         lock.lock()
         pendingKeyframe = true
+        keyframeRequestID &+= 1
         lock.unlock()
     }
 
@@ -123,6 +128,7 @@ public final class StreamPipeline {
         }
         let due = throttle.shouldEncode(at: CMTimeGetSeconds(frame.time))
         let wantKey = pendingKeyframe
+        let servingRequest = keyframeRequestID
         lock.unlock()
         guard due else { return }
 
@@ -135,7 +141,15 @@ public final class StreamPipeline {
         // asked for. Clearing on request meant an encode that returned nil
         // swallowed the request, and the viewer that triggered it decoded
         // nothing until the next periodic IDR.
-        if wantKey, payload.isKeyframe { pendingKeyframe = false }
+        //
+        // And only for the request being served. A viewer attaching while
+        // this frame was encoding raised a new one, and that viewer is not in
+        // the `interested` list this payload goes to -- so clearing on the
+        // stale flag alone dropped a request whose keyframe was never sent
+        // to the client that asked for it.
+        if wantKey, payload.isKeyframe, keyframeRequestID == servingRequest {
+            pendingKeyframe = false
+        }
         lock.unlock()
 
         for sink in interested { sink.receive(payload) }

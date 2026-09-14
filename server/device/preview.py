@@ -298,7 +298,10 @@ class PreviewManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        self._reader_task = asyncio.create_task(self._stdout_reader())
+        self._reader_task = asyncio.create_task(
+            self._stdout_reader(), name="preview-stdout-reader"
+        )
+        self._reader_task.add_done_callback(self._report_background_failure)
 
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=15.0)
@@ -480,12 +483,10 @@ class PreviewManager:
             # here: nothing else notices, and it keeps encoding frames for a
             # viewer that has gone.
             if name in self._streams:
-                task = asyncio.create_task(self._stop_stream(name))
-                # Nothing awaits this. Without a callback an exception inside
-                # it surfaces only as "Task exception was never retrieved" at
-                # collection time -- a line that names neither the stream nor
-                # the cause.
-                task.add_done_callback(self._report_teardown_failure)
+                task = asyncio.create_task(
+                    self._stop_stream(name), name=f"stop-stream[{name}]"
+                )
+                task.add_done_callback(self._report_background_failure)
 
         elif evt_type == "devices":
             devices = event.get("devices", [])
@@ -679,7 +680,12 @@ class PreviewManager:
         stream = _StreamProcess(process=process, port=port, log=deque(maxlen=20))
         # Drained rather than left to fill: a preview runs for as long as
         # someone watches it, and an unread pipe eventually blocks the writer.
-        stream.drain = asyncio.create_task(self._drain_stream(udid, stream))
+        stream.drain = asyncio.create_task(
+            self._drain_stream(udid, stream), name=f"stream-drain[{udid}]"
+        )
+        # `_stop_stream` only awaits this task if it is still running, so a
+        # drain that died on its own would never have its exception read.
+        stream.drain.add_done_callback(self._report_background_failure)
         self._streams[udid] = stream
         return stream
 
@@ -731,13 +737,18 @@ class PreviewManager:
         )
 
     @staticmethod
-    def _report_teardown_failure(task: asyncio.Task) -> None:
-        """Retrieve and log the result of a teardown nobody is awaiting."""
+    def _report_background_failure(task: asyncio.Task) -> None:
+        """Retrieve and log the result of a task nobody awaits.
+
+        Without this an exception surfaces only as "Task exception was never
+        retrieved" when the task is collected -- a line that names neither the
+        task nor the cause, and arrives whenever the collector gets to it.
+        """
         if task.cancelled():
             return
         error = task.exception()
         if error is not None:
-            logger.error("Stopping a preview stream failed", exc_info=error)
+            logger.error("Background task %s failed", task.get_name(), exc_info=error)
 
     async def _stop_stream(self, key: str) -> None:
         """Stop the quern-media behind a preview, if there is one."""
