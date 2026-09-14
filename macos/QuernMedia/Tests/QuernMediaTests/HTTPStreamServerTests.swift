@@ -72,7 +72,7 @@ func servesIndex() async throws {
     try server.start()
     defer { server.stop() }
 
-    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 3)
+    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 20)
     let text = String(decoding: page, as: UTF8.self)
     #expect(text.contains("<img src=\"/stream\">"), "got: \(text.prefix(120))")
 }
@@ -112,7 +112,7 @@ func streamsMJPEGEndToEnd() async throws {
     }
     defer { feeder.cancel() }
 
-    let received = await rawGet(path: "/stream", port: port, limit: 40_000, timeout: 6)
+    let received = await rawGet(path: "/stream", port: port, limit: 40_000, timeout: 30)
     feeder.cancel()
 
     let text = String(decoding: received.prefix(200), as: UTF8.self)
@@ -162,6 +162,6 @@ func startMeansListening() async throws {
     // passes just as happily against the bug.
     #expect(server.isListening, "start() returned before the listener was ready")
 
-    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 3)
+    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 20)
     #expect(!page.isEmpty, "start() returned before the listener was accepting")
 }

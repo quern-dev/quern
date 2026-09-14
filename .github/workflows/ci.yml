@@ -192,7 +192,13 @@ jobs:
         # Runners are VMs and may not expose the media engine. VideoToolbox
         # falls back to software encoding there, which the suite tolerates --
         # verified by running it with hardware acceleration disabled.
-        run: swift test
+        #
+        # Serially, though. Software encoding is far slower than hardware, and
+        # running the whole suite at once on a 3-core VM put every real-time
+        # test in contention with every other: AVAssetWriter missed a 10s
+        # finish and the HTTP tests read nothing inside their read window,
+        # while the same suite passed in 0.3s on a developer machine.
+        run: swift test --no-parallel
 
   mcp-build:
     runs-on: ubuntu-latest
