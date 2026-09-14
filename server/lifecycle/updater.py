@@ -665,13 +665,20 @@ def _refresh_update_check() -> None:
     keep serving the pre-update answer -- which is the reported bug, a menu bar
     offering an update that had already been applied.
 
-    A real check, forced, for two reasons. `rc == 2` does not mean "at the
-    channel tip": `_update_via_git` also returns it when you are on a feature
-    branch *and the release branch is ahead*, where it prints "switch and
-    rerun". Writing `update_available: false` there would hide a real update --
-    worse than the stale cache, because the stale one at least erred towards
-    offering. And `_check_via_quern_dev` omits `channel=`, so its answer is a
-    stable answer even on beta.
+    A real check, forced, because `rc == 2` does not mean "at the channel tip":
+    `_update_via_git` also returns it when you are on a feature branch *and the
+    release branch is ahead*, where it prints "switch and rerun". Writing
+    `update_available: false` there would hide a real update -- worse than the
+    stale cache, which at least erred towards offering.
+
+    If the check does not produce an answer -- offline, endpoint down -- the
+    rate-limit stamp is put back. `check_for_updates` touches it *before* the
+    network call so failures do not retry rapidly, which is right for the
+    automatic check and wrong here: a refresh that failed would leave the stale
+    record in place *and* a fresh stamp suppressing the automatic check that
+    would have corrected it. Before this function existed, `quern update` never
+    touched that stamp, so silently extending the stale window from an hour to
+    a day would be this change making the reported bug worse.
 
     Forced also skips the opt-out, deliberately and consistently with
     `check-updates`: the user ran an update command, which is an explicit
@@ -684,9 +691,32 @@ def _refresh_update_check() -> None:
     neutral state.
     """
     try:
-        from server.lifecycle.update_check import check_for_updates
+        from server.lifecycle.update_check import (
+            LAST_CHECK_FILE,
+            UPDATE_INFO_FILE,
+            check_for_updates,
+        )
+
+        def _mtime(path):
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return None
+
+        stamp_before = _mtime(LAST_CHECK_FILE)
+        record_before = _mtime(UPDATE_INFO_FILE)
 
         check_for_updates(force=True)
+
+        # The record not moving means no answer was obtained. Put the stamp
+        # back rather than let a failed refresh buy 24 hours of silence.
+        if _mtime(UPDATE_INFO_FILE) == record_before:
+            if stamp_before is None:
+                LAST_CHECK_FILE.unlink(missing_ok=True)
+            else:
+                import os
+
+                os.utime(LAST_CHECK_FILE, (stamp_before, stamp_before))
     except Exception:
         import logging
 
@@ -739,6 +769,12 @@ def run_update(apply_tools: bool = False) -> int:
         _write_result(NO_OP, "already up to date", version=_installed_version())
         return 0
 
+    # The pull or swap succeeded, so the installed version has changed and the
+    # cached answer is about the old one. Refresh here rather than at the exits
+    # below: a failed rebuild or a failed tool upgrade still leaves the source
+    # moved, and `_write_result` on those paths already reports the new version.
+    _refresh_update_check()
+
     failures = _rebuild_and_restart(project_root)
 
     # External tools live outside the project and do not depend on the rebuild
@@ -764,6 +800,5 @@ def run_update(apply_tools: bool = False) -> int:
                       version=_installed_version())
         return 1
 
-    _refresh_update_check()
     _write_result(UPDATED, "update applied", version=_installed_version())
     return 0
