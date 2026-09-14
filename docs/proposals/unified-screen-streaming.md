@@ -139,6 +139,86 @@ over USB, and bitrate turns out to be a dial rather than an outcome.
 A Pixel is close to AOSP. A Samsung or Xiaomi would be the real test of
 vendor divergence, and has not been done.
 
+## Where the work actually happens
+
+Measured on an M4 with `tools/encode-bench.swift`, 60 frames per path,
+CPU time via `getrusage` against wall time. The ratio is the whole point:
+a path that is 100% CPU is doing the work on the cores, one at 20% is
+handing it to fixed-function silicon.
+
+Full-resolution 1206x2622 simulator frame:
+
+| path | wall | CPU | CPU/wall | size |
+|---|---|---|---|---|
+| ImageIO JPEG → 900px (**what the spike does now**) | 4.96 ms | 4.91 ms | **99%** | 44 KB |
+| VideoToolbox H.264, full res | 7.02 ms | **0.48 ms** | 7% | 7 KB |
+
+Like-for-like at 414x900, so both paths touch the same pixels:
+
+| path | wall | CPU | CPU/wall | size |
+|---|---|---|---|---|
+| ImageIO JPEG | 0.99 ms | 0.99 ms | **100%** | 44 KB |
+| VideoToolbox JPEG | 0.66 ms | **0.15 ms** | 23% | 51 KB |
+| VideoToolbox H.264 | 1.58 ms | **0.26 ms** | 16% | 1 KB |
+
+So: **nothing in the current encode path is offloaded.** ImageIO JPEG is
+100% CPU, and that is the 9-20% per stream measured earlier.
+
+The relevant silicon is not the GPU. `ioreg` on this machine shows
+`AppleAVE2Driver` (H.264/HEVC encoder), `AppleAVD` (decoder) and
+`AppleJPEGDriver` — fixed-function media blocks, separate from the GPU
+cores. VideoToolbox drives them. Metal or any GPU-compute path would be
+slower and less power-efficient than dedicated encoder silicon.
+
+The GPU *is* already doing one job: the local simulator window sets
+`layer.contents` to the IOSurface, so WindowServer composites it with no
+copy and no encode. That path is free and does not need changing.
+
+### Two offload options, in order of cost
+
+1. **VideoToolbox JPEG, as a drop-in.** Same MJPEG bytes on the wire, same
+   `<img>` on the client, nothing else changes — and CPU drops ~6.6x
+   (0.99 → 0.15 ms/frame). Note `UsingHardwareAcceleratedVideoEncoder`
+   reports **false** for the JPEG codec, yet CPU is 23% of wall, so the
+   work is clearly leaving the cores regardless of what the flag claims.
+   Do not trust that property for JPEG; measure instead.
+
+2. **VideoToolbox H.264 for the farm.** 0.48 ms CPU per full-res frame is
+   ~1.4% of one core at 30 fps, so 18 streams is roughly a quarter of a
+   core against ~2.6 cores for the current path. It also solves the
+   keyframe problem for the two iOS sources, which Android cannot:
+   `kVTEncodeFrameOptionKey_ForceKeyFrame` mints an IDR on demand, so a
+   late-joining viewer needs no process restart.
+
+H.264 has *higher wall time* than JPEG while using a tenth of the CPU.
+That is pipeline latency in the media engine, not slowness, and it does
+not limit throughput — the cores are free during it, and concurrent
+streams overlap.
+
+### Still CPU, still worth moving
+
+- **Downscaling** is `CGContext.draw`, on the cores. Either hand it to
+  `VTPixelTransferSession` or let the encoder output the target size and
+  skip the separate scale entirely.
+- **Physical iOS does a pointless round trip.** The device encodes H.264
+  in hardware, macOS decodes it in hardware, and we then software-encode
+  JPEG. Re-encoding with VideoToolbox keeps it on the media engine;
+  passthrough of the device's own H.264, if the DAL interface allows it,
+  would skip both conversions. Not investigated.
+
+### MLX and v4l — neither applies
+
+MLX is an array/ML framework over Metal. It has no capture or codec
+functionality, and routing video encode through GPU compute would be
+worse than the fixed-function blocks that already exist, on both speed
+and power.
+
+v4l2 is a *Linux kernel* capture API with no macOS equivalent. It shows
+up in this project only because scrcpy's `--v4l2-sink` is Linux-only,
+which is part of why Android previews cannot be reparented on macOS
+(#127). There is nothing to port: AVFoundation and CoreMediaIO are the
+macOS equivalents, and we are already on them.
+
 ## Not investigated
 
 - Whether a hand-written remuxer hits acceptable latency (expected, not measured).
