@@ -131,7 +131,12 @@ public final class Recorder {
     /// it is an unopenable file. Anything that ends the process — including a
     /// signal — must get here first.
     @discardableResult
-    public func finish(timeout: TimeInterval = 10) -> Summary? {
+    /// - Parameter timeout: how long to wait for `finishWriting`. A liveness
+    ///   guard against a wedged writer, not a performance assertion -- so it
+    ///   is generous. Software VideoToolbox on a loaded CI runner took longer
+    ///   than the 10s this used to allow, and the recording was sound; only
+    ///   the deadline was wrong.
+    public func finish(timeout: TimeInterval = 60) -> Summary? {
         lock.lock()
         guard started, !finished else {
             finished = true
