@@ -57,6 +57,40 @@ generalising `EncodedFrameSource` beyond H.264. Do not paper over it by
 decoding JPEGs back to surfaces just to fit: that throws away the only
 advantage of an already-encoded source.
 
+### Proven over wifi
+
+Tested on an iPhone 15 Pro attached by **wifi only** — `usbmux list` reported
+it as `Network` while a second iPhone was the only device on the USB bus.
+
+```
+WDA /status  [fd42:f516:7d1d::1]:8100  -> 200, WebDriverAgent 11.4.0
+WDA MJPEG    [fd42:f516:7d1d::1]:9100  -> 47 frames / ~5s, 1178x2556, ~9.4 fps
+```
+
+Both control and video, with no cable. CoreMediaIO cannot do either for
+this device.
+
+**The tunnel came from `devicectl`, not `tunneld`.** This is the part quern
+is missing. tunneld held no tunnel for the device at any point; the address
+came from:
+
+```
+xcrun devicectl device info details --device <hw-udid>
+  • tunnelIPAddress: fd42:f516:7d1d::1
+```
+
+There are two independent RemoteXPC tunnel providers, and
+`server/device/wda_client.py` only consults tunneld — it tries the tunneld
+address, finds nothing for a wifi device, and falls through to a usbmux
+forward that cannot work without a cable. Reading `tunnelIPAddress` from
+devicectl as a fallback appears to be the whole gap.
+
+One prerequisite: the device must be discoverable to usbmux over the
+network. Before that was enabled, `pymobiledevice3 developer dvt xcuitest`
+failed with "usbmux has no device matching udid", because the launcher
+resolves devices through usbmux. Afterwards it started WDA over wifi
+normally.
+
 ## Android — adb screenrecord, or our own encoder
 
 See `docs/proposals/unified-screen-streaming.md` on the spike branch.
