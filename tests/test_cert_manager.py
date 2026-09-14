@@ -470,3 +470,293 @@ class TestGetDeviceCertState:
 
         assert state.cert_installed is False
         assert state.fingerprint is None
+
+
+class TestVerificationDoesNotClobberTheRecord:
+    """A read-shaped call was erasing fields it had no opinion about.
+
+    `is_cert_installed` rebuilt the entry from the four things it had just
+    learned and wrote that over the whole record, and `update_cert_state`
+    replaced rather than merged. So every verification erased `installed_at`
+    and `wifi_proxy_configs`.
+
+    Found by running the real thing: after an auto-install and an erase on a
+    live simulator, `installed_at` read `None` — the field the erase path's own
+    docstring claims is "what tells a later reader it *had* the CA".
+    """
+
+    @pytest.mark.asyncio
+    async def test_installed_at_survives_a_verification(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "iPhone 16 Pro", "cert_installed": True,
+            "fingerprint": "abc123",
+            "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        after = read_cert_state_for_device("test-udid")
+        assert after["installed_at"] == "2026-09-14T09:00:00+00:00", (
+            "verification erased when the CA was installed"
+        )
+        # Absence of damage is not the whole claim. Without this, a
+        # verification that writes *nothing at all* passes -- and it did:
+        # `if is_installed: return True` above the write left the full suite
+        # green.
+        assert after["verified_at"] != "2026-09-14T09:00:00+00:00"
+        assert after["verified_at"].startswith("20"), after["verified_at"]
+        assert after["cert_installed"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_phones_proxy_config_survives_a_verification(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        """`wifi_proxy_configs` holds the recorded proxy host and `client_ip`.
+
+        It is what `_verify_physical_device` reads to find that device's
+        traffic at all, so losing it makes a phone unverifiable.
+        """
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "iPhone 11", "cert_installed": True,
+            "wifi_proxy_configs": {"MonaLisaOverdrive": {
+                "proxy_host": "192.168.1.189", "proxy_port": 9101,
+                "client_ip": "192.168.1.50",
+                "set_at": "2026-09-14T09:00:00+00:00",
+            }},
+        })
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        after = read_cert_state_for_device("test-udid")
+        assert list(after.get("wifi_proxy_configs") or {}) == ["MonaLisaOverdrive"]
+        assert after["wifi_proxy_configs"]["MonaLisaOverdrive"]["client_ip"] == (
+            "192.168.1.50"
+        )
+        assert after.get("verified_at"), "the verification recorded nothing"
+
+    @pytest.mark.asyncio
+    async def test_verification_still_updates_what_it_learned(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        # The converse: preserving must not become "never writes anything".
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "iPhone 16 Pro", "cert_installed": True,
+            "fingerprint": "abc123", "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=False,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        after = read_cert_state_for_device("test-udid")
+        assert after["cert_installed"] is False, "the erase was not recorded"
+        assert after["fingerprint"] is None, "a named field must still be cleared"
+        assert after["installed_at"] == "2026-09-14T09:00:00+00:00"
+
+    def test_naming_a_field_none_clears_it(self, clean_cert_state):
+        """Omission preserves; naming overwrites, including with None.
+
+        Without that, the erase path could not withdraw a trust claim.
+        """
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {
+            "name": "x", "cert_installed": True, "fingerprint": "abc123",
+            "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+        update_cert_state("test-udid", {"cert_installed": False, "fingerprint": None})
+
+        after = read_cert_state_for_device("test-udid")
+        assert after["cert_installed"] is False
+        assert after["fingerprint"] is None
+        assert after["installed_at"] == "2026-09-14T09:00:00+00:00"
+
+    def test_other_devices_are_still_untouched(self, clean_cert_state):
+        """The merge is per device as well as per field.
+
+        An earlier version of this test wrote `aaa` first, so a merge that
+        took *any* device's record as its base still produced the right answer
+        for `aaa`. Now the device being updated is the second one written, and
+        the first carries a field it must not inherit.
+        """
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("bbb", {
+            "name": "B", "cert_installed": True,
+            "installed_at": "2020-01-01T00:00:00+00:00",
+            "wifi_proxy_configs": {"B-only": {
+                "proxy_host": "10.0.0.1", "proxy_port": 9101,
+                "client_ip": "10.0.0.2", "set_at": "2020-01-01T00:00:00+00:00",
+            }},
+        })
+        update_cert_state("aaa", {"name": "A", "cert_installed": True})
+        update_cert_state("aaa", {"cert_installed": False})
+
+        a = read_cert_state_for_device("aaa")
+        assert a["cert_installed"] is False
+        assert a.get("installed_at") is None, "aaa inherited bbb's installed_at"
+        assert not a.get("wifi_proxy_configs"), "aaa inherited bbb's proxy config"
+
+        b = read_cert_state_for_device("bbb")
+        assert b["cert_installed"] is True, "updating aaa changed bbb"
+        assert list(b["wifi_proxy_configs"]) == ["B-only"]
+
+    @pytest.mark.asyncio
+    async def test_the_android_path_preserves_the_record_too(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        """The sibling site. It was changed by the same commit and had no test,
+        so reverting it to a full `model_dump()` left the suite green."""
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("droid", {
+            "name": "Pixel 6", "cert_installed": True,
+            "installed_at": "2026-09-14T09:00:00+00:00",
+        })
+        mock_controller._is_android = lambda _u: True
+        mock_controller.adb = MagicMock()
+        mock_controller.adb._get_cert_hash = AsyncMock(return_value="abc")
+        mock_controller.adb.is_system_cert_installed = AsyncMock(return_value=True)
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="f"):
+                await cert_manager.is_cert_installed(
+                    mock_controller, "droid", device_name="Pixel 6",
+                )
+
+        assert read_cert_state_for_device("droid")["installed_at"] == (
+            "2026-09-14T09:00:00+00:00"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_name_lookup_does_not_rename_the_device(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        """`_get_device_name` returned "Unknown Device" both when the device was
+        absent and when `list_devices` raised, and the write named `name`
+        unconditionally -- so adb being down renamed a device on disk.
+
+        The PR's own tests demonstrated this and did not notice: they seed
+        "iPhone 16 Pro" and the record they assert on says "Unknown Device".
+        """
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("test-udid", {"name": "iPhone 16 Pro", "cert_installed": True})
+        mock_controller.list_devices = AsyncMock(side_effect=OSError("adb is down"))
+
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ):
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        assert read_cert_state_for_device("test-udid")["name"] == "iPhone 16 Pro", (
+            "a failed lookup renamed the device"
+        )
+
+    def test_legacy_and_computed_fields_do_not_survive_a_write(
+        self, clean_cert_state
+    ):
+        """The merge preserved them forever, where the old replace healed them.
+
+        Flat `proxy_host`/`proxy_port` are the bad case: `DeviceCertState`
+        ignores extras, so nothing raises, `strip_noncanonical_fields` never
+        fires, and they persist permanently.
+        """
+        import json
+
+        from server.proxy.cert_state import (
+            _CANONICAL_FIELDS,
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("legacy", {"name": "A", "cert_installed": True})
+        raw = json.loads(clean_cert_state.read_text())
+        raw["legacy"].update({
+            "wifi_proxy_stale": True, "active_wifi_network": "Home",
+            "proxy_host": "10.0.0.1", "proxy_port": 9101,
+        })
+        clean_cert_state.write_text(json.dumps(raw))
+
+        update_cert_state("legacy", {"cert_installed": False})
+
+        after = read_cert_state_for_device("legacy")
+        assert [k for k in after if k not in _CANONICAL_FIELDS] == [], (
+            f"non-canonical fields survived: {sorted(set(after) - _CANONICAL_FIELDS)}"
+        )
+
+    def test_non_canonical_fields_are_not_accepted_on_the_way_in(
+        self, clean_cert_state
+    ):
+        """Both sides are filtered, and each needs its own test.
+
+        Stripping only what is on disk still passes when the incoming filter is
+        deleted, because the caller in that test passes a clean dict. These are
+        the computed fields `proxy_status` derives at read time and must never
+        store -- writing one makes the stored value shadow the computed one.
+        """
+        from server.proxy.cert_state import (
+            _CANONICAL_FIELDS,
+            read_cert_state_for_device,
+            update_cert_state,
+        )
+
+        update_cert_state("incoming", {
+            "name": "A", "cert_installed": True,
+            "wifi_proxy_stale": True, "active_wifi_network": "Home",
+            "cert_trust_stale": True,
+        })
+
+        after = read_cert_state_for_device("incoming")
+        assert after["name"] == "A", "the canonical fields were dropped too"
+        assert [k for k in after if k not in _CANONICAL_FIELDS] == [], (
+            f"a computed field was stored: {sorted(set(after) - _CANONICAL_FIELDS)}"
+        )

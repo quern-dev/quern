@@ -80,9 +80,25 @@ def _write_cert_state(state: dict) -> None:
 
 
 def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
-    """Update cert state for a single device with exclusive lock.
+    """Update the named fields of one device's cert state, under an exclusive lock.
 
-    Performs read-modify-write to preserve other devices' state.
+    Read-modify-write at two levels: other devices' entries are preserved, and
+    so are *this* device's fields that `cert_data` does not mention. Passing
+    `{"cert_installed": False}` changes that and nothing else.
+
+    The second level was missing, and it lost data. `is_cert_installed` rebuilt
+    the entry from the four fields it had just learned and wrote that over the
+    whole record, so every verification erased `installed_at` -- and with every
+    caller verifying since the cache was deleted, that happened almost
+    immediately after any install. It took `wifi_proxy_configs` with it, which
+    is a physical device's recorded proxy host and `client_ip`: the thing
+    `_verify_physical_device` reads to find that device's traffic at all.
+
+    To clear a field, name it: `{"fingerprint": None}` writes None. Only
+    omission preserves. This is why callers should pass what they mean rather
+    than a full `model_dump()`, which names every field including the ones it
+    has no opinion about.
+
     Only canonical fields are written — computed fields like wifi_proxy_stale
     and active_wifi_network are stripped before saving.
     """
@@ -105,7 +121,18 @@ def update_cert_state(udid: str, cert_data: dict[str, Any]) -> None:
         else:
             state = {}
 
-        state[udid] = cert_data
+        # Filtered on the way in *and* out. `cert_data` is already stripped
+        # above; without stripping what is on disk too, the merge preserves
+        # legacy and computed fields forever -- where the old wholesale replace
+        # quietly healed them on the next write. Flat `proxy_host`/`proxy_port`
+        # are the bad case: `DeviceCertState` ignores extras, so they construct
+        # cleanly, nothing raises, `strip_noncanonical_fields` never fires, and
+        # they persist for good.
+        existing = {
+            k: v for k, v in (state.get(udid) or {}).items()
+            if k in _CANONICAL_FIELDS
+        }
+        state[udid] = {**existing, **cert_data}
 
         fd.seek(0)
         fd.truncate()

@@ -898,6 +898,22 @@ async def set_local_capture(
     if processes:
         await _ensure_ca_is_trusted(request, skip=body.skip_cert_check)
 
+    # Say what this replaced. `set` semantics are right -- but they are silent,
+    # and the response echoes only the new list, so dropping a process looks
+    # identical to adding one. An agent told "capture MobileSafari" will send
+    # `["MobileSafari"]` and delete whatever else was being watched without
+    # either side noticing. The defaults are the common casualty: they are
+    # applied only when nothing is specified, so naming one process removes
+    # them and web-view traffic stops being captured.
+    previous = list(getattr(request.app.state, "local_capture_processes", []) or [])
+    removed = [p for p in previous if p not in processes]
+    if removed:
+        _proxy_logger.warning(
+            "local_capture no longer includes %s (replaced by %s). "
+            "Setting the list replaces it; pass every process you want captured.",
+            ", ".join(removed), ", ".join(processes) or "nothing",
+        )
+
     # Update app state
     request.app.state.local_capture_processes = processes
 

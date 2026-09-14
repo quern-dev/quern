@@ -320,12 +320,16 @@ async def _verify_physical_device(
 
     if has_https_flow:
         # Cert verified — update persistent state
-        cert_state.update({
+        # Only the three fields this verification established. `cert_state` was
+        # read before `flow_store.query` awaited, so writing it back whole
+        # restores a snapshot taken before the await -- and a
+        # `record_device_proxy_config` landing in that window loses its SSID.
+        # `update_cert_state` merges, so naming less is both safer and enough.
+        update_cert_state(udid, {
             "cert_installed": True,
             "fingerprint": fingerprint,
             "verified_at": now,
         })
-        update_cert_state(udid, cert_state)
 
         return DeviceCertInstallStatus(
             udid=udid,
