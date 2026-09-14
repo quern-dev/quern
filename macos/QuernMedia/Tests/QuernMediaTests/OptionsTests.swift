@@ -4,11 +4,10 @@ import Testing
 
 @Test("a minimal simulator invocation parses")
 func minimalSimulator() throws {
-    let o = try OptionsParser.parse(["--sim-udid", "ABC-123"])
+    let o = try OptionsParser.parse(["--sim-udid", "ABC-123", "--serve", "8422"])
     #expect(o.source == .simulator(udid: "ABC-123"))
     #expect(o.codec == .mjpeg)
-    #expect(o.window)
-    #expect(o.servePort == nil)
+    #expect(o.servePort == 8422)
     #expect(o.fps == 15)
     #expect(o.maxDimension == 900)
 }
@@ -16,11 +15,10 @@ func minimalSimulator() throws {
 @Test("a headless streaming invocation parses")
 func headlessStream() throws {
     let o = try OptionsParser.parse([
-        "--device", "iPhone 11", "--serve", "8424", "--no-window", "--fps", "60",
+        "--device", "iPhone 11", "--serve", "8424", "--fps", "60",
     ])
     #expect(o.source == .device(match: "iPhone 11"))
     #expect(o.servePort == 8424)
-    #expect(o.window == false)
     #expect(o.fps == 60)
 }
 
@@ -67,7 +65,7 @@ func flagInValuePosition() {
         try OptionsParser.parse(["--sim-udid", "--no-window"])
     }
     #expect(throws: OptionsError.missingValue("--fps")) {
-        try OptionsParser.parse(["--sim-udid", "X", "--fps"])
+        try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422", "--fps"])
     }
 }
 
@@ -79,16 +77,26 @@ func badNumbers(flag: String, value: String) {
     // "2M" is worth calling out: adb screenrecord accepts it, this does not,
     // and silently reading 0 would be worse than refusing.
     #expect(throws: OptionsError.badValue(flag: flag, value: value)) {
-        try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422", flag, value])
+        try OptionsParser.parse(["--sim-udid", "X", "--record", "/tmp/x.mp4", flag, value])
     }
 }
 
-@Test("an invocation that would do nothing is refused")
-func nothingToDoIsRefused() {
-    // No window, no server, no recording: the process would capture frames
-    // and throw them away.
-    #expect(throws: OptionsError.nothingToDo) {
-        try OptionsParser.parse(["--sim-udid", "X", "--no-window"])
+@Test("an invocation with no output is refused")
+func noOutputIsRefused() {
+    // This tool is a headless producer. With neither a server nor a
+    // recording it would capture frames and discard them. Showing a window
+    // is the preview app's job, not this one's.
+    #expect(throws: OptionsError.noOutput) {
+        try OptionsParser.parse(["--sim-udid", "X"])
+    }
+}
+
+@Test("--no-window is gone, not silently accepted")
+func noWindowFlagRemoved() {
+    // It used to be meaningful. Accepting and ignoring it would leave a
+    // caller believing they had suppressed a window that never existed.
+    #expect(throws: OptionsError.unknownFlag("--no-window")) {
+        try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422", "--no-window"])
     }
 }
 
