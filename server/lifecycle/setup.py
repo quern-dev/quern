@@ -1976,7 +1976,7 @@ def _is_cert_installed(udid: str) -> bool:
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(
-                cert_manager.is_cert_installed(controller, udid, verify=True)
+                cert_manager.is_cert_installed(controller, udid)
             )
         finally:
             loop.close()
@@ -2012,7 +2012,7 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
         try:
             # First verify if cert is already installed (via SQLite)
             is_installed = loop.run_until_complete(
-                cert_manager.is_cert_installed(controller, udid, verify=True)
+                cert_manager.is_cert_installed(controller, udid)
             )
 
             if is_installed:

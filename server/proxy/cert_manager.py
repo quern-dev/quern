@@ -30,7 +30,6 @@ from server.proxy.cert_state import read_cert_state_for_device, update_cert_stat
 logger = logging.getLogger(__name__)
 
 # Cache TTL: 1 hour (3600 seconds)
-CACHE_TTL_SECONDS = 3600
 
 
 def get_cert_path() -> Path:
@@ -156,25 +155,29 @@ def check_truststore_status(
 
 
 async def is_cert_installed(
-    controller, udid: str, verify: bool = False, *, device_name: str | None = None,
+    controller, udid: str, *, device_name: str | None = None,
 ) -> bool:
-    """Check if mitmproxy CA cert is installed on simulator.
+    """Whether this device trusts the mitmproxy CA, asked of the device.
 
-    Hybrid approach:
-    - If verify=False: Check cert-state.json first, only query SQLite if cache is stale
-    - If verify=True: Always query SQLite (ground truth)
+    Always ground truth: the TrustStore for a simulator, `adb` for Android.
+    There used to be an hour-long cache in front of this, and a `verify` flag
+    to skip it. Both are gone -- see ADR 1 in
+    docs/proposals/cert-trust-model.md. In short: Android returned above the
+    cache and so could never use it, `get_cert_fingerprint` shells out to
+    openssl *before* the cache was consulted and costs 9 ms, and the query the
+    cache skipped costs 0.11 ms. It saved about 1% of the call, and the hour it
+    held an answer for was an hour in which an erase went unnoticed.
 
-    Detects device erasure: if cert was previously installed but is now missing,
-    logs a warning about probable erase.
+    Detects device erasure: if the cert was previously installed and is now
+    missing, logs a warning about a probable erase.
 
     Args:
         controller: DeviceController instance
         udid: Device UDID
-        verify: If True, always check SQLite. If False, trust cache.
         device_name: Pre-resolved device name to avoid redundant list_devices calls.
 
     Returns:
-        True if certificate is installed, False otherwise
+        True if the certificate is installed, False otherwise
     """
     cert_path = get_cert_path()
     if not cert_path.exists():
@@ -188,22 +191,10 @@ async def is_cert_installed(
         )
 
     expected_fingerprint = get_cert_fingerprint(cert_path)
-
-    # Fast path: Check cache
     cached = read_cert_state_for_device(udid)
 
-    # Check cache age
-    if not verify and cached and cached.get("verified_at"):
-        try:
-            verified_at = datetime.fromisoformat(cached["verified_at"])
-            age = datetime.now(UTC) - verified_at
-            if age.total_seconds() < CACHE_TTL_SECONDS:
-                logger.debug(f"Cache hit for {udid} (age: {age.total_seconds():.0f}s)")
-                return cached.get("cert_installed", False)
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Invalid verified_at timestamp for {udid}: {e}")
-
-    # Slow path: Query TrustStore SQLite database
+    # Read, never believed: only to notice that a device which *had* the cert
+    # no longer does, which is what makes the erase warning below possible.
     logger.debug(f"Verifying cert for {udid} via SQLite")
     is_installed = verify_cert_in_truststore(udid, expected_fingerprint)
 
@@ -294,7 +285,7 @@ async def install_cert(
 
     # Check if already installed (unless force=True)
     if not force and await is_cert_installed(
-        controller, udid, verify=True, device_name=device_name,
+        controller, udid, device_name=device_name,
     ):
         logger.info(f"Cert already installed on {udid}")
         return False  # Already installed
@@ -405,14 +396,13 @@ async def _install_cert_android(
 
 
 async def get_device_cert_state(
-    controller, udid: str, verify: bool = False, *, device_name: str | None = None,
+    controller, udid: str, *, device_name: str | None = None,
 ) -> DeviceCertState:
     """Get certificate installation state for a device.
 
     Args:
         controller: DeviceController instance
         udid: Device UDID
-        verify: If True, force SQLite verification
         device_name: Pre-resolved device name to avoid redundant list_devices calls.
 
     Returns:
@@ -432,7 +422,7 @@ async def get_device_cert_state(
         )
 
     is_installed = await is_cert_installed(
-        controller, udid, verify=verify, device_name=device_name,
+        controller, udid, device_name=device_name,
     )
     fingerprint = get_cert_fingerprint(cert_path) if is_installed else None
 

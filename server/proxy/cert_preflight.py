@@ -55,14 +55,11 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
         for d in devices:
             if d.device_type != DeviceType.SIMULATOR or d.state != DeviceState.BOOTED:
                 continue
-            # `verify=True`: ask the TrustStore every time, never the cache.
-            # The cache is there to save a query that costs 0.6 ms against a
-            # local SQLite file, and the hour it holds an answer for is an hour
-            # in which an erase goes unnoticed -- measured here, three minutes
-            # after `simctl erase`, with the TrustStore empty and this preflight
-            # reporting nothing missing. That is the field report's exact
-            # scenario and the case this function exists to catch, so the cache
-            # cannot be consulted on this path at any TTL.
+            # `is_cert_installed` asks the device, always. It used to take a
+            # `verify` flag guarding an hour-long cache, and reading that cache
+            # here let an erase go unnoticed for an hour -- measured three
+            # minutes after `simctl erase`, with the TrustStore empty and this
+            # preflight reporting nothing missing. The cache is gone (ADR 1).
             # Per device, not around the loop. A single failing TrustStore
             # query used to reach the outer handler and return `[]`, throwing
             # away every device already *confirmed* untrusted -- so one
@@ -72,7 +69,7 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
             # it is never right for one we could.
             try:
                 trusted = await cert_manager.is_cert_installed(
-                    controller, d.udid, verify=True, device_name=d.name,
+                    controller, d.udid, device_name=d.name,
                 )
             except Exception as e:
                 logger.debug(
