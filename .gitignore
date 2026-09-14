@@ -50,3 +50,7 @@ RELEASE_NOTES.md
 # creates a file instead. One got committed and shipped in every release
 # tarball for two weeks before anyone noticed.
 /-
+
+# SwiftPM build products. macos/QuernMedia/.build is ~116 MB of module cache
+# and object files; `git add -A` from the repo root will sweep it in.
+.build/
