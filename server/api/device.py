@@ -1146,7 +1146,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             preview = await pm.add(device_name)
             return {
                 "status": "added",
-                "name": preview.name,
+                "name": preview.label or preview.name,
                 "position": preview.position,
                 "platform": "ios",
             }
@@ -1164,13 +1164,13 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         added = []
         errors = []
         for dev in pm._available:
-            if dev.name in pm._active:
+            if dev.cmio_id in pm._active:
                 added.append({"name": dev.name, "status": "already_active"})
                 continue
             try:
-                preview = await pm.add(dev.name)
+                preview = await pm.add(dev.cmio_id)
                 added.append({
-                    "name": preview.name,
+                    "name": preview.label or preview.name,
                     "position": preview.position,
                     "status": "added",
                 })

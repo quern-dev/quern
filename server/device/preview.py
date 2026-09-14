@@ -12,9 +12,10 @@ loopback, and ios-preview displays the stream. That is the only way a
 simulator can be previewed, and it is why this module owns a second kind of
 subprocess.
 
-Both are addressed by an opaque session key: a device by its CoreMediaIO
-name, because that is what the protocol has always used, a simulator by its
-udid. Everything here only ever echoes the key back, so the two coexist.
+Both are addressed by an opaque session key: a capture device by its
+CoreMediaIO unique ID, a simulator by its udid. Names are not identities --
+two phones of the same model report the same one -- so they are accepted as
+input and resolved, never stored as the key.
 """
 
 from __future__ import annotations
@@ -79,6 +80,20 @@ _INFO_PLIST = """\
 </dict>
 </plist>
 """
+
+
+async def booted_simulators() -> list[tuple[str, str]]:
+    """(udid, name) for every booted simulator.
+
+    A seam rather than an inline simctl call: preview.add() has to tell a
+    simulator udid apart from a device name, and a test that shells out to
+    simctl to find out is neither fast nor offline-safe.
+    """
+    from server.device.simctl import SimctlBackend
+    from server.models import DeviceState
+
+    devices = await SimctlBackend().list_devices()
+    return [(d.udid, d.name) for d in devices if d.state == DeviceState.BOOTED]
 
 
 def bundle_paths() -> tuple[Path, Path]:
@@ -194,6 +209,7 @@ class PreviewDeviceInfo:
 
 @dataclass
 class ActivePreview:
+    #: The session key: a CoreMediaIO unique ID, or a simulator udid.
     name: str
     position: int
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -202,6 +218,8 @@ class ActivePreview:
     kind: str = "device"
     #: Loopback port quern-media serves on. None for a capture device.
     stream_port: int | None = None
+    #: Human-readable name, for reporting. Not an identity.
+    label: str | None = None
 
 
 @dataclass
@@ -382,7 +400,9 @@ class PreviewManager:
     def _dispatch_event(self, event: dict) -> None:
         """Handle a single event from the subprocess."""
         evt_type = event.get("event")
-        name = event.get("name", "")
+        # Events are addressed by session key. `name`, where present, is a
+        # display label and never an identity.
+        name = event.get("key", "")
 
         if evt_type == "ready":
             devices = event.get("devices", [])
@@ -423,7 +443,7 @@ class PreviewManager:
                 preview = self._active.pop(name)
                 self._positions.discard(preview.position)
                 logger.info("Preview device disconnected: %s", name)
-            self._available = [d for d in self._available if d.name != name]
+            self._available = [d for d in self._available if d.cmio_id != name]
             # Settle whatever was in flight, according to what it asked for. A
             # remove got what it wanted -- the preview is gone. An add did not:
             # completing it successfully would have add() record a preview for
@@ -444,11 +464,11 @@ class PreviewManager:
             # Announced, not opened -- in interactive mode the server decides
             # what is on screen. Recording it keeps the available list honest
             # between explicit `list` calls.
-            if not any(d.name == name for d in self._available):
+            if not any(d.cmio_id == name for d in self._available):
                 self._available.append(
-                    PreviewDeviceInfo(name=name, cmio_id=event.get("id", ""))
+                    PreviewDeviceInfo(name=event.get("name", name), cmio_id=name)
                 )
-                logger.info("Preview device connected: %s", name)
+                logger.info("Preview device connected: %s", event.get("name", name))
 
         elif evt_type == "window_closed":
             # User closed the window manually
@@ -491,31 +511,59 @@ class PreviewManager:
             pos += 1
         return pos
 
-    async def add(self, name: str) -> ActivePreview:
-        """Add a preview for a device by name.
+    def _resolve_device(self, identifier: str) -> PreviewDeviceInfo | None:
+        """Find a capture device by unique ID or by name.
 
-        Args:
-            name: Device name (must match a name from _available).
+        ID first: it is the identity. Two phones of the same model share a
+        name, so a name match picks whichever was discovered first, which is
+        not a choice this should be making silently.
+        """
+        for device in self._available:
+            if device.cmio_id == identifier:
+                return device
+        for device in self._available:
+            if device.name == identifier:
+                return device
+        return None
+
+    async def add(self, name: str) -> ActivePreview:
+        """Open a preview for a physical device or a booted simulator.
+
+        Accepts a CoreMediaIO device name, that device's unique ID, or a
+        simulator udid, and works out which it is. Names are accepted because
+        they are what a person reads off the menu; IDs because they are
+        unambiguous, which a name is not.
 
         Returns:
             ActivePreview record.
 
         Raises:
-            RuntimeError: If device not found or add fails.
+            RuntimeError: if nothing matches, or the preview fails to open.
         """
         await self._ensure_process()
 
-        # Check if already active
-        if name in self._active:
-            return self._active[name]
+        device = self._resolve_device(name)
+        if device is not None:
+            return await self._add_device(device)
 
-        # Validate name
-        available_names = [d.name for d in self._available]
-        if name not in available_names:
-            raise RuntimeError(
-                f"Device '{name}' not found in CoreMediaIO devices. "
-                f"Available: {available_names}"
-            )
+        # Not a capture device. A simulator is the other thing it can be, and
+        # it reaches the screen by a different route entirely.
+        for udid, sim_name in await booted_simulators():
+            if name in (udid, sim_name):
+                return await self.add_simulator(udid, title=sim_name)
+
+        available = [f"{d.name} ({d.cmio_id})" for d in self._available]
+        raise RuntimeError(
+            f"'{name}' is not a connected device or a booted simulator. "
+            f"Devices: {available or 'none'}"
+        )
+
+    async def _add_device(self, device: PreviewDeviceInfo) -> ActivePreview:
+        """Open a preview window on a CoreMediaIO capture device."""
+        key = device.cmio_id
+
+        if key in self._active:
+            return self._active[key]
 
         async with self._stagger_lock:
             position = self._next_position()
@@ -523,20 +571,22 @@ class PreviewManager:
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
             cid = self._next_command_id()
-            self._pending[name] = (cid, "add", fut)
+            self._pending[key] = (cid, "add", fut)
 
             await self._send(
-                {"cmd": "add", "name": name, "position": position, "id": cid}
+                {"cmd": "add", "key": key, "position": position, "id": cid}
             )
 
             try:
                 await asyncio.wait_for(fut, timeout=10.0)
             except TimeoutError:
-                self._pending.pop(name, None)
-                raise RuntimeError(f"Timeout adding preview for {name}")
+                self._pending.pop(key, None)
+                raise RuntimeError(
+                    f"Timeout adding preview for {device.name}"
+                ) from None
 
-            preview = ActivePreview(name=name, position=position)
-            self._active[name] = preview
+            preview = ActivePreview(name=key, position=position, label=device.name)
+            self._active[key] = preview
             self._positions.add(position)
 
             # Stagger: wait 1s before allowing the next add
@@ -586,7 +636,7 @@ class PreviewManager:
 
                 await self._send({
                     "cmd": "add_stream",
-                    "name": udid,
+                    "key": udid,
                     "title": title or udid,
                     "url": f"http://127.0.0.1:{port}/stream",
                     "position": position,
@@ -605,7 +655,8 @@ class PreviewManager:
                 raise
 
             preview = ActivePreview(
-                name=udid, position=position, kind="simulator", stream_port=port
+                name=udid, position=position, kind="simulator", stream_port=port,
+                label=title,
             )
             self._active[udid] = preview
             self._positions.add(position)
@@ -709,7 +760,11 @@ class PreviewManager:
         self._streams.clear()
 
     async def remove(self, name: str) -> None:
-        """Remove a preview for a device by name."""
+        """Remove a preview, by session key or by device name."""
+        if name not in self._active:
+            device = self._resolve_device(name)
+            if device is not None and device.cmio_id in self._active:
+                name = device.cmio_id
         if self._process is None or self._process.returncode is not None:
             self._active.pop(name, None)
             await self._stop_stream(name)
@@ -726,7 +781,7 @@ class PreviewManager:
         cid = self._next_command_id()
         self._pending[name] = (cid, "remove", fut)
 
-        await self._send({"cmd": "remove", "name": name, "id": cid})
+        await self._send({"cmd": "remove", "key": name, "id": cid})
 
         try:
             await asyncio.wait_for(fut, timeout=5.0)
@@ -768,6 +823,7 @@ class PreviewManager:
                 "position": p.position,
                 "started_at": p.started_at.isoformat(),
                 "kind": p.kind,
+                **({"name": p.label} if p.label else {}),
                 **({"stream_port": p.stream_port} if p.stream_port else {}),
             }
             for name, p in self._active.items()
