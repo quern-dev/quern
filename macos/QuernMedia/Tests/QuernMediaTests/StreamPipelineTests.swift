@@ -196,3 +196,40 @@ func keyframeRequestSurvivesAFailedEncode() throws {
     #expect(forced == [true, true],
             "the request was dropped by the encode that failed: \(forced)")
 }
+
+@Test("a keyframe request raised during an encode is not cleared by it")
+func keyframeRequestDuringEncodeSurvives() throws {
+    // A viewer attaching mid-encode is not in the `interested` list the
+    // in-flight payload goes to, so the keyframe it produces never reaches
+    // them. Clearing on the stale flag left them waiting for the periodic
+    // IDR -- the same symptom as the dropped request, one race further along.
+    let surface = try #require(TestSurface.make(width: 64, height: 64))
+    let pipeline = StreamPipeline(
+        codec: .h264, fps: 1000, maxDimension: 0, quality: 0.6, bitrate: 400_000
+    )
+    defer { pipeline.invalidate() }
+    pipeline.add(SpySink())
+
+    var forced: [Bool] = []
+    var raiseDuringEncode = true
+    pipeline.encodeOverride = { _, force in
+        forced.append(force)
+        if raiseDuringEncode {
+            raiseDuringEncode = false
+            // A second viewer arrives while this frame is being encoded.
+            pipeline.requestKeyframe()
+        }
+        return .jpeg(Data([0xFF, 0xD8, 0xFF, 0xD9]))   // a keyframe
+    }
+
+    pipeline.requestKeyframe()
+    pipeline.consume(CapturedFrame(
+        surface: surface, time: CMTime(value: 0, timescale: 600), timeAccuracy: .reported
+    ))
+    pipeline.consume(CapturedFrame(
+        surface: surface, time: CMTime(value: 600, timescale: 600), timeAccuracy: .reported
+    ))
+
+    #expect(forced == [true, true],
+            "the request raised mid-encode was cleared by the encode it raced: \(forced)")
+}
