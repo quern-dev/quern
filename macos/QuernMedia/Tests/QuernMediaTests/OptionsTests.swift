@@ -117,3 +117,43 @@ func orderIndependent() throws {
     let b = try OptionsParser.parse(["--serve", "9000", "--h264", "--sim-udid", "X"])
     #expect(a == b)
 }
+
+@Test("a short flag in a value position is a missing value, not an operand")
+func shortFlagIsNotAnOperand() {
+    // Only the flags the parser actually knows are refused here. `-l` is not
+    // one of them, so it stays a legitimate operand.
+    let args = ["--sim-udid", "X", "--record", "-h"]
+    // The guard tested `hasPrefix("--")`, which waves `-h` straight through:
+    // `--record -h` stored "-h" as the output path and help never ran. The
+    // flag sets are the authority on what is a flag, not the spelling.
+    #expect(throws: OptionsError.missingValue("--record")) {
+        try OptionsParser.parse(args)
+    }
+}
+
+@Test("a value flag in a value position is refused too")
+func valueFlagIsNotAnOperand() {
+    #expect(throws: OptionsError.missingValue("--record")) {
+        try OptionsParser.parse(["--sim-udid", "X", "--record", "--serve", "8422"])
+    }
+}
+
+@Test("an unusable frame rate is refused rather than trapping", arguments: [
+    "1e308", "0", "-5", "nan", "inf", "100000",
+])
+func absurdFrameRatesAreRefused(raw: String) {
+    // `Int(expectedFPS * 2)` traps on a non-finite or huge value, and the
+    // encoder is where that lands. argv is where it comes from, and the
+    // parser is the only layer that can name the flag that was wrong.
+    #expect(throws: OptionsError.self) {
+        try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422", "--fps", raw])
+    }
+}
+
+@Test("an ordinary frame rate still parses")
+func sensibleFrameRateParses() throws {
+    let options = try OptionsParser.parse(
+        ["--sim-udid", "X", "--serve", "8422", "--fps", "60"]
+    )
+    #expect(options.fps == 60)
+}

@@ -30,9 +30,18 @@ public final class HTTPStreamServer: FrameSink {
         }
     }
 
+    /// Caps for an unauthenticated server. Reachable from the network when
+    /// `--bind-all` is set, where a peer that connects and never speaks would
+    /// otherwise hold a slot indefinitely.
+    private static let maxClients = 32
+    private static let maxHeadBytes = 8192
+    private static let headTimeout: TimeInterval = 10
+
     private final class Client {
         let connection: NWConnection
         var streaming = false
+        /// Request bytes so far. Touched only on the connection queue.
+        var head = Data()
         /// Dropped-frame gate. A viewer on wifi cannot absorb 60 fps of JPEG,
         /// and queueing what it cannot take turns "slow" into "minutes
         /// behind". One frame in flight; newer frames are skipped, not queued.
@@ -199,8 +208,15 @@ public final class HTTPStreamServer: FrameSink {
     private func accept(_ conn: NWConnection) {
         let client = Client(conn)
         lock.lock()
-        clients[ObjectIdentifier(conn)] = client
+        let atCapacity = clients.count >= Self.maxClients
+        if !atCapacity { clients[ObjectIdentifier(conn)] = client }
         lock.unlock()
+
+        guard !atCapacity else {
+            MediaLog.log("[http] refusing a connection: \(Self.maxClients) already open")
+            conn.cancel()
+            return
+        }
 
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -214,18 +230,46 @@ public final class HTTPStreamServer: FrameSink {
             }
         }
         conn.start(queue: queue)
+
+        // A connection that never sends a request head is dropped. Without
+        // this it sits in `clients` forever, and enough of them exhaust the
+        // cap above and lock out real viewers.
+        queue.asyncAfter(deadline: .now() + Self.headTimeout) { [weak client] in
+            guard let client, !client.streaming else { return }
+            MediaLog.log("[http] dropping a client that sent no request")
+            client.connection.cancel()
+        }
+
         readRequest(client)
     }
 
     private func readRequest(_ client: Client) {
-        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) {
-            [weak self] data, _, isComplete, error in
+        client.connection.receive(
+            minimumIncompleteLength: 1, maximumLength: Self.maxHeadBytes
+        ) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            guard error == nil, !isComplete, let data,
-                  let head = String(data: data, encoding: .utf8) else {
+            guard error == nil, !isComplete, let data, !data.isEmpty else {
                 client.connection.cancel()
                 return
             }
+
+            client.head.append(data)
+
+            // One receive is not one request. TCP is free to split "GET
+            // /stream" across segments, and routing on the first segment sent
+            // a stream request the index page and then closed the connection.
+            guard let end = client.head.range(of: Data("\r\n\r\n".utf8)) else {
+                guard client.head.count < Self.maxHeadBytes else {
+                    MediaLog.log("[http] request head over \(Self.maxHeadBytes) bytes")
+                    client.connection.cancel()
+                    return
+                }
+                self.readRequest(client)
+                return
+            }
+
+            let head = String(decoding: client.head[..<end.lowerBound], as: UTF8.self)
+            client.head = Data()
             self.route(client, path: HTTPWire.requestPath(head))
         }
     }

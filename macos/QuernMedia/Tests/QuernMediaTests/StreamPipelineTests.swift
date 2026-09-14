@@ -163,3 +163,36 @@ func removeStopsDelivery() throws {
     pipeline.consume(captured(surface, frame: 1))
     #expect(sink.received.count == 1)
 }
+
+@Test("a keyframe request survives an encode that produced nothing")
+func keyframeRequestSurvivesAFailedEncode() throws {
+    // The request used to be cleared as soon as a frame was due, before the
+    // encoder had produced anything. One failed encode swallowed it, and the
+    // viewer that asked decoded nothing until the next periodic IDR.
+    let surface = try #require(TestSurface.make(width: 64, height: 64))
+    let pipeline = StreamPipeline(
+        codec: .h264, fps: 1000, maxDimension: 0, quality: 0.6, bitrate: 400_000
+    )
+    defer { pipeline.invalidate() }
+
+    pipeline.add(SpySink())
+
+    var forced: [Bool] = []
+    var failNext = true
+    pipeline.encodeOverride = { _, force in
+        forced.append(force)
+        if failNext { failNext = false; return nil }
+        return .jpeg(Data([0xFF, 0xD8, 0xFF, 0xD9]))
+    }
+
+    pipeline.requestKeyframe()
+    pipeline.consume(CapturedFrame(
+        surface: surface, time: CMTime(value: 0, timescale: 600), timeAccuracy: .reported
+    ))
+    pipeline.consume(CapturedFrame(
+        surface: surface, time: CMTime(value: 600, timescale: 600), timeAccuracy: .reported
+    ))
+
+    #expect(forced == [true, true],
+            "the request was dropped by the encode that failed: \(forced)")
+}

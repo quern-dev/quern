@@ -1,13 +1,14 @@
 # Handoff — media engine
 
-Written 2026-09-13 at the end of the session that built this. Everything
-below is either verified or explicitly flagged as unverified.
+Written 2026-09-13 at the end of the session that built this, updated
+2026-09-14. Everything below is either verified or explicitly flagged as
+unverified.
 
 ## Where things are
 
 | branch | state |
 |---|---|
-| `feat/media-engine` | this work. Pushed. 70 Swift tests, 14 Python tests. |
+| `feat/media-engine` | this work, and the preview app that consumes it. PR #164. 79 Swift tests, 37 Python tests across media_engine and preview. |
 | `spike/sim-framebuffer-preview` | the spike it was extracted from. Pushed, tagged `spike/media-2026-09-13`. Reference implementation + `WRITEUP.md` + `docs/proposals/unified-screen-streaming.md` (all the measurements). |
 
 Issues from this work: **#159** WDA startup reinstalls, **#160** leaked usbmux
@@ -34,22 +35,38 @@ Verified end to end: MJPEG and H.264 streaming from a booted simulator and a
 USB iPhone; recording to .mp4 with wall-clock timestamps where a deliberate
 idle gap survives as elapsed time.
 
-`server/device/media_engine.py` builds it (`swift build --scratch-path`) but
-**nothing consumes it yet**. That is the next job.
+`server/device/media_engine.py` builds it, and **the preview app consumes
+it**: `PreviewManager.add_simulator` starts a `quern-media` per simulator
+serving MJPEG on loopback, and `ios-preview` opens a window on the stream via
+a new `add_stream` command. Verified end to end against a headless iPhone 16
+Pro — one `added`, first frame 414x900 — and a stream that dies reports
+`window_closed` so the server tears its `quern-media` down.
+
+Sessions are keyed by identity, not by name: `AVCaptureDevice.uniqueID` for a
+capture device, a udid for a simulator. `PreviewManager.add()` accepts a
+device name, a device ID or a simulator udid and works out which it is.
 
 ## Next, in order
 
-1. **Preview app consumes `quern-media`.** The agreed direction. One capture
-   feeds window + recorder + stream through `StreamPipeline`'s sinks, instead
-   of each opening its own. Makes simulators previewable in the existing UI,
-   which they are not today. `preview.py` and `ios-preview` are deliberately
-   untouched so far — this is additive, and `ios-preview --interactive`
-   (the JSON-lines protocol driving the menu-bar windows) is **not ported**.
-2. **Wifi devices (#163).** Small fix, real capability. Proven that session,
-   input and video all work over wifi; quern just looks for the tunnel in
-   the wrong place.
-3. **WDA supervision (#159).** Quern has none. The runner died three times
+1. **WDA supervision (#159).** Quern has none. The runner died three times
    in one session.
+2. **Wifi devices (#163) — re-diagnosed, and harder than it looked.** The
+   original theory (quern reads the tunnel address from the wrong place) is
+   wrong, and the suggested devicectl fallback cannot work. See the issue
+   comment for the measurements. Short version: tunneld *does* discover wifi
+   devices and build tunnels for them, but those tunnels have a **median
+   lifetime of 2.0 seconds** across 11,587 of them, against 32s for USB and
+   13+ hours for the one live wired tunnel. `devicectl device info details`
+   does report `connectionProperties.tunnelIPAddress`, but that tunnel only
+   lives as long as the devicectl process — probing the address from another
+   process immediately afterwards gives "No route to host". The real work is
+   finding out why Network-transport tunnels churn, given one in the log
+   managed 13.7 hours.
+3. **Recorder and stream through one capture.** `StreamPipeline` already fans
+   out to sinks; the preview path currently uses only the HTTP one.
+
+`ios-preview --interactive`'s window layer is still AppKit and still separate
+from `quern-media`, which stays headless. That split is deliberate.
 
 Then: Android on-device encoder, and the video-anchored timeline.
 
@@ -60,8 +77,8 @@ Then: Android on-device encoder, and the video-anchored timeline.
 - `git add -A` from the repo root will sweep `macos/QuernMedia/.build`
   (~116 MB) into every commit. `.gitignore` covers it now; it did not, and
   cleaning it needed a `filter-branch` and a `gc`.
-- There is **no venv in a worktree**. Use
-  `/Volumes/Home/jham/Dev/quern/.venv/bin/python` with `PYTHONPATH=$PWD`.
+- There is **no venv in a worktree**. Use the main checkout's interpreter,
+  `<main-checkout>/.venv/bin/python`, with `PYTHONPATH=$PWD`.
 - The main checkout is an **editable install**, so `import server` resolves
   there, not to your worktree. Pure-Swift work is unaffected; Python work is
   not. `QUERN_STATE_DIR` redirects `CONFIG_DIR` if you need to isolate
@@ -82,6 +99,19 @@ Then: Android on-device encoder, and the video-anchored timeline.
   **traps on alignment**. Assemble bytewise.
 - `URLSession` parses `multipart/x-mixed-replace` and hands back only part
   bodies, so it cannot see MJPEG framing. Test the wire with a raw socket.
+  It bites the *client* too, twice: frame boundaries have to be found by
+  scanning for JPEG start/end markers rather than the multipart boundary,
+  and `didReceive response:` fires **once per part**, so anything hung off
+  it needs a fire-once gate — the add acknowledgement went out per frame
+  until one went in.
+- An **idle simulator sends no frames at all**: the framebuffer is
+  event-driven and free while nothing composites. `curl` against one returns
+  200 and zero bytes. Anything that waits for a first frame to decide a
+  preview started will hang on a working preview; acknowledge on the
+  response instead.
+- One `NWConnection.receive` is not one HTTP request. TCP will split
+  `GET /stream`, and routing on the first segment served the index page.
+  Accumulate to `\r\n\r\n`.
 - `ps %cpu` is a since-start average and read about **half** the real value.
   Measure CPU-time deltas over a window.
 - CoreMediaIO publishes devices only while a run loop turns. `Thread.sleep`
@@ -108,15 +138,21 @@ Then: Android on-device encoder, and the video-anchored timeline.
   protocol, or generalise `EncodedFrameSource`. Do not decode JPEGs back to
   surfaces to make it fit; that discards the only advantage it has. See
   `Docs/source-options.md`.
-- Can tunneld and devicectl hold tunnels to the same device at once, or do
-  they contend? Unknown, and relevant to #163.
+- ~~Can tunneld and devicectl hold tunnels to the same device at once?~~
+  **Answered: yes.** Both were observed holding tunnels to the same wifi
+  iPhone simultaneously, each with its own address. They do not contend.
 - `MaxKeyFrameInterval` counts **frames, not seconds**, so on an
   event-driven source seek granularity drifts with activity. Anchoring
   keyframes to test actions is the fix for the timeline.
 
 ## Environment as left
 
-Four worktrees: `quern` (main), `quern-media-engine`, `quern-sim-preview-spike`,
-`quern-wda-docs`. One simulator booted headless (iPhone 16 Pro). Two physical
-iPhones attached, no WDA session running. Nothing else of this session is
-still live.
+Five worktrees: `quern` (main), `quern-media-engine`, `quern-wifi-devices`
+(branch `fix/wifi-device-tunnel`, no commits — #163 was parked once the
+diagnosis changed), `quern-sim-preview-spike`, `quern-wda-docs`. One
+simulator booted headless (iPhone 16 Pro). Two physical iPhones attached, no
+WDA session running.
+
+CI runs the media suite with `--no-parallel`. Runners are VMs where
+VideoToolbox falls back to software encoding, and 72 tests at once on three
+cores made every real-time deadline in the suite miss.
