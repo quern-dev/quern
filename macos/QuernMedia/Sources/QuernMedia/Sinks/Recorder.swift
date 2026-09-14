@@ -10,16 +10,19 @@ import Foundation
 /// carries no timestamps, so a recording built from it would have to invent
 /// them, which is exactly the bug this design avoids.
 public final class Recorder {
-    public enum StartFailure: Error, CustomStringConvertible {
+    public enum Failure: Error, CustomStringConvertible {
         case noFormatDescription
         case writerRejectedInput
         case writerFailed(String)
+        case finishTimedOut(TimeInterval)
 
         public var description: String {
             switch self {
             case .noFormatDescription: return "first sample carried no format description"
             case .writerRejectedInput: return "AVAssetWriter rejected a passthrough input"
             case .writerFailed(let m): return "AVAssetWriter failed: \(m)"
+            case .finishTimedOut(let t):
+                return "AVAssetWriter did not finish writing within \(t)s"
             }
         }
     }
@@ -49,7 +52,7 @@ public final class Recorder {
     private var lastPTS: CMTime = .invalid
     private var framesWritten = 0
     private var framesDropped = 0
-    private var startError: StartFailure?
+    private var failureReason: Failure?
 
     public let url: URL
 
@@ -76,12 +79,12 @@ public final class Recorder {
             do {
                 try start(with: frame.sample)
                 started = true
-            } catch let error as StartFailure {
-                startError = error
+            } catch let error as Failure {
+                failureReason = error
                 finished = true
                 return false
             } catch {
-                startError = .writerFailed("\(error)")
+                failureReason = .writerFailed("\(error)")
                 finished = true
                 return false
             }
@@ -103,16 +106,16 @@ public final class Recorder {
     /// Caller holds `lock`.
     private func start(with sample: CMSampleBuffer) throws {
         guard let hint = CMSampleBufferGetFormatDescription(sample) else {
-            throw StartFailure.noFormatDescription
+            throw Failure.noFormatDescription
         }
         let created = AVAssetWriterInput(
             mediaType: .video, outputSettings: nil, sourceFormatHint: hint
         )
         created.expectsMediaDataInRealTime = true
-        guard writer.canAdd(created) else { throw StartFailure.writerRejectedInput }
+        guard writer.canAdd(created) else { throw Failure.writerRejectedInput }
         writer.add(created)
         guard writer.startWriting() else {
-            throw StartFailure.writerFailed(writer.error?.localizedDescription ?? "unknown")
+            throw Failure.writerFailed(writer.error?.localizedDescription ?? "unknown")
         }
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         // The session starts at the first frame's real timestamp, so the
@@ -145,7 +148,23 @@ public final class Recorder {
         localInput?.markAsFinished()
         let done = DispatchSemaphore(value: 0)
         writer.finishWriting { done.signal() }
-        _ = done.wait(timeout: .now() + timeout)
+
+        // The wait's result is the whole reason for waiting. Until
+        // `finishWriting` lands the moov atom the file holds samples nothing
+        // can index, and AVFoundation reports reading it as "Cannot Open ...
+        // may be damaged" with Duration as the failed dependency. Discarding
+        // the result returned a Summary describing a complete recording
+        // precisely when the machine was too slow to have made one.
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            note(.finishTimedOut(timeout))
+            return nil
+        }
+        // Finishing can complete and still have failed; status is the only
+        // place that says so.
+        if writer.status == .failed {
+            note(.writerFailed(writer.error?.localizedDescription ?? "unknown"))
+            return nil
+        }
 
         return Summary(
             framesWritten: written, framesDropped: dropped,
@@ -153,11 +172,18 @@ public final class Recorder {
         )
     }
 
-    /// Non-nil when the writer refused to start, for callers that want to
-    /// report why rather than silently produce nothing.
-    public var failure: StartFailure? {
+    private func note(_ reason: Failure) {
         lock.lock()
         defer { lock.unlock() }
-        return startError
+        failureReason = reason
+    }
+
+    /// Non-nil when the writer refused to start, or could not be finished --
+    /// for callers that want to report why rather than silently produce
+    /// nothing. A nil `finish()` always leaves a reason here.
+    public var failure: Failure? {
+        lock.lock()
+        defer { lock.unlock() }
+        return failureReason
     }
 }

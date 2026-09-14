@@ -7,6 +7,29 @@ import Network
 /// `StreamPipeline`, and a recorder is a peer sink — this class used to own
 /// all three, which is what made "record without serving" awkward.
 public final class HTTPStreamServer: FrameSink {
+    public enum StartFailure: Error, CustomStringConvertible {
+        case listenerFailed(String)
+        case notReady(TimeInterval)
+
+        public var description: String {
+            switch self {
+            case .listenerFailed(let m): return "listener failed: \(m)"
+            case .notReady(let t): return "listener was not ready within \(t)s"
+            }
+        }
+    }
+
+    /// Carries a listener failure out of the state handler, which runs on the
+    /// listener's queue while `start()` waits on the caller's.
+    private final class Outcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: StartFailure?
+        var error: StartFailure? {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+        }
+    }
+
     private final class Client {
         let connection: NWConnection
         var streaming = false
@@ -27,6 +50,16 @@ public final class HTTPStreamServer: FrameSink {
     private let queue = DispatchQueue(label: "quern.media.http")
     private let lock = NSLock()
     private var clients: [ObjectIdentifier: Client] = [:]
+
+    /// Whether the listener has reached `.ready`.
+    ///
+    /// The postcondition of `start()`, and the thing a test can pin: timing a
+    /// connect only reproduces the race on a machine slow enough to lose it.
+    public var isListening: Bool {
+        guard let listener else { return false }
+        if case .ready = listener.state { return true }
+        return false
+    }
 
     public private(set) var framesSent = 0
     public private(set) var framesSkipped = 0
@@ -50,7 +83,7 @@ public final class HTTPStreamServer: FrameSink {
         self.onClientAttached = onClientAttached
     }
 
-    public func start() throws {
+    public func start(timeout: TimeInterval = 5) throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
 
@@ -65,12 +98,41 @@ public final class HTTPStreamServer: FrameSink {
             listener = try NWListener(using: params)
         }
         listener.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
+
+        // `listener.start` is asynchronous, so returning as soon as it is
+        // called means "asked to listen", not "listening" -- a caller that
+        // connects immediately races the bind and reads a closed socket. A
+        // bind failure was only logged, too, so a server that never came up
+        // still looked started. Waiting for .ready makes the throw the
+        // caller's answer to both.
+        let ready = DispatchSemaphore(value: 0)
+        let outcome = Outcome()
         listener.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
+            switch state {
+            case .ready:
+                ready.signal()
+            case .failed(let error):
                 MediaLog.log("[http] listener failed: \(error)")
+                outcome.error = .listenerFailed("\(error)")
+                ready.signal()
+            case .cancelled:
+                outcome.error = .listenerFailed("cancelled before ready")
+                ready.signal()
+            default:
+                break
             }
         }
         listener.start(queue: queue)
+
+        if ready.wait(timeout: .now() + timeout) == .timedOut {
+            listener.cancel()
+            throw StartFailure.notReady(timeout)
+        }
+        if let error = outcome.error {
+            listener.cancel()
+            throw error
+        }
+
         self.listener = listener
 
         let host = bindAll ? "0.0.0.0" : "127.0.0.1"
