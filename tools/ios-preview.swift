@@ -13,6 +13,7 @@
 //   ios-preview --sim-udid <UDID> --serve 8422 [--bind-all] [--no-window]
 //   ios-preview --device "iPhone 11" --serve 8424 --no-window
 //                            # --imageio forces the CPU encoder
+//   ... --h264 --bitrate 2000000   # H.264 elementary stream instead of MJPEG
 //                            # ... or stream a USB-connected device
 //                            # ... and stream it as MJPEG over HTTP
 //
@@ -158,6 +159,10 @@ struct StreamTuning {
     let quality: Double
     /// Force the CPU encoder. Diagnostic escape hatch and A/B lever.
     let useImageIO: Bool
+    /// H.264 instead of MJPEG. Cuts bitrate by roughly an order of magnitude
+    /// but costs the bare-<img> client -- the stream needs a decoder.
+    let useH264: Bool
+    let bitrate: Int
 }
 
 struct SimOptions {
@@ -202,7 +207,9 @@ func parseArgs() -> FilterMode {
             fps: value("--fps").flatMap(Double.init) ?? 15,
             maxDimension: value("--max-dim").flatMap(Int.init) ?? 900,
             quality: value("--quality").flatMap(Double.init) ?? 0.6,
-            useImageIO: args.contains("--imageio")
+            useImageIO: args.contains("--imageio"),
+            useH264: args.contains("--h264"),
+            bitrate: value("--bitrate").flatMap(Int.init) ?? 2_000_000
         )
         if let udid = value("--sim-udid") {
             return .simUDID(SimOptions(
@@ -1589,7 +1596,13 @@ final class MJPEGServer {
     private let maxDimension: Int
     private let quality: Double
     private let useImageIO: Bool
+    private let useH264: Bool
     private let hardware: HardwareJPEGEncoder
+    private let h264: HardwareH264Encoder
+    /// Set when a client attaches. H.264 frames depend on earlier ones, so a
+    /// late joiner decodes nothing until the next IDR -- rather than make it
+    /// wait for the periodic one, mint a keyframe on demand.
+    private var pendingKeyframe = false
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "quern.sim-preview.http")
@@ -1612,14 +1625,18 @@ final class MJPEGServer {
     private var lastReport = Date()
 
     init(port: UInt16, bindAll: Bool, fps: Double, maxDimension: Int, quality: Double,
-         useImageIO: Bool) {
+         useImageIO: Bool, useH264: Bool = false, bitrate: Int = 2_000_000) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8422
         self.bindAll = bindAll
         self.fps = fps
         self.maxDimension = maxDimension
         self.quality = quality
         self.useImageIO = useImageIO
+        self.useH264 = useH264
         self.hardware = HardwareJPEGEncoder(maxDimension: maxDimension, quality: quality)
+        self.h264 = HardwareH264Encoder(
+            maxDimension: maxDimension, bitrate: bitrate, expectedFPS: fps
+        )
     }
 
     func start() throws {
@@ -1650,6 +1667,7 @@ final class MJPEGServer {
         let host = bindAll ? "0.0.0.0" : "127.0.0.1"
         simLogErr("[preview] MJPEG on http://\(host):\(port.rawValue)/  "
             + "(fps \(Int(fps)), max \(maxDimension)px, q\(quality), "
+            + "codec \(useH264 ? "H.264" : "MJPEG"), "
             + "encoder \(useImageIO ? "ImageIO/CPU" : "VideoToolbox"))")
         if bindAll {
             simLogErr("[sim-preview] WARNING: bound to all interfaces, no auth -- "
@@ -1659,6 +1677,7 @@ final class MJPEGServer {
 
     func stop() {
         hardware.invalidate()
+        h264.invalidate()
         listener?.cancel()
         listener = nil
         for client in clients.values { client.connection.cancel() }
@@ -1711,9 +1730,12 @@ final class MJPEGServer {
 
     private func route(_ client: MJPEGClient, path: String) {
         if path.hasPrefix("/stream") {
+            let contentType = useH264
+                ? "video/h264"
+                : "multipart/x-mixed-replace; boundary=\(mjpegBoundary)"
             let header = """
             HTTP/1.1 200 OK\r
-            Content-Type: multipart/x-mixed-replace; boundary=\(mjpegBoundary)\r
+            Content-Type: \(contentType)\r
             Cache-Control: no-store\r
             Connection: close\r
             \r\n
@@ -1724,6 +1746,7 @@ final class MJPEGServer {
             )
             self.lock.lock()
             client.streaming = true
+            self.pendingKeyframe = true
             let total = self.clients.count
             self.lock.unlock()
             simLogErr("[preview] client attached (\(total) total)")
@@ -1780,6 +1803,18 @@ final class MJPEGServer {
         }
         lock.unlock()
         guard watching, due else { return }
+
+        if useH264 {
+            lock.lock()
+            let wantKey = pendingKeyframe
+            pendingKeyframe = false
+            lock.unlock()
+            guard let out = h264.encode(surface, forceKeyframe: wantKey) else { return }
+            // Elementary stream: the NAL start codes are the framing, so
+            // there is no per-frame envelope to add.
+            queue.async { [weak self] in self?.fanOut(out.annexB) }
+            return
+        }
 
         // Fall back rather than drop the frame: a VideoToolbox session can
         // fail to create, and a preview that silently goes black is worse
@@ -1860,7 +1895,8 @@ class SimAppDelegate: NSObject, NSApplicationDelegate {
             let server = MJPEGServer(
                 port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
                 maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality,
-                useImageIO: opts.tuning.useImageIO
+                useImageIO: opts.tuning.useImageIO, useH264: opts.tuning.useH264,
+                bitrate: opts.tuning.bitrate
             )
             do {
                 try server.start()
@@ -2042,6 +2078,242 @@ final class HardwareJPEGEncoder {
         sessionWidth = width
         sessionHeight = height
         simLogErr("[preview] VideoToolbox JPEG session \(width)x\(height) q\(quality)")
+        return true
+    }
+}
+
+// MARK: - Hardware H.264 encoder
+
+/// H.264 via VideoToolbox, for the case MJPEG cannot serve: many devices,
+/// watched remotely.
+///
+/// The API is the same `VTCompressionSession` the JPEG path uses, but three
+/// things differ and all of them matter.
+///
+/// 1. Output is **AVCC** — each NAL prefixed with a 4-byte big-endian length,
+///    with SPS/PPS carried out-of-band in the format description rather than
+///    inline. Annex-B (`00 00 00 01` start codes, parameter sets inline) is
+///    what a raw elementary stream wants, so we convert and re-inject.
+/// 2. Frames are *not* independent. A viewer joining mid-stream cannot decode
+///    until a keyframe arrives, which is why `forceKeyframe` exists — the one
+///    thing Android's screenrecord cannot do.
+/// 3. Bitrate is a target we set, not an outcome of quality-per-frame.
+final class HardwareH264Encoder {
+    struct Encoded {
+        let annexB: Data
+        let isKeyframe: Bool
+    }
+
+    private let maxDimension: Int
+    private let bitrate: Int
+    private let expectedFPS: Double
+
+    private var session: VTCompressionSession?
+    private var sessionWidth = 0
+    private var sessionHeight = 0
+    private var frameIndex: Int64 = 0
+    private let lock = NSLock()
+
+    /// Cached Annex-B parameter sets, refreshed whenever the format
+    /// description changes. Re-sent ahead of every keyframe so a late joiner
+    /// can start decoding without a side channel.
+    private var parameterSetsAnnexB: Data?
+
+    init(maxDimension: Int, bitrate: Int, expectedFPS: Double) {
+        self.maxDimension = maxDimension
+        self.bitrate = bitrate
+        self.expectedFPS = expectedFPS
+    }
+
+    deinit { invalidate() }
+
+    func invalidate() {
+        lock.lock()
+        if let session {
+            VTCompressionSessionInvalidate(session)
+            self.session = nil
+        }
+        lock.unlock()
+    }
+
+    /// Synchronous, for the same reason the JPEG encoder is: the IOSurface is
+    /// wrapped, not copied, and both sources rewrite theirs in place.
+    func encode(_ surface: IOSurface, forceKeyframe: Bool) -> Encoded? {
+        let sw = IOSurfaceGetWidth(surface), sh = IOSurfaceGetHeight(surface)
+        guard sw > 0, sh > 0 else { return nil }
+        let (tw, th) = target(sw, sh)
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard ensureSession(width: tw, height: th), let session else { return nil }
+
+        var unmanaged: Unmanaged<CVPixelBuffer>?
+        guard CVPixelBufferCreateWithIOSurface(nil, surface, nil, &unmanaged) == kCVReturnSuccess,
+              let pixelBuffer = unmanaged?.takeRetainedValue() else { return nil }
+
+        var props: CFDictionary?
+        if forceKeyframe {
+            props = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        }
+
+        var out: Encoded?
+        let pts = CMTime(value: frameIndex, timescale: CMTimeScale(max(expectedFPS, 1)))
+        frameIndex += 1
+
+        let status = VTCompressionSessionEncodeFrame(
+            session, imageBuffer: pixelBuffer, presentationTimeStamp: pts,
+            duration: .invalid, frameProperties: props, infoFlagsOut: nil
+        ) { [weak self] status, _, sample in
+            guard status == noErr, let sample, let self else { return }
+            out = self.package(sample)
+        }
+        guard status == noErr else {
+            simLogErr("[preview] H.264 encode failed: \(status)")
+            return nil
+        }
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        return out
+    }
+
+    // MARK: - AVCC -> Annex-B
+
+    private func package(_ sample: CMSampleBuffer) -> Encoded? {
+        let keyframe = isKeyframe(sample)
+
+        if keyframe, let fd = CMSampleBufferGetFormatDescription(sample) {
+            parameterSetsAnnexB = extractParameterSets(fd)
+        }
+
+        guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
+        let length = CMBlockBufferGetDataLength(block)
+        guard length > 0 else { return nil }
+        var avcc = Data(count: length)
+        let ok = avcc.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return CMBlockBufferCopyDataBytes(
+                block, atOffset: 0, dataLength: length, destination: base
+            ) == kCMBlockBufferNoErr
+        }
+        guard ok else { return nil }
+
+        var outData = Data()
+        // Parameter sets ahead of every keyframe, not just the first. Costs a
+        // few dozen bytes per IDR and means a viewer can join on any keyframe
+        // rather than only at stream start.
+        if keyframe, let ps = parameterSetsAnnexB { outData.append(ps) }
+
+        // Walk the AVCC length-prefixed NALs and re-emit them Annex-B.
+        //
+        // Assemble the 4-byte length by hand rather than loading a UInt32:
+        // each NAL advances the cursor by an arbitrary payload size, so the
+        // next length field lands at an arbitrary offset, and a typed load
+        // there traps on alignment.
+        let start = Data([0x00, 0x00, 0x00, 0x01])
+        var i = 0
+        while i + 4 <= length {
+            let n = Int(UInt32(avcc[i]) << 24 | UInt32(avcc[i + 1]) << 16
+                | UInt32(avcc[i + 2]) << 8 | UInt32(avcc[i + 3]))
+            i += 4
+            guard n > 0, i + n <= length else { break }
+            outData.append(start)
+            outData.append(avcc.subdata(in: i..<(i + n)))
+            i += n
+        }
+        return Encoded(annexB: outData, isKeyframe: keyframe)
+    }
+
+    private func isKeyframe(_ sample: CMSampleBuffer) -> Bool {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sample, createIfNecessary: false
+        ) as? [[CFString: Any]], let first = attachments.first else {
+            return true  // no attachments at all: treat as sync
+        }
+        // "not sync" absent or false => this is a sync sample.
+        if let notSync = first[kCMSampleAttachmentKey_NotSync] as? Bool { return !notSync }
+        return true
+    }
+
+    private func extractParameterSets(_ fd: CMFormatDescription) -> Data? {
+        var out = Data()
+        let start = Data([0x00, 0x00, 0x00, 0x01])
+        var count = 0
+        guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            fd, parameterSetIndex: 0, parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil, parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil
+        ) == noErr else { return nil }
+
+        for idx in 0..<count {
+            var ptr: UnsafePointer<UInt8>?
+            var size = 0
+            guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                fd, parameterSetIndex: idx, parameterSetPointerOut: &ptr,
+                parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                nalUnitHeaderLengthOut: nil
+            ) == noErr, let ptr else { continue }
+            out.append(start)
+            out.append(Data(bytes: ptr, count: size))
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    // MARK: - session
+
+    private func target(_ w: Int, _ h: Int) -> (Int, Int) {
+        let longest = max(w, h)
+        guard maxDimension > 0, longest > maxDimension else { return (even(w), even(h)) }
+        let f = Double(maxDimension) / Double(longest)
+        return (even(Int((Double(w) * f).rounded())), even(Int((Double(h) * f).rounded())))
+    }
+    private func even(_ v: Int) -> Int { max(2, v & ~1) }
+
+    /// Caller holds `lock`.
+    private func ensureSession(width: Int, height: Int) -> Bool {
+        if session != nil, sessionWidth == width, sessionHeight == height { return true }
+        if let existing = session { VTCompressionSessionInvalidate(existing); session = nil }
+        parameterSetsAnnexB = nil
+
+        var created: VTCompressionSession?
+        let spec: [CFString: Any] = [
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true
+        ]
+        let status = VTCompressionSessionCreate(
+            allocator: nil, width: Int32(width), height: Int32(height),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: spec as CFDictionary,
+            imageBufferAttributes: nil, compressedDataAllocator: nil,
+            outputCallback: nil, refcon: nil, compressionSessionOut: &created
+        )
+        guard status == noErr, let created else {
+            simLogErr("[preview] VTCompressionSessionCreate(H264) failed: \(status)")
+            return false
+        }
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        // No B-frames: they add a reordering delay for a live view, and the
+        // bitrate they save is not worth it here.
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering,
+                             value: kCFBooleanFalse)
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ProfileLevel,
+                             value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate,
+                             value: NSNumber(value: bitrate))
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                             value: NSNumber(value: expectedFPS))
+        // A periodic IDR bounds join latency even without an explicit request.
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: NSNumber(value: Int(expectedFPS * 2)))
+        var hw: CFTypeRef?
+        var isHW = false
+        if VTSessionCopyProperty(created,
+            key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+            allocator: nil, valueOut: &hw) == noErr, let n = hw as? NSNumber { isHW = n.boolValue }
+        VTCompressionSessionPrepareToEncodeFrames(created)
+
+        session = created
+        sessionWidth = width
+        sessionHeight = height
+        frameIndex = 0
+        simLogErr("[preview] VideoToolbox H.264 \(width)x\(height) "
+            + "@ \(bitrate / 1000) kbps target, hardware=\(isHW ? "YES" : "no")")
         return true
     }
 }
@@ -2256,7 +2528,8 @@ class DeviceStreamAppDelegate: NSObject, NSApplicationDelegate {
             let server = MJPEGServer(
                 port: opts.tuning.port, bindAll: opts.tuning.bindAll, fps: opts.tuning.fps,
                 maxDimension: opts.tuning.maxDimension, quality: opts.tuning.quality,
-                useImageIO: opts.tuning.useImageIO
+                useImageIO: opts.tuning.useImageIO, useH264: opts.tuning.useH264,
+                bitrate: opts.tuning.bitrate
             )
             do {
                 try server.start()

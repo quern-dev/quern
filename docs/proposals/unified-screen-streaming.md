@@ -297,6 +297,64 @@ Two things to know before tuning it:
   A preview that silently goes black is worse than one that quietly costs
   more CPU.
 
+### H.264: the farm case, measured
+
+Added behind `--h264`. Same `VTCompressionSession` API as the JPEG path,
+same hardware, three real differences: output is AVCC and has to be
+rewritten to Annex-B, frames depend on each other, and bitrate is a target
+we set rather than an outcome.
+
+Head to head on the USB iPhone 11, 60 fps cap, 900px, identical driven
+load, CPU as a time delta over an 11s window:
+
+| codec | CPU | RSS | delivered | bitrate | bytes over the window |
+|---|---|---|---|---|---|
+| MJPEG | 10.0% | 68 MB | 43.9-49.4 fps | 15.8-20.6 Mbps | 29.6 MB |
+| H.264 | 10.0% | 66 MB | 44.9-48.0 fps | **0.57-2.2 Mbps** | **2.5 MB** |
+
+**11.9x less data at identical CPU, memory and frame rate.** The CPU tie is
+expected rather than surprising — both paths are decode-bound, so the
+encoder swap shows up entirely in the output.
+
+That changes the farm arithmetic outright. 18 devices at MJPEG's ~18 Mbps
+is ~320 Mbps, which is LAN-only. At H.264's ~2 Mbps it is ~36 Mbps, which
+is an ordinary WAN link.
+
+Verified as real H.264 rather than plausible bytes: `ffprobe` reports High
+profile 416x900 yuv420p, and frames decode back to correct screen content.
+
+### Keyframes on demand, which Android cannot do
+
+NAL structure from a physical-device capture:
+
+```
+frames=776  IDRs at [0, 120, 240, 360, 480, 600, 720]  SPS=7  PPS=7
+```
+
+- IDR at frame 0 is `kVTEncodeFrameOptionKey_ForceKeyFrame`, fired when a
+  client attaches, so a late joiner decodes immediately instead of waiting.
+- IDRs every 120 frames are `MaxKeyFrameInterval` at 2 seconds of a 60 fps
+  stream, bounding join latency even without the explicit request.
+- Seven SPS/PPS pairs for seven IDRs: parameter sets are re-emitted ahead of
+  every keyframe, so a viewer can start at any of them rather than only at
+  stream start.
+
+This is the sharp contrast with Android. `screenrecord` gives one IDR per
+session and no way to ask for another, so the only lever there is
+restarting the subprocess (~290ms, and a glitch for every existing viewer).
+Owning the encoder means owning the keyframe.
+
+### What H.264 costs
+
+MJPEG's real advantage was never bitrate, it was the client: `<img
+src="/stream">` and nothing else. H.264 needs a decoder. The current
+`--h264` mode serves a raw Annex-B elementary stream — fine for `ffprobe`,
+`ffplay` and a native client, not directly playable in a browser.
+
+Browser delivery needs fMP4 via MSE, or WebCodecs feeding a canvas. That is
+the remaining work, and the Android path needs exactly the same muxer, so
+it should be written once for both.
+
 ### Still CPU, still worth moving
 
 - **Downscaling** is `CGContext.draw`, on the cores. Either hand it to
