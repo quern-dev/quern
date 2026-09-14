@@ -12,7 +12,6 @@ public struct Options: Equatable {
     public var servePort: UInt16?
     public var bindAll: Bool
     public var recordPath: String?
-    public var window: Bool
     public var fps: Double
     public var maxDimension: Int
     public var quality: Double
@@ -29,7 +28,7 @@ public enum OptionsError: Error, Equatable, CustomStringConvertible {
     case missingValue(String)
     case badValue(flag: String, value: String)
     case unknownFlag(String)
-    case nothingToDo
+    case noOutput
 
     public var description: String {
         switch self {
@@ -42,8 +41,8 @@ public enum OptionsError: Error, Equatable, CustomStringConvertible {
         case .missingValue(let flag): return "\(flag) needs a value"
         case .badValue(let flag, let value): return "\(flag): cannot parse \"\(value)\""
         case .unknownFlag(let flag): return "unknown flag \(flag)"
-        case .nothingToDo:
-            return "nothing to do: pass --serve, --record, or drop --no-window"
+        case .noOutput:
+            return "no output: pass --serve and/or --record"
         }
     }
 }
@@ -54,7 +53,7 @@ public enum OptionsParser {
         "--quality", "--bitrate", "--record",
     ]
     private static let boolFlags: Set<String> = [
-        "--bind-all", "--no-window", "--h264", "--list", "--help", "-h",
+        "--bind-all", "--h264", "--list", "--help", "-h",
     ]
 
     public static func parse(_ args: [String]) throws -> Options {
@@ -117,15 +116,16 @@ public enum OptionsParser {
             servePort: servePort,
             bindAll: flags.contains("--bind-all"),
             recordPath: record,
-            window: !flags.contains("--no-window"),
             fps: try number("--fps", default: 15.0),
             maxDimension: try number("--max-dim", default: 900),
             quality: try number("--quality", default: 0.6),
             bitrate: try number("--bitrate", default: 2_000_000)
         )
 
-        guard options.window || options.servePort != nil || options.recordPath != nil else {
-            throw OptionsError.nothingToDo
+        // A headless producer with no sink would capture frames and discard
+        // them. Windows are the preview app's job, not this tool's.
+        guard options.servePort != nil || options.recordPath != nil else {
+            throw OptionsError.noOutput
         }
         return options
     }
