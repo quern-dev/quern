@@ -198,7 +198,9 @@ class TestFailures:
         # to whoever tries to execute it.
         def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
             if "--show-bin-path" in cmd:
-                return subprocess.CompletedProcess(cmd, 0, stdout=str(tmp_path / "empty"), stderr="")
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=str(tmp_path / "empty"), stderr=""
+                )
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         (tmp_path / "empty").mkdir()
