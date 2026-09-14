@@ -60,6 +60,52 @@ count over MJPEG. The emulator's 1.75 Mbps was not efficiency, it was the
 encoder under-running a 4M request because the emulated display produced
 fewer frames.
 
+### The frame-rate cap was aliasing away half the frames
+
+The throttle read `now - lastEncode >= 1/fps` and set `lastEncode = now` on
+every encode. Resetting to the *arrival* time discards the remainder, so a
+source faster than the target quantises to an integer division of it. With
+the iPhone delivering 60 fps against a 30 fps target, every second frame
+missed the gate and the served rate landed at ~23, not 30.
+
+Deadline-based scheduling fixes it: advance `nextDeadline` by one interval
+rather than resetting to now, and resync only when more than an interval
+behind, so an idle screen does not produce a catch-up burst.
+
+Measured after the fix (CPU as a time delta over a fixed 10s window, not
+`ps %cpu`, which is a since-start average and reads low):
+
+| config | CPU | RSS | served | bitrate |
+|---|---|---|---|---|
+| VideoToolbox, 30 cap | 10.0% | 66 MB | **30.0 fps** | 11.4 Mbps |
+| VideoToolbox, 60 cap | 10.0% | 68 MB | 48-60 fps | 21-25 Mbps |
+| ImageIO, 60 cap | 30.0% | 110 MB | 48-57 fps | 12-15 Mbps |
+
+**Doubling the frame rate costs no extra CPU on the VideoToolbox path.**
+That follows from the decomposition measured earlier: ~8.3% of the 10% is
+AVFoundation's demux and decode, which runs at source rate no matter how
+many frames we choose to encode, and the VT encode itself is ~1.7%. The
+path is decode-bound, so frame rate is nearly free. ImageIO is not: it
+triples to 30% because its encode is real CPU work per frame.
+
+### MJPEG bitrate tracks frame rate, not motion
+
+Frame size barely moves with content, because every JPEG is a full
+intra-coded image. Median frame was 43 KB on a static screen and 48 KB
+with the TV app playing video behind its onboarding sheet — about 12%.
+Compare that with H.264, where motion dominates.
+
+The practical consequence is that MJPEG bandwidth is something you set,
+via fps and resolution, rather than something the content decides. The
+earlier "static screens flattered the numbers" worry was half right: the
+low figures came from a low *frame rate*, not from static content.
+
+Caveat on this measurement: an attempt to A/B static against scroll-driven
+motion at a fixed 60 fps was invalid — WDA died partway and both runs were
+actually static (30 distinct frames of ~770 in each). The 43 KB / 48 KB
+comparison above comes from the static run against the TV-app run, which
+had genuine motion (277 distinct of 903). Worth redoing cleanly.
+
 ### Static screens were flattering the numbers
 
 Every physical-device figure above was taken on a near-static screen —

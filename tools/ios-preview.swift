@@ -1598,7 +1598,14 @@ final class MJPEGServer {
     /// output's -- so this is no longer single-queue state.
     private let lock = NSLock()
     private var clients: [ObjectIdentifier: MJPEGClient] = [:]
-    private var lastEncode = Date.distantPast
+    /// Next time an encode is due. Deadline-based rather than
+    /// "1/fps since the last encode": resetting to the arrival time throws
+    /// away the remainder, so a source running at 49 fps against a 30 fps
+    /// target skips every other frame and lands on 24.5 instead of 30.
+    private var nextDeadline = Date.distantPast
+    /// Frames handed to publish(), before throttling. The gap between this
+    /// and the served rate is what the throttle is actually doing.
+    private var framesOffered = 0
 
     private var framesEncoded = 0
     private var bytesSent = 0
@@ -1760,8 +1767,17 @@ final class MJPEGServer {
         // Encode at most fps times a second. Sources happily emit 60 fps
         // during animation; JPEG at that rate is a lot of CPU for frames
         // nobody can tell apart.
-        let due = now.timeIntervalSince(lastEncode) >= 1.0 / fps
-        if watching && due { lastEncode = now }
+        framesOffered += 1
+        let interval = 1.0 / fps
+        let due = now >= nextDeadline
+        if watching && due {
+            // Advance by one interval to keep phase. If we have fallen more
+            // than an interval behind -- an idle screen producing no frames,
+            // or a stall -- resync to now instead of emitting a catch-up
+            // burst of stale frames.
+            nextDeadline += interval
+            if nextDeadline <= now { nextDeadline = now + interval }
+        }
         lock.unlock()
         guard watching, due else { return }
 
@@ -1810,13 +1826,15 @@ final class MJPEGServer {
         let elapsed = now.timeIntervalSince(lastReport)
         guard elapsed >= 2.0 else { lock.unlock(); return }
         let fps = Double(framesEncoded) / elapsed
+        let offered = Double(framesOffered) / elapsed
         let kbps = Double(bytesSent) * 8.0 / elapsed / 1000.0
         framesEncoded = 0
+        framesOffered = 0
         bytesSent = 0
         lastReport = now
         lock.unlock()
-        simLogErr(String(format: "[preview] served %.1f fps, %.0f kbps, %d client(s)",
-                         fps, kbps, active))
+        simLogErr(String(format: "[preview] source %.1f fps -> served %.1f fps, %.0f kbps, %d client(s)",
+                         offered, fps, kbps, active))
     }
 }
 
