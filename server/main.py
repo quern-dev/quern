@@ -1427,6 +1427,10 @@ def _cmd_enable_local_capture(process_names: list[str]) -> None:
     processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
 
     current = get_local_capture_processes()
+    removed = [p for p in current if p not in processes]
+    if removed:
+        print(f"  Removing from capture: {', '.join(removed)}")
+        print("  (this sets the list rather than adding to it)")
     if current == processes:
         print(f"Local capture is already enabled for: {', '.join(processes)}")
         return

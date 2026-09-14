@@ -1386,3 +1386,96 @@ class TestBootAutoStartAsksTheTrustStore:
         assert not adapter.start.called, (
             "the proxy auto-started on a record the TrustStore contradicts"
         )
+
+
+class TestSettingCaptureSaysWhatItDropped:
+    """`set` replaces, silently, and the response echoes only the new list.
+
+    So removing a process looks identical to adding one. An agent told
+    "capture MobileSafari" sends `["MobileSafari"]` and deletes whatever else
+    was being watched. The defaults are the usual casualty -- MobileSafari and
+    com.apple.WebKit.Networking are applied only when nothing is specified, so
+    naming one process drops them and web-view traffic stops being captured.
+
+    Reported from a real session: two of three processes were passed and the
+    third vanished with nothing said.
+    """
+
+    def _app_with_proxy(self, app, current):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter._tls_rejections = []
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = list(current)
+
+    def test_a_dropped_process_is_named(
+        self, client, auth_headers, app, monkeypatch, caplog
+    ):
+        import logging
+
+        self._app_with_proxy(
+            app, ["Metatext", "MobileSafari", "com.apple.WebKit.Networking"]
+        )
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert",
+            AsyncMock(return_value=[]),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            r = client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": ["MobileSafari", "com.apple.WebKit.Networking"]},
+                headers=auth_headers,
+            )
+        assert r.status_code == 200
+        logged = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "Metatext" in logged, "a process was dropped with nothing said"
+
+    def test_adding_one_says_nothing(
+        self, client, auth_headers, app, monkeypatch, caplog
+    ):
+        # The converse: a purely additive change must not warn, or the warning
+        # becomes noise and stops being read.
+        import logging
+
+        self._app_with_proxy(app, ["MobileSafari"])
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert",
+            AsyncMock(return_value=[]),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": ["MobileSafari", "Metatext"]},
+                headers=auth_headers,
+            )
+        logged = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "no longer includes" not in logged
+
+    def test_disabling_capture_names_everything_it_stops(
+        self, client, auth_headers, app, monkeypatch, caplog
+    ):
+        import logging
+
+        self._app_with_proxy(app, ["Metatext", "MobileSafari"])
+        with caplog.at_level(logging.WARNING):
+            client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": []},
+                headers=auth_headers,
+            )
+        logged = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "Metatext" in logged and "MobileSafari" in logged
