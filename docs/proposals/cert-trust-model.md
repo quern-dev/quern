@@ -480,7 +480,7 @@ revertable, and so the risky shared-file change comes last.
 | Phase | Change | Lands behind | Unblocks |
 |---|---|---|---|
 | **1** | `tls_failed_client` in the addon; record the event with client IP, SNI, timestamp | nothing — pure addition, no reader changes | the observation §3.5 needs; the third oracle in §4.5.1 |
-| **2** | `#151` — fingerprint-aware cache invalidation | nothing | correctness now, independent of all of this |
+| **2** | Delete the trust cache (ADR 1); closes #151 by removal | nothing | one fewer way to get a stale answer |
 | **3** | `TrustClaim` as an internal type; `verify_trust` dispatcher; **no API change** | existing fields kept, populated from the claim | callers migrate one at a time |
 | **4** | Re-point the ~7 callers, one per commit, each with its Q1/Q2/Q3/Q4 label | phase 3 | D13 encoded rather than re-audited |
 | **5** | The probe (§3.4) + `record_device_proxy_config` triggering it | phase 1 | D12/#150 becomes moot; physical devices get real answers; rows 57–68 become runnable |
@@ -742,6 +742,93 @@ L3 is a real cause of the identical symptom, and the probe can separate it from
 the other two (a pinned app fails *after* a successful handshake to other hosts
 from the same device). §1.1.
 
+### ADR 1 — Delete the trust cache rather than fix it
+
+**Date:** 2026-09-14 · **Status:** accepted · **Supersedes:** the third open
+question in §6.2 as originally written, and narrows #151.
+
+#### Context
+
+`is_cert_installed` kept an hour-long cache of each device's trust. **That hour
+is a window in which an erased simulator reports as trusting the CA**, which is
+the failure in §0: capture silently fails, and the symptom points at the app.
+A field report lost an hour to it, and a live test here reproduced it three
+minutes after `simctl erase`.
+
+Issue `#151` records a second defect in the same branch: it computes
+`expected_fingerprint` and never compares it to the recorded one, so
+regenerating the CA leaves every device reporting trusted — for the old CA —
+until the TTL expires.
+
+The migration had phase 2 as "fingerprint-aware cache invalidation", which
+would have fixed the second defect and left the first.
+
+#### Why the cache is not worth its window
+
+The case for keeping it was latency. It does not survive contact with the code,
+and this is the supporting argument rather than the reason — a cache that made
+erasure invisible would be worth deleting even if it were free.
+
+1. **Android never reaches the cache.** `is_cert_installed` dispatches to
+   `_is_cert_installed_android` and returns *before* the cache block. The one
+   device kind whose verification is genuinely expensive cannot use it, so the
+   stated justification was about a case that does not exist.
+2. **The expensive call happens first regardless.** `get_cert_fingerprint`
+   shells out to `openssl` and runs *above* the cache check, so a cache hit
+   pays it anyway.
+3. **The saving is about 1%**, and none of this is on a hot path: nothing polls
+   it. The menu bar's three-second timer reads `state.json` off disk; no
+   background loop touches cert state. These calls happen when an agent or the
+   CLI asks — session start, enabling capture, `doctor`.
+
+   | step | cost | |
+   |---|---|---|
+   | `get_cert_fingerprint` | 9.13 ms | runs before the cache check |
+   | `read_cert_state_for_device` | 0.08 ms | the cache read itself |
+   | `verify_cert_in_truststore` | 0.11 ms | what the cache skips |
+
+4. **Nothing calls it.** After #152 and #153 every caller passes `verify=True`,
+   including the single pass-through in `get_device_cert_state`. The branch is
+   dead code in production, so #151 is currently unreachable — a latent
+   landmine rather than a live bug.
+
+#### Decision
+
+**Delete the cache**, along with the `verify` parameter, `CACHE_TTL_SECONDS`,
+and the cache-hit path. `is_cert_installed` always asks the TrustStore.
+
+#### Why deletion beats the alternatives
+
+Three other mitigations were considered and rank below it:
+
+- *Fix the fingerprint comparison* (#151 as filed) — correct, but leaves a
+  branch nothing uses, for a future caller to wander into.
+- *Flip the default to `verify=True`* — makes the unsafe path opt-in, but
+  leaves it reachable.
+- *A test asserting every call site passes `verify=True`* — brittle, and guards
+  the symptom rather than the cause.
+
+Deletion is the only one a future caller cannot undo. It is also consistent
+with §2.4: a correct function that is easy not to call is not a fix, and the
+same is true of a correct branch that is easy to reach by accident.
+
+#### Consequences
+
+- **#151 is closed by removal**, not by a fingerprint check. The defect cannot
+  recur because the code holding it is gone.
+- **§3.1's `fingerprint` field is unaffected.** A claim still records which CA
+  it is about; that is what makes CA regeneration expressible. This removes a
+  *time-based* cache, not the identity of the thing being claimed.
+- **The fingerprint comparison inside `verify_cert_in_truststore` is now the
+  only CA-identity mechanism in this path**, and #151 is closed without one
+  being added above it. It is pinned by a test asserting the *current* CA's
+  fingerprint is what gets asked about; before that, passing a constant left
+  the whole suite green.
+- **If speed matters later, cache the fingerprint** — 9 ms, CA-scoped, with no
+  per-device staleness to get wrong. That is a different and much smaller
+  change, and none of this risk attaches to it.
+- Phase 2 of §4.5 is now "delete the cache" rather than "#151".
+
 ### 6.2 Still open
 
 1. **Does `TrustClaim` go on the wire, or stay internal behind a flattened
@@ -752,8 +839,5 @@ from the same device). §1.1.
    reserved domain, but it is still traffic quern generates on someone's
    device. `record_device_proxy_config` is clearly consented. A probe on every
    `proxy_status` is clearly not. The boundary in between is unresolved.
-3. **Is the hour-long cache worth keeping anywhere?** Simulator verification is
-   0.6 ms and should never cache. Android is an `adb` round trip and genuinely
-   wants one — but keyed on fingerprint (#151), not time alone.
-4. **How much of L3 is worth modelling?** Detecting *that* an app pins is
+3. **How much of L3 is worth modelling?** Detecting *that* an app pins is
    within reach via the probe. Doing anything about it is a different project.

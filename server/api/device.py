@@ -248,14 +248,12 @@ async def list_devices(
                     and dev.state == DeviceState.BOOTED
                 )
                 if verifiable and controller is not None:
-                    # `verify=True`, matching the preflight. Without it the
-                    # hour-long cache answers, and this both labels *and*
-                    # filters: asking for devices that trust the CA and being
-                    # handed one erased four minutes ago is the answer being
-                    # wrong, not merely stale. The query costs 0.6 ms.
+                    # Ground truth, matching the preflight. This both labels
+                    # *and* filters: asking for devices that trust the CA and
+                    # being handed one erased four minutes ago is the answer
+                    # being wrong, not merely stale.
                     dd["cert_installed"] = await cert_manager.is_cert_installed(
-                        controller, dd["udid"], verify=True,
-                        device_name=dd.get("name"),
+                        controller, dd["udid"], device_name=dd.get("name"),
                     )
                 else:
                     dd["cert_installed"] = cert_states.get(dd["udid"], {}).get(
@@ -323,8 +321,8 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     has_cert = cert_auto_installed is True
     if not has_cert:
         # Ask the TrustStore, not the record. The install above used to do this
-        # as a side effect -- `install_cert` calls `is_cert_installed(verify=True)`
-        # and writes the result -- so it was the only ground-truth refresh on
+        # as a side effect -- `install_cert` calls `is_cert_installed` and
+        # writes the result -- so it was the only ground-truth refresh on
         # this path, and gating the install removed it. Reading the record
         # instead gets both directions wrong: a simulator that trusts the CA
         # from a manual `simctl keychain add-root-cert` never auto-starts, and
@@ -332,7 +330,7 @@ async def boot_device(request: Request, body: BootDeviceRequest):
         # true. 0.6 ms, the same query every other caller now makes.
         try:
             has_cert = await _cert_manager.is_cert_installed(
-                controller, udid, verify=True,
+                controller, udid,
             )
         except Exception:
             logger.debug("Could not verify the CA on %s", udid, exc_info=True)

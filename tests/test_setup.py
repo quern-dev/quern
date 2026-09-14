@@ -798,7 +798,7 @@ class TestInstallCertSimulator:
         cert.parent.mkdir(parents=True)
         cert.write_text("fake cert")
 
-        async def mock_is_installed(ctrl, udid, verify=False):
+        async def mock_is_installed(ctrl, udid):
             return False
 
         async def mock_install(ctrl, udid, force=False):
@@ -817,7 +817,7 @@ class TestInstallCertSimulator:
         cert.parent.mkdir(parents=True)
         cert.write_text("fake cert")
 
-        async def mock_is_installed(ctrl, udid, verify=False):
+        async def mock_is_installed(ctrl, udid):
             return True
 
         with (
@@ -838,7 +838,7 @@ class TestInstallCertSimulator:
         cert.parent.mkdir(parents=True)
         cert.write_text("fake cert")
 
-        async def mock_is_installed(ctrl, udid, verify=False):
+        async def mock_is_installed(ctrl, udid):
             raise RuntimeError("simctl failed")
 
         with (

@@ -1976,11 +1976,20 @@ def _is_cert_installed(udid: str) -> bool:
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(
-                cert_manager.is_cert_installed(controller, udid, verify=True)
+                cert_manager.is_cert_installed(controller, udid)
             )
         finally:
             loop.close()
     except Exception:
+        # Still fail safe -- setup must not crash because a cert check did --
+        # but not silently. This swallowed a TypeError from a stale call
+        # signature, so a wrong argument reported "no cert installed" and setup
+        # cheerfully offered to reinstall one that was already there.
+        import logging
+
+        logging.getLogger("quern-debug-server.setup").warning(
+            "Could not check the CA on %s", udid, exc_info=True,
+        )
         return False
 
 
@@ -2012,7 +2021,7 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
         try:
             # First verify if cert is already installed (via SQLite)
             is_installed = loop.run_until_complete(
-                cert_manager.is_cert_installed(controller, udid, verify=True)
+                cert_manager.is_cert_installed(controller, udid)
             )
 
             if is_installed:

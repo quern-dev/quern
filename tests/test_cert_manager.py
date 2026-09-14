@@ -238,94 +238,98 @@ class TestCheckTruststoreStatus:
 
 class TestIsCertInstalled:
     @pytest.mark.asyncio
-    async def test_is_cert_installed_cache_hit(
+    async def test_a_fresh_record_does_not_prevent_the_query(
         self, mock_controller, mock_cert_path, clean_cert_state
     ):
-        """Test is_cert_installed uses cache when fresh."""
+        """The cache is gone, and this is what replaces three tests of it.
+
+        `is_cert_installed` used to return a record written within the hour
+        without asking the device. Those three tests pinned that behaviour --
+        cache hit, cache stale, and a `verify=True` flag to force past it --
+        and all three described machinery that no longer exists.
+
+        What matters now is the opposite claim: a record saying "installed",
+        written a second ago, must not stop the TrustStore being asked. See
+        ADR 1 in docs/proposals/cert-trust-model.md.
+        """
         import json
 
-        now = datetime.now(UTC)
-        cert_state_data = {
+        clean_cert_state.write_text(json.dumps({
             "test-udid": {
                 "name": "iPhone 16 Pro",
                 "cert_installed": True,
                 "fingerprint": "abc123",
-                "verified_at": now.isoformat(),
+                "verified_at": datetime.now(UTC).isoformat(),
             }
-        }
-        clean_cert_state.write_text(json.dumps(cert_state_data))
-
-        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
-            with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
-                with patch("server.proxy.cert_manager.verify_cert_in_truststore") as mock_verify:
-                    mock_verify.side_effect = AssertionError("Should not call SQLite!")
-
-                    result = await cert_manager.is_cert_installed(
-                        mock_controller, "test-udid", verify=False
-                    )
-
-        assert result is True
-        mock_verify.assert_not_called()  # Cache hit, no SQLite query
-
-    @pytest.mark.asyncio
-    async def test_is_cert_installed_cache_stale(
-        self, mock_controller, mock_cert_path, clean_cert_state
-    ):
-        """Test is_cert_installed queries SQLite when cache is stale."""
-        import json
-
-        old_time = datetime.now(UTC) - timedelta(hours=2)
-        cert_state_data = {
-            "test-udid": {
-                "name": "iPhone 16 Pro",
-                "cert_installed": True,
-                "fingerprint": "abc123",
-                "verified_at": old_time.isoformat(),
-            }
-        }
-        clean_cert_state.write_text(json.dumps(cert_state_data))
+        }))
 
         with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
             with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
                 with patch(
-                    "server.proxy.cert_manager.verify_cert_in_truststore", return_value=True
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=False,
                 ) as mock_verify:
                     result = await cert_manager.is_cert_installed(
-                        mock_controller, "test-udid", verify=False
+                        mock_controller, "test-udid"
                     )
 
-        assert result is True
-        mock_verify.assert_called_once()  # Cache stale, should verify
+        assert mock_verify.called, "a record was believed instead of the device"
+        assert result is False, (
+            "a device erased since the record was written reported as trusting"
+        )
 
     @pytest.mark.asyncio
-    async def test_is_cert_installed_force_verify(
+    async def test_the_truststore_is_asked_about_the_current_ca(
         self, mock_controller, mock_cert_path, clean_cert_state
     ):
-        """Test is_cert_installed always queries SQLite when verify=True."""
+        """Which CA is being asked about is now the only identity mechanism left.
+
+        ADR 1 closes #151 by deleting the cache rather than teaching it to
+        compare fingerprints -- so the comparison inside
+        `verify_cert_in_truststore` is what stops a device that trusts an *old*
+        CA reporting as trusting the current one. Nothing pinned it: passing a
+        constant instead of the real fingerprint left the whole suite green.
+        """
+        with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
+            with patch(
+                "server.proxy.cert_manager.get_cert_fingerprint",
+                return_value="current-ca-fingerprint",
+            ):
+                with patch(
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
+                ) as mock_verify:
+                    await cert_manager.is_cert_installed(mock_controller, "test-udid")
+
+        mock_verify.assert_called_once_with("test-udid", "current-ca-fingerprint")
+
+    @pytest.mark.asyncio
+    async def test_the_device_is_what_decides(
+        self, mock_controller, mock_cert_path, clean_cert_state
+    ):
+        # The converse, so the test above cannot be satisfied by always
+        # returning False.
         import json
 
-        now = datetime.now(UTC)
-        cert_state_data = {
-            "test-udid": {
-                "name": "iPhone 16 Pro",
-                "cert_installed": True,
-                "fingerprint": "abc123",
-                "verified_at": now.isoformat(),
-            }
-        }
-        clean_cert_state.write_text(json.dumps(cert_state_data))
+        clean_cert_state.write_text(json.dumps({
+            "test-udid": {"name": "iPhone 16 Pro", "cert_installed": False,
+                          "verified_at": datetime.now(UTC).isoformat()}
+        }))
 
         with patch("server.proxy.cert_manager.get_cert_path", return_value=mock_cert_path):
             with patch("server.proxy.cert_manager.get_cert_fingerprint", return_value="abc123"):
                 with patch(
-                    "server.proxy.cert_manager.verify_cert_in_truststore", return_value=True
+                    "server.proxy.cert_manager.verify_cert_in_truststore",
+                    return_value=True,
                 ) as mock_verify:
-                    result = await cert_manager.is_cert_installed(
-                        mock_controller, "test-udid", verify=True
-                    )
+                    assert await cert_manager.is_cert_installed(
+                        mock_controller, "test-udid"
+                    ) is True
 
-        assert result is True
-        mock_verify.assert_called_once()  # Force verify, always check
+        # Not just the answer. Without this, an implementation that shortcuts a
+        # persisted `False` straight to `True` -- never asking the device --
+        # satisfies the assertion above.
+        assert mock_verify.called, "the device was never asked"
 
     @pytest.mark.asyncio
     async def test_is_cert_installed_cert_missing(
@@ -336,7 +340,7 @@ class TestIsCertInstalled:
 
         with patch("server.proxy.cert_manager.get_cert_path", return_value=nonexistent_cert):
             result = await cert_manager.is_cert_installed(
-                mock_controller, "test-udid", verify=False
+                mock_controller, "test-udid"
             )
 
         assert result is False
@@ -366,7 +370,7 @@ class TestIsCertInstalled:
                 ):
                     with patch("server.proxy.cert_manager.logger") as mock_logger:
                         result = await cert_manager.is_cert_installed(
-                            mock_controller, "test-udid", verify=True
+                            mock_controller, "test-udid"
                         )
 
         assert result is False

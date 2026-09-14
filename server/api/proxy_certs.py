@@ -227,7 +227,7 @@ async def _verify_simulator(
     was_installed = prev_state.get("cert_installed", False) if prev_state else False
 
     cert_state = await cert_manager.get_device_cert_state(
-        controller, udid, verify=True, device_name=name,
+        controller, udid, device_name=name,
     )
 
     if fingerprint:
@@ -564,21 +564,20 @@ async def setup_guide(request: Request) -> dict:
             # Verified, not cached. This renders a per-device tick or cross in
             # a setup guide, and a tick against an erased simulator tells
             # someone they are ready when every HTTPS request from that device
-            # will fail. `is_cert_installed` keeps an hour-long cache and falls
-            # through to the TrustStore after that, so this stays cheap without
-            # believing a record indefinitely.
+            # will fail. `is_cert_installed` asks the TrustStore every time --
+            # 0.11 ms against a local SQLite file, so there is nothing to trade
+            # truth for.
             for device in booted_devices:
                 # Simulators verify against their TrustStore; physical devices
                 # cannot, and asking would both answer `false` wrongly and
                 # overwrite the record their own traffic-based verification
                 # reads. See the note in device.py's list endpoint.
                 if device.device_type == DeviceType.SIMULATOR:
-                    # `verify=True`: the guide tells someone what to do next,
-                    # so a cached "already installed" sends them away from the
-                    # one step that would fix it.
+                    # Ground truth: the guide tells someone what to do next,
+                    # so a stale "already installed" would send them away from
+                    # the one step that would fix it.
                     cert_installed = await cert_manager.is_cert_installed(
-                        controller, device.udid, verify=True,
-                        device_name=device.name,
+                        controller, device.udid, device_name=device.name,
                     )
                 else:
                     cert_installed = read_cert_state().get(device.udid, {}).get(
