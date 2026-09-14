@@ -84,6 +84,11 @@ class TestBuildBundle:
         assert captured.get("timeout"), "swiftc was launched with no timeout"
 
 
+#: A CoreMediaIO unique ID. Sessions are keyed by this, never by the name --
+#: two phones of the same model report the same name.
+IPHONE_KEY = "A65275E0-4D75-494B-A89E-378F7EABA35D"
+
+
 class TestDisconnectEvent:
     """`_pending` holds futures for both add and remove, so a disconnect has to
     settle them differently."""
@@ -92,7 +97,7 @@ class TestDisconnectEvent:
         loop = asyncio.new_event_loop()
         mgr = PreviewManager()
         fut = loop.create_future()
-        mgr._pending["iPhone 11"] = (cid, op, fut)
+        mgr._pending[IPHONE_KEY] = (cid, op, fut)
         return loop, mgr, fut
 
     def test_a_disconnect_fails_an_in_flight_add(self):
@@ -100,7 +105,9 @@ class TestDisconnectEvent:
         unplugged device and reserve a window position for it."""
         loop, mgr, fut = self._manager_with_pending("add")
         try:
-            mgr._dispatch_event({"event": "disconnected", "name": "iPhone 11"})
+            mgr._dispatch_event(
+                {"event": "disconnected", "key": IPHONE_KEY, "name": "iPhone 11"}
+            )
             assert fut.done()
             with pytest.raises(RuntimeError, match="disconnected before"):
                 fut.result()
@@ -111,7 +118,9 @@ class TestDisconnectEvent:
         """A remove got what it asked for: the preview is gone."""
         loop, mgr, fut = self._manager_with_pending("remove")
         try:
-            mgr._dispatch_event({"event": "disconnected", "name": "iPhone 11"})
+            mgr._dispatch_event(
+                {"event": "disconnected", "key": IPHONE_KEY, "name": "iPhone 11"}
+            )
             assert fut.result() is True
         finally:
             loop.close()
@@ -122,15 +131,20 @@ class TestDisconnectEvent:
         from server.device.preview import PreviewDeviceInfo
 
         mgr = PreviewManager()
-        mgr._available = [PreviewDeviceInfo(name="iPhone 11", cmio_id="A")]
-        mgr._dispatch_event({"event": "disconnected", "name": "iPhone 11"})
+        mgr._available = [PreviewDeviceInfo(name="iPhone 11", cmio_id=IPHONE_KEY)]
+        mgr._dispatch_event(
+            {"event": "disconnected", "key": IPHONE_KEY, "name": "iPhone 11"}
+        )
         assert mgr._available == []
 
     def test_a_connect_adds_the_device_without_opening_anything(self):
         """In interactive mode the server decides what is on screen."""
         mgr = PreviewManager()
-        mgr._dispatch_event({"event": "connected", "name": "iPhone 11", "id": "A"})
+        mgr._dispatch_event(
+            {"event": "connected", "key": IPHONE_KEY, "name": "iPhone 11"}
+        )
         assert [d.name for d in mgr._available] == ["iPhone 11"]
+        assert [d.cmio_id for d in mgr._available] == [IPHONE_KEY]
         assert mgr._active == {}
 
 
@@ -142,7 +156,7 @@ class TestCommandCorrelation:
         loop = asyncio.new_event_loop()
         mgr = PreviewManager()
         fut = loop.create_future()
-        mgr._pending["iPhone 11"] = (cid, op, fut)
+        mgr._pending[IPHONE_KEY] = (cid, op, fut)
         return loop, mgr, fut
 
     def test_a_late_reply_does_not_settle_a_newer_command(self):
@@ -152,17 +166,17 @@ class TestCommandCorrelation:
         loop, mgr, add_fut = self._pending("add", "c2")
         try:
             mgr._dispatch_event(
-                {"event": "removed", "name": "iPhone 11", "id": "c1"}
+                {"event": "removed", "key": IPHONE_KEY, "id": "c1"}
             )
             assert not add_fut.done(), "a stale reply settled the new command"
-            assert "iPhone 11" in mgr._pending, "the new command was discarded"
+            assert IPHONE_KEY in mgr._pending, "the new command was discarded"
         finally:
             loop.close()
 
     def test_the_matching_reply_settles_it(self):
         loop, mgr, fut = self._pending("add", "c2")
         try:
-            mgr._dispatch_event({"event": "added", "name": "iPhone 11", "id": "c2"})
+            mgr._dispatch_event({"event": "added", "key": IPHONE_KEY, "id": "c2"})
             assert fut.result() is True
         finally:
             loop.close()
@@ -175,7 +189,7 @@ class TestCommandCorrelation:
         id is one this code never sent an id to."""
         loop, mgr, fut = self._pending("add", "c2")
         try:
-            mgr._dispatch_event({"event": "added", "name": "iPhone 11"})
+            mgr._dispatch_event({"event": "added", "key": IPHONE_KEY})
             assert not fut.done(), "an id-less reply settled an id-bearing command"
         finally:
             loop.close()
@@ -195,11 +209,11 @@ class TestAddAcknowledgement:
         loop = asyncio.new_event_loop()
         mgr = PreviewManager()
         fut = loop.create_future()
-        mgr._pending["iPhone 11"] = ("c1", "add", fut)
+        mgr._pending[IPHONE_KEY] = ("c1", "add", fut)
         try:
             mgr._dispatch_event({
                 "event": "add_failed",
-                "name": "iPhone 11",
+                "key": IPHONE_KEY,
                 "error": "Window closed before the preview was acknowledged",
                 "id": "c1",
             })
@@ -341,7 +355,7 @@ class TestSimulatorStreams:
             mgr._streams["SIM"] = preview._StreamProcess(
                 process=process, port=8422, log=deque(maxlen=20)
             )
-            mgr._dispatch_event({"event": "window_closed", "name": "SIM"})
+            mgr._dispatch_event({"event": "window_closed", "key": "SIM"})
             # The handler is synchronous and schedules the teardown.
             await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -363,3 +377,79 @@ class TestSimulatorStreams:
             exclude={s.port for s in mgr._streams.values()},
         )
         assert chosen != preview.STREAM_BASE_PORT
+
+
+class TestIdentityResolution:
+    """Sessions are keyed by CoreMediaIO unique ID. A name is input, not an
+    identity: two phones of the same model report the same one."""
+
+    @staticmethod
+    def _available(*pairs):
+        from server.device.preview import PreviewDeviceInfo
+
+        mgr = PreviewManager()
+        mgr._available = [PreviewDeviceInfo(name=n, cmio_id=i) for n, i in pairs]
+        return mgr
+
+    def test_two_phones_of_one_model_stay_distinct(self):
+        """Keyed by name, the second could not be previewed at all -- the
+        table already held that name -- and unplugging either closed the
+        other's window."""
+        mgr = self._available(("iPhone 15 Pro", "AAA"), ("iPhone 15 Pro", "BBB"))
+        assert mgr._resolve_device("AAA").cmio_id == "AAA"
+        assert mgr._resolve_device("BBB").cmio_id == "BBB"
+
+    def test_an_id_beats_a_name_that_collides_with_it(self):
+        """Resolving names first would hand back the wrong device outright."""
+        mgr = self._available(("BBB", "AAA"), ("iPhone 11", "BBB"))
+        assert mgr._resolve_device("BBB").cmio_id == "BBB"
+
+    def test_a_name_still_resolves(self):
+        """It is what a person reads off the menu."""
+        mgr = self._available(("iPhone 11", "AAA"))
+        assert mgr._resolve_device("iPhone 11").cmio_id == "AAA"
+
+    def test_add_routes_a_simulator_udid_to_a_stream(self, monkeypatch):
+        """One entry point for both kinds: a udid is not a capture device, and
+        the caller should not have to know which call to make."""
+        from server.device import preview
+        from server.device.preview import ActivePreview
+
+        mgr = PreviewManager()
+        seen: dict = {}
+
+        async def _no_process():
+            return None
+
+        async def _booted():
+            return [("SIM-UDID", "iPhone 16 Pro")]
+
+        async def _add_sim(udid, title=None):
+            seen.update(udid=udid, title=title)
+            return ActivePreview(name=udid, position=0, kind="simulator")
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview, "booted_simulators", _booted)
+        monkeypatch.setattr(mgr, "add_simulator", _add_sim)
+
+        asyncio.run(mgr.add("SIM-UDID"))
+        assert seen == {"udid": "SIM-UDID", "title": "iPhone 16 Pro"}
+
+    def test_an_unknown_identifier_says_it_is_neither(self, monkeypatch):
+        """"Device not found" sent the reader looking at the USB cable for a
+        simulator that simply was not booted."""
+        from server.device import preview
+
+        mgr = PreviewManager()
+
+        async def _no_process():
+            return None
+
+        async def _booted():
+            return []
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview, "booted_simulators", _booted)
+
+        with pytest.raises(RuntimeError, match="not a connected device or a booted"):
+            asyncio.run(mgr.add("nothing-like-this"))

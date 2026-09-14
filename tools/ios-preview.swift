@@ -242,10 +242,17 @@ func loadAppIcon() {
 
 // MARK: - PreviewController protocol
 
+/// Sessions are addressed by `AVCaptureDevice.uniqueID`, not by name.
+///
+/// Two phones of the same model report the same `localizedName`, so a
+/// name-keyed session table could only ever hold one of them, and unplugging
+/// one left the other's window unreachable. The unique ID is also what
+/// survives a re-plug, which a name does not: the old entry kept the name
+/// taken and the returning device could not attach.
 protocol PreviewController: AnyObject {
     var allDevices: [AVCaptureDevice] { get set }
-    var activeDeviceNames: Set<String> { get }
-    func togglePreview(name: String, position: Int)
+    var activeSessionKeys: Set<String> { get }
+    func togglePreview(key: String, position: Int)
     func nextPosition() -> Int
 }
 
@@ -272,8 +279,8 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
             for device in devices {
                 let item = NSMenuItem(title: device.localizedName, action: #selector(DevicesMenuDelegate.toggleDevice(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = device.localizedName
-                if controller.activeDeviceNames.contains(device.localizedName) {
+                item.representedObject = device.uniqueID
+                if controller.activeSessionKeys.contains(device.uniqueID) {
                     item.state = .on
                 }
                 menu.addItem(item)
@@ -288,8 +295,8 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
 
     @objc func toggleDevice(_ sender: NSMenuItem) {
         guard let controller = controller,
-              let name = sender.representedObject as? String else { return }
-        controller.togglePreview(name: name, position: controller.nextPosition())
+              let key = sender.representedObject as? String else { return }
+        controller.togglePreview(key: key, position: controller.nextPosition())
     }
 
     @objc func refreshDevices(_ sender: NSMenuItem) {
@@ -455,7 +462,7 @@ class PreviewWindow: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         sizer?.cancel()
         session.stopRunning()
-        onWindowClosed?(device.localizedName)
+        onWindowClosed?(device.uniqueID)
     }
 }
 
@@ -468,7 +475,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     let mode: FilterMode
     private var deviceObservers: [NSObjectProtocol] = []
 
-    var activeDeviceNames: Set<String> {
+    var activeSessionKeys: Set<String> {
         return Set(activePreviews.keys)
     }
 
@@ -502,13 +509,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// exists -- which also meant replugging could not attach to it, because
     /// the name was still taken.
     private func deviceVanished(_ device: AVCaptureDevice) {
-        let name = device.localizedName
-        allDevices.removeAll { $0.uniqueID == device.uniqueID }
-        guard let preview = activePreviews[name] else { return }
-        fputs("  \(name) disconnected — closing its window\n", stderr)
+        let key = device.uniqueID
+        allDevices.removeAll { $0.uniqueID == key }
+        guard let preview = activePreviews[key] else { return }
+        fputs("  \(device.localizedName) disconnected — closing its window\n", stderr)
         preview.onWindowClosed = nil  // we are already removing it
         preview.stop()
-        activePreviews.removeValue(forKey: name)
+        activePreviews.removeValue(forKey: key)
     }
 
     /// Plugging a phone in opens its window, so the app keeps showing what is
@@ -519,12 +526,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// device and must not sprout windows for the rest. List mode never gets
     /// here -- it prints and exits.
     private func deviceAppeared(_ device: AVCaptureDevice) {
-        let name = device.localizedName
         if !allDevices.contains(where: { $0.uniqueID == device.uniqueID }) {
             allDevices.append(device)
         }
 
-        guard activePreviews[name] == nil else { return }
+        guard activePreviews[device.uniqueID] == nil else { return }
 
         switch mode {
         case .all:
@@ -535,8 +541,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             return
         }
 
-        fputs("  \(name) connected — opening its window\n", stderr)
-        togglePreview(name: name, position: nextPosition())
+        fputs("  \(device.localizedName) connected — opening its window\n", stderr)
+        togglePreview(key: device.uniqueID, position: nextPosition())
     }
 
     func onDevicesReady() {
@@ -580,40 +586,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             print("  \(device.localizedName)")
             fputs("  Creating preview window for \(device.localizedName) (index \(i))...\n", stderr)
             let preview = PreviewWindow(device: device, index: i)
-            preview.onWindowClosed = { [weak self] name in
-                self?.activePreviews.removeValue(forKey: name)
+            preview.onWindowClosed = { [weak self] key in
+                self?.activePreviews.removeValue(forKey: key)
             }
-            activePreviews[device.localizedName] = preview
+            activePreviews[device.uniqueID] = preview
             fputs("  Preview window created for \(device.localizedName)\n", stderr)
         }
         // Stagger session starts to avoid CoreMediaIO race conditions
-        let names = devices.map { $0.localizedName }
-        startNextSession(names: names, index: 0)
+        startNextSession(keys: devices.map { $0.uniqueID }, index: 0)
         print("Close all windows or Ctrl+C to quit.")
     }
 
-    func startNextSession(names: [String], index: Int) {
-        guard index < names.count, let preview = activePreviews[names[index]] else { return }
+    func startNextSession(keys: [String], index: Int) {
+        guard index < keys.count, let preview = activePreviews[keys[index]] else { return }
         preview.start()
-        if index + 1 < names.count {
+        if index + 1 < keys.count {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.startNextSession(names: names, index: index + 1)
+                self.startNextSession(keys: keys, index: index + 1)
             }
         }
     }
 
-    func togglePreview(name: String, position: Int) {
-        if let preview = activePreviews[name] {
+    func togglePreview(key: String, position: Int) {
+        if let preview = activePreviews[key] {
             preview.onWindowClosed = nil
             preview.stop()
-            activePreviews.removeValue(forKey: name)
+            activePreviews.removeValue(forKey: key)
         } else {
-            guard let device = allDevices.first(where: { $0.localizedName == name }) else { return }
+            guard let device = allDevices.first(where: { $0.uniqueID == key }) else { return }
             let preview = PreviewWindow(device: device, index: position)
-            preview.onWindowClosed = { [weak self] name in
-                self?.activePreviews.removeValue(forKey: name)
+            preview.onWindowClosed = { [weak self] closedKey in
+                self?.activePreviews.removeValue(forKey: closedKey)
             }
-            activePreviews[name] = preview
+            activePreviews[key] = preview
             preview.start()
         }
     }
@@ -646,12 +651,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
 /// appears in a `DiscoverySession`, so it cannot be previewed the first way
 /// at all.
 ///
-/// `sessionKey` is deliberately opaque here. Capture devices are filed under
-/// their `localizedName` because that is what the wire protocol has always
-/// addressed them by; streams are filed under a udid. The controller and the
-/// server only ever echo the key back, so the two can coexist -- and moving
-/// capture devices onto udids later is a change to one line of derivation
-/// rather than to every message.
+/// `sessionKey` is deliberately opaque here: a capture device's
+/// `AVCaptureDevice.uniqueID`, a stream's udid. The controller and the server
+/// only ever echo it back, so neither has to know which it is holding.
 protocol PreviewSessionKind: AnyObject {
     var sessionKey: String { get }
     var onWindowClosed: ((String) -> Void)? { get set }
@@ -900,8 +902,7 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
 
 class PreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
     let deviceName: String
-    /// Capture devices are filed under their name; see `PreviewSessionKind`.
-    var sessionKey: String { deviceName }
+    let sessionKey: String
     let window: NSWindow
     let session: AVCaptureSession
     var onWindowClosed: ((String) -> Void)?
@@ -910,6 +911,7 @@ class PreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
 
     init(device: AVCaptureDevice, position: Int) {
         self.deviceName = device.localizedName
+        self.sessionKey = device.uniqueID
         self.session = AVCaptureSession()
 
         session.beginConfiguration()
@@ -972,7 +974,7 @@ class PreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
     func windowWillClose(_ notification: Notification) {
         sizer?.cancel()
         session.stopRunning()
-        onWindowClosed?(deviceName)
+        onWindowClosed?(sessionKey)
     }
 }
 
@@ -986,7 +988,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     let devicesMenuDelegate = DevicesMenuDelegate()
     private var deviceObservers: [NSObjectProtocol] = []
 
-    var activeDeviceNames: Set<String> {
+    var activeSessionKeys: Set<String> {
         return Set(sessions.keys)
     }
 
@@ -1062,35 +1064,37 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
         switch cmd {
         case "add":
-            guard let name = json["name"] as? String else {
-                emit(["event": "error", "message": "add requires 'name'"])
+            // `key` is what this speaks; `name` is accepted because a person
+            // driving it by hand has the name and not the ID.
+            guard let identifier = (json["key"] ?? json["name"]) as? String else {
+                emit(["event": "error", "message": "add requires 'key' or 'name'"])
                 return
             }
             let position = json["position"] as? Int ?? nextPosition()
-            handleAdd(name: name, position: position, id: id)
+            handleAdd(name: identifier, position: position, id: id)
 
         case "add_stream":
-            guard let name = json["name"] as? String else {
-                emit(["event": "error", "message": "add_stream requires 'name'"])
+            guard let key = (json["key"] ?? json["name"]) as? String else {
+                emit(["event": "error", "message": "add_stream requires 'key'"])
                 return
             }
             guard let urlString = json["url"] as? String, let url = URL(string: urlString) else {
                 emit([
-                    "event": "add_failed", "name": name,
+                    "event": "add_failed", "key": key,
                     "error": "add_stream requires a valid 'url'", "id": id as Any,
                 ])
                 return
             }
             let position = json["position"] as? Int ?? nextPosition()
-            let title = json["title"] as? String ?? name
-            handleAddStream(name: name, title: title, url: url, position: position, id: id)
+            let title = json["title"] as? String ?? key
+            handleAddStream(key: key, title: title, url: url, position: position, id: id)
 
         case "remove":
-            guard let name = json["name"] as? String else {
-                emit(["event": "error", "message": "remove requires 'name'"])
+            guard let key = (json["key"] ?? json["name"]) as? String else {
+                emit(["event": "error", "message": "remove requires 'key' or 'name'"])
                 return
             }
-            handleRemove(name: name, id: id)
+            handleRemove(key: key, id: id)
 
         case "list":
             handleList()
@@ -1105,33 +1109,52 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
     // MARK: Command handlers
 
-    func handleAdd(name: String, position: Int, id: String? = nil) {
-        // Already previewing?
-        if sessions[name] != nil {
-            emit(["event": "add_failed", "name": name, "error": "Already previewing", "id": id as Any])
+    /// Opens a window on a CoreMediaIO capture device.
+    ///
+    /// `identifier` is resolved to the device's `uniqueID`, which is what the
+    /// session is filed under and what every event about it echoes back. A
+    /// caller that sent a name therefore gets replies keyed by ID; the server
+    /// sends the ID it was handed in `ready`, so for it the two are the same.
+    func handleAdd(name identifier: String, position: Int, id: String? = nil) {
+        // Both forms are accepted because both are things a caller reasonably
+        // holds -- the server has the ID from `ready`, a person driving this
+        // by hand has the name off the menu. The ID wins: two phones of the
+        // same model share a name, and matching on it picks whichever was
+        // discovered first.
+        guard let device = allDevices.first(where: { $0.uniqueID == identifier })
+            ?? allDevices.first(where: { $0.localizedName == identifier }) else {
+            emit([
+                "event": "add_failed", "key": identifier,
+                "error": "Device not found", "id": id as Any,
+            ])
             return
         }
 
-        // Find device by exact name
-        guard let device = allDevices.first(where: { $0.localizedName == name }) else {
-            emit(["event": "add_failed", "name": name, "error": "Device not found", "id": id as Any])
+        let key = device.uniqueID
+        if sessions[key] != nil {
+            emit([
+                "event": "add_failed", "key": key,
+                "error": "Already previewing", "id": id as Any,
+            ])
             return
         }
 
-        // Create session
         let session = PreviewSession(device: device, position: position)
 
         if session.session.inputs.isEmpty {
             session.stop()
-            emit(["event": "add_failed", "name": name, "error": "Cannot create input", "id": id as Any])
+            emit([
+                "event": "add_failed", "key": key,
+                "error": "Cannot create input", "id": id as Any,
+            ])
             return
         }
 
-        session.onWindowClosed = { [weak self] closedName in
-            self?.onWindowClosed(name: closedName)
+        session.onWindowClosed = { [weak self] closedKey in
+            self?.onWindowClosed(name: closedKey)
         }
 
-        sessions[name] = session
+        sessions[key] = session
         positions.insert(position)
 
         // Start capture, then acknowledge after a brief delay for CoreMediaIO.
@@ -1145,16 +1168,16 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         session.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak session] in
             guard let self else { return }
-            guard let session, self.sessions[name] as AnyObject === session else {
+            guard let session, self.sessions[key] === session else {
                 self.emit([
                     "event": "add_failed",
-                    "name": name,
+                    "key": key,
                     "error": "Window closed before the preview was acknowledged",
                     "id": id as Any,
                 ])
                 return
             }
-            self.emit(["event": "added", "name": name, "id": id as Any])
+            self.emit(["event": "added", "key": key, "id": id as Any])
         }
     }
 
@@ -1165,20 +1188,20 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// requested this preview should be able to tell "the phone was unplugged"
     /// from "someone called remove".
     private func deviceVanished(_ device: AVCaptureDevice) {
-        let name = device.localizedName
-        allDevices.removeAll { $0.uniqueID == device.uniqueID }
-        if let session = sessions[name] {
-            fputs("  \(name) disconnected — closing its window\n", stderr)
+        let key = device.uniqueID
+        allDevices.removeAll { $0.uniqueID == key }
+        if let session = sessions[key] {
+            fputs("  \(device.localizedName) disconnected — closing its window\n", stderr)
             session.onWindowClosed = nil
             session.stop()
-            sessions.removeValue(forKey: name)
+            sessions.removeValue(forKey: key)
             rebuildPositions()
         }
         // Emitted whether or not a window was open. The server prunes its
         // available-devices list on this event, so returning early for a
         // device nobody was previewing left the server advertising an
         // unplugged phone until something forced a refresh.
-        emit(["event": "disconnected", "name": name])
+        emit(["event": "disconnected", "key": key, "name": device.localizedName])
     }
 
     /// No window is opened here on purpose. In interactive mode the server
@@ -1189,7 +1212,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         if !allDevices.contains(where: { $0.uniqueID == device.uniqueID }) {
             allDevices.append(device)
         }
-        emit(["event": "connected", "name": device.localizedName, "id": device.uniqueID])
+        emit(["event": "connected", "key": device.uniqueID, "name": device.localizedName])
     }
 
     /// Opens a window on an MJPEG stream rather than a capture device.
@@ -1198,17 +1221,17 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// framebuffer and serves it, the server passes the URL here. Filed under
     /// the caller's key -- a udid in practice -- which every event about it
     /// echoes back, exactly as a capture device echoes its name.
-    func handleAddStream(name: String, title: String, url: URL, position: Int, id: String? = nil) {
-        if sessions[name] != nil {
+    func handleAddStream(key: String, title: String, url: URL, position: Int, id: String? = nil) {
+        if sessions[key] != nil {
             emit([
-                "event": "add_failed", "name": name,
+                "event": "add_failed", "key": key,
                 "error": "Already previewing", "id": id as Any,
             ])
             return
         }
 
         let session = StreamPreviewSession(
-            sessionKey: name, title: title, url: url, position: position
+            sessionKey: key, title: title, url: url, position: position
         )
         session.onWindowClosed = { [weak self] closedKey in
             self?.onWindowClosed(name: closedKey)
@@ -1222,27 +1245,27 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         // preview with no window and then refuse to open a fresh one.
         session.onConnected = { [weak self, weak session] in
             guard let self else { return }
-            guard let session, self.sessions[name] === session else { return }
-            self.emit(["event": "added", "name": name, "id": id as Any])
+            guard let session, self.sessions[key] === session else { return }
+            self.emit(["event": "added", "key": key, "id": id as Any])
         }
 
-        sessions[name] = session
+        sessions[key] = session
         positions.insert(position)
         session.start()
     }
 
-    func handleRemove(name: String, id: String? = nil) {
-        guard let session = sessions[name] else {
-            emit(["event": "error", "message": "Not previewing: \(name)"])
+    func handleRemove(key: String, id: String? = nil) {
+        guard let session = sessions[key] else {
+            emit(["event": "error", "message": "Not previewing: \(key)"])
             return
         }
 
         session.onWindowClosed = nil  // Prevent double event
         session.stop()
-        sessions.removeValue(forKey: name)
+        sessions.removeValue(forKey: key)
         // Release position (we don't track which position maps to which session, so just rebuild)
         rebuildPositions()
-        emit(["event": "removed", "name": name, "id": id as Any])
+        emit(["event": "removed", "key": key, "id": id as Any])
     }
 
     func handleList() {
@@ -1266,11 +1289,11 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         handleQuit()
     }
 
-    func togglePreview(name: String, position: Int) {
-        if sessions[name] != nil {
-            handleRemove(name: name)
+    func togglePreview(key: String, position: Int) {
+        if sessions[key] != nil {
+            handleRemove(key: key)
         } else {
-            handleAdd(name: name, position: position)
+            handleAdd(name: key, position: position)
         }
     }
 
@@ -1283,7 +1306,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     func onWindowClosed(name: String) {
         sessions.removeValue(forKey: name)
         rebuildPositions()
-        emit(["event": "window_closed", "name": name])
+        emit(["event": "window_closed", "key": name])
     }
 
     func nextPosition() -> Int {
