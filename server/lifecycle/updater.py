@@ -143,9 +143,19 @@ def _is_git_install(project_root: Path) -> bool:
 
 
 def _check_via_quern_dev(head_sha: str) -> bool | None:
-    """Check quern.dev for updates. Returns True/False, or None on failure."""
+    """Check quern.dev for updates. Returns True/False, or None on failure.
+
+    Sends `channel`, for the reason `check_for_updates` gives at its own call:
+    quern.dev compares the SHA against that channel's pointer branch, and
+    omitting it makes the endpoint assume stable. Without it a beta user
+    sitting at the stable pointer is told there is nothing to update to, while
+    beta is ahead -- and since this is the answer `run_update` acts on, that
+    became a persisted "up to date" rather than one wrong console line.
+    """
+    from server.config import get_update_channel
+
     try:
-        url = f"{ENDPOINT}?sha={head_sha}"
+        url = f"{ENDPOINT}?sha={head_sha}&channel={get_update_channel()}"
         req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
         with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:
             data = json.loads(resp.read().decode())

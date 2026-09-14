@@ -866,3 +866,58 @@ class TestUpdateRefreshesTheCachedCheck:
             lambda **_k: (_ for _ in ()).throw(OSError("offline")),
         )
         assert updater.run_update() == 0
+
+    def test_run_update_never_writes_the_record_itself(self, monkeypatch):
+        """The invariant that makes the meaning of `rc` irrelevant here.
+
+        `_update_via_git` returns 2 from three places and only one means "at
+        the channel tip" -- `test_update_via_git_on_feature_branch_with_updates
+        _warns_and_skips_pull` pins the one that does not. The first fix read
+        `rc == 2` as "up to date" and wrote that, hiding a real update.
+
+        So: `run_update` must never write `update-info.json` on any path. Only
+        `check_for_updates` writes it, and only after asking. With the check
+        stubbed out, the file must be exactly as it was.
+        """
+        import json
+
+        for rc in (0, 1, 2):
+            uc = self._stale_cache()
+            before = uc.UPDATE_INFO_FILE.read_text()
+            self._run(monkeypatch, git_rc=rc)
+            assert uc.UPDATE_INFO_FILE.read_text() == before, (
+                f"run_update wrote the record itself on rc={rc}; "
+                "that is an inference about what rc means"
+            )
+            assert json.loads(before)["update_available"] is True
+
+    def test_the_channel_reaches_the_sha_check(self, monkeypatch):
+        """quern.dev compares the SHA against the channel's pointer branch.
+
+        Omitting `channel` makes it assume stable, so a beta user at the stable
+        pointer is told there is nothing to update to while beta is ahead --
+        and this is the answer `run_update` acts on.
+        """
+        from server.lifecycle import updater
+
+        seen = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"update_available": false}'
+
+        def fake_urlopen(req, timeout=None):
+            seen["url"] = req.full_url
+            return _Resp()
+
+        monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+        monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+        updater._check_via_quern_dev("abc123")
+
+        assert "channel=beta" in seen["url"], seen["url"]
