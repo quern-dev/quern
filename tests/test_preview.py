@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections import deque
 
@@ -297,7 +298,10 @@ class TestSimulatorStreams:
             return process
 
         monkeypatch.setattr(mgr, "_ensure_process", _no_process)
-        monkeypatch.setattr(preview, "build_media_engine", lambda: "/tmp/quern-media")
+        async def _build():
+            return "/tmp/quern-media"
+
+        monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
         return mgr
 
@@ -453,3 +457,29 @@ class TestIdentityResolution:
 
         with pytest.raises(RuntimeError, match="not a connected device or a booted"):
             asyncio.run(mgr.add("nothing-like-this"))
+
+
+class TestTeardownFailureReporting:
+    def test_a_failing_teardown_is_logged_not_swallowed(self, caplog):
+        """The teardown is fire-and-forget, so an exception inside it would
+        otherwise appear only as "Task exception was never retrieved" at
+        collection time -- naming neither the stream nor the cause."""
+        import logging
+
+        async def run():
+            mgr = PreviewManager()
+
+            async def boom():
+                raise OSError("terminate failed")
+
+            task = asyncio.create_task(boom())
+            task.add_done_callback(mgr._report_teardown_failure)
+            with contextlib.suppress(OSError):
+                await task
+
+        with caplog.at_level(logging.ERROR):
+            asyncio.run(run())
+
+        assert any(
+            "Stopping a preview stream failed" in r.message for r in caplog.records
+        ), "the teardown failure was never reported"

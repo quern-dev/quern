@@ -123,7 +123,6 @@ public final class StreamPipeline {
         }
         let due = throttle.shouldEncode(at: CMTimeGetSeconds(frame.time))
         let wantKey = pendingKeyframe
-        if due, wantKey { pendingKeyframe = false }
         lock.unlock()
         guard due else { return }
 
@@ -132,12 +131,25 @@ public final class StreamPipeline {
         lock.lock()
         framesEncoded += 1
         bytesProduced += payload.byteCount
+        // Cleared once a keyframe has actually come out, not when one was
+        // asked for. Clearing on request meant an encode that returned nil
+        // swallowed the request, and the viewer that triggered it decoded
+        // nothing until the next periodic IDR.
+        if wantKey, payload.isKeyframe { pendingKeyframe = false }
         lock.unlock()
 
         for sink in interested { sink.receive(payload) }
     }
 
+    /// Test seam. The encoders fail only on conditions a test cannot
+    /// manufacture -- a zero-sized IOSurface cannot be allocated -- so the
+    /// "encode returned nil" branch would otherwise be unreachable from a
+    /// test, which is how the keyframe request came to be dropped there in
+    /// the first place. Internal, and set before the pipeline is fed.
+    var encodeOverride: ((CapturedFrame, Bool) -> EncodedPayload?)?
+
     private func encode(_ frame: CapturedFrame, forceKeyframe: Bool) -> EncodedPayload? {
+        if let encodeOverride { return encodeOverride(frame, forceKeyframe) }
         switch codec {
         case .mjpeg:
             return jpeg.encode(frame.surface).map { .jpeg($0) }

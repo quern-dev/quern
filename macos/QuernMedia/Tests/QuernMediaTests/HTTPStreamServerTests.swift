@@ -29,17 +29,20 @@ private func rawGet(
             using: .tcp
         )
         let box = Box()
+        // The receive callback and the timeout below both run on the global
+        // queue and both call this. Unsynchronized, each could see `done` as
+        // false and resume the same continuation -- which traps the whole
+        // test process, not just this test.
         let finish = {
-            guard !box.done else { return }
-            box.done = true
+            guard let data = box.claim() else { return }
             conn.cancel()
-            continuation.resume(returning: box.data)
+            continuation.resume(returning: data)
         }
 
         func readMore() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { chunk, _, complete, error in
-                if let chunk { box.data.append(chunk) }
-                if box.data.count >= limit || complete || error != nil {
+                if let chunk { box.append(chunk) }
+                if box.count >= limit || complete || error != nil {
                     finish()
                 } else {
                     readMore()
@@ -61,8 +64,22 @@ private func rawGet(
 }
 
 private final class Box: @unchecked Sendable {
-    var data = Data()
-    var done = false
+    private let lock = NSLock()
+    private var storage = Data()
+    private var finished = false
+
+    func append(_ chunk: Data) { lock.lock(); storage.append(chunk); lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return storage.count }
+
+    /// Hands the data over exactly once; nil to every later caller. The
+    /// single-claim rule is what makes a double resume impossible.
+    func claim() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return nil }
+        finished = true
+        return storage
+    }
 }
 
 @Test("the index page is served to a browser")
@@ -164,4 +181,56 @@ func startMeansListening() async throws {
 
     let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 20)
     #expect(!page.isEmpty, "start() returned before the listener was accepting")
+}
+
+
+@Test("a request head split across packets still routes to the stream")
+func splitRequestHeadIsReassembled() async throws {
+    // One receive is not one request: TCP may deliver "GET /stream" in
+    // pieces, and routing on the first piece served the index page and closed
+    // the connection -- a viewer that asked for video got HTML.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let received: Data = await withCheckedContinuation { continuation in
+        let conn = NWConnection(
+            host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!, using: .tcp
+        )
+        let box = Box()
+        let finish = {
+            guard let data = box.claim() else { return }
+            conn.cancel()
+            continuation.resume(returning: data)
+        }
+        func readMore() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { chunk, _, done, err in
+                if let chunk { box.append(chunk) }
+                // The response header alone clears this. Anything larger
+                // waits for the fallback below, because a stream with no
+                // source attached sends nothing after its header.
+                if box.count >= 64 || done || err != nil { finish() } else { readMore() }
+            }
+        }
+        conn.stateUpdateHandler = { state in
+            if case .ready = state {
+                // Deliberately split mid-path, with a gap between the halves.
+                conn.send(content: Data("GET /str".utf8), completion: .contentProcessed { _ in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                        let rest = "eam HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                        conn.send(content: Data(rest.utf8), completion: .contentProcessed { _ in })
+                        readMore()
+                    }
+                })
+            }
+            if case .failed = state { finish() }
+        }
+        conn.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { finish() }
+    }
+
+    let text = String(decoding: received, as: UTF8.self)
+    #expect(text.contains("multipart/x-mixed-replace"),
+            "a split head was routed somewhere other than the stream: \(text.prefix(120))")
 }

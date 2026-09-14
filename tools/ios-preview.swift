@@ -811,6 +811,8 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     private let imageLayer = CALayer()
     private var client: MJPEGClient?
     private var haveSized = false
+    private var connected = false
+    private var reported = false
 
     init(sessionKey: String, title: String, url: URL, position: Int) {
         self.sessionKey = sessionKey
@@ -851,18 +853,38 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     /// Called once the stream's HTTP response arrives, on the main queue.
     var onConnected: (() -> Void)?
 
+    /// Called once, on the main queue, when the stream ends or fails. The
+    /// flag says whether the add had already been acknowledged, which decides
+    /// whether the server hears a failed add or a closed window.
+    var onFailed: ((Bool, String) -> Void)?
+
     func start() {
         let client = MJPEGClient(
             url: url,
             onConnected: { [weak self] in
-                DispatchQueue.main.async { self?.onConnected?() }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.connected = true
+                    self.onConnected?()
+                }
             },
             onFrame: { [weak self] image in
                 DispatchQueue.main.async { self?.show(image) }
             },
             onError: { [weak self] message in
-                guard let self else { return }
-                fputs("  stream \(self.sessionKey): \(message)\n", stderr)
+                // A dead stream used to be logged and nothing else: the
+                // window stayed on screen showing its last frame, the
+                // URLSession kept the delegate alive, and the server went on
+                // believing the preview was running -- the same failure the
+                // capture path handles in deviceVanished.
+                DispatchQueue.main.async {
+                    guard let self, !self.reported else { return }
+                    self.reported = true
+                    fputs("  stream \(self.sessionKey): \(message)\n", stderr)
+                    let wasAcknowledged = self.connected
+                    self.stop()
+                    self.onFailed?(wasAcknowledged, message)
+                }
             }
         )
         self.client = client
@@ -1235,6 +1257,24 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         )
         session.onWindowClosed = { [weak self] closedKey in
             self?.onWindowClosed(name: closedKey)
+        }
+
+        // `stop()` clears the window delegate, so a stream that dies reports
+        // itself here rather than through windowWillClose. Before the
+        // acknowledgement it is a failed add; after it, the window is simply
+        // gone, and the server tears down quern-media on that.
+        session.onFailed = { [weak self, weak session] wasAcknowledged, message in
+            guard let self, let session, self.sessions[key] === session else { return }
+            self.sessions.removeValue(forKey: key)
+            self.rebuildPositions()
+            if wasAcknowledged {
+                self.emit(["event": "window_closed", "key": key])
+            } else {
+                self.emit([
+                    "event": "add_failed", "key": key,
+                    "error": message, "id": id as Any,
+                ])
+            }
         }
 
         // Acknowledged when the stream's response arrives, not after a fixed

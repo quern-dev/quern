@@ -14,6 +14,7 @@ complained about. Retire ios-preview when there is a reason beyond tidiness.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import subprocess
@@ -67,11 +68,20 @@ def _newest_source_mtime(package: Path) -> float:
     return newest
 
 
-def build_media_engine(force: bool = False) -> Path:
+async def build_media_engine(force: bool = False) -> Path:
     """Build quern-media and install it, returning the binary path.
 
-    Synchronous, matching build_preview_bundle: `quern setup` is a synchronous
-    CLI path, and the server reaches it through a worker thread.
+    Async because every caller inside the server is, and the work below
+    blocks for up to BUILD_TIMEOUT seconds: called directly from a request
+    path it would stall the event loop for three minutes. The blocking half
+    is `build_media_engine_sync`, which `quern setup` and the tests call
+    directly because neither has a loop to protect.
+    """
+    return await asyncio.to_thread(build_media_engine_sync, force)
+
+
+def build_media_engine_sync(force: bool = False) -> Path:
+    """The blocking half of `build_media_engine`.
 
     A no-op when the installed binary is newer than every source. Raises
     RuntimeError with an actionable message when sources or the toolchain are
@@ -138,18 +148,28 @@ def _locate_built_binary(swift: str, package: Path) -> Path:
     The layout under the scratch directory includes the target triple, so
     hardcoding it would break on a different architecture.
     """
-    proc = subprocess.run(  # noqa: S603
-        [
-            swift, "build",
-            "--package-path", str(package),
-            "--scratch-path", str(SCRATCH_DIR),
-            "-c", "release",
-            "--show-bin-path",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [
+                swift, "build",
+                "--package-path", str(package),
+                "--scratch-path", str(SCRATCH_DIR),
+                "-c", "release",
+                "--show-bin-path",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Otherwise this escapes as TimeoutExpired while the build step next
+        # door raises RuntimeError, so a caller handling the documented
+        # contract sees an unhandled exception from the same function.
+        raise RuntimeError(
+            "swift build --show-bin-path did not finish within 60s. "
+            "Check the active toolchain with `xcode-select -p`."
+        ) from exc
+
     if proc.returncode != 0:
         raise RuntimeError(f"Could not locate the built binary:\n{proc.stderr.strip()}")
     built = Path(proc.stdout.strip()) / BINARY_NAME
