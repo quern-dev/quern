@@ -780,23 +780,53 @@ class TestUpdateDiscardsTheCachedCheck:
         monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: [])
         return updater.run_update()
 
-    def test_the_no_op_branch_clears_it(self, monkeypatch):
+    def test_the_no_op_branch_corrects_it(self, monkeypatch):
         """"Already up to date" is the branch people land on repeatedly, and
-        the one a per-exit fix would forget."""
+        the one a per-exit fix would forget.
+
+        Corrected rather than emptied: nothing to pull means this install is at
+        its channel's tip, which is an answer, and an opted-out user has nothing
+        that would refill an empty cache.
+        """
+        import json
+
         uc = self._stale_cache()
         assert self._run(monkeypatch, git_rc=2) == 0
-        assert not uc.UPDATE_INFO_FILE.exists(), (
+        info = json.loads(uc.UPDATE_INFO_FILE.read_text())
+        assert info["current_version"] == "0.17.0", (
+            "the cache still names the version the update replaced"
+        )
+        assert info["update_available"] is False, (
             "a no-op update left the cache offering an applied update"
         )
-        assert not uc.LAST_CHECK_FILE.exists(), (
-            "the rate-limit stamp survived, suppressing a fresh check for 24h"
-        )
+        assert info["message"] is None
 
-    def test_a_successful_update_clears_it(self, monkeypatch):
+    def test_a_successful_update_corrects_it(self, monkeypatch):
+        import json
+
         uc = self._stale_cache()
         assert self._run(monkeypatch, git_rc=0) == 0
-        assert not uc.UPDATE_INFO_FILE.exists()
-        assert not uc.LAST_CHECK_FILE.exists()
+        info = json.loads(uc.UPDATE_INFO_FILE.read_text())
+        assert info["current_version"] == "0.17.0"
+        assert info["update_available"] is False
+
+    def test_it_works_with_the_automatic_check_opted_out(self, monkeypatch):
+        """The case deleting alone got wrong.
+
+        With `update_check` off, nothing refills an emptied cache -- so `quern
+        update` would destroy information the user's own setting prevents
+        regenerating, and they would see nothing at all.
+        """
+        import json
+
+        from server import config
+
+        uc = self._stale_cache()
+        monkeypatch.setattr(config, "get_update_check", lambda: False)
+        assert self._run(monkeypatch, git_rc=2) == 0
+        info = json.loads(uc.UPDATE_INFO_FILE.read_text())
+        assert info["current_version"] == "0.17.0"
+        assert info["update_available"] is False
 
     def test_a_failed_update_clears_it_too(self, monkeypatch):
         """The source may have moved before the failure, so the cached version

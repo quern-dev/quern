@@ -23,7 +23,11 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.lifecycle.invocation import run_it_yourself
-from server.lifecycle.update_check import ENDPOINT, invalidate_update_check
+from server.lifecycle.update_check import (
+    ENDPOINT,
+    invalidate_update_check,
+    record_up_to_date,
+)
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
 GITHUB_REPO = "quern-dev/quern"
@@ -709,6 +713,11 @@ def run_update(apply_tools: bool = False) -> int:
             # durable one -- it is what anybody reads afterwards.
             _write_result(FAILED, "a tool upgrade failed")
             return 1
+        # Knows the answer: nothing to pull means this install is at its
+        # channel's tip. Correct the cache rather than leave it empty, so an
+        # opted-out user -- for whom nothing will refill it -- still gets a
+        # true answer instead of none.
+        record_up_to_date(_installed_version())
         _write_result(NO_OP, "already up to date", version=_installed_version())
         return 0
 
@@ -737,5 +746,6 @@ def run_update(apply_tools: bool = False) -> int:
                       version=_installed_version())
         return 1
 
+    record_up_to_date(_installed_version())
     _write_result(UPDATED, "update applied", version=_installed_version())
     return 0
