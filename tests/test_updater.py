@@ -739,3 +739,79 @@ class TestTheUpdateRecord:
         assert updater.run_update() == 0, "a lost record must not fail the update"
         leftovers = list(updater.RESULT_FILE.parent.glob(".*tmp"))
         assert leftovers == [], f"left behind: {leftovers}"
+
+
+class TestUpdateDiscardsTheCachedCheck:
+    """An update left the cached check saying the old version was current.
+
+    `update-info.json` records a version and an `update_available` computed
+    before the run, and `last-update-check` suppresses a fresh check for 24
+    hours. Nothing in the update path cleared either, so after updating
+    0.16.1 -> 0.17.0 the menu bar kept offering an update that had already been
+    applied. Reported from a real machine: three update runs left both files
+    untouched; one `quern check-updates` fixed it.
+
+    `invalidate_update_check` already existed for this -- it was called only
+    when the channel changed.
+    """
+
+    def _stale_cache(self):
+        import json
+
+        from server.lifecycle import update_check as uc
+
+        uc.UPDATE_INFO_FILE.write_text(json.dumps({
+            "current_version": "0.16.1", "latest_version": "0.17.0",
+            "update_available": True, "message": "Update available",
+        }))
+        uc.LAST_CHECK_FILE.touch()
+        return uc
+
+    def _run(self, monkeypatch, git_rc, tools_ok=True):
+        from pathlib import Path
+
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/tmp"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _p: git_rc)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda *_a: tools_ok)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: [])
+        return updater.run_update()
+
+    def test_the_no_op_branch_clears_it(self, monkeypatch):
+        """"Already up to date" is the branch people land on repeatedly, and
+        the one a per-exit fix would forget."""
+        uc = self._stale_cache()
+        assert self._run(monkeypatch, git_rc=2) == 0
+        assert not uc.UPDATE_INFO_FILE.exists(), (
+            "a no-op update left the cache offering an applied update"
+        )
+        assert not uc.LAST_CHECK_FILE.exists(), (
+            "the rate-limit stamp survived, suppressing a fresh check for 24h"
+        )
+
+    def test_a_successful_update_clears_it(self, monkeypatch):
+        uc = self._stale_cache()
+        assert self._run(monkeypatch, git_rc=0) == 0
+        assert not uc.UPDATE_INFO_FILE.exists()
+        assert not uc.LAST_CHECK_FILE.exists()
+
+    def test_a_failed_update_clears_it_too(self, monkeypatch):
+        """The source may have moved before the failure, so the cached version
+        is no more trustworthy than after a success. One extra HTTP request is
+        the whole cost of being wrong here."""
+        uc = self._stale_cache()
+        assert self._run(monkeypatch, git_rc=1) == 1
+        assert not uc.UPDATE_INFO_FILE.exists()
+
+    def test_clearing_failing_does_not_fail_the_update(self, monkeypatch):
+        # Bookkeeping must not turn a good update into a reported failure.
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(
+            updater, "invalidate_update_check",
+            lambda: (_ for _ in ()).throw(OSError("read-only")),
+        )
+        assert self._run(monkeypatch, git_rc=2) == 0

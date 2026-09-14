@@ -23,7 +23,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.lifecycle.invocation import run_it_yourself
-from server.lifecycle.update_check import ENDPOINT
+from server.lifecycle.update_check import ENDPOINT, invalidate_update_check
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
 GITHUB_REPO = "quern-dev/quern"
@@ -660,6 +660,28 @@ def run_update(apply_tools: bool = False) -> int:
     # than none: the menu bar would read a previous "updated" as this run's
     # answer and relaunch into a version nothing just installed.
     _clear_result()
+
+    # And the cached update *check*, for the same reason and at the same point.
+    # It records a version and an `update_available` computed before this run;
+    # the moment an update begins, that answer is suspect. Nothing here wrote
+    # it, so after updating 0.16.1 -> 0.17.0 the cache still said 0.16.1 with an
+    # update available, and `last-update-check` suppressed a fresh check for 24
+    # hours -- so the menu bar kept offering an update that had already been
+    # applied. Reported from a real machine: three update runs left both files
+    # untouched, and one `check-updates` fixed it.
+    #
+    # Up front rather than at each completion, because `run_update` has seven
+    # exits and the `no_op` branch -- "already up to date", the one people land
+    # on repeatedly -- is exactly the one a per-exit fix would forget. Clearing
+    # costs one HTTP request the next time someone asks.
+    try:
+        invalidate_update_check()
+    except Exception:
+        import logging
+
+        logging.getLogger("quern-debug-server.updater").debug(
+            "Could not clear the cached update check", exc_info=True,
+        )
 
     project_root = _find_project_root()
     if project_root is None:
