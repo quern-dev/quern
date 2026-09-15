@@ -361,6 +361,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
             return
+        # Local capture routes traffic through the proxy with no gate on this
+        # path -- the process list comes from config.json, written by a CLI
+        # command in an earlier process. Warn rather than refuse; see the
+        # function's docstring for why booting cannot be the thing that fails.
+        try:
+            from server.proxy.cert_preflight import warn_if_capture_lacks_trust
+
+            await warn_if_capture_lacks_trust(
+                device_controller, app.state.local_capture_processes,
+            )
+        except Exception:
+            logger.debug("Could not check CA trust at startup", exc_info=True)
+
         try:
             device_controller.refresh_active_device()
         except OSError:
@@ -437,6 +450,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown WDA client (cancels idle task, deletes sessions, kills port-forwards)
     # Note: does NOT kill xcodebuild processes — they persist across restarts
+    warmup = getattr(app.state, "_warmup_task", None)
+    if warmup and not warmup.done():
+        # It used to only warm caches, where an abrupt teardown cost nothing.
+        # It now installs a CA and then records that it did, and losing the
+        # loop between those two steps leaves the TrustStore holding a
+        # certificate that cert-state.json says is absent.
+        warmup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warmup
+
     if device_controller:
         await device_controller.wda_client.close()
 
@@ -1422,18 +1445,121 @@ def _report_python_deps(fix: bool) -> bool | None:
     return False
 
 
-def _cmd_enable_local_capture(process_names: list[str]) -> None:
+def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> None:
+    """The capture gate, for the one caller that reaches it without a request.
+
+    `enable-local-capture` writes config.json and the lifespan starts routing
+    from it, so this command is a routing boundary in the same sense the two
+    HTTP endpoints are -- and until now the only one of the three with no gate.
+    It is not a human-only path: an agent has a shell, and the agent guide names
+    this command.
+
+    Runs the preflight in-process rather than through the API, so the CLI does
+    not need an authenticated HTTP client it has nowhere else. A
+    `DeviceController` costs almost nothing to build -- it reads the
+    active-device sidecar and nothing else -- and the check itself is about
+    0.9s, near enough all of it `list_devices()` enumerating simulators. That
+    is paid on every run of this command, booted simulators or not.
+
+    Exits non-zero rather than returning, so a script or an agent that ignores
+    the text still sees the failure.
+    """
+    if not processes or skip_cert_check:
+        return
+
+    import asyncio
+
+    from server.config import get_auto_install_cert
+    from server.device.controller import DeviceController
+    from server.proxy import cert_manager
+    from server.proxy.cert_preflight import simulators_without_cert
+
+    # No CA yet means no trust to check and nothing anyone could install. It is
+    # generated on the first proxy start (see lifecycle/setup.py), so on a fresh
+    # machine this command legitimately runs before it exists -- and refusing
+    # there would offer three resolutions of which two are impossible and the
+    # third reads as a workaround. `device.py` guards the same way.
+    if not cert_manager.get_cert_path().exists():
+        return
+
+    async def _check():
+        controller = DeviceController()
+        missing = await simulators_without_cert(controller)
+        if not missing:
+            return None, []
+        if get_auto_install_cert():
+            from server.proxy.cert_manager import install_cert
+
+            failed = []
+            for dev in missing:
+                try:
+                    await install_cert(controller, dev["udid"], device_name=dev["name"])
+                    print(f"  Installed the CA on {dev['name']} ({dev['udid'][:8]})")
+                except Exception as e:
+                    # Not swallowed into the check's own error handler below.
+                    # A failed install is not "could not check" -- the answer is
+                    # known and it is bad, and proceeding would enable capture
+                    # that cannot work for the user who asked us to handle this.
+                    failed.append((dev, e))
+            return None, failed
+        return missing, []
+
+    try:
+        missing, failed = asyncio.run(_check())
+    except Exception as e:
+        # Fails open, like the preflight itself. Blocking capture over a bug in
+        # the check would be worse than the state it prevents.
+        print(f"Could not check certificate trust ({e}); continuing.")
+        return
+
+    if failed:
+        print("auto_install_cert is set, but installing the CA failed:")
+        for dev, err in failed:
+            print(f"  {dev['name']} ({dev['udid'][:8]}): {err}")
+        print()
+        print("Capture from those simulators would fail. Install the CA by hand,")
+        print("or rerun with --skip-cert-check to enable capture anyway.")
+        sys.exit(1)
+
+    if not missing:
+        return
+
+    names = ", ".join(f"{d['name']} ({d['udid'][:8]})" for d in missing)
+    print(f"Refusing: {len(missing)} booted simulator(s) do not trust the mitmproxy CA.")
+    print(f"  {names}")
+    print()
+    print("Every HTTPS request from them would fail, and nothing in the app would")
+    print("point at the proxy as the cause. Three ways forward:")
+    print("  - install the CA on those simulators, then rerun this")
+    print("  - quern set-auto-install-cert on   (Quern installs it from now on)")
+    print("  - quern enable-local-capture --skip-cert-check ...   (proceed anyway)")
+    sys.exit(1)
+
+
+def _cmd_enable_local_capture(
+    process_names: list[str], skip_cert_check: bool = False,
+) -> None:
     """Enable local capture mode for specific processes."""
     processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
 
     current = get_local_capture_processes()
+    if current == processes:
+        # Before the gate on purpose. This command changes nothing, so there is
+        # no new routing to refuse -- and refusing here would contradict a
+        # config.json that already says capture is on, while the server carries
+        # on capturing. With auto_install_cert set it would also install a root
+        # CA on behalf of a no-op.
+        print(f"Local capture is already enabled for: {', '.join(processes)}")
+        return
+
+    # Before the write. Refusing after config.json has changed would leave the
+    # refusal and the persisted state disagreeing.
+    _local_capture_cert_gate(processes, skip_cert_check)
+
     removed = [p for p in current if p not in processes]
     if removed:
         print(f"  Removing from capture: {', '.join(removed)}")
         print("  (this sets the list rather than adding to it)")
-    if current == processes:
-        print(f"Local capture is already enabled for: {', '.join(processes)}")
-        return
 
     print("Enabling local capture mode.")
     print("This uses a macOS System Extension (mitmproxy-macos) to transparently")
@@ -1585,6 +1711,14 @@ def cli() -> None:
             "nothing."
         ),
     )
+    enable_lc.add_argument(
+        "--skip-cert-check",
+        action="store_true",
+        help=(
+            "Enable capture even when a booted simulator does not trust the "
+            "mitmproxy CA. Correct when deliberately exercising TLS failure."
+        ),
+    )
     subparsers.add_parser("disable-local-capture", help="Disable local traffic capture")
 
     # mcp-install / grant-full-perms (handled in __main__.py, listed here for help)
@@ -1626,7 +1760,7 @@ def cli() -> None:
         key = ServerConfig.regenerate_api_key()
         print(f"New API key: {key}")
     elif args.command == "enable-local-capture":
-        _cmd_enable_local_capture(args.processes)
+        _cmd_enable_local_capture(args.processes, args.skip_cert_check)
     elif args.command == "disable-local-capture":
         _cmd_disable_local_capture()
     elif args.command == "capture-env":

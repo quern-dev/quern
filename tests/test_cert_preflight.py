@@ -7,6 +7,8 @@ app with no network -- points nowhere near the proxy.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +18,7 @@ from server.proxy.cert_preflight import (
     refusal_detail,
     simulators_without_cert,
     trust_is_stale,
+    warn_if_capture_lacks_trust,
 )
 
 
@@ -395,3 +398,441 @@ class TestOneUncheckableDeviceDoesNotUnRefuseTheRest:
         with self._trust_raising_on("BOOM", {}):
             missing = await simulators_without_cert(_Ctrl([_sim(udid="BOOM")]))
         assert missing == []
+
+
+class TestTheStartupPathSaysSomething:
+    """`quern enable-local-capture` writes config.json and the lifespan starts
+    the adapter from it, so nothing on that route passes the capture gate.
+
+    It cannot be gated the way the endpoints are -- there is no request to
+    refuse, and refusing to boot the server over one device's certificate is a
+    worse outcome than the failure it would prevent. So the requirement is only
+    that the state is no longer silent: before this, the server started
+    cleanly, printed `Local capture: MyApp`, captured nothing decryptable, and
+    said so only in `proxy_status`, which the person who ran the CLI never sees.
+    """
+
+    async def test_it_warns_when_capture_is_on_and_the_ca_is_not_trusted(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        ctrl = _Ctrl([_sim()])
+        with _trust({"AAAA": False}):
+            with caplog.at_level("WARNING"):
+                missing = await warn_if_capture_lacks_trust(ctrl, ["MyApp"])
+        assert [d["udid"] for d in missing] == ["AAAA"]
+        assert "do(es) not trust" in caplog.text
+        assert "iPhone 16 Pro" in caplog.text, "the warning has to name the device"
+        assert "MyApp" in caplog.text, "and what is being captured"
+
+    async def test_it_is_quiet_when_the_ca_is_trusted(self, monkeypatch, caplog):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        ctrl = _Ctrl([_sim()])
+        with _trust({"AAAA": True}):
+            with caplog.at_level("WARNING"):
+                missing = await warn_if_capture_lacks_trust(ctrl, ["MyApp"])
+        assert missing == []
+        assert caplog.text == "", "a warning on the healthy path is noise"
+
+    async def test_it_does_not_ask_when_capture_is_off(self, caplog):
+        """The check costs a TrustStore query per booted simulator. With no
+        capture configured there is nothing to warn about, and warning anyway
+        would fire on every server start on every machine."""
+        ctrl = _Ctrl([_sim()])
+        with _trust({"AAAA": False}):
+            missing = await warn_if_capture_lacks_trust(ctrl, [])
+        assert missing == []
+        ctrl.list_devices.assert_not_awaited()
+
+    def test_the_lifespan_actually_calls_it(self):
+        """A correct function nobody calls is not a fix (CONTRIBUTING 2.4).
+
+        Static, because the lifespan cannot be run here -- it builds a real
+        DeviceController and every adapter, and the existing suite notes in
+        three places that it does not run under test. So deleting the call site
+        left all of this file green while the startup path went back to being
+        silent, which is the mutation this test exists for.
+
+        Also pins the `await`. `warn_if_capture_lacks_trust` is async, so
+        dropping it leaves a coroutine that is never run: no warning, no error,
+        and a RuntimeWarning in a stream nobody reads.
+        """
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "server" / "main.py").read_text())
+
+        awaited = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Await) or not isinstance(node.value, ast.Call):
+                continue
+            func = node.value.func
+            awaited.add(getattr(func, "id", None) or getattr(func, "attr", None))
+
+        assert "warn_if_capture_lacks_trust" in awaited, (
+            "server/main.py does not await warn_if_capture_lacks_trust, so a "
+            "server started with local capture against an untrusting simulator "
+            "reports nothing anywhere the CLI user can see it"
+        )
+
+        # One frame out, and the same bug. The check lives inside
+        # `_warmup_devices`, which is only ever reached because something
+        # schedules it -- replacing `create_task(_warmup_devices())` with `None`
+        # left the whole startup path dead and every test green.
+        scheduled = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (getattr(func, "attr", None) or getattr(func, "id", None)) != "create_task":
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Call):
+                    scheduled.add(
+                        getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
+                    )
+
+        assert "_warmup_devices" in scheduled, (
+            "nothing schedules _warmup_devices, so the startup cert check never "
+            "runs no matter what it contains"
+        )
+
+
+class TestTheCliCommandIsGatedToo:
+    """`quern enable-local-capture` is the fourth routing boundary.
+
+    It was left ungated on the reasoning that it is the human's path, which was
+    wrong twice over: an agent has a shell and the agent guide names this
+    command, and the config it writes is what the lifespan starts routing from
+    in the next process. The gate runs in-process -- a DeviceController does no
+    I/O to construct -- so the CLI does not need an HTTP client to ask the same
+    question the endpoints ask.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _machine_state(self, monkeypatch, tmp_path):
+        """Pin what the CLI gate reads off the machine.
+
+        Two dependencies, both introduced by this branch and both invisible
+        locally. The CA-existence guard means these tests would pass on a
+        developer's Mac (which has ~/.mitmproxy) and fail on CI (which does
+        not), reporting the opposite of the behaviour under test. And the gate
+        now runs after the no-op early return, so a sibling test that persists
+        a capture list into the sandboxed config.json makes this one skip the
+        gate entirely -- which is how it passed alone and failed in the suite.
+        """
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\n")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        from server import main
+
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+    def _refuses(self, monkeypatch, missing):
+        async def _missing(_controller):
+            return list(missing)
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+
+    def test_it_refuses_and_writes_nothing(self, monkeypatch, capsys):
+        from server import main
+
+        self._refuses(monkeypatch, [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}])
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+
+        with pytest.raises(SystemExit) as exc:
+            main._cmd_enable_local_capture(["MyApp"])
+
+        assert exc.value.code == 1, "a script ignoring the text must still see failure"
+        assert wrote == [], "config.json was written by a refused command"
+        out = capsys.readouterr().out
+        assert "iPhone 16 Pro" in out, "the refusal has to name the device"
+        assert "--skip-cert-check" in out, "and the way past it"
+
+    def test_the_skip_flag_lets_it_through(self, monkeypatch):
+        from server import main
+
+        self._refuses(monkeypatch, [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}])
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+        main._cmd_enable_local_capture(["MyApp"], skip_cert_check=True)
+        assert wrote == [["MyApp"]]
+
+    def test_a_trusting_machine_is_not_slowed_into_refusing(self, monkeypatch):
+        from server import main
+
+        self._refuses(monkeypatch, [])
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+        main._cmd_enable_local_capture(["MyApp"])
+        assert wrote == [["MyApp"]]
+
+    def test_disabling_is_never_refused(self, monkeypatch):
+        """Clearing the list stops capture. Refusing it would trap someone in
+        the state they are trying to leave -- the same rule the endpoint has."""
+        from server import main
+
+        called = []
+
+        async def _missing(_controller):
+            called.append(True)
+            return [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        main._local_capture_cert_gate([], skip_cert_check=False)
+        assert called == [], "an empty list must not even ask"
+
+    def test_a_broken_check_does_not_block_capture(self, monkeypatch, capsys):
+        """Fails open, like the preflight it calls. A gate that refuses over
+        its own bug is worse than the state it prevents."""
+        from server import main
+
+        async def _boom(_controller):
+            raise RuntimeError("simctl exploded")
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _boom
+        )
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+        main._local_capture_cert_gate(["MyApp"], skip_cert_check=False)
+        assert "Could not check" in capsys.readouterr().out
+
+
+class TestAutoInstallCertClearsEveryGate:
+    """`auto_install_cert` has to mean the same thing everywhere: you are never
+    asked again, and nothing refuses you for a certificate.
+
+    It is the answer to a question four gates and one startup check each ask
+    independently, and a setting honoured in four of five places is worse than
+    one honoured nowhere -- it works until the day it does not, on whichever
+    path the user happens to take. The CLI and the startup check are here; the
+    three HTTP gates are pinned in test_cert_api.py, where the client fixtures
+    live. Each is asserted separately rather than trusting the shared helper,
+    because these two do not go through that helper at all.
+
+    The one thing it does not do is make a failed install succeed. That is
+    reported, not swallowed: enabling capture that cannot work is the state all
+    of this exists to prevent, and it is not improved by the user having opted
+    into automatic installation.
+    """
+
+    UNTRUSTING = [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+    @pytest.fixture(autouse=True)
+    def _consent(self, monkeypatch):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+    @pytest.fixture(autouse=True)
+    def _machine_state(self, monkeypatch, tmp_path):
+        """Pin what the CLI gate reads off the machine.
+
+        Two dependencies, both introduced by this branch and both invisible
+        locally. The CA-existence guard means these tests would pass on a
+        developer's Mac (which has ~/.mitmproxy) and fail on CI (which does
+        not), reporting the opposite of the behaviour under test. And the gate
+        now runs after the no-op early return, so a sibling test that persists
+        a capture list into the sandboxed config.json makes this one skip the
+        gate entirely -- which is how it passed alone and failed in the suite.
+        """
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\n")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        from server import main
+
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+    @pytest.fixture
+    def _untrusting(self, monkeypatch):
+        async def _missing(_controller):
+            return list(self.UNTRUSTING)
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+
+    @pytest.fixture
+    def _installs(self, monkeypatch):
+        done = []
+
+        async def _install(_controller, udid, device_name=None):
+            done.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _install)
+        return done
+
+    def test_the_cli_command_is_not_refused(
+        self, monkeypatch, _untrusting, _installs, capsys
+    ):
+        from server import main
+
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+        main._cmd_enable_local_capture(["MyApp"])
+
+        assert wrote == [["MyApp"]], "the CLI refused despite the setting"
+        assert _installs == ["AAAA1111"]
+
+    async def test_the_startup_check_installs_instead_of_warning(
+        self, _untrusting, _installs, caplog
+    ):
+        """The path with no caller to read a warning."""
+        with caplog.at_level("WARNING"):
+            still_missing = await warn_if_capture_lacks_trust(object(), ["MyApp"])
+        assert _installs == ["AAAA1111"]
+        assert still_missing == []
+        assert "do(es) not trust" not in caplog.text, (
+            "it warned about a device it had just fixed"
+        )
+
+    async def test_a_failed_install_is_still_reported(self, _untrusting, monkeypatch, caplog):
+        """Consent does not make a broken install work, and saying nothing
+        would leave capture silently failing for the user who opted in."""
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        with caplog.at_level("WARNING"):
+            still_missing = await warn_if_capture_lacks_trust(object(), ["MyApp"])
+        assert [d["udid"] for d in still_missing] == ["AAAA1111"]
+        assert "failed" in caplog.text
+
+    def test_a_failed_install_refuses_the_cli_rather_than_proceeding(
+        self, monkeypatch, _untrusting, capsys
+    ):
+        from server import main
+
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+
+        with pytest.raises(SystemExit) as exc:
+            main._cmd_enable_local_capture(["MyApp"])
+        assert exc.value.code == 1
+        assert wrote == [], "capture was enabled after the install failed"
+        assert "installing the CA failed" in capsys.readouterr().out
+
+    def test_it_does_not_refuse_before_the_ca_exists(self, monkeypatch, tmp_path):
+        """The CA is generated on the first proxy start, so a fresh machine
+        reaches this command without one -- which is the ordering the README's
+        own example implies.
+
+        Refusing there would name three ways out of which two cannot be done:
+        you cannot install a CA that has not been generated, and
+        `set-auto-install-cert on` would then fail on the same missing file.
+        Shipping a refusal whose resolutions are unreachable is the exact bug
+        this branch exists to fix.
+        """
+        from server import main
+
+        called = []
+
+        async def _missing(_controller):
+            called.append(True)
+            return [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_path",
+            lambda: tmp_path / "nope" / "mitmproxy-ca-cert.pem",
+        )  # overrides _machine_state
+        # No SystemExit, and it does not even ask.
+        main._local_capture_cert_gate(["MyApp"], skip_cert_check=False)
+        assert called == [], "it queried devices about a CA that does not exist"
+
+    def test_the_skip_flag_is_wired_from_the_command_line(self, monkeypatch):
+        """Dropping `args.skip_cert_check` at the dispatch left the whole suite
+        green: the flag was parsed, documented and honoured by the function,
+        with nothing pinning the wire between them."""
+        import sys
+
+        from server import main
+
+        seen = {}
+        monkeypatch.setattr(
+            main, "_cmd_enable_local_capture",
+            lambda processes, skip=False, **kw: seen.update(
+                processes=processes, skip=skip or kw.get("skip_cert_check", False)
+            ),
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["quern", "enable-local-capture", "MyApp", "--skip-cert-check"],
+        )
+        main.cli()
+        assert seen.get("processes") == ["MyApp"]
+        assert seen.get("skip") is True, "the --skip-cert-check flag never reached the command"
+
+
+class TestAnInstallSurvivesShutdown:
+    """The startup check runs in the warmup task, which is cancelled at
+    shutdown. `install_cert` runs simctl and then records what it did, and
+    cancelling the await does not stop the subprocess that already ran -- so an
+    unshielded cancel between those two steps leaves the device trusting a CA
+    that `cert-state.json` says is absent.
+
+    Self-correcting, because nothing trusts that record any more and the next
+    check asks the device. Still not worth writing deliberately.
+    """
+
+    async def test_a_cancel_mid_install_still_records_it(self, monkeypatch):
+        recorded = []
+
+        async def _slow_install(_controller, udid, device_name=None):
+            await asyncio.sleep(0.05)
+            recorded.append(udid)  # stands in for update_cert_state
+            return True
+
+        async def _missing(_controller):
+            return [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _slow_install)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+        task = asyncio.create_task(warn_if_capture_lacks_trust(object(), ["MyApp"]))
+        await asyncio.sleep(0.01)  # let it reach the install
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.1)  # give the shielded install time to finish
+
+        assert recorded == ["AAAA1111"], (
+            "the install was abandoned mid-flight, so simctl may have changed "
+            "the TrustStore with nothing written to the record"
+        )

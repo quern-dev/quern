@@ -1498,3 +1498,313 @@ class TestSettingCaptureSaysWhatItDropped:
         assert len(warnings) == 1
         dropped = warnings[0].getMessage().split("replaced by")[0]
         assert "Metatext" in dropped and "MobileSafari" in dropped
+
+
+class TestStartingTheSystemProxyIsGatedToo:
+    """`POST /proxy/start {system_proxy: true}` reached the gated action by
+    another door.
+
+    It calls the same `detect_and_configure` that `configure_system` calls one
+    line after its preflight, and had no preflight of its own. So an agent
+    refused by `configure_system_proxy` could stop the proxy and start it again
+    with the flag, and land in exactly the state the refusal exists to prevent
+    -- no 428, nobody asked. The gate's own docstring said it was called from
+    "both paths that begin routing a device's traffic through the proxy"; there
+    were three.
+
+    Starting the listener alone is still never refused. Binding a port routes
+    nothing, and refusing it would stop people setting up the very thing that
+    fixes the refusal.
+    """
+
+    def _no_trust(self, monkeypatch):
+        async def missing(_controller):
+            return [{"udid": "AAAA", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", missing
+        )
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_it_is_refused_when_the_ca_is_not_trusted(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._adapter(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/start", json={"system_proxy": True}, headers=auth_headers,
+        )
+        assert r.status_code == 428, (
+            "the system proxy was configured for a device that cannot use it"
+        )
+
+    def test_the_refusal_leaves_the_proxy_stopped(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """The gate runs before anything starts.
+
+        Gating after `adapter.start()` would leave the listener running behind a
+        refused request -- a side effect on the path that declined to act, and
+        the next call would then get 409 rather than the 428 that explains it.
+        """
+        adapter = self._adapter(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        client.post(
+            "/api/v1/proxy/start", json={"system_proxy": True}, headers=auth_headers,
+        )
+        adapter.start.assert_not_called()
+        adapter.reconfigure.assert_not_called()
+
+    def test_starting_the_listener_alone_is_never_refused(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Binding a port routes nothing, so an untrusted device is irrelevant
+        -- and this is the call someone makes on the way to fixing it."""
+        adapter = self._adapter(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post("/api/v1/proxy/start", json={}, headers=auth_headers)
+        assert r.status_code == 200
+        adapter.start.assert_awaited_once()
+
+    def test_the_string_false_does_not_switch_the_gate_off(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """`bool("false")` is `True`, and this body was an untyped dict."""
+        self._adapter(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        r = client.post(
+            "/api/v1/proxy/start",
+            json={"system_proxy": True, "skip_cert_check": "false"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 428, "the string 'false' disabled the cert gate"
+
+    def test_an_explicit_skip_is_honoured(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        adapter = self._adapter(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        monkeypatch.setattr(
+            # `server/api/proxy.py` does a module-scope `from ... import
+            # detect_and_configure`, so patching the source module leaves the
+            # handler calling the real one -- which shells out to networksetup
+            # and reconfigures the developer's Mac.
+            "server.api.proxy.detect_and_configure", lambda *a, **k: None
+        )
+
+        r = client.post(
+            "/api/v1/proxy/start",
+            json={"system_proxy": True, "skip_cert_check": True},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        adapter.start.assert_awaited_once()
+
+
+class TestAutoInstallCertClearsEveryHttpGate:
+    """The setting has to answer the question at every gate, not most of them.
+
+    Three endpoints raise this refusal and each calls the shared helper, so in
+    principle one test would do. They are asserted separately anyway: the whole
+    reason this release has four gates is that a guard on one path was assumed
+    to cover a sibling and did not, twice.
+
+    The CLI and startup halves are in test_cert_preflight.py, which is where
+    those two live.
+    """
+
+    UNTRUSTING = [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+    @pytest.fixture(autouse=True)
+    def _consent(self, monkeypatch):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+    @pytest.fixture(autouse=True)
+    def _untrusting(self, monkeypatch):
+        async def _missing(_controller):
+            return list(self.UNTRUSTING)
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+
+    @pytest.fixture(autouse=True)
+    def _installs(self, monkeypatch):
+        done = []
+
+        async def _install(_controller, udid, device_name=None):
+            done.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _install)
+        return done
+
+    @pytest.fixture(autouse=True)
+    def _no_real_system_proxy(self, monkeypatch):
+        monkeypatch.setattr(
+            # `server/api/proxy.py` does a module-scope `from ... import
+            # detect_and_configure`, so patching the source module leaves the
+            # handler calling the real one -- which shells out to networksetup
+            # and reconfigures the developer's Mac.
+            "server.api.proxy.detect_and_configure", lambda *a, **k: None
+        )
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_set_local_capture_is_not_refused(
+        self, client, auth_headers, app, _installs
+    ):
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MyApp"]},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert _installs == ["AAAA1111"], "it proceeded without installing anything"
+
+    def test_start_proxy_with_system_proxy_is_not_refused(
+        self, client, auth_headers, app, _installs
+    ):
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/start", json={"system_proxy": True}, headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert _installs == ["AAAA1111"]
+
+    def test_configure_system_proxy_is_not_refused(
+        self, client, auth_headers, app, monkeypatch, _installs
+    ):
+        # This endpoint 503s unless the proxy is already running, which is
+        # before the gate -- so without this the test passes on `!= 428` while
+        # never reaching the code under test. The install assertion is what
+        # caught that.
+        adapter = self._adapter(app)
+        adapter.is_running = True
+        monkeypatch.setattr("server.lifecycle.state.read_state", lambda: None)
+
+        r = client.post("/api/v1/proxy/configure-system", json={}, headers=auth_headers)
+        assert r.status_code != 428, "the setting did not answer the question"
+        assert _installs == ["AAAA1111"], "the gate was never reached"
+
+    def test_a_failed_install_is_a_500_not_a_silent_proceed(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Consent does not make a broken install work. Proceeding would enable
+        capture that cannot succeed, for the user who asked us to handle it."""
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MyApp"]},
+            headers=auth_headers,
+        )
+        assert r.status_code == 500
+        assert "auto_install_cert is set" in r.text
+
+
+class TestStartProxyKeepsItsOldContract:
+    """`body: dict` became a model, which is a behaviour change on a live
+    endpoint. These pin the parts that must not move."""
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_an_explicit_null_still_means_not_requested(
+        self, client, auth_headers, app
+    ):
+        """The old reader was `body.get("system_proxy") is not None`, so null
+        started a listener and left the system proxy alone. A plain `bool`
+        would 422 an external script that has been sending it for months."""
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/start", json={"system_proxy": None}, headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+
+    def test_the_string_false_does_not_start_the_system_proxy(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._adapter(app)
+        called = []
+        monkeypatch.setattr(
+            "server.api.proxy.detect_and_configure",
+            lambda *a, **k: called.append(True),
+        )
+        r = client.post(
+            "/api/v1/proxy/start",
+            json={"system_proxy": "false"},
+            headers=auth_headers,
+        )
+        assert r.status_code in (200, 422), r.text
+        assert called == [], "the string 'false' configured the system proxy"
+
+    def test_a_bare_start_is_unchanged(self, client, auth_headers, app):
+        adapter = self._adapter(app)
+        r = client.post("/api/v1/proxy/start", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        adapter.start.assert_awaited_once()

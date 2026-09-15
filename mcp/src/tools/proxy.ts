@@ -529,7 +529,15 @@ WORKFLOW (physical devices):
 
 NOTE: If local_capture is enabled (check proxy_status), all local traffic
 including simulator traffic is captured transparently without any proxy
-configuration needed.`,
+configuration needed.
+
+CERTIFICATE CHECK (system_proxy: true only). Refuses with HTTP 428 when a
+booted simulator does not trust the mitmproxy CA and auto_install_cert is off,
+the same refusal configure_system_proxy returns and for the same reason. It is
+NOT transient. Do not route around it by calling this tool after
+configure_system_proxy refused -- it is the same gate, and reaching the
+configured state another way recreates exactly the silent HTTPS failure the
+refusal exists to prevent.`,
     inputSchema: strictParams({
       port: z
         .coerce.number()
@@ -539,19 +547,33 @@ configuration needed.`,
         .string()
         .optional()
         .describe("Host to listen on (default: 0.0.0.0)"),
+      // Accepts a real boolean or the two string spellings, and nothing else.
+      // `z.coerce.boolean()` was wrong in the dangerous direction -- every
+      // non-empty string is truthy, so "false" turned the system proxy ON --
+      // and a plain `z.boolean()` would reject "true", which used to work.
       system_proxy: z
-        .coerce.boolean()
+        .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
         .optional()
         .describe(
-          "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control."
+          "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control. With this set, the call takes the same certificate check as configure_system_proxy and can refuse with 428 -- starting the listener alone routes nothing and is never refused."
+        ),
+      skip_cert_check: z
+        .boolean()
+        .optional()
+        .describe(
+          "Start and configure the system proxy even when a booted simulator " +
+          "does not trust the mitmproxy CA. Only applies with system_proxy: " +
+          "true, and only pass it when the user has said so. Correct when " +
+          "deliberately exercising TLS-failure paths."
         ),
     }),
-  }, async ({ port, listen_host, system_proxy }) => {
+  }, async ({ port, listen_host, system_proxy, skip_cert_check: skipCertCheck }) => {
     try {
       const body: Record<string, unknown> = {};
       if (port !== undefined) body.port = port;
       if (listen_host !== undefined) body.listen_host = listen_host;
       if (system_proxy !== undefined) body.system_proxy = system_proxy;
+      if (skipCertCheck) body.skip_cert_check = true;
 
       const data = await apiRequest(
         "POST",
@@ -914,22 +936,52 @@ without configuring a system proxy.
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
 
+SETS THE LIST, does not add to it. Whatever is not named is dropped, so read
+proxy_status first and pass the processes already there alongside the new one.
+Told "capture MyApp", sending ["MyApp"] silently stops capturing everything
+else -- most often the web-view defaults, which are applied only when nothing
+is specified. The response echoes only the new list, so it cannot tell you
+what went missing; the drop is recorded as a warning in the server log, which
+query_logs(source: "server") will show you.
+
+CERTIFICATE CHECK. Enabling capture refuses with HTTP 428 when a booted
+simulator does not trust the mitmproxy CA and auto_install_cert is off. With
+that setting on it installs the CA instead of refusing, exactly as configure_system_proxy
+does and for the same reason: routing a process's traffic through the proxy
+from a device that does not trust the CA fails every HTTPS request from it with
+no indication the proxy is the cause. The refusal is NOT transient and retrying
+will not clear it; the body names the devices and the same three resolutions
+(install_proxy_cert, set auto_install_cert, or skip_cert_check). Ask the user
+which they want. Disabling capture is never refused.
+
 On first use, macOS will prompt to allow the Mitmproxy Redirector system
 extension in System Settings > Privacy & Security.`,
     inputSchema: strictParams({
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Empty list disables local capture.'
+          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Replaces the current list; empty list disables local capture.'
+        ),
+      skip_cert_check: z
+        .boolean()
+        .optional()
+        .describe(
+          "Enable capture even when a booted simulator does not trust the " +
+          "mitmproxy CA. Only pass this when the user has said so: capturing " +
+          "in that state fails every HTTPS request from that device with " +
+          "nothing pointing at the proxy. Correct when deliberately " +
+          "exercising TLS-failure paths."
         ),
     }),
-  }, async ({ processes }) => {
+  }, async ({ processes, skip_cert_check: skipCertCheck }) => {
     try {
+      const body: Record<string, unknown> = { processes };
+      if (skipCertCheck) body.skip_cert_check = true;
       const data = await apiRequest(
         "POST",
         "/api/v1/proxy/local-capture",
         undefined,
-        { processes }
+        body
       );
 
       return {
@@ -938,11 +990,19 @@ extension in System Settings > Privacy & Security.`,
         ],
       };
     } catch (e) {
+      // The "is it running?" hint is for a transport failure. A refusal the
+      // server deliberately returned -- the 428 above says in terms that
+      // retrying will not clear it -- is not helped by being told the server
+      // may be down, and reads as a contradiction of the advice it follows.
+      const message = e instanceof Error ? e.message : String(e);
+      const served = /^HTTP \d{3}:/.test(message);
       return {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: served
+              ? `Error: ${message}`
+              : `Error: ${message}\n\nIs Quern running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
