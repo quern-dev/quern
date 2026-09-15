@@ -32,7 +32,10 @@ class TestAProbeIsBounded:
 
     async def test_a_hanging_command_returns_within_the_budget(self):
         start = time.perf_counter()
-        result = await probe_command("sleep", "120", timeout=1.0, tool="wedged")
+        result = await asyncio.wait_for(
+            probe_command("sleep", "120", timeout=1.0, tool="wedged"),
+            timeout=15.0,
+        )
         elapsed = time.perf_counter() - start
 
         assert result is False
@@ -58,15 +61,23 @@ class TestAProbeIsBounded:
         and makes any mutation result measured in that window worthless.
         """
         marker = "quern-probe-leak-canary-98214"
-        await probe_command(
-            "/bin/sh", "-c", f"sleep 90 & echo go; wait  # {marker}",
-            timeout=1.0, tool="canary",
+        # Bounded from outside, because the thing under test owns the only
+        # other bound. When the internal `wait_for` regresses this fails in
+        # seconds instead of hanging the suite for the length of the sleep --
+        # which is exactly what mutating that timeout away did.
+        await asyncio.wait_for(
+            probe_command(
+                "/bin/sh", "-c", f"sleep 90 & echo go; wait  # {marker}",
+                timeout=1.0, tool="canary",
+            ),
+            timeout=15.0,
         )
         await asyncio.sleep(0.4)
 
         def alive(pattern: str) -> list[str]:
             return subprocess.run(
                 ["pgrep", "-f", pattern], capture_output=True, text=True,
+                timeout=10,
             ).stdout.split()
 
         child = alive(marker)

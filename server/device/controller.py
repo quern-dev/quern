@@ -64,6 +64,11 @@ class DeviceController(DeviceControllerUI):
         #: unavailable. The server and its own health endpoint disagreed.
         self._sim_bridge_checked_at: float = 0.0
         self._tools_cache: tuple[float, dict[str, bool]] | None = None
+        #: Serialises probe-and-adopt. /tools and the periodic refresh can run
+        #: at once, and without this an older sample can land after a newer one
+        #: -- leaving `_ui_backend` on the wrong backend until the next refresh,
+        #: up to 300s of taps going somewhere they should not.
+        self._sim_bridge_lock = asyncio.Lock()
         self.__active_udid: str | None = None
         # What was last persisted, so an assignment that changes nothing can
         # skip the write entirely. Separate from __active_udid, which is
@@ -232,7 +237,7 @@ class DeviceController(DeviceControllerUI):
             self.pmd3.is_available(),
             is_tunneld_running(),
             self.adb.is_available(),
-            self.sim_bridge_manager.is_available(),
+            self._probe_sim_bridge(adopt=adopt),
             return_exceptions=True,
         )
         tools: dict[str, bool] = {}
@@ -246,16 +251,27 @@ class DeviceController(DeviceControllerUI):
                 tools[name] = bool(result)
 
         self._tools_cache = (time.monotonic(), dict(tools))
-
-        # Adopting is opt-in rather than a side effect of measuring. This is the
-        # cheap half of #179 -- a /tools call re-syncs a server left routing to
-        # a backend the same response calls unavailable -- but it decides which
-        # backend serves every subsequent tap, and no operator associates
-        # *listing devices* with re-selecting a backend. So the endpoint that
-        # reports health asks for it; the one that merely includes it does not.
-        if adopt:
-            self._adopt_sim_bridge_state(tools["sim_bridge"])
         return tools
+
+    async def _probe_sim_bridge(self, *, adopt: bool) -> bool:
+        """Probe the sim-bridge backend, optionally adopting the result.
+
+        Adopting is opt-in rather than a side effect of measuring. It is the
+        cheap half of #179 -- a /tools call re-syncs a server left routing to a
+        backend the same response calls unavailable -- but it decides which
+        backend serves every subsequent tap, and no operator associates
+        *listing devices* with re-selecting one.
+
+        The probe and the adoption are one critical section. They are not the
+        only caller: the periodic refresh runs the same pair, and interleaved,
+        a slower older probe can land after a faster newer one and leave
+        `_ui_backend` wrong until the next refresh.
+        """
+        async with self._sim_bridge_lock:
+            ok = await self.sim_bridge_manager.is_available()
+            if adopt:
+                self._adopt_sim_bridge_state(ok)
+            return ok
 
     def _adopt_sim_bridge_state(self, ok: bool) -> None:
         """Record a freshly measured sim-bridge availability, loudly on change.
@@ -294,7 +310,7 @@ class DeviceController(DeviceControllerUI):
 
         if time.monotonic() - self._sim_bridge_checked_at < max_age:
             return self._sim_bridge_ok
-        self._adopt_sim_bridge_state(await self.sim_bridge_manager.is_available())
+        await self._probe_sim_bridge(adopt=True)
         return self._sim_bridge_ok
 
     async def tool_sites(self) -> list:
