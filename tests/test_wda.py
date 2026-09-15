@@ -1152,3 +1152,68 @@ class TestWdaStartStopApi:
             )
 
         assert resp.status_code == 400
+
+
+class TestTheDeploymentTargetIsOverridden:
+    """Xcode 27 refuses to build upstream WebDriverAgent.
+
+    The vendored project declares `IPHONEOS_DEPLOYMENT_TARGET = 13.0`, and
+    Xcode 27 accepts only 15.0 and above:
+
+        error: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to
+        13.0, but the range of supported deployment target versions is 15.0 to
+        27.0.x. (in target 'WebDriverAgentRunner')
+
+    Without the override every physical-device build fails, and the failure is
+    masked for existing users because `build_wda` skips when the team matches --
+    so a stale build from an older Xcode keeps working until something forces a
+    rebuild, and then there is nothing to fall back to.
+
+    Overridden on the command line rather than patched into the project,
+    because the project is a clone that gets re-pulled.
+    """
+
+    async def _captured_args(self, tmp_path):
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+        (repo / "WebDriverAgent.xcodeproj").mkdir()
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            return _mock_process()
+
+        with (
+            patch("server.device.wda.read_wda_state", return_value={"cloned": True}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
+            patch("server.device.wda.asyncio.create_subprocess_exec", fake_exec),
+            patch("server.device.wda._post_process_runner_app", AsyncMock()),
+        ):
+            await build_wda("TEAM123")
+        return captured["args"]
+
+    async def test_xcodebuild_is_given_a_supported_deployment_target(self, tmp_path):
+        args = await self._captured_args(tmp_path)
+        setting = next(
+            (a for a in args if str(a).startswith("IPHONEOS_DEPLOYMENT_TARGET=")), None,
+        )
+        assert setting is not None, (
+            "xcodebuild was invoked without a deployment-target override, so "
+            "Xcode 27 will reject the vendored project's 13.0"
+        )
+        version = float(setting.split("=", 1)[1])
+        assert version >= 15.0, (
+            f"{setting} is below the 15.0 floor Xcode 27 enforces"
+        )
+
+    async def test_it_does_not_claim_more_than_quern_supports(self, tmp_path):
+        """The floor is a build constraint, not a capability claim. Physical
+        devices need iOS 17+ for tunneld, so anything up to that is free -- but
+        setting it *above* what quern supports would silently narrow the
+        supported device range from a build flag."""
+        args = await self._captured_args(tmp_path)
+        setting = next(a for a in args if str(a).startswith("IPHONEOS_DEPLOYMENT_TARGET="))
+        assert float(setting.split("=", 1)[1]) <= 17.0

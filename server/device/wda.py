@@ -33,6 +33,11 @@ WDA_RUNNER_BUNDLE_ID = f"{WDA_BUNDLE_ID}.xctrunner"
 WDA_DIR = CONFIG_DIR / "wda"
 WDA_REPO = WDA_DIR / "WebDriverAgent"
 WDA_DERIVED = WDA_DIR / "build"
+
+#: Floor passed to xcodebuild, because upstream WebDriverAgent declares 13.0 and
+#: Xcode 27 rejects anything under 15.0. Not a capability claim: physical-device
+#: support needs iOS 17+ for tunneld regardless.
+WDA_MIN_DEPLOYMENT_TARGET = "15.0"
 WDA_APP = WDA_DERIVED / "Build" / "Products" / "Debug-iphoneos" / "WebDriverAgentRunner-Runner.app"
 XCTESTRUN = WDA_DERIVED / "Build" / "Products" / "quern-driver.xctestrun"
 WDA_STATE_FILE = CONFIG_DIR / "wda-state.json"
@@ -317,6 +322,19 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
         f"DEVELOPMENT_TEAM={team_id}",
         f"PRODUCT_BUNDLE_IDENTIFIER={WDA_BUNDLE_ID}",
         "CODE_SIGNING_ALLOWED=YES",
+        # Upstream WebDriverAgent still declares a 13.0 deployment target, and
+        # Xcode 27 refuses anything below 15.0:
+        #
+        #   error: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set
+        #   to 13.0, but the range of supported deployment target versions is
+        #   15.0 to 27.0.x. (in target 'WebDriverAgentRunner')
+        #
+        # Overridden rather than patching the vendored project, which is a
+        # clone we re-pull. 15.0 is Xcode 27's floor and far below anything
+        # quern supports on a physical device -- tunneld requires iOS 17+ -- so
+        # raising it costs nothing today. It will need raising again when Apple
+        # next moves the floor; the error names the new range when that happens.
+        f"IPHONEOS_DEPLOYMENT_TARGET={WDA_MIN_DEPLOYMENT_TARGET}",
         "-allowProvisioningUpdates",
         "-derivedDataPath", str(WDA_DERIVED),
         stdout=asyncio.subprocess.PIPE,
