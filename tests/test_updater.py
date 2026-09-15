@@ -1086,23 +1086,69 @@ class TestBetaNeverOffersOlderContentThanStable:
 
 
 class TestAnUpdateNeverMovesBackwards:
-    """The guard that makes the next resolver bug a no-op rather than a
-    downgrade. `current == latest` treats any difference as an update, so a
-    wrong answer is acted on without question."""
+    """The guard that makes a wrong answer from the resolver a refusal rather
+    than a downgrade -- without blocking the one backwards move that is
+    deliberate.
 
-    def _run(self, monkeypatch, tmp_path, current, offered):
+    `current == latest` was the only check, so any wrong answer was acted on.
+    But `quern set-channel stable && quern update` from a beta build genuinely
+    moves backwards mid beta cycle, and that flow is documented in
+    docs/guides/update-channels.md. A first version of this guard refused it,
+    and -- because rc 2 is mapped to "already up to date" -- told the user the
+    move had succeeded. That is this release's own defect class, reintroduced
+    by the fix for it.
+    """
+
+    def _run(self, monkeypatch, tmp_path, current, offered, channel="beta"):
         from server.lifecycle import updater
 
         monkeypatch.setattr(updater, "_read_local_version", lambda root: current)
         monkeypatch.setattr(
-            updater, "_fetch_latest_release", lambda channel: (offered, "x.tgz"),
+            updater, "_fetch_latest_release", lambda ch: (offered, "x.tgz"),
         )
-        monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+        monkeypatch.setattr("server.config.get_update_channel", lambda: channel)
         return updater._update_via_tarball(tmp_path)
 
-    def test_an_older_offer_is_refused(self, monkeypatch, tmp_path, capsys):
+    def test_an_older_offer_on_the_same_channel_is_refused(
+        self, monkeypatch, tmp_path, capsys
+    ):
         rc = self._run(monkeypatch, tmp_path, "0.18.0", "0.15.0-beta.1")
-        assert rc == 2, "it went ahead and downgraded"
+        assert rc == 1, "it went ahead and downgraded"
+        assert "Not downgrading" in capsys.readouterr().out
+
+    def test_a_refusal_is_not_reported_as_being_up_to_date(
+        self, monkeypatch, tmp_path
+    ):
+        """rc 2 is mapped to NO_OP / "already up to date" and exit 0. A refusal
+        is the opposite: an update was wanted and did not happen. Returning 2
+        here would tell every surface -- the CLI, the menu bar's `isNoOp`, the
+        result file -- that nothing needed doing."""
+        rc = self._run(monkeypatch, tmp_path, "0.18.0", "0.15.0-beta.1")
+        assert rc != 2, (
+            "a refusal was mapped to 'already up to date', which is how someone "
+            "ends up on a stale build believing they are current"
+        )
+
+    def test_leaving_beta_for_stable_is_allowed(self, monkeypatch, tmp_path, capsys):
+        """The documented flow: `quern set-channel stable && quern update` from
+        a beta build. Mid beta cycle the newest stable really is older than what
+        is installed, and refusing it strands tarball users on beta."""
+        with contextlib.suppress(Exception):
+            self._run(
+                monkeypatch, tmp_path, "0.19.0-beta.1", "0.18.0", channel="stable",
+            )
+        out = capsys.readouterr().out
+        assert "Not downgrading" not in out, (
+            "a user switching back to stable was refused and left on beta"
+        )
+        assert "→ v0.18.0" in out
+
+    def test_a_beta_build_is_still_protected_on_the_beta_channel(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Leaving beta is the exception, not "prereleases may go backwards"."""
+        rc = self._run(monkeypatch, tmp_path, "0.19.0-beta.1", "0.15.0-beta.1")
+        assert rc == 1
         assert "Not downgrading" in capsys.readouterr().out
 
     def _got_past_the_guard(self, monkeypatch, tmp_path, capsys, current, offered):

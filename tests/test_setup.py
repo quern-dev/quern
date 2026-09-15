@@ -1953,3 +1953,91 @@ class TestDecliningTheVenvStopsThere:
             "the failure surfaced as a missing dependency rather than the "
             "decision that caused it"
         )
+
+    def test_an_unasked_prompt_still_gets_the_no_terminal_report(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Without a terminal every prompt declines rather than hanging, so a
+        menu-bar or `curl | bash` setup on a machine with no venv lands on this
+        exit *every time* -- and the early return skipped the block that names
+        what was never asked and says to run setup in a terminal. Being told you
+        "declined" a question nobody put to you is the worse half of that."""
+        from server.lifecycle import setup
+
+        setup_mod = self._decline(monkeypatch, tmp_path)
+        monkeypatch.setattr(setup_mod, "create_venv", lambda *a, **k: True)
+
+        # Record the question the way the real no-terminal path does, rather
+        # than pre-seeding the list: `run_setup` clears `_UNASKED` on entry, so
+        # anything seeded beforehand is gone by the time the branch runs.
+        def declines_and_records(question, *a, **k):
+            setup._UNASKED.append(question.strip())
+            return False
+
+        monkeypatch.setattr(setup_mod, "_prompt_yn", declines_and_records)
+
+        setup_mod.run_setup()
+
+        out = capsys.readouterr().out
+        assert "No virtual environment found. Create one?" in out, (
+            "the block naming what was never asked was skipped by the early exit"
+        )
+        assert "declined without asking" in out
+        assert "quern setup" in out, "it does not say how to answer the question"
+
+
+class TestAFailedVenvRecreateStopsThere:
+    """One branch above the declined-venv fix, the same shape.
+
+    "Recreate venv with X?" accepted -> the old venv is deleted -> `create_venv`
+    fails -> execution fell through to the branch that prints "Virtual
+    environment found but not activated" about a directory that no longer
+    exists, then re-execs into it. That returns -1, so `quern setup` exits 255
+    with no summary, no CheckResult and no guidance, having just destroyed the
+    user's environment.
+    """
+
+    def test_it_reports_instead_of_re_execing_into_nothing(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from server.lifecycle import setup
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+
+        reexeced = []
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: True)
+        monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
+        monkeypatch.setattr(
+            setup, "_reexec_in_venv", lambda *a, **k: reexeced.append(True) or -1,
+        )
+
+        # The branch only runs for a venv built with an unsupported Python when
+        # a better one exists: venv on 3.14 (> PYTHON_MAX), best is 3.12.
+        monkeypatch.setattr(setup, "_find_best_python", lambda *a, **k: "python3.12")
+
+        def fake_run(cmd, *a, **k):
+            if str(cmd[0]).endswith(".venv/bin/python"):
+                return 0, "Python 3.14.0", ""
+            return 0, "Python 3.12.0", ""
+
+        monkeypatch.setattr(setup, "_run", fake_run)
+
+        # Not inside a venv, so the block is reached at all.
+        monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+
+        rc = setup.run_setup()
+
+        assert reexeced == [], (
+            "it re-execed into a venv it had just deleted, which exits 255 with "
+            "no explanation"
+        )
+        assert rc == 1, "the failure did not reach the exit code"
+        out = capsys.readouterr().out
+        assert "found but not activated" not in out, (
+            "it described a deleted directory as present"
+        )

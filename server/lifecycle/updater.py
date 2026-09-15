@@ -391,26 +391,45 @@ def _update_via_tarball(project_root: Path) -> int:
         print(f"Already up to date (v{current_version}, channel '{channel}').")
         return 2  # No update needed
 
-    # Never move backwards. The equality check above treats "the version
-    # differs" as "there is an update", so any wrong answer from the resolver
-    # is acted on without question -- and one of them shipped: the beta channel
-    # offered the newest *prerelease* even when it was older than stable, which
-    # downgraded users three minor versions and pinned them there, since the
-    # next check then found current == latest.
+    # Never move backwards *by accident*. The equality check above treats "the
+    # version differs" as "there is an update", so any wrong answer from the
+    # resolver is acted on without question -- and one of them shipped: the beta
+    # channel offered the newest *prerelease* even when it was older than
+    # stable, which downgraded users three minor versions and pinned them there,
+    # since the next check then found current == latest.
     #
-    # The resolver is fixed, but this is the guard that makes the next such bug
-    # a no-op instead of a downgrade. Unparseable versions fall through to the
-    # old behaviour rather than blocking a legitimate update.
+    # Going backwards *on purpose* is a different thing, and the one case of it
+    # is documented: `quern set-channel stable && quern update` from a beta
+    # build, mid beta cycle, where the newest stable genuinely is older than
+    # what is installed. Refusing that leaves a tarball user with no way back to
+    # stable, and -- because rc 2 reads as "already up to date" -- told the move
+    # succeeded. That is the failure this whole release is about, so it is worth
+    # being precise rather than blunt here.
+    #
+    # Hence: a prerelease going to the stable channel is the deliberate case and
+    # is allowed. Everything else backwards is the resolver being wrong.
+    # Unparseable versions fall through rather than wedging updates shut.
     if current_version:
         from packaging.version import InvalidVersion, Version
 
         try:
-            if Version(latest_version) < Version(current_version):
+            installed = Version(current_version)
+            offered = Version(latest_version)
+            leaving_beta = installed.is_prerelease and channel == "stable"
+            if offered < installed and not leaving_beta:
                 print(
                     f"Channel '{channel}' offers v{latest_version}, which is older "
                     f"than the installed v{current_version}. Not downgrading."
                 )
-                return 2
+                print(
+                    "This usually means the channel is resolving the wrong "
+                    "release. Nothing has been changed."
+                )
+                # Not rc 2: that is mapped to "already up to date", and this is
+                # the opposite -- an update that was wanted and did not happen.
+                # A refusal reported as success is what put people on a stale
+                # build without noticing in the first place.
+                return 1
         except (InvalidVersion, TypeError):
             pass
 
