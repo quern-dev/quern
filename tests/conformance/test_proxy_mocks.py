@@ -14,6 +14,7 @@ import pytest
 
 from tests.conformance.client import QuernClient
 
+
 #: A pattern that matches a host nothing on this machine will ever contact, so a
 #: rule left behind by a crashed run cannot silently mock real traffic.
 def _unique_pattern() -> str:
