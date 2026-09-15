@@ -23,6 +23,7 @@ from collections.abc import Iterator
 import pytest
 
 from tests.conformance import client as client_mod
+from tests.conformance import probe as probe_mod
 from tests.conformance.capabilities import Device, Environment, Role, discover
 
 #: Opt-in gates. Absent means off; any of 1/true/yes turns a tier on.
@@ -227,6 +228,33 @@ def android_device(environment: Environment, authenticated: None) -> Device:
     return _device_for(environment, Role.ANDROID_DEVICE)
 
 
+def _any_of(env: Environment, roles: tuple[Role, ...], platform: str) -> Device:
+    """Pick across several roles, preferring one that is already booted.
+
+    Booted-ness is weighed *before* role preference, and that ordering is load
+    bearing. Preferring the emulator role first picked a shut-down AVD over an
+    attached, running phone, and a shut-down emulator's identifier is not an adb
+    serial at all -- `avd:Medium_Phone_API_36.1` -- so every call against it
+    failed with `adb: unknown host service`. Ranking by role first is how a
+    device fixture hands out something that cannot be driven.
+    """
+    available = [r for r in roles if env.has(r)]
+    if not available:
+        reasons = "; ".join(env.role(r).blocked_reason for r in roles)
+        pytest.skip(f"no {platform} target: {reasons}")
+
+    for role in available:
+        device = env.role(role).pick(prefer_booted=True)
+        if device is not None and device.booted:
+            return device
+    # Nothing booted anywhere: fall back to role order and let the caller boot.
+    for role in available:
+        device = env.role(role).pick()
+        if device is not None:
+            return device
+    pytest.skip(f"no usable {platform} target")  # pragma: no cover
+
+
 @pytest.fixture(scope="session")
 def any_ios(environment: Environment, authenticated: None) -> Device:
     """A simulator if there is one, else a physical iPhone.
@@ -234,26 +262,14 @@ def any_ios(environment: Environment, authenticated: None) -> Device:
     For the many endpoints that do not care which, and should be exercised on
     whatever the machine has rather than skipped for want of a simulator.
     """
-    for role in (Role.IOS_SIMULATOR, Role.IOS_DEVICE):
-        if environment.has(role):
-            return environment.role(role).pick()  # type: ignore[return-value]
-    reasons = "; ".join(
-        environment.role(r).blocked_reason
-        for r in (Role.IOS_SIMULATOR, Role.IOS_DEVICE)
-    )
-    pytest.skip(f"no iOS target: {reasons}")
+    return _any_of(environment, (Role.IOS_SIMULATOR, Role.IOS_DEVICE), "iOS")
 
 
 @pytest.fixture(scope="session")
 def any_android(environment: Environment, authenticated: None) -> Device:
-    for role in (Role.ANDROID_EMULATOR, Role.ANDROID_DEVICE):
-        if environment.has(role):
-            return environment.role(role).pick()  # type: ignore[return-value]
-    reasons = "; ".join(
-        environment.role(r).blocked_reason
-        for r in (Role.ANDROID_EMULATOR, Role.ANDROID_DEVICE)
+    return _any_of(
+        environment, (Role.ANDROID_EMULATOR, Role.ANDROID_DEVICE), "Android"
     )
-    pytest.skip(f"no Android target: {reasons}")
 
 
 # -- host tooling ------------------------------------------------------------
@@ -393,3 +409,121 @@ def bypass_sandbox(quern: client_mod.QuernClient, proxy_running: dict):
                 )
         except Exception:  # noqa: BLE001
             pass
+
+
+# -- the QuernProbe fixture app ----------------------------------------------
+
+
+def _install_and_launch(
+    client: client_mod.QuernClient, udid: str, artifact, contract
+):
+    """Install the built artifact and bring the app to the foreground."""
+    client.json_ok(
+        "POST", "/api/v1/device/app/install",
+        json={"udid": udid, "app_path": str(artifact)}, timeout=300.0,
+    )
+    client.json_ok(
+        "POST", "/api/v1/device/app/launch",
+        json={"udid": udid, "bundle_id": probe_mod.BUNDLE_ID}, timeout=180.0,
+    )
+    driver = probe_mod.ProbeDriver(client, udid, contract)
+    driver.wait_until_ready()
+    return driver
+
+
+@pytest.fixture(scope="session")
+def ios_probe(quern: client_mod.QuernClient, ios_simulator: Device):
+    """QuernProbe built, installed and running on an iOS simulator.
+
+    Session-scoped: the build is the expensive part and the app is stateless
+    between tests in every way this suite depends on. Tests that need a
+    particular tab call `goto` themselves rather than assuming where the last
+    one left it -- ordering assumptions between tests are how a suite becomes
+    unable to run a single test on its own.
+    """
+    if not ios_simulator.booted:
+        quern.json_ok(
+            "POST", "/api/v1/device/boot",
+            json={"udid": ios_simulator.udid}, timeout=300.0,
+        )
+
+    try:
+        bundle = probe_mod.build_ios()
+    except probe_mod.ProbeUnavailable as exc:
+        pytest.skip(f"iOS probe app unavailable: {exc}")
+
+    return _install_and_launch(quern, ios_simulator.udid, bundle, probe_mod.IOS)
+
+
+@pytest.fixture(scope="session")
+def android_probe(quern: client_mod.QuernClient, any_android: Device):
+    """QuernProbe on whichever Android target this machine has.
+
+    Takes `any_android` rather than the emulator specifically: the Android half
+    of the fixture exists because of a bug that only shows on a real device
+    (#78, `am start` exiting 0 for an unresolvable intent), so preferring one
+    over the other would be arbitrary.
+    """
+    try:
+        apk = probe_mod.build_android()
+    except probe_mod.ProbeUnavailable as exc:
+        pytest.skip(f"Android probe app unavailable: {exc}")
+
+    return _install_and_launch(quern, any_android.udid, apk, probe_mod.ANDROID)
+
+
+@pytest.fixture
+def probe_id(request: pytest.FixtureRequest):
+    """Resolve a logical element name against the driver in use, or skip.
+
+    A surface that exists on one platform and not the other is a fact about the
+    apps, not a failure. `Ids.SEGMENT` on Android skips with a reason; it does
+    not quietly pass, and it does not fail.
+    """
+
+    def _resolve(driver, logical: str) -> str:
+        identifier = driver.contract.id_for(logical)
+        if identifier is None:
+            pytest.skip(
+                f"{logical!r} has no counterpart in the "
+                f"{driver.contract.platform} probe app"
+            )
+        return identifier
+
+    return _resolve
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Run every `probe`-based test against each platform the machine has.
+
+    Parametrised here rather than written as two modules. The whole point of the
+    identifier contract is that one test body covers both apps; duplicating the
+    module per platform would let the two copies drift, which is the thing the
+    contract exists to prevent.
+    """
+    if "probe" in metafunc.fixturenames:
+        metafunc.parametrize(
+            "probe", ["ios", "android"], indirect=True, scope="session"
+        )
+
+
+@pytest.fixture(scope="session")
+def probe(request: pytest.FixtureRequest):
+    """Whichever platform's probe app this parametrisation asked for.
+
+    Skips — rather than fails — when that platform is not present, so a
+    Mac with no Android device runs the iOS half and says the other was absent.
+    """
+    return request.getfixturevalue(f"{request.param}_probe")
+
+
+@pytest.fixture
+def fresh_probe(probe):
+    """A probe app restored to its launch state before the test runs.
+
+    Function-scoped and therefore not free -- a relaunch costs a second or two
+    -- so it is requested only by tests that genuinely need empty fields rather
+    than applied to the whole module.
+    """
+    probe.relaunch()
+    return probe
