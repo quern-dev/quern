@@ -166,8 +166,14 @@ async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[
     `capture_without_cert` warning in `proxy_status`, which is HTTP-only and so
     invisible to the person who ran the CLI command.
 
-    Returns the untrusting devices so a caller can test the decision rather
-    than the log line.
+    One exception to "warns rather than acts": with `auto_install_cert` set the
+    user has already answered this question, so it installs, exactly as the
+    four gates do. Otherwise this would be the single path where opting into
+    "handle it for me" still produced broken capture -- and the only one whose
+    complaint goes to a log rather than to a caller.
+
+    Returns the devices still untrusting afterwards, so a caller can test the
+    decision rather than the log line.
     """
     if not processes:
         return []
@@ -175,6 +181,34 @@ async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[
     missing = await simulators_without_cert(controller)
     if not missing:
         return []
+
+    # The setting is consent, and it means the same thing here as at the four
+    # gates: Quern handles it from now on. Warning instead would make this the
+    # one path where "handle it for me" produced a log line and broken capture
+    # -- and it is the path with no caller to read the log line.
+    from server.config import get_auto_install_cert
+
+    if get_auto_install_cert():
+        from server.proxy.cert_manager import install_cert
+
+        installed, failed = [], []
+        for dev in missing:
+            try:
+                await install_cert(controller, dev["udid"], device_name=dev["name"])
+                installed.append(dev)
+            except Exception as e:
+                failed.append((dev, e))
+                logger.warning(
+                    "auto_install_cert is set but installing the CA on %s (%s) "
+                    "failed, so HTTPS from it will not be captured: %s",
+                    dev["name"], dev["udid"][:8], e,
+                )
+        if installed:
+            logger.info(
+                "Auto-installed the mitmproxy CA on %s for local capture",
+                ", ".join(f"{d['name']} ({d['udid'][:8]})" for d in installed),
+            )
+        return [d for d, _ in failed]
 
     logger.warning(
         "Local capture is enabled for %s, but %s do(es) not trust the mitmproxy "

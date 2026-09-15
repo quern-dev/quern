@@ -413,6 +413,7 @@ class TestTheStartupPathSaysSomething:
     async def test_it_warns_when_capture_is_on_and_the_ca_is_not_trusted(
         self, monkeypatch, caplog
     ):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
         ctrl = _Ctrl([_sim()])
         with _trust({"AAAA": False}):
             with caplog.at_level("WARNING"):
@@ -422,7 +423,8 @@ class TestTheStartupPathSaysSomething:
         assert "iPhone 16 Pro" in caplog.text, "the warning has to name the device"
         assert "MyApp" in caplog.text, "and what is being captured"
 
-    async def test_it_is_quiet_when_the_ca_is_trusted(self, caplog):
+    async def test_it_is_quiet_when_the_ca_is_trusted(self, monkeypatch, caplog):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
         ctrl = _Ctrl([_sim()])
         with _trust({"AAAA": True}):
             with caplog.at_level("WARNING"):
@@ -569,3 +571,111 @@ class TestTheCliCommandIsGatedToo:
         )
         main._local_capture_cert_gate(["MyApp"], skip_cert_check=False)
         assert "Could not check" in capsys.readouterr().out
+
+
+class TestAutoInstallCertClearsEveryGate:
+    """`auto_install_cert` has to mean the same thing everywhere: you are never
+    asked again, and nothing refuses you for a certificate.
+
+    It is the answer to a question four gates and one startup check each ask
+    independently, and a setting honoured in four of five places is worse than
+    one honoured nowhere -- it works until the day it does not, on whichever
+    path the user happens to take. The CLI and the startup check are here; the
+    three HTTP gates are pinned in test_cert_api.py, where the client fixtures
+    live. Each is asserted separately rather than trusting the shared helper,
+    because these two do not go through that helper at all.
+
+    The one thing it does not do is make a failed install succeed. That is
+    reported, not swallowed: enabling capture that cannot work is the state all
+    of this exists to prevent, and it is not improved by the user having opted
+    into automatic installation.
+    """
+
+    UNTRUSTING = [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+    @pytest.fixture(autouse=True)
+    def _consent(self, monkeypatch):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+    @pytest.fixture
+    def _untrusting(self, monkeypatch):
+        async def _missing(_controller):
+            return list(self.UNTRUSTING)
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+
+    @pytest.fixture
+    def _installs(self, monkeypatch):
+        done = []
+
+        async def _install(_controller, udid, device_name=None):
+            done.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _install)
+        return done
+
+    def test_the_cli_command_is_not_refused(
+        self, monkeypatch, _untrusting, _installs, capsys
+    ):
+        from server import main
+
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+        main._cmd_enable_local_capture(["MyApp"])
+
+        assert wrote == [["MyApp"]], "the CLI refused despite the setting"
+        assert _installs == ["AAAA1111"]
+
+    async def test_the_startup_check_installs_instead_of_warning(
+        self, _untrusting, _installs, caplog
+    ):
+        """The path with no caller to read a warning."""
+        with caplog.at_level("WARNING"):
+            still_missing = await warn_if_capture_lacks_trust(object(), ["MyApp"])
+        assert _installs == ["AAAA1111"]
+        assert still_missing == []
+        assert "do(es) not trust" not in caplog.text, (
+            "it warned about a device it had just fixed"
+        )
+
+    async def test_a_failed_install_is_still_reported(self, _untrusting, monkeypatch, caplog):
+        """Consent does not make a broken install work, and saying nothing
+        would leave capture silently failing for the user who opted in."""
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        with caplog.at_level("WARNING"):
+            still_missing = await warn_if_capture_lacks_trust(object(), ["MyApp"])
+        assert [d["udid"] for d in still_missing] == ["AAAA1111"]
+        assert "failed" in caplog.text
+
+    def test_a_failed_install_refuses_the_cli_rather_than_proceeding(
+        self, monkeypatch, _untrusting, capsys
+    ):
+        from server import main
+
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+
+        with pytest.raises(SystemExit) as exc:
+            main._cmd_enable_local_capture(["MyApp"])
+        assert exc.value.code == 1
+        assert wrote == [], "capture was enabled after the install failed"
+        assert "installing the CA failed" in capsys.readouterr().out

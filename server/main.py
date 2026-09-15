@@ -1465,23 +1465,40 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
         controller = DeviceController()
         missing = await simulators_without_cert(controller)
         if not missing:
-            return None
+            return None, []
         if get_auto_install_cert():
             from server.proxy.cert_manager import install_cert
 
+            failed = []
             for dev in missing:
-                await install_cert(controller, dev["udid"], device_name=dev["name"])
-                print(f"  Installed the CA on {dev['name']} ({dev['udid'][:8]})")
-            return None
-        return missing
+                try:
+                    await install_cert(controller, dev["udid"], device_name=dev["name"])
+                    print(f"  Installed the CA on {dev['name']} ({dev['udid'][:8]})")
+                except Exception as e:
+                    # Not swallowed into the check's own error handler below.
+                    # A failed install is not "could not check" -- the answer is
+                    # known and it is bad, and proceeding would enable capture
+                    # that cannot work for the user who asked us to handle this.
+                    failed.append((dev, e))
+            return None, failed
+        return missing, []
 
     try:
-        missing = asyncio.run(_check())
+        missing, failed = asyncio.run(_check())
     except Exception as e:
         # Fails open, like the preflight itself. Blocking capture over a bug in
         # the check would be worse than the state it prevents.
         print(f"Could not check certificate trust ({e}); continuing.")
         return
+
+    if failed:
+        print("auto_install_cert is set, but installing the CA failed:")
+        for dev, err in failed:
+            print(f"  {dev['name']} ({dev['udid'][:8]}): {err}")
+        print()
+        print("Capture from those simulators would fail. Install the CA by hand,")
+        print("or rerun with --skip-cert-check to enable capture anyway.")
+        sys.exit(1)
 
     if not missing:
         return

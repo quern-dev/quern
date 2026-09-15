@@ -1622,3 +1622,122 @@ class TestStartingTheSystemProxyIsGatedToo:
         )
         assert r.status_code == 200
         adapter.start.assert_awaited_once()
+
+
+class TestAutoInstallCertClearsEveryHttpGate:
+    """The setting has to answer the question at every gate, not most of them.
+
+    Three endpoints raise this refusal and each calls the shared helper, so in
+    principle one test would do. They are asserted separately anyway: the whole
+    reason this release has four gates is that a guard on one path was assumed
+    to cover a sibling and did not, twice.
+
+    The CLI and startup halves are in test_cert_preflight.py, which is where
+    those two live.
+    """
+
+    UNTRUSTING = [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+    @pytest.fixture(autouse=True)
+    def _consent(self, monkeypatch):
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+    @pytest.fixture(autouse=True)
+    def _untrusting(self, monkeypatch):
+        async def _missing(_controller):
+            return list(self.UNTRUSTING)
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+
+    @pytest.fixture(autouse=True)
+    def _installs(self, monkeypatch):
+        done = []
+
+        async def _install(_controller, udid, device_name=None):
+            done.append(udid)
+            return True
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _install)
+        return done
+
+    @pytest.fixture(autouse=True)
+    def _no_real_system_proxy(self, monkeypatch):
+        monkeypatch.setattr(
+            "server.proxy.system_proxy.detect_and_configure", lambda *a, **k: None
+        )
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_set_local_capture_is_not_refused(
+        self, client, auth_headers, app, _installs
+    ):
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MyApp"]},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert _installs == ["AAAA1111"], "it proceeded without installing anything"
+
+    def test_start_proxy_with_system_proxy_is_not_refused(
+        self, client, auth_headers, app, _installs
+    ):
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/start", json={"system_proxy": True}, headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert _installs == ["AAAA1111"]
+
+    def test_configure_system_proxy_is_not_refused(
+        self, client, auth_headers, app, monkeypatch, _installs
+    ):
+        # This endpoint 503s unless the proxy is already running, which is
+        # before the gate -- so without this the test passes on `!= 428` while
+        # never reaching the code under test. The install assertion is what
+        # caught that.
+        adapter = self._adapter(app)
+        adapter.is_running = True
+        monkeypatch.setattr("server.lifecycle.state.read_state", lambda: None)
+
+        r = client.post("/api/v1/proxy/configure-system", json={}, headers=auth_headers)
+        assert r.status_code != 428, "the setting did not answer the question"
+        assert _installs == ["AAAA1111"], "the gate was never reached"
+
+    def test_a_failed_install_is_a_500_not_a_silent_proceed(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """Consent does not make a broken install work. Proceeding would enable
+        capture that cannot succeed, for the user who asked us to handle it."""
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/local-capture",
+            json={"processes": ["MyApp"]},
+            headers=auth_headers,
+        )
+        assert r.status_code == 500
+        assert "auto_install_cert is set" in r.text
