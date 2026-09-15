@@ -7,6 +7,9 @@ app with no network -- points nowhere near the proxy.
 
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,6 +20,8 @@ from server.proxy.cert_preflight import (
     simulators_without_cert,
     trust_is_stale,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sim(udid="AAAA", name="iPhone 16 Pro", state=DeviceState.BOOTED):
@@ -395,3 +400,122 @@ class TestOneUncheckableDeviceDoesNotUnRefuseTheRest:
         with self._trust_raising_on("BOOM", {}):
             missing = await simulators_without_cert(_Ctrl([_sim(udid="BOOM")]))
         assert missing == []
+
+
+class TestEveryRefusalNamesOnlyReachableActions:
+    """`skip_cert_check` is one of the three ways out the 428 offers, so every
+    path that can raise it has to accept it -- over HTTP *and* through the MCP
+    tool an agent actually holds.
+
+    A refusal that names an action the caller cannot take is worse than one
+    that offers fewer options. The agent has been told the request is fine and
+    the world is not ready for it, and the one resolution that does not require
+    the user's consent is the one it cannot reach; what is left is retrying a
+    refusal that will never clear on its own.
+
+    `set_local_capture` shipped precisely that gap. The gate and the request
+    field were both added to the endpoint, and the MCP tool's schema -- which
+    is `strictParams`, so `.strict()` -- was not, meaning the field the error
+    message names was rejected by validation before a request was ever made.
+    The sibling path `configure_system_proxy` had it from the start, which is
+    what made the omission easy to miss.
+    """
+
+    MCP_TOOLS_DIR = REPO_ROOT / "mcp" / "src" / "tools"
+    PROXY_API = REPO_ROOT / "server" / "api" / "proxy.py"
+    GATE = "_ensure_ca_is_trusted"
+
+    def _gated_routes(self) -> dict[str, str]:
+        """{full path: body model name} for handlers that call the gate.
+
+        Read from the source rather than listed here on purpose: a third
+        capture path added later is caught by this test rather than by the
+        person who hits the refusal.
+        """
+        tree = ast.parse(self.PROXY_API.read_text())
+        prefix = re.search(
+            r'APIRouter\(\s*prefix="([^"]*)"', self.PROXY_API.read_text()
+        ).group(1)
+
+        routes: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            calls = {
+                n.func.id
+                for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            }
+            if self.GATE not in calls:
+                continue
+            for dec in node.decorator_list:
+                if not (isinstance(dec, ast.Call) and dec.args):
+                    continue
+                path = getattr(dec.args[0], "value", None)
+                if not isinstance(path, str):
+                    continue
+                # The body model, unwrapped from `Model | None`.
+                model = None
+                for arg in node.args.args:
+                    if arg.arg != "body" or arg.annotation is None:
+                        continue
+                    ann = arg.annotation
+                    if isinstance(ann, ast.BinOp):
+                        ann = ann.left
+                    model = getattr(ann, "id", None)
+                routes[prefix + path] = model
+        return routes
+
+    def _tool_blocks(self) -> dict[str, str]:
+        """{tool name: its registerTool(...) source}, split at each call."""
+        blocks: dict[str, str] = {}
+        for ts_file in sorted(self.MCP_TOOLS_DIR.glob("*.ts")):
+            chunks = ts_file.read_text().split("server.registerTool(")
+            for chunk in chunks[1:]:
+                name = re.match(r'\s*"([a-z_0-9]+)"', chunk)
+                if name:
+                    blocks[name.group(1)] = chunk
+        return blocks
+
+    def test_the_gate_guards_more_than_one_endpoint(self):
+        """Guards the parse. A regex that silently matched nothing would make
+        every assertion below vacuous, and the whole point is that this is a
+        shared gate rather than one endpoint's business."""
+        routes = self._gated_routes()
+        assert len(routes) >= 2, f"expected the shared gate on both capture paths, got {routes}"
+        assert "/api/v1/proxy/local-capture" in routes
+        assert "/api/v1/proxy/configure-system" in routes
+
+    def test_every_gated_endpoint_accepts_the_parameter(self):
+        """The HTTP half: the model behind the body has the field."""
+        import server.models as models
+
+        for path, model_name in self._gated_routes().items():
+            assert model_name, f"{path} is gated but takes no typed body"
+            model = getattr(models, model_name)
+            assert "skip_cert_check" in model.model_fields, (
+                f"{path} can refuse with 428 naming skip_cert_check, but "
+                f"{model_name} has no such field"
+            )
+
+    def test_every_gated_endpoint_exposes_the_parameter_to_agents(self):
+        """The half that was missing. An MCP tool posting to a gated path must
+        take `skip_cert_check`, or the resolution is unreachable for the caller
+        the refusal was written for."""
+        blocks = self._tool_blocks()
+        for path in self._gated_routes():
+            posting = {
+                name: src for name, src in blocks.items() if f'"{path}"' in src
+            }
+            assert posting, f"no MCP tool posts to {path}"
+            for name, src in posting.items():
+                schema = src.split("inputSchema:", 1)
+                assert len(schema) == 2, f"{name} has no inputSchema to check"
+                # Cut at the handler so a mention in the body cannot pass for
+                # a declared parameter.
+                declared = schema[1].split("}, async", 1)[0]
+                assert "skip_cert_check" in declared, (
+                    f"{name} posts to {path}, which refuses with 428 and tells "
+                    f"the caller to pass skip_cert_check -- but the tool's "
+                    f"schema is strict and does not accept it"
+                )

@@ -914,22 +914,49 @@ without configuring a system proxy.
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
 
+SETS THE LIST, does not add to it. Whatever is not named is dropped, so read
+proxy_status first and pass the processes already there alongside the new one.
+Told "capture MyApp", sending ["MyApp"] silently stops capturing everything
+else -- most often the web-view defaults, which are applied only when nothing
+is specified. The response reports what was dropped.
+
+CERTIFICATE CHECK. Enabling capture refuses with HTTP 428 when a booted
+simulator does not trust the mitmproxy CA, exactly as configure_system_proxy
+does and for the same reason: routing a process's traffic through the proxy
+from a device that does not trust the CA fails every HTTPS request from it with
+no indication the proxy is the cause. The refusal is NOT transient and retrying
+will not clear it; the body names the devices and the same three resolutions
+(install_proxy_cert, set auto_install_cert, or skip_cert_check). Ask the user
+which they want. Disabling capture is never refused.
+
 On first use, macOS will prompt to allow the Mitmproxy Redirector system
 extension in System Settings > Privacy & Security.`,
     inputSchema: strictParams({
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Empty list disables local capture.'
+          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Replaces the current list; empty list disables local capture.'
+        ),
+      skip_cert_check: z
+        .boolean()
+        .optional()
+        .describe(
+          "Enable capture even when a booted simulator does not trust the " +
+          "mitmproxy CA. Only pass this when the user has said so: capturing " +
+          "in that state fails every HTTPS request from that device with " +
+          "nothing pointing at the proxy. Correct when deliberately " +
+          "exercising TLS-failure paths."
         ),
     }),
-  }, async ({ processes }) => {
+  }, async ({ processes, skip_cert_check: skipCertCheck }) => {
     try {
+      const body: Record<string, unknown> = { processes };
+      if (skipCertCheck) body.skip_cert_check = true;
       const data = await apiRequest(
         "POST",
         "/api/v1/proxy/local-capture",
         undefined,
-        { processes }
+        body
       );
 
       return {
