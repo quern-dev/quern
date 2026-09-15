@@ -68,7 +68,14 @@ def _find_sdk_tool(name: str, subdir: str = "platform-tools") -> str | None:
 _AM_START_FAILURES = (
     "Error: Activity not started",
     "unable to resolve Intent",
-    "does not exist",
+    # Anchored to the `Error:` line on purpose. `am start` echoes the URL back
+    # in its `Starting: Intent { ... dat=<url> }` line, so a bare "does not
+    # exist" could be matched out of a URL on a successful launch. Measured on a
+    # Pixel 3 XL (Android 10), the missing-package case actually reports
+    # "unable to resolve Intent" and this spelling never appeared -- it is kept
+    # for the versions that do emit it, which is all the more reason not to let
+    # it match loosely.
+    "Error: Activity class",
 )
 
 

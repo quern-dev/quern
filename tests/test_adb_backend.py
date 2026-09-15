@@ -329,6 +329,9 @@ class TestOpenUrlReportsAnUnhandledUrl:
 
         backend = self._backend(
             monkeypatch,
+            # Measured on a Pixel 3 XL (Android 10) this case actually reports
+            # "unable to resolve Intent"; this spelling is what other versions
+            # emit, and is kept for them.
             "Error: Activity class {com.nope/com.nope.Main} does not exist.",
         )
         with pytest.raises(DeviceError):
@@ -350,3 +353,16 @@ class TestOpenUrlReportsAnUnhandledUrl:
             stderr="Warning: Activity not started, its current task has been brought to the front",
         )
         await backend.open_url("emulator-5554", "https://example.com/")
+
+    async def test_a_url_containing_the_marker_text_is_not_a_failure(
+        self, monkeypatch
+    ):
+        """`am start` echoes the URL back in its `Starting:` line, so an
+        unanchored marker could be matched out of the URL itself on a
+        successful launch."""
+        backend = self._backend(
+            monkeypatch,
+            "Starting: Intent { act=android.intent.action.VIEW "
+            "dat=https://example.com/this-page-does-not-exist }",
+        )
+        await backend.open_url("emulator-5554", "https://example.com/this-page-does-not-exist")

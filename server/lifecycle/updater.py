@@ -78,6 +78,14 @@ def _select_asset_url(assets: list, version: str) -> str | None:
     return None
 
 
+def _best_release(releases: list) -> dict | None:
+    """The highest-versioned release in a list, or None if it is empty."""
+    best = None
+    for release in releases:
+        best = _newer_release(best, release)
+    return best
+
+
 def _newer_release(a: dict | None, b: dict | None) -> dict | None:
     """Whichever of two GitHub release objects has the greater version.
 
@@ -97,8 +105,14 @@ def _newer_release(a: dict | None, b: dict | None) -> dict | None:
         from packaging.version import InvalidVersion, Version
 
         try:
-            return Version(release.get("tag_name", "").lstrip("v"))
-        except (InvalidVersion, TypeError):
+            # `or ""` rather than a default: a JSON `"tag_name": null` gives
+            # None from `.get`, and `.lstrip` on it raises AttributeError, which
+            # is not in the tuple below and escapes to `_fetch_latest_release`'s
+            # broad handler -- reported as "could not fetch release info", so
+            # the whole update fails instead of falling back to the candidate
+            # that parsed fine.
+            return Version((release.get("tag_name") or "").lstrip("v"))
+        except InvalidVersion:
             return None
 
     va, vb = _v(a), _v(b)
@@ -145,13 +159,15 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
             # /releases is sorted newest-first, but "newest prerelease" and
             # "newest release" are different questions and the answer to the
             # first can be older than the answer to the second.
-            prerelease = next(
-                (r for r in data if r.get("prerelease") and not r.get("draft")),
-                None,
+            # The *highest-versioned* of each kind, not the topmost.
+            # `/releases` is ordered by `created_at`, so a hotfix published
+            # after a newer release sits above it and would win its category.
+            live = [r for r in data if not r.get("draft")]
+            prerelease = _best_release(
+                [r for r in live if r.get("prerelease")],
             )
-            stable = next(
-                (r for r in data if not r.get("prerelease") and not r.get("draft")),
-                None,
+            stable = _best_release(
+                [r for r in live if not r.get("prerelease")],
             )
             data = _newer_release(prerelease, stable)
             if data is None:

@@ -1076,6 +1076,27 @@ class TestBetaNeverOffersOlderContentThanStable:
         ])
         assert updater._fetch_latest_release("beta") == ("0.18.0", "final.tgz")
 
+    def test_release_order_does_not_decide_it(self, monkeypatch):
+        """`/releases` is ordered by `created_at`, so a hotfix published after a
+        newer release sits above it. Taking the topmost of each category would
+        offer 0.17.1 over 0.18.0."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "v0.17.1", "tarball_url": "hotfix.tgz", "prerelease": False},
+            {"tag_name": "v0.18.0", "tarball_url": "newest.tgz", "prerelease": False},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.18.0", "newest.tgz")
+
+    def test_a_null_tag_does_not_fail_the_whole_check(self, monkeypatch):
+        """A JSON `"tag_name": null` used to raise AttributeError out of the
+        comparison, which the broad handler upstream reported as "could not
+        fetch release info" -- failing the update rather than falling back to
+        the candidate that parsed."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": None, "tarball_url": "junk.tgz", "prerelease": True},
+            {"tag_name": "v0.18.0", "tarball_url": "stable.tgz", "prerelease": False},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
+
     def test_an_unparseable_tag_cannot_win(self, monkeypatch):
         """A malformed tag must not offer itself as an update by accident."""
         updater = self._releases(monkeypatch, [
