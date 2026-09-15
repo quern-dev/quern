@@ -37,15 +37,22 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
-# seconds, for everything newer than A13. Measured at 5.15-5.34s across four
-# samples on an iPhone 15 Pro (A17 Pro, iOS 26), WDA built with Xcode 27, home
+# seconds, for everything newer than A13. Measured on an iPhone 15 Pro (A17 Pro,
+# iOS 26), WDA built with Xcode 27: 5.15-5.34s across four samples on the home
 # screen -- a *denser* tree than the iPhone 11's, 714KB against 448KB, in half
-# the time.
+# the time -- and 4.37-4.58s across eight on a 150KB screen.
 #
-# Which means the 5.0 this replaces was under water too: a modern device sat
-# just above it, so `element_count: 0` was already the normal outcome on an
-# iPhone 15 Pro. Confirmed by asking for the old budget explicitly and getting
-# an empty tree, then 641 elements at this one.
+# So the 5.0 this replaces did not fail outright on a modern device; it
+# straddled one. Which screen you were on decided whether you got a tree, and
+# `element_count: 0` on the busiest screens was the normal outcome. Confirmed by
+# asking for the old budget explicitly on the dense screen and getting an empty
+# tree, then 641 elements at this one.
+#
+# Note what those two ranges say about the cost: 4.75x less markup bought 15%
+# less time. /source is dominated by a fixed serialization cost on the device,
+# so tree size moves it only at the margin -- and transport not at all. The same
+# device answered in 4.37s mean over a USB forward and 4.51s over Wi-Fi,
+# interleaved against one screen, which is noise.
 SOURCE_TIMEOUT = 10.0
 # seconds, for A13 and older devices.
 #

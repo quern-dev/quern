@@ -3022,16 +3022,21 @@ class TestSourceTimeoutCoversRealHardware:
 
     #: Measured on a physical iPhone 15 Pro (A17 Pro), iOS 26, home screen,
     #: WDA built with Xcode 27. Four samples, 5.15-5.34s -- against a *larger*
-    #: tree than the iPhone 11's (714KB vs 448KB) in half the time.
+    #: tree than the iPhone 11's (714KB vs 448KB) in half the time. The same
+    #: device on a 150KB screen answered in 4.37-4.58s, so this is the busy end
+    #: of the range rather than the whole of it, and it is the end a budget has
+    #: to cover.
     OBSERVED_A17 = 5.34
 
     def test_a_modern_device_gets_more_than_the_measured_time(self):
-        """The old 5.0 default was under water on an A17 too.
+        """The old 5.0 default straddled an A17 rather than clearing it.
 
         It was raised on the assumption that the Xcode 27 slowdown was not
         device-specific; measuring an A17 turned that assumption into a fact.
-        A budget of 5.0 sits *below* the observed 5.34s, which is why an
-        iPhone 15 Pro returned `element_count: 0` on the default path."""
+        A budget of 5.0 sits *below* the observed 5.34s but above the 4.4s the
+        same phone manages on a light screen -- so whether an iPhone 15 Pro got
+        a tree or `element_count: 0` came down to which screen it was on, which
+        is worse than a clean failure and much harder to report."""
         assert SOURCE_TIMEOUT >= self.OBSERVED_A17 * 1.5, (
             f"the default {SOURCE_TIMEOUT}s leaves no room above the "
             f"{self.OBSERVED_A17}s measured on an A17. Clearing the last "
