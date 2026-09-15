@@ -88,6 +88,59 @@ class TestAShippedBuildNeedsNoNpm:
         assert run.call_count > 0, "a stale dist/ was served as current"
 
 
+class TestCurrentMeansEveryArtifactAndEveryInput:
+    """"Current" was decided from one output file and one input directory."""
+
+    def test_a_dist_missing_the_launcher_is_not_current(self, project):
+        """Clients are registered on `launcher.cjs`, so a dist/ without it is
+        not usable -- and `mcp-install` would write a path to a missing file."""
+        dist = _ship_dist(project)
+        (dist / "launcher.cjs").unlink()
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0)
+            entry._ensure_mcp_built(quiet=True)
+        assert run.call_count > 0, (
+            "a dist/ with no launcher.cjs reported as current, so registration "
+            "points at a file that is not there"
+        )
+
+    @pytest.mark.parametrize("name", ["package.json", "tsconfig.json", "package-lock.json"])
+    def test_a_changed_build_input_rebuilds(self, project, name):
+        """These change the output without any source file changing -- a new
+        dependency, a different compile target."""
+        import os
+        import time
+
+        _ship_dist(project)
+        f = project / "mcp" / name
+        f.write_text("{}\n")
+        later = time.time() + 100
+        os.utime(f, (later, later))
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0)
+            entry._ensure_mcp_built(quiet=True)
+        assert run.call_count > 0, f"a newer {name} did not trigger a rebuild"
+
+    def test_an_input_written_in_the_same_second_rebuilds(self, project):
+        """Filesystem timestamps are coarse. An input stamped equal to the
+        output is a real outcome of a fast checkout, and calling that current is
+        how a cache serves a stale build."""
+        import os
+
+        dist = _ship_dist(project)
+        stamp = (dist / "index.js").stat().st_mtime
+        os.utime(project / "mcp" / "src" / "index.ts", (stamp, stamp))
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0)
+            entry._ensure_mcp_built(quiet=True)
+        assert run.call_count > 0, (
+            "an input with the same mtime as the output was treated as older"
+        )
+
+
 class TestAMissingNpmIsReportedNotRaised:
     """Every caller already treats a failed build as survivable. That intent
     only worked for the failures the function anticipated."""

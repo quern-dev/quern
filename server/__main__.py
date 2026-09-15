@@ -223,22 +223,41 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
 
     mcp_dir = project_root / "mcp"
     src_dir = mcp_dir / "src"
-    dist_file = mcp_dir / "dist" / "index.js"
+    #: Both are shipped and both are used: `index.js` is the ESM entry, and
+    #: `launcher.cjs` is what MCP clients are registered on. Checking only the
+    #: first would let a dist/ missing the launcher read as current, and
+    #: `mcp-install` would then write a config pointing at a file that is not
+    #: there.
+    dist_files = [mcp_dir / "dist" / "index.js", mcp_dir / "dist" / "launcher.cjs"]
 
     if not src_dir.exists():
         if not quiet:
             print("Warning: mcp/src/ not found — skipping MCP build")
         return False
 
+    #: Everything the build reads. `src/` is the obvious one; the rest change
+    #: the output without changing a single source file -- a new dependency, a
+    #: different compile target -- and a cache keyed on `src/` alone serves a
+    #: stale dist/ after any of them moves.
+    build_inputs = [
+        mcp_dir / "package.json",
+        mcp_dir / "package-lock.json",
+        mcp_dir / "tsconfig.json",
+    ]
+
     # Is a build needed at all? Asked first, because answering "no" is what lets
     # a tarball install start on a machine with no reachable npm.
-    needs_build = not dist_file.exists()
+    needs_build = not all(f.exists() for f in dist_files)
     if not needs_build:
-        dist_mtime = dist_file.stat().st_mtime
-        for src_file in src_dir.rglob("*"):
-            if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
-                needs_build = True
-                break
+        oldest_output = min(f.stat().st_mtime for f in dist_files)
+        inputs = [f for f in build_inputs if f.exists()]
+        inputs += [f for f in src_dir.rglob("*") if f.is_file()]
+        # `>=`, not `>`. Filesystem timestamps are coarse enough that an input
+        # written in the same second as the output is a real outcome, and
+        # treating that as current is how a cache serves a stale build. Erring
+        # the other way now only costs a rebuild attempt, because a build that
+        # cannot run is reported rather than fatal.
+        needs_build = any(f.stat().st_mtime >= oldest_output for f in inputs)
 
     if not needs_build:
         if not quiet:
@@ -280,7 +299,7 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         # OSError covers the one that reached a user: npm absent from a
         # GUI-launched process's PATH, which is FileNotFoundError.
         print(f"Error: could not build the MCP server: {exc}")
-        if not dist_file.exists():
+        if not all(f.exists() for f in dist_files):
             print(
                 "  MCP tools will be unavailable until this is built. Node 22+ "
                 "and npm are needed, and a GUI launch may not see a node "
