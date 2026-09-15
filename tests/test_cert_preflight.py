@@ -470,3 +470,102 @@ class TestTheStartupPathSaysSomething:
             "server started with local capture against an untrusting simulator "
             "reports nothing anywhere the CLI user can see it"
         )
+
+
+class TestTheCliCommandIsGatedToo:
+    """`quern enable-local-capture` is the fourth routing boundary.
+
+    It was left ungated on the reasoning that it is the human's path, which was
+    wrong twice over: an agent has a shell and the agent guide names this
+    command, and the config it writes is what the lifespan starts routing from
+    in the next process. The gate runs in-process -- a DeviceController does no
+    I/O to construct -- so the CLI does not need an HTTP client to ask the same
+    question the endpoints ask.
+    """
+
+    def _refuses(self, monkeypatch, missing):
+        async def _missing(_controller):
+            return list(missing)
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+
+    def test_it_refuses_and_writes_nothing(self, monkeypatch, capsys):
+        from server import main
+
+        self._refuses(monkeypatch, [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}])
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+
+        with pytest.raises(SystemExit) as exc:
+            main._cmd_enable_local_capture(["MyApp"])
+
+        assert exc.value.code == 1, "a script ignoring the text must still see failure"
+        assert wrote == [], "config.json was written by a refused command"
+        out = capsys.readouterr().out
+        assert "iPhone 16 Pro" in out, "the refusal has to name the device"
+        assert "--skip-cert-check" in out, "and the way past it"
+
+    def test_the_skip_flag_lets_it_through(self, monkeypatch):
+        from server import main
+
+        self._refuses(monkeypatch, [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}])
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+        main._cmd_enable_local_capture(["MyApp"], skip_cert_check=True)
+        assert wrote == [["MyApp"]]
+
+    def test_a_trusting_machine_is_not_slowed_into_refusing(self, monkeypatch):
+        from server import main
+
+        self._refuses(monkeypatch, [])
+        wrote = []
+        monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
+        main._cmd_enable_local_capture(["MyApp"])
+        assert wrote == [["MyApp"]]
+
+    def test_disabling_is_never_refused(self, monkeypatch):
+        """Clearing the list stops capture. Refusing it would trap someone in
+        the state they are trying to leave -- the same rule the endpoint has."""
+        from server import main
+
+        called = []
+
+        async def _missing(_controller):
+            called.append(True)
+            return [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        main._local_capture_cert_gate([], skip_cert_check=False)
+        assert called == [], "an empty list must not even ask"
+
+    def test_a_broken_check_does_not_block_capture(self, monkeypatch, capsys):
+        """Fails open, like the preflight it calls. A gate that refuses over
+        its own bug is worse than the state it prevents."""
+        from server import main
+
+        async def _boom(_controller):
+            raise RuntimeError("simctl exploded")
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _boom
+        )
+        monkeypatch.setattr(
+            "server.device.controller.DeviceController", lambda: object()
+        )
+        main._local_capture_cert_gate(["MyApp"], skip_cert_check=False)
+        assert "Could not check" in capsys.readouterr().out

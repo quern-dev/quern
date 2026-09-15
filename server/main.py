@@ -1435,9 +1435,78 @@ def _report_python_deps(fix: bool) -> bool | None:
     return False
 
 
-def _cmd_enable_local_capture(process_names: list[str]) -> None:
+def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> None:
+    """The capture gate, for the one caller that reaches it without a request.
+
+    `enable-local-capture` writes config.json and the lifespan starts routing
+    from it, so this command is a routing boundary in the same sense the two
+    HTTP endpoints are -- and until now the only one of the three with no gate.
+    It is not a human-only path: an agent has a shell, and the agent guide names
+    this command.
+
+    Runs the preflight in-process rather than through the API. A `DeviceController`
+    is an object graph with no I/O in its constructor, and the whole check costs
+    under a second against five booted devices, so the CLI does not need an
+    authenticated HTTP client to ask the question the endpoints ask.
+
+    Exits non-zero rather than returning, so a script or an agent that ignores
+    the text still sees the failure.
+    """
+    if not processes or skip_cert_check:
+        return
+
+    import asyncio
+
+    from server.config import get_auto_install_cert
+    from server.device.controller import DeviceController
+    from server.proxy.cert_preflight import simulators_without_cert
+
+    async def _check():
+        controller = DeviceController()
+        missing = await simulators_without_cert(controller)
+        if not missing:
+            return None
+        if get_auto_install_cert():
+            from server.proxy.cert_manager import install_cert
+
+            for dev in missing:
+                await install_cert(controller, dev["udid"], device_name=dev["name"])
+                print(f"  Installed the CA on {dev['name']} ({dev['udid'][:8]})")
+            return None
+        return missing
+
+    try:
+        missing = asyncio.run(_check())
+    except Exception as e:
+        # Fails open, like the preflight itself. Blocking capture over a bug in
+        # the check would be worse than the state it prevents.
+        print(f"Could not check certificate trust ({e}); continuing.")
+        return
+
+    if not missing:
+        return
+
+    names = ", ".join(f"{d['name']} ({d['udid'][:8]})" for d in missing)
+    print(f"Refusing: {len(missing)} booted simulator(s) do not trust the mitmproxy CA.")
+    print(f"  {names}")
+    print()
+    print("Every HTTPS request from them would fail, and nothing in the app would")
+    print("point at the proxy as the cause. Three ways forward:")
+    print("  - install the CA on those simulators, then rerun this")
+    print("  - quern set-auto-install-cert on   (Quern installs it from now on)")
+    print("  - quern enable-local-capture --skip-cert-check ...   (proceed anyway)")
+    sys.exit(1)
+
+
+def _cmd_enable_local_capture(
+    process_names: list[str], skip_cert_check: bool = False,
+) -> None:
     """Enable local capture mode for specific processes."""
     processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
+
+    # Before the write. Refusing after config.json has changed would leave the
+    # refusal and the persisted state disagreeing.
+    _local_capture_cert_gate(processes, skip_cert_check)
 
     current = get_local_capture_processes()
     removed = [p for p in current if p not in processes]
@@ -1598,6 +1667,14 @@ def cli() -> None:
             "nothing."
         ),
     )
+    enable_lc.add_argument(
+        "--skip-cert-check",
+        action="store_true",
+        help=(
+            "Enable capture even when a booted simulator does not trust the "
+            "mitmproxy CA. Correct when deliberately exercising TLS failure."
+        ),
+    )
     subparsers.add_parser("disable-local-capture", help="Disable local traffic capture")
 
     # mcp-install / grant-full-perms (handled in __main__.py, listed here for help)
@@ -1639,7 +1716,7 @@ def cli() -> None:
         key = ServerConfig.regenerate_api_key()
         print(f"New API key: {key}")
     elif args.command == "enable-local-capture":
-        _cmd_enable_local_capture(args.processes)
+        _cmd_enable_local_capture(args.processes, args.skip_cert_check)
     elif args.command == "disable-local-capture":
         _cmd_disable_local_capture()
     elif args.command == "capture-env":

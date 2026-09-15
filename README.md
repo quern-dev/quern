@@ -406,8 +406,11 @@ quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
 quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without prompting
 quern install-precommit-hook # Install the pre-commit checklist hook
-quern enable-local-capture   # Enable transparent simulator traffic capture
-quern disable-local-capture  # Disable local capture
+quern enable-local-capture [--skip-cert-check] [process ...]
+                             # Enable transparent simulator traffic capture. Refuses
+                             #   when a booted simulator does not trust the capture
+                             #   certificate; --skip-cert-check proceeds anyway
+quern disable-local-capture  # Disable local capture (never refused)
 quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart,
                              #   grant-recovery/revoke-recovery for password-free wedge recovery)
 ```
