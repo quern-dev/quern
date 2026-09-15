@@ -137,6 +137,12 @@ let shutdownOnce = ShutdownGuard { () -> Int32 in
                 summary.framesWritten, summary.duration,
                 summary.framesDropped, summary.url.path
             ))
+        } else if case .neverStarted? = recording.failure {
+            // Not a failure. No keyframe ever reached the recorder, so there
+            // is no file -- reporting that as a broken recording, and exiting
+            // 1 for it, told the caller their capture was corrupt when there
+            // simply was not one. Reachable with ^C on an idle simulator.
+            MediaLog.log("[record] nothing was recorded")
         } else {
             // A recording that could not be finalised is an unopenable file,
             // not a shorter one. Saying nothing and exiting 0 told the caller
@@ -167,28 +173,48 @@ for sig in [SIGINT, SIGTERM] {
 }
 
 /// Runs a closure at most once, however many ways the process can end, and
-/// remembers the exit status it produced so every caller sees the same one.
+/// hands every caller the status it produced.
+///
+/// A second caller arriving while the body is still running **waits** for it.
+/// Marking the guard done on entry and returning the not-yet-written status
+/// reported a failure as 0, and let that caller carry on -- so an exit racing
+/// a recording still being finalised produced the moov-less file this exists
+/// to prevent. The same-thread re-entrant case returns instead of waiting,
+/// because that is `atexit` firing inside `exit()` and there is nobody left
+/// to wait for.
 final class ShutdownGuard {
     private let body: () -> Int32
-    private var done = false
-    private var status: Int32 = 0
-    private let lock = NSLock()
+    private let condition = NSCondition()
+    private var running = false
+    private var owner: Thread?
+    private var completed: Int32?
 
     init(_ body: @escaping () -> Int32) { self.body = body }
 
     @discardableResult
     func run() -> Int32 {
-        lock.lock()
-        let already = done
-        done = true
-        let previous = status
-        lock.unlock()
-        guard !already else { return previous }
+        condition.lock()
+        if owner == Thread.current {
+            condition.unlock()
+            return completed ?? 0
+        }
+        while running { condition.wait() }
+        if let completed {
+            condition.unlock()
+            return completed
+        }
+        running = true
+        owner = Thread.current
+        condition.unlock()
 
         let result = body()
-        lock.lock()
-        status = result
-        lock.unlock()
+
+        condition.lock()
+        completed = result
+        running = false
+        owner = nil
+        condition.broadcast()
+        condition.unlock()
         return result
     }
 }

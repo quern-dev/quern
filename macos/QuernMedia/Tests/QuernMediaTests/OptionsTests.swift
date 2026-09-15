@@ -177,3 +177,24 @@ func qualityInRangeIsAccepted(raw: String) throws {
     )
     #expect(options.quality == Double(raw))
 }
+
+@Test("values that reach an unchecked API are refused", arguments: [
+    ["--bitrate", "0"], ["--bitrate", "-1"], ["--max-dim", "-1"], ["--serve", "0"],
+])
+func unusableNumericValuesAreRefused(pair: [String]) {
+    // Each of these goes to VTSessionSetProperty or to a bind, and nothing
+    // reads the result -- so out of range was accepted in silence and did
+    // something other than what was asked: --bitrate 0 ran at VideoToolbox's
+    // default, --serve 0 bound an ephemeral port and advertised :0.
+    #expect(throws: OptionsError.self) {
+        try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422"] + pair)
+    }
+}
+
+@Test("max-dim 0 still means native")
+func maxDimZeroIsNative() throws {
+    let options = try OptionsParser.parse(
+        ["--sim-udid", "X", "--serve", "8422", "--max-dim", "0"]
+    )
+    #expect(options.maxDimension == 0)
+}

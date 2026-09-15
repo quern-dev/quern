@@ -154,3 +154,40 @@ func finishTimeoutIsNotSilentSuccess() throws {
         return
     }
 }
+
+@Test("a recording that never started reports that, not a failure to finish")
+func finishWithoutAnyFramesReportsNeverStarted() throws {
+    // `quern-media --record out.mp4` interrupted before the first keyframe
+    // reaches the recorder. The caller gets nil either way, so without a
+    // distinct reason it cannot tell "nothing was captured" from "the file is
+    // broken" -- and main.swift reported the second, with exit 1, for the
+    // first.
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    #expect(recorder.finish() == nil)
+    guard case .neverStarted = try #require(recorder.failure) else {
+        Issue.record("expected neverStarted, got \(String(describing: recorder.failure))")
+        return
+    }
+}
+
+@Test("a successful recording leaves no failure behind")
+func successLeavesNoFailure() throws {
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let out = try #require(encoder.encode(captured(surface, at: 0)))
+    #expect(recorder.append(out.frame))
+    _ = try #require(recorder.finish())
+    #expect(recorder.failure == nil)
+
+    // And a second finish does not invent one.
+    #expect(recorder.finish() == nil)
+    #expect(recorder.failure == nil, "a repeat finish overwrote a clean result")
+}

@@ -113,3 +113,18 @@ func laterFramesAreSmallerThanKeyframes() throws {
     #expect(smallest < key.annexB.count / 4,
             "expected a small residual, got \(smallest) against a \(key.annexB.count) keyframe")
 }
+
+@Test("an encoder built with an absurd frame rate does not trap", arguments: [
+    Double.infinity, -Double.infinity, Double.nan, 1e308, 0, -5,
+])
+func encoderSurvivesAbsurdExpectedFPS(fps: Double) throws {
+    // The parser rejects these, but this initialiser is public and a library
+    // caller bypasses it. `Int(infinity)` traps rather than failing, which is
+    // a crash in a dependency's process, not a diagnosable error.
+    let surface = try #require(TestSurface.make(width: 64, height: 64))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 400_000, expectedFPS: fps)
+    defer { encoder.invalidate() }
+    _ = encoder.encode(
+        CapturedFrame(surface: surface, time: .zero, timeAccuracy: .reported)
+    )
+}
