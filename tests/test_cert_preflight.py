@@ -439,3 +439,34 @@ class TestTheStartupPathSaysSomething:
             missing = await warn_if_capture_lacks_trust(ctrl, [])
         assert missing == []
         ctrl.list_devices.assert_not_awaited()
+
+    def test_the_lifespan_actually_calls_it(self):
+        """A correct function nobody calls is not a fix (CONTRIBUTING 2.4).
+
+        Static, because the lifespan cannot be run here -- it builds a real
+        DeviceController and every adapter, and the existing suite notes in
+        three places that it does not run under test. So deleting the call site
+        left all of this file green while the startup path went back to being
+        silent, which is the mutation this test exists for.
+
+        Also pins the `await`. `warn_if_capture_lacks_trust` is async, so
+        dropping it leaves a coroutine that is never run: no warning, no error,
+        and a RuntimeWarning in a stream nobody reads.
+        """
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "server" / "main.py").read_text())
+
+        awaited = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Await) or not isinstance(node.value, ast.Call):
+                continue
+            func = node.value.func
+            awaited.add(getattr(func, "id", None) or getattr(func, "attr", None))
+
+        assert "warn_if_capture_lacks_trust" in awaited, (
+            "server/main.py does not await warn_if_capture_lacks_trust, so a "
+            "server started with local capture against an untrusting simulator "
+            "reports nothing anywhere the CLI user can see it"
+        )
