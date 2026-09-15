@@ -143,9 +143,19 @@ def _is_git_install(project_root: Path) -> bool:
 
 
 def _check_via_quern_dev(head_sha: str) -> bool | None:
-    """Check quern.dev for updates. Returns True/False, or None on failure."""
+    """Check quern.dev for updates. Returns True/False, or None on failure.
+
+    Sends `channel`, for the reason `check_for_updates` gives at its own call:
+    quern.dev compares the SHA against that channel's pointer branch, and
+    omitting it makes the endpoint assume stable. Without it a beta user
+    sitting at the stable pointer is told there is nothing to update to, while
+    beta is ahead -- and since this is the answer `run_update` acts on, that
+    became a persisted "up to date" rather than one wrong console line.
+    """
+    from server.config import get_update_channel
+
     try:
-        url = f"{ENDPOINT}?sha={head_sha}"
+        url = f"{ENDPOINT}?sha={head_sha}&channel={get_update_channel()}"
         req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
         with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
@@ -647,6 +657,74 @@ def _write_result(outcome: str, detail: str, version: str | None = None) -> None
             pass
 
 
+def _refresh_update_check() -> None:
+    """Ask, rather than infer, whether an update is still available.
+
+    Called on the paths where the run completed, so the cached answer is
+    stale: the version may have changed, and the 24-hour stamp would otherwise
+    keep serving the pre-update answer -- which is the reported bug, a menu bar
+    offering an update that had already been applied.
+
+    A real check, forced, because `rc == 2` does not mean "at the channel tip":
+    `_update_via_git` also returns it when you are on a feature branch *and the
+    release branch is ahead*, where it prints "switch and rerun". Writing
+    `update_available: false` there would hide a real update -- worse than the
+    stale cache, which at least erred towards offering.
+
+    If the check does not produce an answer -- offline, endpoint down -- the
+    rate-limit stamp is put back. `check_for_updates` touches it *before* the
+    network call so failures do not retry rapidly, which is right for the
+    automatic check and wrong here: a refresh that failed would leave the stale
+    record in place *and* a fresh stamp suppressing the automatic check that
+    would have corrected it. Before this function existed, `quern update` never
+    touched that stamp, so silently extending the stale window from an hour to
+    a day would be this change making the reported bug worse.
+
+    Forced also skips the opt-out, deliberately and consistently with
+    `check-updates`: the user ran an update command, which is an explicit
+    request, and that setting governs the *automatic* check. It is also what
+    stops an opted-out user being left with no record at all.
+
+    Never raises, and on failure leaves the previous record alone rather than
+    removing it -- `UpdateInfo` in the menu bar defaults `updateAvailable` to
+    false, so a missing file reads as "Up to date". An absent record is not a
+    neutral state.
+    """
+    try:
+        from server.lifecycle.update_check import (
+            LAST_CHECK_FILE,
+            UPDATE_INFO_FILE,
+            check_for_updates,
+        )
+
+        def _mtime(path):
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return None
+
+        stamp_before = _mtime(LAST_CHECK_FILE)
+        record_before = _mtime(UPDATE_INFO_FILE)
+
+        check_for_updates(force=True)
+
+        # The record not moving means no answer was obtained. Put the stamp
+        # back rather than let a failed refresh buy 24 hours of silence.
+        if _mtime(UPDATE_INFO_FILE) == record_before:
+            if stamp_before is None:
+                LAST_CHECK_FILE.unlink(missing_ok=True)
+            else:
+                import os
+
+                os.utime(LAST_CHECK_FILE, (stamp_before, stamp_before))
+    except Exception:
+        import logging
+
+        logging.getLogger("quern-debug-server.updater").debug(
+            "Could not refresh the update check", exc_info=True,
+        )
+
+
 def run_update(apply_tools: bool = False) -> int:
     """Pull latest changes and rebuild.
 
@@ -687,8 +765,15 @@ def run_update(apply_tools: bool = False) -> int:
             # durable one -- it is what anybody reads afterwards.
             _write_result(FAILED, "a tool upgrade failed")
             return 1
+        _refresh_update_check()
         _write_result(NO_OP, "already up to date", version=_installed_version())
         return 0
+
+    # The pull or swap succeeded, so the installed version has changed and the
+    # cached answer is about the old one. Refresh here rather than at the exits
+    # below: a failed rebuild or a failed tool upgrade still leaves the source
+    # moved, and `_write_result` on those paths already reports the new version.
+    _refresh_update_check()
 
     failures = _rebuild_and_restart(project_root)
 

@@ -739,3 +739,285 @@ class TestTheUpdateRecord:
         assert updater.run_update() == 0, "a lost record must not fail the update"
         leftovers = list(updater.RESULT_FILE.parent.glob(".*tmp"))
         assert leftovers == [], f"left behind: {leftovers}"
+
+
+class TestUpdateRefreshesTheCachedCheck:
+    """An update left the cached check saying the old version was current.
+
+    `update-info.json` holds a version and `update_available` computed before
+    the run; `last-update-check` suppresses a fresh check for 24 hours. Nothing
+    in the update path touched either, so after 0.16.1 -> 0.17.0 the menu bar
+    kept offering an update already applied. Three update runs left both
+    untouched; one `check-updates` fixed it.
+
+    The fix asks rather than infers. Two earlier attempts did infer, and a
+    review showed both were worse than the bug:
+
+    - writing `update_available: false` on `rc == 2` is false whenever
+      `_update_via_git` returns 2 *because you are on a feature branch and the
+      release branch is ahead* -- it prints "switch and rerun" and returns 2.
+      That hides a real update, where the stale cache at least over-offered.
+    - deleting the files is also a false all-clear: `UpdateInfo` in the menu bar
+      defaults `updateAvailable` to false, so a missing file renders as "Up to
+      date".
+
+    So these tests drive the *real* `_update_via_git` decision rather than
+    stubbing its return code -- stubbing it is what made the first defect
+    invisible.
+    """
+
+    def _stale_cache(self):
+        import json
+
+        from server.lifecycle import update_check as uc
+
+        uc.UPDATE_INFO_FILE.write_text(json.dumps({
+            "current_version": "0.16.1", "latest_version": "0.17.0",
+            "update_available": True, "message": "Update available",
+        }))
+        uc.LAST_CHECK_FILE.touch()
+        return uc
+
+    def _run(self, monkeypatch, git_rc, tools_ok=True, checked=None, failures=()):
+        from pathlib import Path
+
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/tmp"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _p: git_rc)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda *_a: tools_ok)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda _p: list(failures))
+
+        def fake_check(force=False, on_error=None):
+            (checked if checked is not None else []).append(force)
+            return None
+
+        monkeypatch.setattr(
+            "server.lifecycle.update_check.check_for_updates", fake_check
+        )
+        return updater.run_update()
+
+    def test_the_no_op_branch_asks(self, monkeypatch):
+        """"Already up to date" is the branch that kept being hit, and the one
+        a per-exit fix would forget."""
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=2, checked=calls) == 0
+        assert calls == [True], "no fresh check after a no-op update"
+
+    def test_a_successful_update_asks(self, monkeypatch):
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=0, checked=calls) == 0
+        assert calls == [True]
+
+    def test_it_forces_past_the_rate_limit_and_the_opt_out(self, monkeypatch):
+        """Both gates are what kept the wrong answer on screen: the stamp for 24
+        hours, and the opt-out permanently for anyone who turned it off.
+
+        `force=True` is consistent with `check-updates` -- the user ran an
+        update command, which is an explicit request, and the setting governs
+        the automatic check.
+        """
+        calls = []
+        self._stale_cache()
+        self._run(monkeypatch, git_rc=2, checked=calls)
+        assert calls == [True], f"the check was not forced: {calls}"
+
+    def test_a_failed_update_leaves_the_record_alone(self, monkeypatch):
+        """Nothing was applied, so the previous answer is no worse than before
+        -- and removing it would render as "Up to date" in the menu bar."""
+        import json
+
+        calls = []
+        uc = self._stale_cache()
+        assert self._run(monkeypatch, git_rc=1, checked=calls) == 1
+        assert calls == [], "a failed update refreshed the check anyway"
+        info = json.loads(uc.UPDATE_INFO_FILE.read_text())
+        assert info["update_available"] is True, "a failed update erased a true answer"
+
+    def test_a_failed_rebuild_still_refreshes(self, monkeypatch):
+        """The source moved, so the cached answer is about the old version.
+
+        A failed rebuild or a failed tool upgrade does not undo the pull, and
+        `_write_result` on those paths already reports the new version -- so
+        skipping the refresh left the menu bar offering a version that was
+        already installed.
+        """
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=0, checked=calls, failures=["venv"]) == 1
+        assert calls == [True], "the source moved and nothing refreshed the record"
+
+    def test_a_failed_tool_upgrade_after_an_update_still_refreshes(self, monkeypatch):
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=0, tools_ok=False, checked=calls) == 1
+        assert calls == [True]
+
+    def test_nothing_applied_means_no_refresh(self, monkeypatch):
+        """rc 2 with a failed tool upgrade: quern was not updated, so the
+        previous record is no worse than before and removing or replacing it
+        would be a guess."""
+        calls = []
+        self._stale_cache()
+        assert self._run(monkeypatch, git_rc=2, tools_ok=False, checked=calls) == 1
+        assert calls == []
+
+    def test_refreshing_failing_does_not_fail_the_update(self, monkeypatch):
+        # Bookkeeping must not turn a good update into a reported failure.
+        from server.lifecycle import updater
+
+        self._stale_cache()
+        from pathlib import Path
+
+        monkeypatch.setattr(updater, "_find_project_root", lambda: Path("/tmp"))
+        monkeypatch.setattr(updater, "_is_git_install", lambda _p: True)
+        monkeypatch.setattr(updater, "_update_via_git", lambda _p: 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda *_a: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.17.0")
+        monkeypatch.setattr(
+            "server.lifecycle.update_check.check_for_updates",
+            lambda **_k: (_ for _ in ()).throw(OSError("offline")),
+        )
+        assert updater.run_update() == 0
+
+    def test_run_update_never_writes_the_record_itself(self, monkeypatch):
+        """The invariant that makes the meaning of `rc` irrelevant here.
+
+        `_update_via_git` returns 2 from three places and only one means "at
+        the channel tip" -- `test_update_via_git_on_feature_branch_with_updates
+        _warns_and_skips_pull` pins the one that does not. The first fix read
+        `rc == 2` as "up to date" and wrote that, hiding a real update.
+
+        So: `run_update` must never write `update-info.json` on any path. Only
+        `check_for_updates` writes it, and only after asking. With the check
+        stubbed out, the file must be exactly as it was.
+        """
+        import json
+
+
+        cases = [
+            ("rc=0", dict(git_rc=0)),
+            ("rc=1", dict(git_rc=1)),
+            ("rc=2", dict(git_rc=2)),
+            ("rc=2 + failed tools", dict(git_rc=2, tools_ok=False)),
+            ("rc=0 + failed tools", dict(git_rc=0, tools_ok=False)),
+        ]
+        for _label, kwargs in cases:
+            uc = self._stale_cache()
+            before = uc.UPDATE_INFO_FILE.read_text()
+            self._run(monkeypatch, **kwargs)
+            assert uc.UPDATE_INFO_FILE.read_text() == before, (
+                f"run_update wrote the record itself on {_label}; "
+                "that is an inference about what rc means"
+            )
+            assert json.loads(before)["update_available"] is True
+
+        uc = self._stale_cache()
+        before = uc.UPDATE_INFO_FILE.read_text()
+        self._run(monkeypatch, git_rc=0, failures=["venv"])
+        assert uc.UPDATE_INFO_FILE.read_text() == before, (
+            "run_update wrote the record itself on the failed-rebuild exit"
+        )
+
+    def test_the_channel_reaches_the_sha_check(self, monkeypatch):
+        """quern.dev compares the SHA against the channel's pointer branch.
+
+        Omitting `channel` makes it assume stable, so a beta user at the stable
+        pointer is told there is nothing to update to while beta is ahead --
+        and this is the answer `run_update` acts on.
+        """
+        from server.lifecycle import updater
+
+        seen = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"update_available": false}'
+
+        def fake_urlopen(req, timeout=None):
+            seen["url"] = req.full_url
+            return _Resp()
+
+        monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+        monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+        updater._check_via_quern_dev("abc123")
+
+        assert "channel=beta" in seen["url"], seen["url"]
+        # And the sha, which the name promised and the assertion did not.
+        # Without it the endpoint has nothing to compare and answers
+        # `update_available: false` unconditionally, so `quern update` would
+        # report "Already up to date" forever.
+        assert "sha=abc123" in seen["url"], seen["url"]
+
+    def test_a_failed_refresh_does_not_buy_24_hours_of_silence(self, monkeypatch):
+        """`check_for_updates` stamps the rate-limit file *before* the network
+        call, so failures do not retry rapidly. Right for the automatic check,
+        wrong here.
+
+        A refresh that cannot reach the endpoint would otherwise leave the
+        stale record in place *and* a fresh stamp suppressing the automatic
+        check that would have corrected it -- turning an hour of staleness into
+        a day. Before this function existed `quern update` never touched that
+        stamp, so that window would be this change making the bug worse.
+        """
+        import os
+        import time
+
+        from server.lifecycle import update_check as uc
+        from server.lifecycle import updater
+
+        uc.UPDATE_INFO_FILE.write_text('{"update_available": true}')
+        uc.LAST_CHECK_FILE.touch()
+        old = time.time() - 23 * 3600
+        os.utime(uc.LAST_CHECK_FILE, (old, old))
+
+        def failing_check(force=False, on_error=None):
+            uc.LAST_CHECK_FILE.touch()      # what the real one does first
+            return None                      # ...and then fails to write a record
+
+        monkeypatch.setattr(
+            "server.lifecycle.update_check.check_for_updates", failing_check
+        )
+        updater._refresh_update_check()
+
+        age_hours = (time.time() - uc.LAST_CHECK_FILE.stat().st_mtime) / 3600
+        assert age_hours > 22, (
+            f"a failed refresh reset the rate-limit stamp (age now {age_hours:.1f}h), "
+            "suppressing the automatic check that would have corrected the record"
+        )
+
+    def test_a_successful_refresh_leaves_the_new_stamp(self, monkeypatch):
+        # The converse, so the restore cannot become "always put it back".
+        import os
+        import time
+
+        from server.lifecycle import update_check as uc
+        from server.lifecycle import updater
+
+        uc.UPDATE_INFO_FILE.write_text('{"update_available": true}')
+        uc.LAST_CHECK_FILE.touch()
+        old = time.time() - 23 * 3600
+        os.utime(uc.LAST_CHECK_FILE, (old, old))
+
+        def good_check(force=False, on_error=None):
+            uc.LAST_CHECK_FILE.touch()
+            uc.UPDATE_INFO_FILE.write_text('{"update_available": false}')
+            return None
+
+        monkeypatch.setattr(
+            "server.lifecycle.update_check.check_for_updates", good_check
+        )
+        updater._refresh_update_check()
+
+        age_hours = (time.time() - uc.LAST_CHECK_FILE.stat().st_mtime) / 3600
+        assert age_hours < 1, "a real answer should reset the rate limit"
