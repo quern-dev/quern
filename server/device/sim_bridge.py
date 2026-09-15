@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
-import os
 import shutil
 import time
 from collections.abc import AsyncGenerator
@@ -111,7 +111,14 @@ def find_simulator_kit(developer_dir: str | Path) -> Path | None:
     """
     base = Path(developer_dir)
     for relative in SIMULATOR_KIT_RELATIVE_PATHS:
-        candidate = Path(os.path.normpath(base / relative))
+        # `resolve`, not `normpath`. The Swift half uses
+        # `NSString.standardizingPath`, which follows symlinks, and a lexical
+        # `..` disagrees with it whenever the developer directory *is* a
+        # symlink -- `xcode-select -s` pointing at one is enough. Python then
+        # walks up from the link's parent instead of the real Contents/, finds
+        # nothing, and reports sim-bridge unavailable for an Xcode the Swift
+        # binary loads happily. The two halves must answer the same question.
+        candidate = (base / relative).resolve()
         if candidate.exists():
             return candidate
     return None
@@ -127,6 +134,10 @@ class SimBridgeManager:
         self._stderr_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._binary_path = QUERN_BIN_DIR / BINARY_NAME
+        #: Digest of the source the cached binary was built from. Beside the
+        #: binary rather than inside it so a partially-written binary and a
+        #: missing stamp both read as "rebuild".
+        self._stamp_path = QUERN_BIN_DIR / f"{BINARY_NAME}.sha256"
         self._pending_response: asyncio.Future | None = None
         self._operations = 0
 
@@ -160,11 +171,21 @@ class SimBridgeManager:
                 "Expected at tools/sim-bridge.swift relative to the project root."
             )
 
-        if self._binary_path.exists():
-            src_mtime = source.stat().st_mtime
-            bin_mtime = self._binary_path.stat().st_mtime
-            if bin_mtime >= src_mtime:
-                return self._binary_path
+        # Keyed on the source's content, not its mtime. An mtime check is
+        # defeated by the normal upgrade path: release tarballs are produced by
+        # `git archive`, which stamps files with the *commit* time, and both
+        # `tar -xzf` and `shutil.move` preserve it -- so an extracted source can
+        # be older than a binary compiled last week, and nothing in the update
+        # path deletes the cached binary.
+        #
+        # The result was worse than a missed rebuild. A pre-fix binary still
+        # completes the readiness handshake and logs its dlopen failure only to
+        # stderr, so `_sim_bridge_ok` goes True and every gesture is routed to a
+        # bridge that cannot resolve HID. Before the SimulatorKit fix those
+        # users at least got an honest `sim_bridge: false` and fell back to idb.
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        if self._binary_path.exists() and self._cached_digest() == digest:
+            return self._binary_path
 
         swiftc = shutil.which("swiftc")
         if swiftc is None:
@@ -192,8 +213,24 @@ class SimBridgeManager:
             err = stderr.decode().strip() or stdout.decode().strip()
             raise RuntimeError(f"Failed to compile sim-bridge:\n{err}")
 
+        # After the compile, never before: a stamp written up front would mark
+        # a failed build as current and skip the retry.
+        try:
+            self._stamp_path.write_text(digest)
+        except OSError:
+            # A stamp that cannot be written costs a rebuild next time, which
+            # is the safe direction. It must not fail the compile that worked.
+            logger.debug("Could not write the sim-bridge stamp", exc_info=True)
+
         logger.info("sim-bridge compiled successfully")
         return self._binary_path
+
+    def _cached_digest(self) -> str | None:
+        """The source digest the cached binary was built from, if recorded."""
+        try:
+            return self._stamp_path.read_text().strip()
+        except OSError:
+            return None
 
     # ------------------------------------------------------------------
     # Process lifecycle

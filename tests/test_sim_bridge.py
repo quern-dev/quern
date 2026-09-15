@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import pathlib
 from pathlib import Path
 from unittest.mock import AsyncMock
+
+import pytest
 
 from server.device.sim_bridge import (
     SIMULATOR_KIT_RELATIVE_PATHS,
@@ -290,11 +293,228 @@ class TestSimulatorKitDiscovery:
         works — and both failures look like this bug did.
         """
         source = Path(__file__).resolve().parents[1] / "tools" / "sim-bridge.swift"
-        text = source.read_text()
+        assert source.exists(), (
+            f"{source} is missing, so this guard cannot check anything -- fail "
+            "rather than error, so the reason is the drift message"
+        )
+
+        # Comments stripped first. The paths appear in prose there as well as in
+        # the constant, and matching either meant the guard passed on a doc
+        # comment: reducing the Swift constant to the new path only -- dropping
+        # Xcode 26 support in the half that actually dlopens -- left the suite
+        # green, because the legacy path was still mentioned two lines above in
+        # a comment.
+        code = "\n".join(
+            line for line in source.read_text().splitlines()
+            if not line.lstrip().startswith("//")
+        )
+
         for relative in SIMULATOR_KIT_RELATIVE_PATHS:
             # The Swift constant names the binary inside the bundle; the Python
             # one names the bundle. Compare the part they share.
-            assert relative.replace(".framework", "") in text, (
+            assert relative.replace(".framework", "") in code, (
                 f"tools/sim-bridge.swift does not look for {relative!r}; the "
                 "Swift and Python halves of SimulatorKit discovery have drifted"
             )
+
+
+class TestIsAvailableResolvesTheSamePath:
+    """The helper is not the bug site.
+
+    Every other test here exercises `find_simulator_kit`, which is pure. The
+    function that actually reported `sim_bridge: false` on Xcode 27 is
+    `SimBridgeManager.is_available()`, and reverting *its* call site to the
+    hardcoded legacy path left the whole suite green — the fix was pinned
+    everywhere except where it was made.
+
+    Driven through `DEVELOPER_DIR`, which `xcode-select -p` honours, so the
+    real Xcode layout on the machine running this is irrelevant: CI without
+    Xcode and a developer box with either layout all behave the same.
+    """
+
+    def _fake_xcode(self, tmp_path, layout: str) -> pathlib.Path:
+        """Build a throwaway Xcode.app of one shape and return its dev dir."""
+        contents = tmp_path / "Xcode.app" / "Contents"
+        dev = contents / "Developer"
+        dev.mkdir(parents=True)
+        if layout == "legacy":
+            target = dev / "Library" / "PrivateFrameworks" / "SimulatorKit.framework"
+        elif layout == "xcode27":
+            target = contents / "SharedFrameworks" / "SimulatorKit.framework"
+        else:
+            return dev
+        target.mkdir(parents=True)
+        return dev
+
+    async def _available(self, monkeypatch, dev_dir) -> bool:
+        from server.device.sim_bridge import SimBridgeManager
+
+        monkeypatch.setenv("DEVELOPER_DIR", str(dev_dir))
+        return await SimBridgeManager().is_available()
+
+    async def test_the_xcode_27_layout_is_available(self, monkeypatch, tmp_path):
+        """The regression. Against the pre-fix call site this returns False."""
+        dev = self._fake_xcode(tmp_path, "xcode27")
+        assert await self._available(monkeypatch, dev) is True
+
+    async def test_the_legacy_layout_is_still_available(self, monkeypatch, tmp_path):
+        dev = self._fake_xcode(tmp_path, "legacy")
+        assert await self._available(monkeypatch, dev) is True
+
+    async def test_neither_layout_is_not_available(self, monkeypatch, tmp_path):
+        """And the negative, so the two above cannot be satisfied by a stub
+        that always answers True."""
+        dev = self._fake_xcode(tmp_path, "none")
+        assert await self._available(monkeypatch, dev) is False
+
+
+class TestTheBinaryCacheIsKeyedOnContent:
+    """An mtime check is defeated by the normal upgrade path.
+
+    Release tarballs come from `git archive`, which stamps files with the
+    *commit* time, and both `tar -xzf` and `shutil.move` preserve it — so an
+    extracted source is routinely older than a binary compiled last week, and
+    nothing in the update path deletes the cached binary. The modal case: a user
+    on Xcode 26 with a working bridge upgrades to Xcode 27, taps break, they run
+    `quern update`, and the fix never gets compiled.
+
+    Worse than a missed rebuild, because a pre-fix binary still completes the
+    readiness handshake and logs its dlopen failure only to stderr. So
+    `_sim_bridge_ok` goes True and every gesture is routed to a bridge that
+    cannot resolve HID — where before the fix the user got an honest
+    `sim_bridge: false` and fell back to idb.
+    """
+
+    def _manager(self, monkeypatch, tmp_path, source_text: str):
+        from server.device import sim_bridge as sb
+
+        src = tmp_path / "sim-bridge.swift"
+        src.write_text(source_text)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        monkeypatch.setattr(sb, "QUERN_BIN_DIR", bin_dir)
+        monkeypatch.setattr(sb, "_find_source", lambda: src)
+        mgr = sb.SimBridgeManager()
+        mgr._binary_path = bin_dir / sb.BINARY_NAME
+        mgr._stamp_path = bin_dir / f"{sb.BINARY_NAME}.sha256"
+        return mgr, src
+
+    async def test_a_source_change_rebuilds_even_when_the_binary_is_newer(
+        self, monkeypatch, tmp_path
+    ):
+        """The exact tarball shape: binary mtime *ahead* of the source."""
+        import os
+        import time
+
+        mgr, src = self._manager(monkeypatch, tmp_path, "// original")
+        compiled = []
+
+        async def fake_compile(*a, **k):
+            compiled.append(True)
+            mgr._binary_path.write_text("binary")
+
+            class P:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"", b""
+
+            return P()
+
+        monkeypatch.setattr(
+            "server.device.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
+        )
+        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+
+        await mgr.ensure_binary()
+        assert compiled == [True], "the first build did not happen"
+
+        # The source changes, but its mtime goes *backwards* — what `git
+        # archive` produces.
+        src.write_text("// the Xcode 27 fix")
+        old = time.time() - 86400
+        os.utime(src, (old, old))
+
+        await mgr.ensure_binary()
+        assert len(compiled) == 2, (
+            "an older-but-different source was treated as up to date, so the "
+            "fix would never reach a tarball user"
+        )
+
+    async def test_an_unchanged_source_does_not_rebuild(self, monkeypatch, tmp_path):
+        """The cache still has to be a cache."""
+        mgr, _src = self._manager(monkeypatch, tmp_path, "// same")
+        compiled = []
+
+        async def fake_compile(*a, **k):
+            compiled.append(True)
+            mgr._binary_path.write_text("binary")
+
+            class P:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"", b""
+
+            return P()
+
+        monkeypatch.setattr(
+            "server.device.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
+        )
+        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+
+        await mgr.ensure_binary()
+        await mgr.ensure_binary()
+        assert len(compiled) == 1, "it recompiled an unchanged source"
+
+    async def test_a_failed_compile_does_not_record_a_stamp(self, monkeypatch, tmp_path):
+        """A stamp written before the compile would mark a failed build current
+        and skip the retry."""
+        mgr, _src = self._manager(monkeypatch, tmp_path, "// broken")
+
+        async def failing(*a, **k):
+            class P:
+                returncode = 1
+
+                async def communicate(self):
+                    return b"", b"boom"
+
+            return P()
+
+        monkeypatch.setattr(
+            "server.device.sim_bridge.asyncio.create_subprocess_exec", failing,
+        )
+        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+
+        with pytest.raises(RuntimeError, match="Failed to compile"):
+            await mgr.ensure_binary()
+        assert not mgr._stamp_path.exists()
+
+
+class TestTheTwoHalvesAgreeOnSymlinkedDeveloperDirs:
+    """Python resolved `..` lexically while the Swift half follows symlinks.
+
+    `xcode-select -s` pointing at a symlink to `Contents/Developer` is enough:
+    a lexical `..` climbs out of the *link's* parent rather than the real
+    `Contents/`, finds nothing, and reports sim-bridge unavailable — for an
+    Xcode whose SimulatorKit the Swift binary loads without complaint. That is
+    the inverse of the failure this fix exists to prevent.
+    """
+
+    def test_a_symlinked_developer_dir_still_resolves(self, tmp_path):
+        from server.device.sim_bridge import find_simulator_kit
+
+        contents = tmp_path / "Xcode.app" / "Contents"
+        real_dev = contents / "Developer"
+        real_dev.mkdir(parents=True)
+        (contents / "SharedFrameworks" / "SimulatorKit.framework").mkdir(parents=True)
+
+        link = tmp_path / "devlink"
+        link.symlink_to(real_dev)
+
+        found = find_simulator_kit(str(link))
+        assert found is not None, (
+            "a symlinked developer dir resolved to nothing, so sim-bridge would "
+            "report unavailable for an Xcode that works"
+        )
+        assert found.name == "SimulatorKit.framework"
