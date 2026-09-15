@@ -154,6 +154,10 @@ git push origin vN.M.K
 #    *** Do this BEFORE creating the GitHub Release. ***
 #    Once a commit has a Release attached, GitHub silently refuses pushes
 #    that point any branch at that exact commit (see "GitHub quirk" below).
+# `main` here, not `vN.M.K`: an annotated tag is a tag object and cannot be a
+# branch head. If you push the tag ref instead, GitHub rejects it with the same
+# opaque message as the quirk documented below. Use `vN.M.K^{commit}` if you
+# want to push from the tag rather than the branch.
 git push origin main:refs/heads/release/stable
 git push origin main:refs/heads/release/beta
 
@@ -361,7 +365,11 @@ git push origin "$TAG"
 #    From the tag, not from main: the tag is what was published, and a
 #    prerelease is often cut somewhere other than main HEAD.
 for ref in $CHANNELS; do
-  git push origin "$TAG:refs/heads/$ref"
+  # ^{commit} is load-bearing: an annotated tag is a tag *object*, and a
+  # branch head must be a commit. Without it the push is rejected with a bare
+  # "remote rejected ... (failed)" that reads exactly like the GitHub quirk
+  # below -- same message, completely different cause.
+  git push origin "$TAG^{commit}:refs/heads/$ref"
 done
 
 # 3. Verify — the rejection above is silent, so this has to fail loudly.
