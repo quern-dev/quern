@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from server.device._xcode import xcode_available
+from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.devicectl")
@@ -74,16 +75,9 @@ class DevicectlBackend:
         """
         if not xcode_available():
             return False
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "xcrun", "devicectl", "list", "devices", "--help",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-            return proc.returncode == 0
-        except Exception:
-            return False
+        return await probe_command(
+            "xcrun", "devicectl", "list", "devices", "--help", tool="devicectl",
+        )
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List connected physical devices by parsing devicectl list devices output.

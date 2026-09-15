@@ -359,11 +359,9 @@ class TestIsAvailableResolvesTheSamePath:
         """
         from server.device import sim_bridge as sb
 
-        proc = AsyncMock()
-        proc.communicate.return_value = (str(dev_dir).encode(), b"")
         monkeypatch.setattr(sb.shutil, "which", lambda _name: "/usr/bin/swiftc")
         monkeypatch.setattr(
-            sb.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc),
+            sb, "probe_stdout", AsyncMock(return_value=str(dev_dir)),
         )
         return await sb.SimBridgeManager().is_available()
 
