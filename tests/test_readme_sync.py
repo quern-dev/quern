@@ -626,15 +626,39 @@ def _skip_strings(src: str, i: int) -> int:
     return j
 
 
+def _skip_comment(src: str, i: int) -> int:
+    """Index just past a `//` or `/* */` comment starting at `i`, else `i`."""
+    if not src.startswith(("//", "/*"), i):
+        return i
+    if src[i + 1] == "/":
+        end = src.find("\n", i)
+        return len(src) if end == -1 else end
+    end = src.find("*/", i + 2)
+    return len(src) if end == -1 else end + 2
+
+
 def _balanced(src: str, open_idx: int) -> int:
-    """Index of the `)` matching the `(` at `open_idx`, ignoring strings.
+    """Index of the `)` matching the `(` at `open_idx`, ignoring strings and comments.
 
     Parens inside a `.describe()` string are common ("(default: false)"), so a
     naive counter miscounts on prose. Strings are skipped wholesale.
+
+    Comments are skipped for a nastier reason. They are prose too, and English
+    prose has apostrophes -- a `// don't` inside a schema reads as the start of
+    a string literal, which then runs to the next apostrophe or to EOF, taking
+    any closing paren in between with it. The result is either no boundary at
+    all or, worse, a plausible one in the wrong place. This file has comments
+    inside a zod schema already.
     """
     depth = 0
     i = open_idx
     while i < len(src):
+        # Comments first: a `//` inside a string is not a comment, and strings
+        # are handled in the same loop, so order is what keeps that true.
+        nxt = _skip_comment(src, i)
+        if nxt != i:
+            i = nxt
+            continue
         c = src[i]
         if c in "\"'`":
             i = _skip_strings(src, i)
@@ -749,3 +773,39 @@ def test_every_gated_endpoint_offers_the_skip_to_agents():
                 f"request body, so passing it changes nothing -- the same 428 "
                 f"comes back after the agent did exactly what it was told"
             )
+
+
+def test_the_scanner_survives_an_apostrophe_in_a_comment():
+    """A `//` comment is prose, and prose has apostrophes.
+
+    Without comment handling, `don't` opens a string literal that runs to the
+    next apostrophe or to EOF, swallowing the closing paren on the way. The
+    scanner then reports no boundary, or -- worse -- a plausible one in the
+    wrong place, which would silently change what the parity checks read.
+    """
+    src = "strictParams({ a: z.boolean() })"
+    assert _balanced(src, src.index("(")) == len(src) - 1
+
+    commented = (
+        "strictParams({\n"
+        "  // don't let this break the scan (it used to)\n"
+        "  a: z.boolean(),\n"
+        "})"
+    )
+    end = _balanced(commented, commented.index("("))
+    assert end == len(commented) - 1, "an apostrophe in a comment broke the scan"
+
+    block = (
+        "strictParams({\n"
+        "  /* the tool's option ) */\n"
+        "  a: z.boolean(),\n"
+        "})"
+    )
+    end = _balanced(block, block.index("("))
+    assert end == len(block) - 1, "a block comment broke the scan"
+
+
+def test_a_paren_inside_a_real_string_is_still_ignored():
+    """The original reason this scanner exists -- `.describe()` prose."""
+    src = 'strictParams({ a: z.boolean().describe("(default: false)") })'
+    assert _balanced(src, src.index("(")) == len(src) - 1

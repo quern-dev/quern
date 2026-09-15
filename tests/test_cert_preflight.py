@@ -7,6 +7,8 @@ app with no network -- points nowhere near the proxy.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -793,3 +795,44 @@ class TestAutoInstallCertClearsEveryGate:
         main.cli()
         assert seen.get("processes") == ["MyApp"]
         assert seen.get("skip") is True, "the --skip-cert-check flag never reached the command"
+
+
+class TestAnInstallSurvivesShutdown:
+    """The startup check runs in the warmup task, which is cancelled at
+    shutdown. `install_cert` runs simctl and then records what it did, and
+    cancelling the await does not stop the subprocess that already ran -- so an
+    unshielded cancel between those two steps leaves the device trusting a CA
+    that `cert-state.json` says is absent.
+
+    Self-correcting, because nothing trusts that record any more and the next
+    check asks the device. Still not worth writing deliberately.
+    """
+
+    async def test_a_cancel_mid_install_still_records_it(self, monkeypatch):
+        recorded = []
+
+        async def _slow_install(_controller, udid, device_name=None):
+            await asyncio.sleep(0.05)
+            recorded.append(udid)  # stands in for update_cert_state
+            return True
+
+        async def _missing(_controller):
+            return [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _slow_install)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
+
+        task = asyncio.create_task(warn_if_capture_lacks_trust(object(), ["MyApp"]))
+        await asyncio.sleep(0.01)  # let it reach the install
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.1)  # give the shielded install time to finish
+
+        assert recorded == ["AAAA1111"], (
+            "the install was abandoned mid-flight, so simctl may have changed "
+            "the TrustStore with nothing written to the record"
+        )

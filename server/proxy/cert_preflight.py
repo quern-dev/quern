@@ -14,6 +14,7 @@ unaffected by this call and reporting it here would be noise.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 logger = logging.getLogger("quern-debug-server.cert-preflight")
@@ -194,7 +195,20 @@ async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[
         installed, failed = [], []
         for dev in missing:
             try:
-                await install_cert(controller, dev["udid"], device_name=dev["name"])
+                # Shielded: this runs in the startup warmup task, which is
+                # cancelled at shutdown. `install_cert` shells out to simctl and
+                # *then* records what it did, and cancelling between those two
+                # leaves the TrustStore holding a certificate the record calls
+                # absent -- cancelling the await does not stop the subprocess
+                # that already ran. The shield lets the write finish.
+                #
+                # The stranded state would be self-correcting, since nothing
+                # trusts the record any more (ADR 1) and the next check asks the
+                # device. But "it heals later" is a reason not to panic, not a
+                # reason to write it.
+                await asyncio.shield(
+                    install_cert(controller, dev["udid"], device_name=dev["name"]),
+                )
                 installed.append(dev)
             except Exception as e:
                 failed.append((dev, e))
