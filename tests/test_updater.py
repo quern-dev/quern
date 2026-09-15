@@ -318,7 +318,7 @@ def test_fetch_latest_release_stable_hits_releases_latest(monkeypatch):
     ]
 
 
-def test_fetch_latest_release_beta_picks_first_prerelease(monkeypatch):
+def test_fetch_latest_release_beta_picks_the_newest_prerelease(monkeypatch):
     """Beta scans /releases and takes the newest prerelease when it really is
     the newest thing.
 
@@ -1105,6 +1105,17 @@ class TestBetaNeverOffersOlderContentThanStable:
         ])
         assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
 
+    def test_an_unparseable_tag_cannot_win_from_either_side(self, monkeypatch):
+        """The fixture above always puts the malformed tag in the same argument
+        position, so only one of the two comparisons was pinned. Two stable
+        releases put it in the other one -- and unpinned, the mutant really does
+        offer `nightly` as an update."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "v0.18.0", "tarball_url": "stable.tgz", "prerelease": False},
+            {"tag_name": "nightly", "tarball_url": "junk.tgz", "prerelease": False},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
+
 
 class TestAnUpdateNeverMovesBackwards:
     """The guard that makes a wrong answer from the resolver a refusal rather
@@ -1169,6 +1180,18 @@ class TestAnUpdateNeverMovesBackwards:
     ):
         """Leaving beta is the exception, not "prereleases may go backwards"."""
         rc = self._run(monkeypatch, tmp_path, "0.19.0-beta.1", "0.15.0-beta.1")
+        assert rc == 1
+        assert "Not downgrading" in capsys.readouterr().out
+
+    def test_a_stable_user_is_protected_too(self, monkeypatch, tmp_path, capsys):
+        """Every other test here drives the beta channel, and the one that uses
+        stable has a *prerelease* installed -- so `leaving_beta` could be
+        rewritten as plain `channel == "stable"`, disabling the guard for every
+        user on the default channel, with the suite green.
+
+        Stable can offer something older: a release yanked after the fact, or a
+        locally built version ahead of it. The guard is the only thing there."""
+        rc = self._run(monkeypatch, tmp_path, "0.18.0", "0.17.1", channel="stable")
         assert rc == 1
         assert "Not downgrading" in capsys.readouterr().out
 

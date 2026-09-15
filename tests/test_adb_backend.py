@@ -294,7 +294,8 @@ class TestOpenUrlReportsAnUnhandledUrl:
 
     iOS already raises here -- `simctl openurl` fails loudly -- which is what
     made the Android silence surprising rather than merely unhelpful. Reported
-    against a Pixel_7 AVD on Android 13.
+    against a Pixel_7 AVD on Android 13; the failure strings below were then
+    measured on a Pixel 3 XL on Android 10.
     """
 
     def _backend(self, monkeypatch, stdout, stderr=""):
@@ -309,6 +310,7 @@ class TestOpenUrlReportsAnUnhandledUrl:
         return backend
 
     async def test_an_unresolvable_intent_raises(self, monkeypatch):
+        """Measured verbatim on a Pixel 3 XL, Android 10."""
         from server.models import DeviceError
 
         backend = self._backend(
@@ -319,19 +321,67 @@ class TestOpenUrlReportsAnUnhandledUrl:
         )
         with pytest.raises(DeviceError) as exc:
             await backend.open_url("emulator-5554", "nope://x")
-        assert "nope://x" in str(exc.value)
         assert "unable to resolve Intent" in str(exc.value), (
             "the message should carry adb's own reason, not a paraphrase"
         )
 
-    async def test_a_missing_explicit_package_raises(self, monkeypatch):
+    async def test_the_not_started_marker_alone_is_enough(self, monkeypatch):
+        """The measured line contains two markers at once, so a single fixture
+        leaves either one droppable with the suite green. One marker each."""
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch, "Error: Activity not started, something new here",
+        )
+        with pytest.raises(DeviceError):
+            await backend.open_url("emulator-5554", "nope://x")
+
+    async def test_the_unresolved_intent_marker_alone_is_enough(self, monkeypatch):
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch, "Some future prefix: unable to resolve Intent { ... }",
+        )
+        with pytest.raises(DeviceError):
+            await backend.open_url("emulator-5554", "nope://x")
+
+    async def test_a_failure_reported_on_stderr_is_caught(self, monkeypatch):
+        """Which stream carries it varies by Android version, which is why the
+        two are scanned together -- and nothing pinned the stderr half, so
+        scanning stdout alone passed."""
         from server.models import DeviceError
 
         backend = self._backend(
             monkeypatch,
-            # Measured on a Pixel 3 XL (Android 10) this case actually reports
-            # "unable to resolve Intent"; this spelling is what other versions
-            # emit, and is kept for them.
+            "Starting: Intent { act=android.intent.action.VIEW dat=nope://x }",
+            stderr="Error: Activity not started, unable to resolve Intent { ... }",
+        )
+        with pytest.raises(DeviceError):
+            await backend.open_url("emulator-5554", "nope://x")
+
+    async def test_the_message_names_the_url_itself(self, monkeypatch):
+        """Not via adb's echo. The obvious assertion passes for the wrong
+        reason: adb repeats the URL inside its own error line, so dropping the
+        interpolation entirely leaves the URL in the message anyway. This
+        fixture's detail line does not mention it."""
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch,
+            "Error: Activity class {com.nope/com.nope.Main} does not exist.",
+        )
+        with pytest.raises(DeviceError) as exc:
+            await backend.open_url("emulator-5554", "myscheme://target")
+        assert "myscheme://target" in str(exc.value)
+
+    async def test_a_missing_explicit_package_raises(self, monkeypatch):
+        """Kept for the versions that emit this spelling. On a Pixel 3 XL
+        (Android 10) the missing-package case actually reports "unable to
+        resolve Intent" and this string never appears."""
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch,
             "Error: Activity class {com.nope/com.nope.Main} does not exist.",
         )
         with pytest.raises(DeviceError):
@@ -347,22 +397,31 @@ class TestOpenUrlReportsAnUnhandledUrl:
         await backend.open_url("emulator-5554", "https://example.com/")
 
     async def test_a_warning_about_something_else_is_not_a_failure(self, monkeypatch):
+        """Android prints this on an ordinary re-launch. It is why the marker is
+        `Error: Activity not started` and not the bare substring."""
         backend = self._backend(
             monkeypatch,
             "Starting: Intent { ... }",
-            stderr="Warning: Activity not started, its current task has been brought to the front",
+            stderr="Warning: Activity not started, its current task has been "
+                   "brought to the front",
         )
         await backend.open_url("emulator-5554", "https://example.com/")
 
-    async def test_a_url_containing_the_marker_text_is_not_a_failure(
-        self, monkeypatch
-    ):
-        """`am start` echoes the URL back in its `Starting:` line, so an
-        unanchored marker could be matched out of the URL itself on a
-        successful launch."""
-        backend = self._backend(
-            monkeypatch,
-            "Starting: Intent { act=android.intent.action.VIEW "
-            "dat=https://example.com/this-page-does-not-exist }",
-        )
-        await backend.open_url("emulator-5554", "https://example.com/this-page-does-not-exist")
+    def test_every_marker_is_anchored_to_an_error_line(self):
+        """`am start` echoes the URL back in its `Starting:` line, so a marker
+        that is only a common English phrase can be matched out of whatever the
+        caller passed.
+
+        Asserted on the constant rather than through a fixture on purpose: a
+        realistic URL cannot contain "does not exist" with spaces, so a
+        behavioural test of it would have to invent output no device produces --
+        which is how the previous version of this test came to assert nothing at
+        all. The decision being pinned is that each marker carries enough
+        context to be adb's own error rather than an echo of the input.
+        """
+        from server.device.adb import _AM_START_FAILURES
+
+        for marker in _AM_START_FAILURES:
+            assert marker.startswith("Error:") or marker == "unable to resolve Intent", (
+                f"{marker!r} is loose enough to match echoed input"
+            )

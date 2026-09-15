@@ -1892,6 +1892,44 @@ class TestOtherQuernOnPath:
         assert "rehash" in result.detail
 
 
+def _stub_the_checks_before_the_venv(monkeypatch):
+    """Get `run_setup` as far as the venv block, on any machine.
+
+    Two things sit in front of it and both bite.
+
+    `check_homebrew` halts the run outright when brew is missing, so on a
+    machine without it these tests never reach the code they name -- and every
+    assertion about "it stopped" is satisfied by the *Homebrew* stop. That is
+    how `TestAFailedVenvRecreateStopsThere` passed with its fix fully reverted.
+
+    `check_python` is worse than a false pass: the venv tests answer yes to
+    every prompt, and the Python check offers a Homebrew install. `_brew_install`
+    calls `subprocess.run(["brew", "install", ...])` directly rather than through
+    the patched `_run`, so nothing in the test or in conftest stops a real
+    install. Latent only because the suite runs on a supported interpreter --
+    which is exactly what the recreate branch under test assumes is not the case.
+    """
+    from server.lifecycle import setup
+    from server.lifecycle.setup import CheckResult, CheckStatus
+
+    monkeypatch.setattr(
+        setup, "check_homebrew",
+        lambda *a, **k: CheckResult(
+            name="Homebrew", status=CheckStatus.OK, message="stubbed",
+        ),
+    )
+    monkeypatch.setattr(
+        setup, "check_python",
+        lambda *a, **k: CheckResult(
+            name="Python", status=CheckStatus.OK, message="stubbed",
+        ),
+    )
+    monkeypatch.setattr(
+        setup, "_brew_install",
+        lambda *a, **k: pytest.fail("a test shelled out to a real `brew install`"),
+    )
+
+
 class TestDecliningTheVenvStopsThere:
     """Answering "no" to the venv prompt used to fall through to the block
     commented "we're inside the venv", which reports the check OK.
@@ -1910,6 +1948,7 @@ class TestDecliningTheVenvStopsThere:
     def _decline(self, monkeypatch, tmp_path):
         from server.lifecycle import setup
 
+        _stub_the_checks_before_the_venv(monkeypatch)
         (tmp_path / "pyproject.toml").write_text("")
         monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
         monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: False)
@@ -2008,6 +2047,7 @@ class TestAFailedVenvRecreateStopsThere:
         (tmp_path / "pyproject.toml").write_text("")
 
         reexeced = []
+        _stub_the_checks_before_the_venv(monkeypatch)
         monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
         monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: True)
         monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
@@ -2038,6 +2078,11 @@ class TestAFailedVenvRecreateStopsThere:
         )
         assert rc == 1, "the failure did not reach the exit code"
         out = capsys.readouterr().out
+        assert "Could not recreate the venv" in out, (
+            "it stopped, but reported nothing -- the bug was exiting 255 with no "
+            "summary, no CheckResult and no guidance, and a negative assertion "
+            "alone does not pin that"
+        )
         assert "found but not activated" not in out, (
             "it described a deleted directory as present"
         )
