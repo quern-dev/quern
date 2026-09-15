@@ -32,6 +32,7 @@ from server.models import (
     InterfaceInfo,
     LocalCaptureRequest,
     ProxyStatusResponse,
+    StartProxyRequest,
     SystemProxyInfo,
     SystemProxyRestoreInfo,
     WaitForFlowRequest,
@@ -319,8 +320,16 @@ async def proxy_status(
 
 
 @router.post("/start", response_model=ProxyStatusResponse)
-async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatusResponse:
-    """Start the mitmproxy network capture."""
+async def start_proxy(
+    request: Request, body: StartProxyRequest | None = None,
+) -> ProxyStatusResponse:
+    """Start the mitmproxy network capture.
+
+    Refuses with 428 when `system_proxy` is requested and a booted simulator
+    does not trust the CA. Starting the listener alone routes nothing and is
+    never refused; `system_proxy` calls the same `detect_and_configure` that
+    `configure_system` does, so it is the same routing boundary.
+    """
     import asyncio
 
     adapter = request.app.state.proxy_adapter
@@ -330,22 +339,26 @@ async def start_proxy(request: Request, body: dict | None = None) -> ProxyStatus
     if adapter.is_running:
         raise HTTPException(status_code=409, detail="Proxy is already running")
 
+    want_system_proxy = body.system_proxy if body else False
+
+    # Before anything is started. The gate raises, and refusing a request after
+    # having started the listener would leave a side effect behind on the path
+    # that declined to act -- and `configure_system` next door refuses before
+    # it touches anything.
+    if want_system_proxy:
+        await _ensure_ca_is_trusted(
+            request, skip=body.skip_cert_check if body else False,
+        )
+
     # Apply optional port/host reconfiguration
     if body:
-        port = body.get("port")
-        listen_host = body.get("listen_host")
-        adapter.reconfigure(listen_port=port, listen_host=listen_host)
+        adapter.reconfigure(listen_port=body.port, listen_host=body.listen_host)
 
     await adapter.start()
     try:
         update_state(proxy_status="running")
     except Exception:
         _proxy_logger.debug("Could not update state file (test mode?)", exc_info=True)
-
-    # Auto-configure system proxy only if explicitly enabled
-    want_system_proxy = False
-    if body and body.get("system_proxy") is not None:
-        want_system_proxy = body["system_proxy"]
 
     system_proxy_info: SystemProxyInfo | None = None
     if want_system_proxy:

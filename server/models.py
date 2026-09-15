@@ -486,6 +486,30 @@ class LocalCaptureRequest(BaseModel):
     """
 
 
+class StartProxyRequest(BaseModel):
+    """Body for ``POST /proxy/start``.
+
+    A model rather than a raw dict because `system_proxy` begins routing the
+    machine's traffic through us and `skip_cert_check` disables a safety gate.
+    An untyped body read either with `bool(...)`, and `bool("false")` is True --
+    the defect #152 had to fix on the local-capture path for the same reason.
+    """
+
+    port: int | None = None
+    listen_host: str | None = None
+    system_proxy: bool = False
+    """Configure the macOS system proxy as part of starting.
+
+    Starting the listener alone routes nothing, which is why this endpoint was
+    never gated. With this flag it calls the same `detect_and_configure` that
+    `configure_system` does, so it is the same routing boundary and takes the
+    same cert preflight.
+    """
+    skip_cert_check: bool = False
+    """Start and configure the system proxy even when a booted simulator does
+    not trust the CA."""
+
+
 class ConfigureSystemProxyRequest(BaseModel):
     """Body for ``POST /proxy/configure-system``."""
 

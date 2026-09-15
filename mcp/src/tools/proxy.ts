@@ -529,7 +529,15 @@ WORKFLOW (physical devices):
 
 NOTE: If local_capture is enabled (check proxy_status), all local traffic
 including simulator traffic is captured transparently without any proxy
-configuration needed.`,
+configuration needed.
+
+CERTIFICATE CHECK (system_proxy: true only). Refuses with HTTP 428 when a
+booted simulator does not trust the mitmproxy CA and auto_install_cert is off,
+the same refusal configure_system_proxy returns and for the same reason. It is
+NOT transient. Do not route around it by calling this tool after
+configure_system_proxy refused -- it is the same gate, and reaching the
+configured state another way recreates exactly the silent HTTPS failure the
+refusal exists to prevent.`,
     inputSchema: strictParams({
       port: z
         .coerce.number()
@@ -543,15 +551,25 @@ configuration needed.`,
         .coerce.boolean()
         .optional()
         .describe(
-          "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control."
+          "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control. With this set, the call takes the same certificate check as configure_system_proxy and can refuse with 428 -- starting the listener alone routes nothing and is never refused."
+        ),
+      skip_cert_check: z
+        .boolean()
+        .optional()
+        .describe(
+          "Start and configure the system proxy even when a booted simulator " +
+          "does not trust the mitmproxy CA. Only applies with system_proxy: " +
+          "true, and only pass it when the user has said so. Correct when " +
+          "deliberately exercising TLS-failure paths."
         ),
     }),
-  }, async ({ port, listen_host, system_proxy }) => {
+  }, async ({ port, listen_host, system_proxy, skip_cert_check: skipCertCheck }) => {
     try {
       const body: Record<string, unknown> = {};
       if (port !== undefined) body.port = port;
       if (listen_host !== undefined) body.listen_host = listen_host;
       if (system_proxy !== undefined) body.system_proxy = system_proxy;
+      if (skipCertCheck) body.skip_cert_check = true;
 
       const data = await apiRequest(
         "POST",
