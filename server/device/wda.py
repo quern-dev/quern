@@ -33,10 +33,16 @@ WDA_RUNNER_BUNDLE_ID = f"{WDA_BUNDLE_ID}.xctrunner"
 WDA_DIR = CONFIG_DIR / "wda"
 WDA_REPO = WDA_DIR / "WebDriverAgent"
 WDA_DERIVED = WDA_DIR / "build"
+
 WDA_APP = WDA_DERIVED / "Build" / "Products" / "Debug-iphoneos" / "WebDriverAgentRunner-Runner.app"
 XCTESTRUN = WDA_DERIVED / "Build" / "Products" / "quern-driver.xctestrun"
 WDA_STATE_FILE = CONFIG_DIR / "wda-state.json"
 WDA_LOG_DIR = CONFIG_DIR / "wda"
+
+#: Floor passed to xcodebuild, because upstream WebDriverAgent declares 13.0 and
+#: Xcode 27 rejects anything under 15.0. Anything in [15.0, 17.0] is equivalent
+#: in practice -- see `build_wda` for why the upper bound is where it is.
+WDA_MIN_DEPLOYMENT_TARGET = "15.0"
 
 DRIVER_START_TIMEOUT = 30
 DRIVER_STOP_TIMEOUT = 5
@@ -317,6 +323,29 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
         f"DEVELOPMENT_TEAM={team_id}",
         f"PRODUCT_BUNDLE_IDENTIFIER={WDA_BUNDLE_ID}",
         "CODE_SIGNING_ALLOWED=YES",
+        # Upstream WebDriverAgent still declares a 13.0 deployment target, and
+        # Xcode 27 refuses anything below 15.0:
+        #
+        #   error: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set
+        #   to 13.0, but the range of supported deployment target versions is
+        #   15.0 to 27.0.x. (in target 'WebDriverAgentRunner')
+        #
+        # Overridden on the command line, where it outranks every layer in the
+        # project and so reaches WebDriverAgentLib as well as the Runner.
+        #
+        # Any value in [15.0, 17.0] is equivalent today, and the reason is
+        # measurable rather than inferred: the outer Runner app is stamped from
+        # Xcode 27's own XCTRunner template, which is built at 17.0, so the
+        # runner lands at minos 17.0 whether this says 15.0 or 17.0 -- only the
+        # inner .xctest and framework take this value. Above 17.0 the inner
+        # bundle becomes the binding floor and a build flag silently narrows the
+        # supported device range, which is why the tests pin both ends.
+        #
+        # 15.0 is the bottom of that band and matches quern's actual WDA floor:
+        # `install_wda` routes iOS 15-16 devices through ideviceinstaller, and
+        # `server/device/usbmux.py` exists to enumerate them. It will need
+        # raising when Apple next moves the floor; the error names the new range.
+        f"IPHONEOS_DEPLOYMENT_TARGET={WDA_MIN_DEPLOYMENT_TARGET}",
         "-allowProvisioningUpdates",
         "-derivedDataPath", str(WDA_DERIVED),
         stdout=asyncio.subprocess.PIPE,
