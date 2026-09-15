@@ -97,11 +97,17 @@ class SetupReport:
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
-    """Run a command and return (returncode, stdout, stderr)."""
+def _run(
+    cmd: list[str], timeout: int = 30, env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Run a command and return (returncode, stdout, stderr).
+
+    ``env`` replaces the child's environment wholesale, for the tools that
+    cannot start without a runtime fix-up.
+    """
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            cmd, capture_output=True, text=True, timeout=timeout, env=env,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except FileNotFoundError:
@@ -1652,10 +1658,48 @@ def check_idb() -> CheckResult:
     )
 
 
+def _companion_probe_env(companion: Path) -> dict[str, str]:
+    """The environment the patched companion needs in order to start.
+
+    It resolves its frameworks through ``DYLD_FRAMEWORK_PATH``, which
+    ``IDBController._companion_env`` supplies at runtime. A probe that omits it
+    reports a perfectly good install as broken, so this mirrors that function
+    rather than running the binary bare. See #190.
+    """
+    import os
+
+    fw = companion.parent / "Frameworks"
+    env = os.environ.copy()
+    env["DYLD_FRAMEWORK_PATH"] = f"{fw}:{fw / 'PackageFrameworks'}"
+    return env
+
+
 def check_idb_companion() -> CheckResult:
     """Check for idb_companion, preferring the patched build in ~/.quern/bin/."""
     quern_companion = CONFIG_DIR / "bin" / "idb_companion"
     if quern_companion.is_file():
+        # Existence is not health. This reported OK for anything occupying the
+        # path, so a truncated download or a half-extracted tarball read as a
+        # working install -- and because the patched copy is *preferred*, it
+        # would shadow a working system one while claiming to be fine (#190).
+        rc, _, _ = _run(
+            [str(quern_companion), "--version"],
+            timeout=10,
+            env=_companion_probe_env(quern_companion),
+        )
+        if rc != 0:
+            return CheckResult(
+                name="idb_companion",
+                status=CheckStatus.ERROR,
+                message=f"installed but not running ({quern_companion})",
+                detail=(
+                    "The binary is present but exited "
+                    f"{rc} when asked for its version. Re-run './quern setup' "
+                    "to reinstall it; until then simulator UI automation will "
+                    "fall back to whatever else is available."
+                ),
+                fixable=True,
+            )
         return CheckResult(
             name="idb_companion",
             status=CheckStatus.OK,

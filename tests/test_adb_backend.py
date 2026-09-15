@@ -19,10 +19,34 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 class TestIsAvailable:
-    async def test_available_when_adb_on_path(self):
+    async def test_available_when_adb_on_path_and_answering(self):
         with patch("server.device.adb._find_sdk_tool", return_value="/usr/bin/adb"):
             backend = AdbBackend()
-        assert await backend.is_available() is True
+        with patch("server.device.adb.probe_command", AsyncMock(return_value=True)):
+            assert await backend.is_available() is True
+
+    async def test_a_present_binary_that_does_not_answer_is_unavailable(self):
+        """This used to be a path lookup, so it reported True here.
+
+        A truncated download or an SDK left half-upgraded is present and
+        broken, and `quern doctor` called it healthy -- which sends the reader
+        looking anywhere but at adb.
+        """
+        with patch("server.device.adb._find_sdk_tool", return_value="/usr/bin/adb"):
+            backend = AdbBackend()
+        with patch("server.device.adb.probe_command", AsyncMock(return_value=False)):
+            assert await backend.is_available() is False
+
+    async def test_being_installed_is_a_separate_cheaper_question(self):
+        """Control flow asks "is it there", reporting asks "does it work".
+
+        `list_devices` guards on the first: it runs on a hot path and the
+        command it guards fails on its own terms anyway. Collapsing them would
+        put a subprocess probe in front of every device listing.
+        """
+        with patch("server.device.adb._find_sdk_tool", return_value="/usr/bin/adb"):
+            backend = AdbBackend()
+        assert backend.is_installed() is True
 
     async def test_unavailable_when_no_adb(self):
         with patch("server.device.adb._find_sdk_tool", return_value=None):

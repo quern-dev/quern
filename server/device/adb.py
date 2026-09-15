@@ -8,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
+from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.adb")
@@ -213,9 +214,27 @@ class AdbBackend:
             except ValueError:
                 return api_str, ""
 
-    async def is_available(self) -> bool:
-        """Check if adb is available."""
+    def is_installed(self) -> bool:
+        """Whether adb is on disk. Cheap, and says nothing about health.
+
+        Split from `is_available` because the two questions have different
+        callers. Control flow -- "should I try the Android path at all?" --
+        wants this: it runs on hot paths, and the command it guards will fail
+        on its own terms if the binary is broken. Reporting wants the probe.
+        """
         return self._adb_path is not None
+
+    async def is_available(self) -> bool:
+        """Check that adb is installed *and* answers.
+
+        Was a path lookup, which reports a corrupt or half-installed binary as
+        healthy -- the shape #181 exists to fix, and one this cannot express
+        either, but it can at least stop claiming a tool works without ever
+        asking it.
+        """
+        if not self.is_installed():
+            return False
+        return await probe_command(str(self._adb_path), "version", tool="adb")
 
     async def _get_device_property(self, serial: str, prop: str) -> str:
         """Get a single device property via getprop."""
@@ -242,7 +261,7 @@ class AdbBackend:
         AVDs from ``emulator -list-avds`` so that unbooted emulators
         appear in the device list.
         """
-        if not await self.is_available():
+        if not self.is_installed():
             return []
 
         try:
