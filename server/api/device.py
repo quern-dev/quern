@@ -40,6 +40,14 @@ from server.models import (
     WdaKeyboardNotPresentError,
 )
 
+#: How stale the tool block in a device listing may be.
+#:
+#: `/device/list` reports availability alongside the devices; it is not a health
+#: endpoint, and an agent driving `list_devices` calls it constantly. Measuring
+#: seven tools per request costs six subprocesses. `/tools` and startup still
+#: measure fresh.
+TOOLS_IN_LIST_MAX_AGE = 5.0
+
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger("quern-debug-server.api")
 
@@ -172,7 +180,7 @@ async def list_devices(
     controller = _get_controller(request)
     try:
         devices = await controller.list_devices()
-        tools = await controller.check_tools()
+        tools = await controller.check_tools(max_age=TOOLS_IN_LIST_MAX_AGE)
 
         # Apply server-side filters
         if not include_disconnected:

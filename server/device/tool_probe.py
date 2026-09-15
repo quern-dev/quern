@@ -15,11 +15,15 @@ a failed check must never read as a passing one.
 
 Two things are easy to get wrong here, and both were:
 
-* **Cancelling the wait does not kill the process.** `asyncio.wait_for` on
-  `proc.communicate()` raises and moves on while the child keeps running. A
-  probe that gives up on a wedged tool and leaks it is how a stray
-  `usbmux forward` came to squat a port for a week (#160). The child is killed
-  and reaped on every exit path.
+* **Cancelling the wait does not kill the process, and killing the child does
+  not kill what it spawned.** `asyncio.wait_for` on `proc.communicate()` raises
+  and moves on while the child keeps running; a probe that gives up on a wedged
+  tool and leaks it is how a stray `usbmux forward` came to squat a port for a
+  week (#160). `proc.kill()` alone is not enough either -- `xcrun`, which
+  fronts two of these probes and is the one #180 is about, forks a helper, so
+  signalling only the direct child can orphan a grandchild that no `pgrep` on
+  the child's argv would ever find. Each probe gets its own process group and
+  the group is killed and reaped on every exit path.
 * **A probe has to launch the tool the way the runtime launches it.** The
   patched `idb_companion` needs `DYLD_FRAMEWORK_PATH` pointing at the
   frameworks beside it; run bare it dies in dyld, so the obvious
@@ -33,6 +37,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import signal
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,27 @@ logger = logging.getLogger(__name__)
 #: `check_tools()` runs its probes concurrently so this is the worst case for
 #: the whole set rather than per tool.
 TOOL_PROBE_TIMEOUT = 10.0
+
+#: Must stay below `state.TOOLS_FETCH_TIMEOUT`, the budget `quern doctor` gives
+#: the whole /tools request. The two are a coupled pair and neither referenced
+#: the other: raise this above that and a wedged tool makes the *client* give up
+#: first, so doctor reports the server unreachable rather than the tool wedged --
+#: #180's symptom, restored from the other end. Pinned in test_tool_probe.py.
+
+
+def _kill_group(proc) -> None:
+    """Kill the probe's whole process group, falling back to the child alone.
+
+    `start_new_session=True` makes the child a group leader, so one `killpg`
+    reaches anything it spawned. The fallback matters: if the child has already
+    exited, `os.killpg` raises and the group may no longer exist, and a probe
+    must never raise out of its own cleanup.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return
+    with contextlib.suppress(ProcessLookupError, OSError):
+        proc.kill()
 
 
 async def probe_command(
@@ -79,6 +106,7 @@ async def probe_command(
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
+            start_new_session=True,
         )
         await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return proc.returncode == 0
@@ -97,8 +125,7 @@ async def probe_command(
         # The wait was cancelled; the child was not. Leaving a wedged probe
         # running is its own bug (#160), so kill and reap it on every path.
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
+            _kill_group(proc)
             with contextlib.suppress(Exception):
                 await proc.wait()
 
@@ -124,6 +151,7 @@ async def probe_stdout(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
+            start_new_session=True,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         if proc.returncode != 0:
@@ -136,7 +164,6 @@ async def probe_stdout(
         return None
     finally:
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
+            _kill_group(proc)
             with contextlib.suppress(Exception):
                 await proc.wait()

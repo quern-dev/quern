@@ -293,7 +293,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
-    tools = await device_controller.check_tools()
+    tools = await device_controller.check_tools(adopt=True)
     logger.info("Device tools: %s", tools)
     if tools.get("sim_bridge"):
         logger.info("sim-bridge available — using native simulator UI backend")
@@ -687,7 +687,7 @@ fetch('/api/v1/device/list', {
         tools_status: dict = {}
         cache_stats: dict = {}
         if hasattr(app.state, "device_controller") and app.state.device_controller:
-            tools_status = await app.state.device_controller.check_tools()
+            tools_status = await app.state.device_controller.check_tools(adopt=True)
             cache_stats = app.state.device_controller.get_cache_stats()
         # Availability flags only. The per-site inventory carries absolute
         # paths -- account names and filesystem layout -- and lives behind auth

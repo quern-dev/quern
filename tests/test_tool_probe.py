@@ -41,25 +41,44 @@ class TestAProbeIsBounded:
             "still be holding up quern doctor — the whole point of the budget"
         )
 
-    async def test_the_hanging_child_is_killed_rather_than_left_running(self):
-        """Cancelling the wait does not stop the process.
+    async def test_a_wedged_probe_leaves_nothing_running(self):
+        """Cancelling the wait does not stop the process, and killing the child
+        does not stop what *it* spawned.
 
-        `asyncio.wait_for` raises and moves on while the child keeps running.
-        A probe that gives up on a wedged tool and leaks it is how a stray
-        `usbmux forward` squatted a port for a week (#160) — so the fix for one
-        hang must not create a process leak instead.
+        `asyncio.wait_for` raises and moves on while the child keeps running --
+        a probe that gives up on a wedged tool and leaks it is how a stray
+        `usbmux forward` squatted a port for a week (#160). And `proc.kill()`
+        alone is not enough: `xcrun` fronts two of these probes and forks a
+        helper, so a marker in the *child's* argv is structurally blind to an
+        orphaned grandchild. This spawns one deliberately.
+
+        The survivor is killed before asserting rather than after. A leaked
+        `sleep` outlives the test and fails every later run of this file until
+        it expires, which turns one real failure into a run of spurious ones --
+        and makes any mutation result measured in that window worthless.
         """
         marker = "quern-probe-leak-canary-98214"
         await probe_command(
-            sys.executable, "-c", f"import time; time.sleep(120)  # {marker}",
+            "/bin/sh", "-c", f"sleep 90 & echo go; wait  # {marker}",
             timeout=1.0, tool="canary",
         )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.4)
 
-        found = subprocess.run(
-            ["pgrep", "-f", marker], capture_output=True, text=True,
-        ).stdout.strip()
-        assert not found, f"probe left a child running: pid(s) {found}"
+        def alive(pattern: str) -> list[str]:
+            return subprocess.run(
+                ["pgrep", "-f", pattern], capture_output=True, text=True,
+            ).stdout.split()
+
+        child = alive(marker)
+        grandchild = [p for p in alive("^sleep 90") if p not in child]
+        for pid in child + grandchild:
+            subprocess.run(["kill", "-9", pid], capture_output=True)
+
+        assert not child, f"the probe left its child running: {child}"
+        assert not grandchild, (
+            f"the probe killed its child but orphaned what the child spawned: "
+            f"{grandchild} -- which a pgrep on the child's own argv cannot see"
+        )
 
     def test_the_default_budget_is_far_above_a_healthy_probe(self):
         """Measured warm: the slowest probe (pymobiledevice3) was 0.23s.
@@ -67,11 +86,32 @@ class TestAProbeIsBounded:
         The budget bounds an *indefinite hang*, not a slow answer, so the only
         property that matters is that it never fires on a working machine. A
         value tuned close to the measurement would report healthy tools as
-        missing — the exact failure this module exists to prevent, and the same
+        missing -- the exact failure this module exists to prevent, and the same
         mistake that put the WDA /source budgets under water twice.
         """
         slowest_healthy_probe = 0.23
-        assert TOOL_PROBE_TIMEOUT >= slowest_healthy_probe * 10
+        assert TOOL_PROBE_TIMEOUT >= slowest_healthy_probe * 20, (
+            f"{TOOL_PROBE_TIMEOUT}s is close enough to the {slowest_healthy_probe}s "
+            "measured warm that a cold or loaded machine would trip it, and a "
+            "probe that gives up early reports a healthy tool as missing"
+        )
+
+    def test_the_budget_fits_inside_the_one_the_doctor_client_allows(self):
+        """The half that was missing, and it is the half that bites.
+
+        `quern doctor` fetches /tools with its own budget. Raise the server's
+        per-probe budget above it and a wedged tool makes the *client* give up
+        first, so doctor reports the server unreachable instead of the tool
+        wedged -- #180's symptom restored from the other end, with every test
+        still green. Only the lower bound was pinned, so 600.0 survived the
+        whole suite.
+        """
+        from server.lifecycle.state import TOOLS_FETCH_TIMEOUT
+
+        assert TOOL_PROBE_TIMEOUT < TOOLS_FETCH_TIMEOUT, (
+            f"a probe may take {TOOL_PROBE_TIMEOUT}s but doctor only waits "
+            f"{TOOLS_FETCH_TIMEOUT}s for the whole /tools request"
+        )
 
 
 class TestAProbeProvesLiveness:
@@ -199,7 +239,7 @@ class TestTheBackendIsNotLatchedAtStartup:
             ),
             patch("server.device.tunneld.is_tunneld_running", AsyncMock(return_value=True)),
         ):
-            return await ctrl.check_tools()
+            return await ctrl.check_tools(adopt=True)
 
     async def test_checking_tools_resyncs_a_server_that_has_gone_stale(self):
         ctrl = self._controller()
@@ -324,24 +364,162 @@ class TestTheCompanionCheckAsksTheBinary:
         assert backend._companion_env()["DYLD_FRAMEWORK_PATH"] == env["DYLD_FRAMEWORK_PATH"]
 
 
-class TestThePathOnlyProbesNowAsk:
-    """adb, idb and pymobiledevice3 all answered from `path is not None`."""
+class TestTheCompanionProbeIsWiredUpCorrectly:
+    """The guard this change argues hardest for, tested where it matters.
 
-    @pytest.mark.parametrize("attr,factory", [
-        ("adb", "server.device.adb.AdbBackend"),
-        ("pmd3", "server.device.pmd3.Pmd3Backend"),
-    ])
-    async def test_a_present_but_dead_binary_is_not_available(self, attr, factory):
-        module, _, cls = factory.rpartition(".")
-        mod = __import__(module, fromlist=[cls])
-        controller = getattr(mod, cls)()
+    Comparing `_companion_probe_env()` with `IdbBackend._companion_env()` proves
+    the two agree. It does not prove `check_idb_companion` *uses* it -- deleting
+    `env=` from the call survived the entire suite, and the consequence is that
+    every correctly-installed patched companion reports ERROR.
+    """
 
-        with patch(f"{module}.probe_command", AsyncMock(return_value=False)) as probe:
-            available = await controller.is_available()
+    def _companion(self, tmp_path, body: str = "#!/bin/sh\nexit 0\n", mode: int = 0o755):
+        c = tmp_path / "bin" / "idb_companion"
+        c.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(body, bytes):
+            c.write_bytes(body)
+        else:
+            c.write_text(body)
+        c.chmod(mode)
+        return c
 
-        if probe.await_count == 0:
-            pytest.skip(f"{attr} is not installed on this machine")
-        assert available is False, (
-            "the binary was present but did not answer, and it still reported "
-            "as available — existence is not health"
+    def test_the_probe_is_given_the_framework_path(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as s
+
+        self._companion(tmp_path)
+        monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
+        seen = {}
+
+        def fake_run(cmd, timeout=30, env=None):
+            seen["env"] = env
+            return 0, "", ""
+
+        monkeypatch.setattr(s, "_run", fake_run)
+        s.check_idb_companion()
+
+        assert seen["env"] is not None and "DYLD_FRAMEWORK_PATH" in seen["env"], (
+            "check_idb_companion probed the companion bare, so a working "
+            "install reports as broken"
         )
+
+    @pytest.mark.parametrize("name,body,mode", [
+        ("a truncated binary", b"\xcf\xfa\xed\xfe" + b"\x00" * 8, 0o755),
+        ("one that lost its exec bit", "#!/bin/sh\nexit 0\n", 0o644),
+    ])
+    def test_a_binary_that_cannot_be_run_is_reported_not_raised(
+        self, tmp_path, monkeypatch, name, body, mode,
+    ):
+        """The corruption the check exists for must not crash the check.
+
+        `subprocess.run` raises OSError for a truncated binary and
+        PermissionError for one that lost its exec bit -- neither is
+        FileNotFoundError or TimeoutExpired. Uncaught, those escape
+        `check_idb_companion` into `run_setup`, so `quern setup` and
+        `quern update` end in a traceback instead of a diagnosis. Before this
+        change the same file was merely reported OK, so a crash would be a
+        regression rather than a fix.
+        """
+        from server.lifecycle import setup as s
+
+        self._companion(tmp_path, body, mode)
+        monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
+
+        result = s.check_idb_companion()
+
+        assert result.status is not s.CheckStatus.OK, f"{name} reported healthy"
+        assert "not running" in result.message
+
+
+class TestHotPathsDoNotSpawnSubprocesses:
+    """`is_available` is a real probe now, so it is no longer free.
+
+    Two call sites ask "should I try the Android path at all" rather than "is
+    this healthy". Putting a subprocess in front of every device listing is not
+    a fix, and the command they guard fails on its own terms anyway.
+    """
+
+    async def test_listing_devices_does_not_probe(self):
+        from server.device.adb import AdbBackend
+
+        backend = AdbBackend()
+        backend._adb_path = "/usr/bin/adb"
+        backend._run_adb = AsyncMock(return_value=("List of devices attached\n", ""))
+        backend.list_avds = AsyncMock(return_value=[])
+        with patch("server.device.adb.probe_command", AsyncMock()) as probe:
+            await backend.list_devices()
+        assert probe.await_count == 0, (
+            "list_devices spawned a liveness probe, so every device listing now "
+            "pays for a subprocess"
+        )
+        assert backend._run_adb.await_count > 0, (
+            "the listing never ran, so the probe count proves nothing"
+        )
+
+    async def test_resolving_a_named_emulator_does_not_probe(self):
+        from server.device.controller import DeviceController
+
+        ctrl = DeviceController()
+        ctrl.adb._adb_path = "/usr/bin/adb"
+        ctrl.adb.list_avds = AsyncMock(return_value=[])
+        with patch("server.device.adb.probe_command", AsyncMock()) as probe:
+            ctrl.adb.is_installed()
+            await ctrl.adb.list_avds()
+        assert probe.await_count == 0
+
+
+class TestMeasuringIsNotSelecting:
+    """Adopting the measurement is opt-in, and caching keeps listings cheap."""
+
+    def _controller(self):
+        from server.device.controller import DeviceController
+        return DeviceController()
+
+    async def _probe_all(self, ctrl, sim_bridge, **kw):
+        with (
+            patch.object(ctrl.simctl, "is_available", AsyncMock(return_value=True)),
+            patch.object(ctrl.idb, "is_available", AsyncMock(return_value=True)),
+            patch.object(ctrl.devicectl, "is_available", AsyncMock(return_value=True)),
+            patch.object(ctrl.pmd3, "is_available", AsyncMock(return_value=True)),
+            patch.object(ctrl.adb, "is_available", AsyncMock(return_value=True)),
+            patch.object(
+                ctrl.sim_bridge_manager, "is_available",
+                AsyncMock(return_value=sim_bridge),
+            ),
+            patch("server.device.tunneld.is_tunneld_running", AsyncMock(return_value=True)),
+        ):
+            return await ctrl.check_tools(**kw)
+
+    async def test_listing_devices_does_not_reselect_the_backend(self):
+        """It decides which backend serves every subsequent tap, and nobody
+        associates *listing devices* with re-selecting one."""
+        ctrl = self._controller()
+        await self._probe_all(ctrl, sim_bridge=True, adopt=True)
+        await self._probe_all(ctrl, sim_bridge=False)  # a listing, not a health check
+        assert ctrl._sim_bridge_ok is True, (
+            "a device listing silently switched the UI backend"
+        )
+
+    async def test_reporting_health_does_reselect(self):
+        ctrl = self._controller()
+        await self._probe_all(ctrl, sim_bridge=True, adopt=True)
+        await self._probe_all(ctrl, sim_bridge=False, adopt=True)
+        assert ctrl._sim_bridge_ok is False
+
+    async def test_a_listing_can_reuse_a_recent_measurement(self):
+        """Seven tools per request is six subprocesses, and `list_devices` is a
+        hot path for an agent. #180 called out "no timeout, no cache"."""
+        ctrl = self._controller()
+        await self._probe_all(ctrl, sim_bridge=True)
+        probe = AsyncMock(return_value=True)
+        with patch.object(ctrl.simctl, "is_available", probe):
+            await ctrl.check_tools(max_age=300)
+        assert probe.await_count == 0, "a cached listing re-probed every tool"
+
+    async def test_reporting_health_never_serves_a_cached_answer(self):
+        ctrl = self._controller()
+        await self._probe_all(ctrl, sim_bridge=True)
+        probe = AsyncMock(return_value=False)
+        with patch.object(ctrl.simctl, "is_available", probe):
+            tools = await ctrl.check_tools(adopt=True)
+        assert probe.await_count == 1, "/tools served a stale answer"
+        assert tools["simctl"] is False

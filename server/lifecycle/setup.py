@@ -110,10 +110,17 @@ def _run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
-    except FileNotFoundError:
-        return -1, "", f"Command not found: {cmd[0]}"
     except subprocess.TimeoutExpired:
         return -1, "", f"Command timed out: {' '.join(cmd)}"
+    except (OSError, subprocess.SubprocessError) as e:
+        # Base classes, not the subclasses we happened to see first. A file
+        # that exists but cannot be exec'd raises neither FileNotFoundError nor
+        # TimeoutExpired: a truncated binary raises OSError (Exec format
+        # error), one that lost its exec bit in extraction raises
+        # PermissionError. Those are precisely the corruptions the callers
+        # probe *for*, so letting them escape turns a health check into a
+        # traceback out of `quern setup` and `quern update`.
+        return -1, "", f"Could not run {cmd[0]}: {e}"
 
 
 def _which(name: str) -> str | None:

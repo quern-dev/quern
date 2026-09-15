@@ -63,6 +63,7 @@ class DeviceController(DeviceControllerUI):
         #: could no longer work, while `/tools` correctly reported it
         #: unavailable. The server and its own health endpoint disagreed.
         self._sim_bridge_checked_at: float = 0.0
+        self._tools_cache: tuple[float, dict[str, bool]] | None = None
         self.__active_udid: str | None = None
         # What was last persisted, so an assignment that changes nothing can
         # skip the write entirely. Separate from __active_udid, which is
@@ -191,7 +192,9 @@ class DeviceController(DeviceControllerUI):
             return
         self._active_udid = udid
 
-    async def check_tools(self) -> dict[str, bool]:
+    async def check_tools(
+        self, *, adopt: bool = False, max_age: float = 0.0,
+    ) -> dict[str, bool]:
         """Check availability of CLI tools.
 
         Every probe is bounded and runs concurrently. Sequentially, the shared
@@ -203,7 +206,20 @@ class DeviceController(DeviceControllerUI):
         as False, indistinguishable from "not installed". The probe logs the
         difference; expressing it is #181.
         """
+        import time
+
         from server.device.tunneld import is_tunneld_running
+
+        # `max_age` exists because this is no longer cheap. Seven probes, six of
+        # them subprocesses, and `GET /api/v1/device/list` calls it on every
+        # request to report tool availability alongside the devices -- which for
+        # an agent driving the MCP tool is a hot path. Callers that *report*
+        # health (/tools, startup) pass 0 and always measure; callers that
+        # merely include it in a larger response can accept a few seconds old.
+        if max_age > 0 and self._tools_cache is not None:
+            cached_at, cached = self._tools_cache
+            if time.monotonic() - cached_at < max_age:
+                return dict(cached)
 
         names = (
             "simctl", "idb", "devicectl", "pymobiledevice3",
@@ -229,13 +245,16 @@ class DeviceController(DeviceControllerUI):
             else:
                 tools[name] = bool(result)
 
-        # Adopt what was just measured. This is the cheap half of #179: any
-        # caller of /tools -- `quern doctor`, `quern status`, the menu-bar app
-        # -- now re-syncs the running server instead of leaving it routing to a
-        # backend the same response calls unavailable. Free, because the probe
-        # has already run; the periodic refresh covers the case where nobody
-        # asks.
-        self._adopt_sim_bridge_state(tools["sim_bridge"])
+        self._tools_cache = (time.monotonic(), dict(tools))
+
+        # Adopting is opt-in rather than a side effect of measuring. This is the
+        # cheap half of #179 -- a /tools call re-syncs a server left routing to
+        # a backend the same response calls unavailable -- but it decides which
+        # backend serves every subsequent tap, and no operator associates
+        # *listing devices* with re-selecting a backend. So the endpoint that
+        # reports health asks for it; the one that merely includes it does not.
+        if adopt:
+            self._adopt_sim_bridge_state(tools["sim_bridge"])
         return tools
 
     def _adopt_sim_bridge_state(self, ok: bool) -> None:

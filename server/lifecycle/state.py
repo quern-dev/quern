@@ -16,6 +16,13 @@ from typing import Any, TypedDict
 
 from server.config import CONFIG_DIR
 
+#: Seconds `quern doctor` waits on /tools before giving up on the server.
+#:
+#: The server's own per-probe budget (`TOOL_PROBE_TIMEOUT`) has to fit inside
+#: this, or the client gives up first and doctor reports the server unreachable
+#: rather than the tool wedged. A test pins the pair.
+TOOLS_FETCH_TIMEOUT = 15.0
+
 logger = logging.getLogger(__name__)
 
 # CONFIG_DIR honours QUERN_STATE_DIR, so these follow it too. They used to read
@@ -396,7 +403,7 @@ def is_server_healthy(port: int, host: str = "127.0.0.1", timeout: float = 2.0) 
 
 
 def fetch_tools(
-    port: int, host: str = "127.0.0.1", timeout: float = 15.0
+    port: int, host: str = "127.0.0.1", timeout: float = TOOLS_FETCH_TIMEOUT
 ) -> dict | None:
     """Fetch device-tool availability from a running server's /tools endpoint.
 
