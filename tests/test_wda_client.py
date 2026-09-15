@@ -3001,8 +3001,14 @@ class TestSourceTimeoutCoversRealHardware:
     a device that cannot be automated until someone relaunches WDA by hand.
     """
 
-    #: Measured on a physical iPhone 11, iOS 26.6.2, home screen, first call.
-    OBSERVED_IPHONE_11 = 7.52
+    #: Measured on a physical iPhone 11, iOS 26.6.2, home screen.
+    #:
+    #: 7.52s against a WDA built with Xcode 26; 10.19-10.35s across three
+    #: samples once the same WDA was rebuilt under Xcode 27, on the same device
+    #: and the same screen. The higher figure is the one to hold the budget
+    #: against, and the fact that it moved at all is why #170 wants this
+    #: derived per device rather than pinned to whatever was last observed.
+    OBSERVED_IPHONE_11 = 10.35
 
     def test_a_slow_device_gets_more_than_the_measured_time(self):
         backend = WdaBackend()
@@ -3012,6 +3018,16 @@ class TestSourceTimeoutCoversRealHardware:
             f"an iPhone 11 takes {self.OBSERVED_IPHONE_11}s to answer /source; a "
             f"{timeout}s budget means every call restarts the driver and returns "
             f"nothing"
+        )
+
+    def test_the_slow_budget_has_real_headroom(self):
+        """Not merely above the measurement. Both constants have been under
+        water within a day of being set from the last observation, so the test
+        pins a margin rather than a threshold."""
+        assert SOURCE_TIMEOUT_SLOW >= self.OBSERVED_IPHONE_11 * 1.5, (
+            f"{SOURCE_TIMEOUT_SLOW}s leaves no room above the observed "
+            f"{self.OBSERVED_IPHONE_11}s -- which is how this has already been "
+            f"wrong twice"
         )
 
     def test_a_modern_device_gets_the_shorter_budget(self):

@@ -37,21 +37,37 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
-# seconds. Most screens answer in under 2s, but the budget is deliberately
-# well clear of that: the penalty for guessing low is not a slow call, it is
-# the restart cascade described below.
-SOURCE_TIMEOUT = 5.0
-# seconds, for A13 and older devices. Measured at 7.52s on an iPhone 11
-# (iOS 26.6.2) sitting on its home screen -- not a dense or unusual tree, and
-# comfortably over the 6.0 this used to be.
+# seconds, for everything newer than A13.
 #
-# The old value did not merely make the call slow: a timeout here is treated as
-# evidence that WDA is hung, and the response is to restart the driver, which
-# reinstalls the runner. So one second of latency destroyed a healthy runner and
-# returned an empty tree with no error, on every call, permanently. See #170 --
-# the rest of that cascade is still open; this is the part that stops it firing
-# on ordinary hardware.
-SOURCE_TIMEOUT_SLOW = 10.0
+# Unlike the slow budget below, this one is **not** measured: no modern device
+# has been timed under Xcode 27. It was raised from 5.0 on the reasoning that
+# the toolchain shift which doubled the iPhone 11's /source time was not
+# device-specific, so a modern device is likely slower too -- likely, not known.
+# Most screens answer in under 2s and the penalty for guessing low is severe
+# (see the cascade below), so erring high costs little.
+#
+# Worth measuring on an A16/A17 before treating this number as meaningful.
+SOURCE_TIMEOUT = 10.0
+# seconds, for A13 and older devices.
+#
+# The budget is not a latency knob. A timeout here is treated as evidence that
+# WDA is hung, and the response is to restart the driver, which reinstalls the
+# runner -- so a value set too low does not produce a slow call, it produces an
+# empty tree with no error, on every call, permanently. See #170; the rest of
+# that cascade is still open and this only stops it firing on ordinary hardware.
+#
+# Both values have now been wrong twice, and the second time is the interesting
+# one. 0.18.0 raised them to 5/10 from a measured 7.52s on an iPhone 11 (iOS
+# 26.6.2) on its home screen. Rebuilding WDA under Xcode 27 -- same device, same
+# screen, same quern -- moved that to 10.19-10.35s across three samples, so the
+# 10.0 floor was under water again within a day. The *toolchain* changed, not
+# the device or the tree.
+#
+# Doubled rather than nudged past the new measurement, because a margin sized to
+# the last observation is what produced this situation twice. The real fix is to
+# derive the budget from the first successful /source per device and delete
+# these constants, which is the open half of #170.
+SOURCE_TIMEOUT_SLOW = 20.0
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
