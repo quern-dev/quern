@@ -37,8 +37,21 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
-SOURCE_TIMEOUT = 3.0  # seconds — most screens return /source in <2s
-SOURCE_TIMEOUT_SLOW = 6.0  # seconds — for A13 and older devices
+# seconds. Most screens answer in under 2s, but the budget is deliberately
+# well clear of that: the penalty for guessing low is not a slow call, it is
+# the restart cascade described below.
+SOURCE_TIMEOUT = 5.0
+# seconds, for A13 and older devices. Measured at 7.52s on an iPhone 11
+# (iOS 26.6.2) sitting on its home screen -- not a dense or unusual tree, and
+# comfortably over the 6.0 this used to be.
+#
+# The old value did not merely make the call slow: a timeout here is treated as
+# evidence that WDA is hung, and the response is to restart the driver, which
+# reinstalls the runner. So one second of latency destroyed a healthy runner and
+# returned an empty tree with no error, on every call, permanently. See #170 --
+# the rest of that cascade is still open; this is the part that stops it firing
+# on ordinary hardware.
+SOURCE_TIMEOUT_SLOW = 10.0
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
@@ -183,7 +196,11 @@ class WdaBackend:
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     def _source_timeout(self, udid: str) -> float:
-        """Return the /source timeout for a device, doubled for slower chips."""
+        """Return the /source timeout for a device, extended for slower chips.
+
+        Was a doubling of the default; it is now set from measurement instead,
+        because the observed value on an A13 exceeded the doubled one.
+        """
         name = self._device_names.get(udid, "")
         if name and _is_slow_device(name):
             return SOURCE_TIMEOUT_SLOW

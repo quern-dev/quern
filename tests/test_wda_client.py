@@ -15,6 +15,7 @@ from server.device.wda_client import (
     IDLE_TIMEOUT,
     SNAPSHOT_MAX_DEPTH,
     SOURCE_TIMEOUT,
+    SOURCE_TIMEOUT_SLOW,
     WdaBackend,
     _map_wda_element,
     _map_wda_element_from_query,
@@ -2988,3 +2989,40 @@ class TestConnectionRecovery:
 
         # Connection should have been absent when _get_base_url was called on retry
         assert connections_during_retry["test-udid"] is False
+
+
+class TestSourceTimeoutCoversRealHardware:
+    """The /source timeout is not a latency knob; it is the threshold above
+    which quern destroys the WDA runner.
+
+    `describe_all` treats a timeout as "WDA is hung" and calls `_restart_wda`,
+    which reinstalls the runner through the xcodebuild path. So a value set too
+    low does not produce a slow call -- it produces an empty tree, no error, and
+    a device that cannot be automated until someone relaunches WDA by hand.
+    """
+
+    #: Measured on a physical iPhone 11, iOS 26.6.2, home screen, first call.
+    OBSERVED_IPHONE_11 = 7.52
+
+    def test_a_slow_device_gets_more_than_the_measured_time(self):
+        backend = WdaBackend()
+        backend._device_names["some-udid"] = "iPhone 11"
+        timeout = backend._source_timeout("some-udid")
+        assert timeout > self.OBSERVED_IPHONE_11, (
+            f"an iPhone 11 takes {self.OBSERVED_IPHONE_11}s to answer /source; a "
+            f"{timeout}s budget means every call restarts the driver and returns "
+            f"nothing"
+        )
+
+    def test_a_modern_device_gets_the_shorter_budget(self):
+        """Still shorter than the slow-device value: a modern device that has
+        genuinely hung should be reported sooner. But not so short that an
+        ordinary screen trips it, which is the failure being fixed."""
+        backend = WdaBackend()
+        backend._device_names["some-udid"] = "iPhone 16 Pro"
+        assert backend._source_timeout("some-udid") == SOURCE_TIMEOUT
+        assert SOURCE_TIMEOUT < SOURCE_TIMEOUT_SLOW
+
+    def test_an_unknown_device_uses_the_default(self):
+        backend = WdaBackend()
+        assert backend._source_timeout("never-seen") == SOURCE_TIMEOUT
