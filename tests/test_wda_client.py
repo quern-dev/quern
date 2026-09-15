@@ -284,6 +284,15 @@ def _make_session_backend() -> WdaBackend:
 
     Uses a mock forward_proc (returncode=None → alive) so the cache check
     is a simple process-alive test, not a network /status ping.
+
+    The forward starter is stubbed as well, and that is not belt-and-braces.
+    A cached session is only good until something invalidates it: a request
+    that times out drops the connection and re-establishes, which reaches the
+    real `pymobiledevice3 usbmux forward`. That process outlives the test and
+    squats port 18100, where it silently disables physical-device automation --
+    WDA answers `ready: true` because a forward exists, while every
+    accessibility query returns empty because it points at `test-udid`, which
+    is not a device. Found running on a developer machine; issue #160.
     """
     backend = WdaBackend()
     mock_proc = MagicMock()
@@ -292,6 +301,9 @@ def _make_session_backend() -> WdaBackend:
         base_url="http://localhost:8100",
         forward_proc=mock_proc,
         session_id="test-session",
+    )
+    backend._start_usbmux_forward = AsyncMock(
+        return_value=("http://localhost:8100", mock_proc, 18100),
     )
     return backend
 

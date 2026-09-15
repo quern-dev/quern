@@ -274,3 +274,45 @@ def _no_real_network_settings(monkeypatch):
         "imports detect_and_configure at module scope, so patching "
         "server.proxy.system_proxy binds a name nobody calls."
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_subprocess_spawns(monkeypatch):
+    """Fail any test that spawns a real device-side subprocess.
+
+    `_start_usbmux_forward` runs `pymobiledevice3 usbmux forward 18100 8100
+    --udid <udid>`, and a test reaching it leaves that process **running after
+    the test ends** -- nothing owns it, so it squats port 18100 until someone
+    notices. A leaked one with the literal udid `test-udid` was found holding
+    that port on a developer machine, which silently disables physical-device
+    automation: WDA reports `ready: true` because the forward exists, and every
+    accessibility query comes back empty because it points at a device that
+    does not.
+
+    That is issue #160, and the reason it recurs is that nothing fails when a
+    test spawns one. The path backstop cannot see it (no file is written) and
+    the network guard cannot either (it is not networksetup). Same shape as
+    both: reaching outside the sandbox has to be the thing that fails.
+
+    Recorded and re-raised at teardown, because callers of this path wrap it in
+    their own error handling.
+    """
+    import asyncio
+
+    violations: list[str] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def guarded(program, *args, **kwargs):
+        parts = [str(program), *(str(a) for a in args)]
+        name = parts[0].split("/")[-1]
+        if name.startswith("pymobiledevice3") and "forward" in parts:
+            violations.append(" ".join(parts))
+            raise AssertionError(f"blocked: {' '.join(parts)}")
+        return await real_exec(program, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded)
+    yield
+    assert not violations, (
+        "this test spawned a real usbmux forward, which outlives it and squats "
+        "port 18100 (issue #160): " + "; ".join(violations)
+    )
