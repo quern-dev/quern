@@ -59,6 +59,19 @@ def _find_sdk_tool(name: str, subdir: str = "platform-tools") -> str | None:
     return None
 
 
+#: Failures `am start` reports in its output while still exiting 0.
+#:
+#: "Activity not started" covers an unresolvable intent; "does not exist" is
+#: what an explicit package that is not installed produces. Matched against
+#: stdout and stderr together, because which stream carries it varies by
+#: Android version.
+_AM_START_FAILURES = (
+    "Error: Activity not started",
+    "unable to resolve Intent",
+    "does not exist",
+)
+
+
 class AdbBackend:
     """Manages Android devices and emulators via adb subprocess calls."""
 
@@ -750,7 +763,28 @@ rm -rf /data/local/tmp/tmp-ca-copy
         ]
         if package:
             args.append(package)
-        await self._run_adb_for_device(*args)
+        stdout, stderr = await self._run_adb_for_device(*args)
+
+        # `am start` exits 0 when nothing can handle the intent, and says so
+        # only in its output -- so discarding that made an unhandled URL
+        # byte-for-byte identical to a successful dispatch. iOS raises here,
+        # which is what made the Android silence surprising rather than merely
+        # unhelpful.
+        combined = f"{stdout}\n{stderr}"
+        for marker in _AM_START_FAILURES:
+            if marker in combined:
+                detail = next(
+                    (
+                        line.strip()
+                        for line in combined.splitlines()
+                        if marker in line
+                    ),
+                    combined.strip(),
+                )
+                raise DeviceError(
+                    f"No app on {serial} handled {url}: {detail}",
+                    tool="adb",
+                )
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.

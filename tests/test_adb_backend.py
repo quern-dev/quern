@@ -285,3 +285,68 @@ class TestScreenState:
         assert ("dev", "shell", "input", "keyevent", "224") in calls
         assert ("dev", "shell", "wm", "dismiss-keyguard") in calls
         assert not any("swipe" in c for c in calls)
+
+
+class TestOpenUrlReportsAnUnhandledUrl:
+    """`am start` exits 0 when nothing can handle the intent and says so only
+    in its output, so discarding that output made an unhandled URL
+    byte-for-byte identical to a successful dispatch.
+
+    iOS already raises here -- `simctl openurl` fails loudly -- which is what
+    made the Android silence surprising rather than merely unhelpful. Reported
+    against a Pixel_7 AVD on Android 13.
+    """
+
+    def _backend(self, monkeypatch, stdout, stderr=""):
+        from server.device.adb import AdbBackend
+
+        backend = AdbBackend()
+
+        async def fake(*args):
+            return stdout, stderr
+
+        monkeypatch.setattr(backend, "_run_adb_for_device", fake)
+        return backend
+
+    async def test_an_unresolvable_intent_raises(self, monkeypatch):
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch,
+            "Starting: Intent { act=android.intent.action.VIEW dat=nope://x }\n"
+            "Error: Activity not started, unable to resolve Intent "
+            "{ act=android.intent.action.VIEW dat=nope://x flg=0x10000000 }",
+        )
+        with pytest.raises(DeviceError) as exc:
+            await backend.open_url("emulator-5554", "nope://x")
+        assert "nope://x" in str(exc.value)
+        assert "unable to resolve Intent" in str(exc.value), (
+            "the message should carry adb's own reason, not a paraphrase"
+        )
+
+    async def test_a_missing_explicit_package_raises(self, monkeypatch):
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch,
+            "Error: Activity class {com.nope/com.nope.Main} does not exist.",
+        )
+        with pytest.raises(DeviceError):
+            await backend.open_url("emulator-5554", "https://x/", package="com.nope")
+
+    async def test_a_successful_dispatch_is_silent(self, monkeypatch):
+        """The happy path must stay quiet -- `am start` prints 'Starting:' on
+        success, and treating any output as failure would break every call."""
+        backend = self._backend(
+            monkeypatch,
+            "Starting: Intent { act=android.intent.action.VIEW dat=https://example.com/ }",
+        )
+        await backend.open_url("emulator-5554", "https://example.com/")
+
+    async def test_a_warning_about_something_else_is_not_a_failure(self, monkeypatch):
+        backend = self._backend(
+            monkeypatch,
+            "Starting: Intent { ... }",
+            stderr="Warning: Activity not started, its current task has been brought to the front",
+        )
+        await backend.open_url("emulator-5554", "https://example.com/")

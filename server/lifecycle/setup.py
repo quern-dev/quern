@@ -2213,6 +2213,32 @@ def run_setup() -> int:
                     ))
                     report.print_summary()
                     return 1
+            else:
+                # Declining used to fall through to the block below, which is
+                # commented "we're inside the venv" and reports the check OK.
+                # It is not inside a venv, so the next third-party import ended
+                # setup with `ModuleNotFoundError: No module named 'httpx'` --
+                # several hundred lines from the decision that caused it, and
+                # naming a dependency the user never mentioned.
+                #
+                # This branch is also where an *unaskable* prompt lands: with no
+                # terminal, `_prompt_yn` declines rather than hanging, so a GUI
+                # or piped setup arrives here without anyone having said no.
+                report.add(CheckResult(
+                    name="Virtual env",
+                    status=CheckStatus.ERROR,
+                    message="Declined — nothing further can run",
+                    detail=(
+                        "Quern's dependencies live in the virtualenv, so the "
+                        "checks after this one cannot run without it.\n"
+                        "To create it later:\n"
+                        f"  python3 -m venv {project_root / '.venv'}\n"
+                        f"  source {project_root / '.venv'}/bin/activate\n"
+                        '  pip install -e ".[dev]"'
+                    ),
+                ))
+                report.print_summary()
+                return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(

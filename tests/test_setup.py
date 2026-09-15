@@ -1890,3 +1890,51 @@ class TestOtherQuernOnPath:
         assert result.status is CheckStatus.WARNING
         assert str(clone_copy) in result.detail
         assert "rehash" in result.detail
+
+
+class TestDecliningTheVenvStopsThere:
+    """Answering "no" to the venv prompt used to fall through to the block
+    commented "we're inside the venv", which reports the check OK.
+
+    It is not inside a venv, so the run continued until the first third-party
+    import and died with `ModuleNotFoundError: No module named 'httpx'` --
+    several hundred lines from the decision that caused it, naming a dependency
+    the user never mentioned. A deliberate "no" is not an error to be reported
+    as a missing module.
+
+    This is also where an *unaskable* prompt lands: with no terminal
+    `_prompt_yn` declines rather than hanging, so a GUI or piped setup arrives
+    here without anyone having said anything.
+    """
+
+    def _decline(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup
+
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: False)
+        # Not in a venv.
+        monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+        return setup
+
+    def test_it_exits_nonzero_instead_of_continuing(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        setup = self._decline(monkeypatch, tmp_path)
+        created = []
+        monkeypatch.setattr(
+            setup, "create_venv", lambda *a, **k: created.append(True) or True,
+        )
+
+        rc = setup.run_setup()
+
+        assert rc == 1, "declining was reported as success"
+        assert created == [], "it created a venv after being told not to"
+        out = capsys.readouterr().out
+        assert "Declined" in out, "the summary does not say why it stopped"
+        assert "ModuleNotFoundError" not in out
+        assert "httpx" not in out, (
+            "the failure surfaced as a missing dependency rather than the "
+            "decision that caused it"
+        )
