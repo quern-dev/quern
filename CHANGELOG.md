@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`quern doctor` could hang instead of answering.** The `/tools` endpoint behind it probed every device CLI with no timeout, and `xcrun simctl help` *hangs* rather than erroring while Xcode's first-launch tasks run — which is the normal state of a machine for some minutes after an Xcode upgrade. Every probe is now bounded, and they run concurrently, so one wedged tool no longer holds up the rest.
+- **Tools were reported as working without ever being asked.** `adb`, `idb`, `pymobiledevice3` and the patched `idb_companion` all answered from "a file exists at this path", so a truncated download or a half-extracted archive read as a healthy install — and because the patched companion is preferred over a system one, a broken copy would shadow a working one while claiming to be fine. Each is now run and has to answer. A tool that is present but not responding still reports as unavailable rather than as its own state; that distinction is the remaining half of the work.
+- **An Xcode upgrade under a running server left it using the wrong backend.** Which backend serves simulator UI automation was decided once at startup and never revisited, so when Xcode 27 moved `SimulatorKit` mid-session the server went on routing every tap to a backend that could no longer work — indefinitely, and while its own health endpoint correctly reported that backend unavailable. Any `quern doctor` or `quern status` now re-syncs it, and it is re-checked periodically regardless.
+
 ## [0.18.2] - 2026-09-15
 
 Three fixes, all from the Xcode 27 upgrade, and all of which reported success while doing nothing useful.
