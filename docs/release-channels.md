@@ -197,9 +197,29 @@ The one-shot form, `scripts/release-menubar.sh vN.M.K`, still does everything
 in a single run. It needs the tag and Release to already exist, so it belongs
 at step 6, not step 0.
 
-Both forms need a `notarytool` keychain profile; see
-`macos/QuernMenuBar/README.md` for the one-time credential setup. Use whatever
-name you gave it when you ran `store-credentials`.
+**Where the credentials actually are.** `macos/QuernMenuBar/README.md` covers
+the one-time setup with placeholders; the values in use on the maintainer's
+machine are recorded in the mp3cd project, which established this signing
+setup first and is the reference for it:
+
+    /Volumes/Home/Dev/mp3cd/mp3cd-gpui/CLAUDE.md
+
+In short, and worth knowing before you go looking:
+
+- **Signing identity** — `$SIGNING_IDENTITY`, exported from `~/.zshrc`. That is
+  the value `DEVELOPER_ID_APP` wants, so `DEVELOPER_ID_APP="$SIGNING_IDENTITY"`
+  works once the profile is sourced. `security find-identity -v -p codesigning`
+  lists what the machine actually holds if the variable is missing.
+- **Notarization profile** — `mp3cd-notarize`, a `notarytool` keychain profile.
+  Confirm it still works before starting a release with
+  `xcrun notarytool history --keychain-profile mp3cd-notarize`, which is much
+  faster than finding out at the end of a build.
+
+They are **separate credentials**: signing is a keychain identity, notarizing is
+an Apple ID plus an app-specific password stored under that profile name. Having
+one working tells you nothing about the other, which is the thing that wastes an
+afternoon. Use whatever name you gave it when you ran `store-credentials` if you
+set this up yourself.
 
 **Why the ordering matters:** see the *GitHub quirk* section. Once the Release
 in step 5 exists, you cannot retroactively move any branch to that commit. The
