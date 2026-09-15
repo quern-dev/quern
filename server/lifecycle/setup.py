@@ -2092,6 +2092,29 @@ def _reexec_in_venv(venv_path: Path) -> int:
     return result.returncode
 
 
+def _print_unasked() -> None:
+    """Name the questions nobody was asked, if there were any.
+
+    A function rather than inline at the end of `run_setup`, because the early
+    exits need it too. Without a terminal every prompt declines rather than
+    hanging, so a menu-bar or `curl | bash` setup on a machine with no venv
+    lands on the declined-venv exit *every time* -- and was told it "declined"
+    something it was never asked, with no pointer to run setup where it can be.
+    """
+    if not _UNASKED:
+        return
+    # Named, not counted. "3 questions were skipped" tells the reader they
+    # missed something without telling them what, which is the same dead
+    # end as saying nothing.
+    print("  Setup had no terminal, so these were declined without asking:")
+    for question in _UNASKED:
+        print(f"    • {question}")
+    print()
+    for line in run_it_yourself(["quern", "setup"]):
+        print(f"  {line}")
+    print()
+
+
 def run_setup() -> int:
     """Run the interactive setup. Returns 0 on success, 1 on errors."""
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
@@ -2191,6 +2214,32 @@ def run_setup() -> int:
                             _shutil.rmtree(venv_path)
                             if create_venv(project_root):
                                 return _reexec_in_venv(venv_path)
+                            # The venv has been deleted and not replaced. Falling
+                            # through from here reached the branch below, which
+                            # prints "Virtual environment found but not
+                            # activated" -- of a directory that no longer exists
+                            # -- and then re-execs into it, returning -1 and
+                            # exiting 255 with no summary and no guidance. Same
+                            # shape as the declined-venv fall-through, one branch
+                            # up: a prompt accepted, and execution continuing
+                            # into code that assumes it worked.
+                            report.add(CheckResult(
+                                name="Virtual env",
+                                status=CheckStatus.ERROR,
+                                message=f"Could not recreate the venv with {best}",
+                                detail=(
+                                    f"The previous virtualenv at {venv_path} has "
+                                    "been removed and the replacement could not "
+                                    "be built, so there is no environment to run "
+                                    "in.\nTo build one by hand:\n"
+                                    f"  {best} -m venv {venv_path}\n"
+                                    f"  source {venv_path}/bin/activate\n"
+                                    '  pip install -e ".[dev]"'
+                                ),
+                            ))
+                            report.print_summary()
+                            _print_unasked()
+                            return 1
 
             # Venv exists but not activated — re-exec inside it
             print("    Virtual environment found but not activated.")
@@ -2213,6 +2262,33 @@ def run_setup() -> int:
                     ))
                     report.print_summary()
                     return 1
+            else:
+                # Declining used to fall through to the block below, which is
+                # commented "we're inside the venv" and reports the check OK.
+                # It is not inside a venv, so the next third-party import ended
+                # setup with `ModuleNotFoundError: No module named 'httpx'` --
+                # several hundred lines from the decision that caused it, and
+                # naming a dependency the user never mentioned.
+                #
+                # This branch is also where an *unaskable* prompt lands: with no
+                # terminal, `_prompt_yn` declines rather than hanging, so a GUI
+                # or piped setup arrives here without anyone having said no.
+                report.add(CheckResult(
+                    name="Virtual env",
+                    status=CheckStatus.ERROR,
+                    message="Declined — nothing further can run",
+                    detail=(
+                        "Quern's dependencies live in the virtualenv, so the "
+                        "checks after this one cannot run without it.\n"
+                        "To create it later:\n"
+                        f"  python3 -m venv {project_root / '.venv'}\n"
+                        f"  source {project_root / '.venv'}/bin/activate\n"
+                        '  pip install -e ".[dev]"'
+                    ),
+                ))
+                report.print_summary()
+                _print_unasked()
+                return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(
@@ -2671,17 +2747,7 @@ def run_setup() -> int:
 
     report.print_summary()
 
-    if _UNASKED:
-        # Named, not counted. "3 questions were skipped" tells the reader they
-        # missed something without telling them what, which is the same dead
-        # end as saying nothing.
-        print("  Setup had no terminal, so these were declined without asking:")
-        for question in _UNASKED:
-            print(f"    • {question}")
-        print()
-        for line in run_it_yourself(["quern", "setup"]):
-            print(f"  {line}")
-        print()
+    _print_unasked()
 
     return 1 if report.has_errors else 0
 

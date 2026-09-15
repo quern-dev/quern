@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-15
+
+Four fixes, all the same shape: something failed and reported success, or
+reported it somewhere the reader would never look.
+
+### Fixed
+- **Beta users were being offered a downgrade.** The updater took the newest *prerelease* on the beta channel even when it was older than the newest stable release — the normal state of this repo between beta cycles. With 0.18.0 out and `0.15.0-beta.1` the most recent prerelease, a beta user on 0.18.0 was told `Updating v0.18.0 → v0.15.0-beta.1` and taken back three minor versions, onto a source-only tarball with no menu-bar app. It was also one-way: afterwards the installed version matched what the channel offered, so every later check reported "already up to date" and left them there. The two candidates are now compared and the newer wins. Switching back to stable from a beta build still works, and is the one backwards move that is deliberate; any other is refused rather than applied, because the only thing that produces one is the channel resolving the wrong release.
+- **A recorded Wi-Fi proxy config was invisible.** Recording a physical device's proxy setup writes the config and nothing else — there is no device name to hand — and the response model required one, so building the entry failed and the device was dropped from `proxy_status` entirely. Everything that record exists to feed went with it: whether the config had gone stale, which network it belonged to, and the host, port and address you typed into Settings by hand. The only trace was a log line calling the entry "invalid stored fields", which points at corruption rather than at a field nobody wrote.
+- **`open_url` on Android reported success for a URL nothing could handle.** `am start` exits 0 when no app resolves the intent and says so only in its output, which was discarded — so the response was byte-for-byte identical to a successful launch. iOS has always failed loudly here, which is what made the Android silence surprising rather than merely unhelpful. It now reports adb's own reason.
+- **Declining the virtualenv prompt during setup failed later, somewhere else.** Answering no fell through to code that assumes a virtualenv exists, reported that check as passing, and then ended the run with `ModuleNotFoundError: No module named 'httpx'` — naming a dependency nobody mentioned, hundreds of lines from the decision that caused it. It now stops where the decision was made and says what to run. The same exit also covers a setup with no terminal, where every prompt declines without being asked; that case now names the questions it could not put to you.
+- **A failed virtualenv rebuild no longer leaves you with nothing.** Agreeing to recreate a virtualenv built with an unsupported Python deleted the old one first; if the rebuild then failed, setup announced it was "found but not activated", tried to run inside the directory it had just removed, and exited 255 with no summary and no guidance.
+
+
 ## [0.18.0] - 2026-09-15
 
 Certificate trust is the theme. Quern knew whether a device trusted its CA and
@@ -475,7 +488,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.17.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.18.1...main
+[0.18.1]: https://github.com/quern-dev/quern/releases/tag/v0.18.1
 [0.18.0]: https://github.com/quern-dev/quern/releases/tag/v0.18.0
 [0.17.0]: https://github.com/quern-dev/quern/releases/tag/v0.17.0
 [0.16.1]: https://github.com/quern-dev/quern/releases/tag/v0.16.1

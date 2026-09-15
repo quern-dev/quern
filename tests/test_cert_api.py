@@ -1808,3 +1808,71 @@ class TestStartProxyKeepsItsOldContract:
         r = client.post("/api/v1/proxy/start", headers=auth_headers)
         assert r.status_code == 200, r.text
         adapter.start.assert_awaited_once()
+
+
+class TestARecordedWifiProxyConfigIsVisible:
+    """`record_device_proxy_config` writes the config and nothing else, because
+    it has no device name to hand. That used to make the whole device vanish
+    from `proxy_status`.
+
+    `DeviceCertState.name` was required, so building the response entry raised,
+    `_get_proxy_status` caught it, and the device was dropped -- taking with it
+    everything that record exists to feed: `wifi_proxy_stale`,
+    `active_wifi_network`, and the host, port and client IP the user set up by
+    hand in device Settings. The only trace was a log line calling the entry
+    "invalid stored fields", which sends the reader looking for corruption
+    rather than for a field nobody wrote.
+
+    Found by driving a physical iPhone 11 through the whole Wi-Fi proxy setup
+    and then looking for it in the response.
+    """
+
+    UDID = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_a_nameless_entry_still_appears(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._adapter(app)
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state",
+            lambda: {
+                self.UDID: {
+                    "wifi_proxy_configs": {
+                        "MonaLisaOverdrive": {
+                            "proxy_host": "192.168.1.189",
+                            "proxy_port": 9101,
+                            "client_ip": "192.168.1.160",
+                            "set_at": "2026-09-15T04:40:02+00:00",
+                        },
+                    },
+                },
+            },
+        )
+
+        r = client.get(
+            "/api/v1/proxy/status?include_offline=true", headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+        entry = r.json()["cert_setup"].get(self.UDID)
+        assert entry is not None, "the device was dropped from cert_setup entirely"
+        configs = entry["wifi_proxy_configs"]
+        assert configs["MonaLisaOverdrive"]["client_ip"] == "192.168.1.160", (
+            "the config the user set up by hand is not reported back"
+        )
+        assert entry.get("name") is None, "a name was invented rather than omitted"
