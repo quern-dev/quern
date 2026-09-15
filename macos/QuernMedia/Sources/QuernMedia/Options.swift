@@ -108,7 +108,7 @@ public enum OptionsParser {
 
         var servePort: UInt16?
         if let raw = values["--serve"] {
-            guard let parsed = UInt16(raw) else {
+            guard let parsed = UInt16(raw), parsed > 0 else {
                 throw OptionsError.badValue(flag: "--serve", value: raw)
             }
             servePort = parsed
@@ -132,6 +132,25 @@ public enum OptionsParser {
             )
         }
 
+        // Same shape as --quality above, and the same reasoning: these go to
+        // VTSessionSetProperty or to a bind, and nothing reads the result, so
+        // a nonsense value is accepted in silence and quietly does something
+        // else. --bitrate 0 ran at VideoToolbox's own default; --max-dim -1
+        // meant "native", which is documented as 0; --serve 0 bound an
+        // ephemeral port and then advertised http://127.0.0.1:0/.
+        let bitrate: Int = try number("--bitrate", default: 2_000_000)
+        guard bitrate > 0 else {
+            throw OptionsError.badValue(
+                flag: "--bitrate", value: values["--bitrate"] ?? "\(bitrate)"
+            )
+        }
+        let maxDimension: Int = try number("--max-dim", default: 900)
+        guard maxDimension >= 0 else {
+            throw OptionsError.badValue(
+                flag: "--max-dim", value: values["--max-dim"] ?? "\(maxDimension)"
+            )
+        }
+
         let record = values["--record"]
         let options = Options(
             source: source,
@@ -142,9 +161,9 @@ public enum OptionsParser {
             bindAll: flags.contains("--bind-all"),
             recordPath: record,
             fps: fps,
-            maxDimension: try number("--max-dim", default: 900),
+            maxDimension: maxDimension,
             quality: quality,
-            bitrate: try number("--bitrate", default: 2_000_000)
+            bitrate: bitrate
         )
 
         // A headless producer with no sink would capture frames and discard

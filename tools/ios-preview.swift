@@ -762,6 +762,15 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        // `cancel()` is asynchronous, so a response already dispatched can
+        // land after stop() returned. Downstream identity checks happen to
+        // catch it today; not firing callbacks for a stopped client is the
+        // guarantee this class should be making itself.
+        guard !isStopped else {
+            completionHandler(.cancel)
+            return
+        }
+
         // The acknowledgement signal. Deliberately not "first frame": the
         // simulator framebuffer is event-driven and costs nothing while idle,
         // so a simulator sitting on a static screen sends no frames at all and
@@ -782,6 +791,7 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
     func urlSession(
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
+        guard !isStopped else { return }
         buffer.append(data)
         extractFrames()
         if buffer.count > Self.maxBuffer {

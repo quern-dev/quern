@@ -39,7 +39,11 @@ public final class H264Encoder {
     public init(maxDimension: Int, bitrate: Int, expectedFPS: Double) {
         self.maxDimension = maxDimension
         self.bitrate = bitrate
-        self.expectedFPS = max(expectedFPS, 1)
+        // Normalized here so every later use is sane, not just the one that
+        // traps. `max(nan, 1)` is nan, which then reached
+        // kVTCompressionPropertyKey_ExpectedFrameRate, whose result nothing
+        // checks -- silent acceptance rather than a crash.
+        self.expectedFPS = expectedFPS.isFinite ? min(max(expectedFPS, 1), 600) : 30
     }
 
     deinit { invalidate() }
