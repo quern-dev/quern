@@ -24,6 +24,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.device import ax_recovery, probing
+from server.device.tool_probe import probe_stdout
 from server.models import SimBridgeSaturatedError
 
 logger = logging.getLogger("quern-debug-server.sim-bridge")
@@ -147,20 +148,16 @@ class SimBridgeManager:
             return False
         if _find_source() is None:
             return False
-        # Check for Xcode (need private frameworks)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "xcode-select", "-p",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            dev_dir = stdout.decode().strip()
-            if not dev_dir:
-                return False
-            return find_simulator_kit(dev_dir) is not None
-        except Exception:
+        # Check for Xcode (need private frameworks). Bounded: `xcode-select`
+        # is normally instant, but every probe in check_tools() shares one
+        # budget now and an unbounded one holds up the whole set (#180).
+        out = await probe_stdout("xcode-select", "-p", tool="xcode-select")
+        if out is None:
             return False
+        dev_dir = out.strip()
+        if not dev_dir:
+            return False
+        return find_simulator_kit(dev_dir) is not None
 
     async def ensure_binary(self) -> Path:
         """Lazy-compile sim-bridge if needed. Returns path to binary."""

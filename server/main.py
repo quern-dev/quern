@@ -293,9 +293,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
-    tools = await device_controller.check_tools()
+    tools = await device_controller.check_tools(adopt=True)
     logger.info("Device tools: %s", tools)
-    device_controller._sim_bridge_ok = tools.get("sim_bridge", False)
     if tools.get("sim_bridge"):
         logger.info("sim-bridge available — using native simulator UI backend")
     else:
@@ -388,6 +387,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
+    # Re-probe the simulator UI backend periodically. Selection used to be
+    # latched at startup and never revisited, so an Xcode upgrade under a
+    # running server left every tap routed to a backend that could no longer
+    # work -- indefinitely, and while /tools reported the correct answer
+    # (#179). A /tools call re-syncs it too; this covers nobody asking.
+    async def _resync_sim_bridge() -> None:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await device_controller.refresh_sim_bridge_availability(max_age=0)
+            except Exception:
+                logger.debug("sim-bridge re-probe failed", exc_info=True)
+
+    sim_bridge_resync_task = asyncio.create_task(_resync_sim_bridge())
+
     # Launch proxy watchdog if proxy is enabled
     watchdog_task = None
     if app.state.enable_proxy:
@@ -434,7 +448,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
-    for task in (watchdog_task, update_check_task, network_monitor_task):
+    for task in (
+        watchdog_task, update_check_task, network_monitor_task,
+        sim_bridge_resync_task,
+    ):
         if task and not task.done():
             task.cancel()
             try:
@@ -670,7 +687,7 @@ fetch('/api/v1/device/list', {
         tools_status: dict = {}
         cache_stats: dict = {}
         if hasattr(app.state, "device_controller") and app.state.device_controller:
-            tools_status = await app.state.device_controller.check_tools()
+            tools_status = await app.state.device_controller.check_tools(adopt=True)
             cache_stats = app.state.device_controller.get_cache_stats()
         # Availability flags only. The per-site inventory carries absolute
         # paths -- account names and filesystem layout -- and lives behind auth

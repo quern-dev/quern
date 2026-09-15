@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from server.device._xcode import xcode_available
+from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.simctl")
@@ -66,27 +67,18 @@ class SimctlBackend:
         """
         if not xcode_available():
             return False
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "xcrun", "simctl", "help",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-            if proc.returncode == 0:
-                return True
-            # xcrun exists but simctl failed — check for stale developer dir
-            logger.warning(
-                "xcrun simctl failed — this often happens when Xcode has been "
-                "renamed or moved. Run 'xcode-select -p' to check the current "
-                "developer directory, and 'sudo xcode-select -s /path/to/Xcode.app"
-                "/Contents/Developer' to fix it."
-            )
-            return False
-        except FileNotFoundError:
-            return False
-        except Exception:
-            return False
+        if await probe_command("xcrun", "simctl", "help", tool="simctl"):
+            return True
+        # Present but not answering. The probe already logged a timeout if that
+        # is what happened; this covers the other way it fails, which looks
+        # identical from here and has a specific fix.
+        logger.warning(
+            "xcrun simctl failed — this often happens when Xcode has been "
+            "renamed or moved. Run 'xcode-select -p' to check the current "
+            "developer directory, and 'sudo xcode-select -s /path/to/Xcode.app"
+            "/Contents/Developer' to fix it."
+        )
+        return False
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List all simulators by parsing simctl list devices --json.
