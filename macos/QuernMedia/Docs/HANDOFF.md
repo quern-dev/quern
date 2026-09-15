@@ -46,29 +46,103 @@ Sessions are keyed by identity, not by name: `AVCaptureDevice.uniqueID` for a
 capture device, a udid for a simulator. `PreviewManager.add()` accepts a
 device name, a device ID or a simulator udid and works out which it is.
 
-## Next, in order
+## Work items
 
-1. **WDA supervision (#159).** Quern has none. The runner died three times
-   in one session.
-2. **Wifi devices (#163) — re-diagnosed, and harder than it looked.** The
-   original theory (quern reads the tunnel address from the wrong place) is
-   wrong, and the suggested devicectl fallback cannot work. See the issue
-   comment for the measurements. Short version: tunneld *does* discover wifi
-   devices and build tunnels for them, but those tunnels have a **median
-   lifetime of 2.0 seconds** across 11,587 of them, against 32s for USB and
-   13+ hours for the one live wired tunnel. `devicectl device info details`
-   does report `connectionProperties.tunnelIPAddress`, but that tunnel only
-   lives as long as the devicectl process — probing the address from another
-   process immediately afterwards gives "No route to host". The real work is
-   finding out why Network-transport tunnels churn, given one in the log
-   managed 13.7 hours.
-3. **Recorder and stream through one capture.** `StreamPipeline` already fans
-   out to sinks; the preview path currently uses only the HTTP one.
+The list. Anything deferred lands here rather than in a commit message
+nobody re-reads. Ordered within each group; groups are not ordered against
+each other.
 
-`ios-preview --interactive`'s window layer is still AppKit and still separate
-from `quern-media`, which stays headless. That split is deliberate.
+### Blocking the merge of #164
 
-Then: Android on-device encoder, and the video-anchored timeline.
+- [ ] **`075602f` has never had a CodeRabbit full pass.** Three attempts:
+      one refused on the OSS review limit, two accepted and silently never
+      ran. Two review agents covered `a00eeb2` instead and found nine real
+      problems, so the gap is partly filled, but `075602f` itself is
+      unreviewed. Confirm a review actually *started* before waiting on one —
+      the acknowledgement body says `Reviews are available now` when it did
+      and carries an `Action not completed` block when it did not, and the
+      walkthrough's "Review limit reached" banner is a stale edit that lies.
+
+### Product work
+
+- [ ] **A viewer attaching to an idle simulator sees ~14s of black.**
+      `multipart/x-mixed-replace` makes URLSession deliver a "response" per
+      part, so the add acknowledgement is in practice gated on the first
+      frame rather than the HTTP header — and an idle simulator composites
+      nothing. Fix: cache the last payload in `HTTPStreamServer` and write it
+      to a newly streaming client. Valid for MJPEG, where every frame stands
+      alone; H.264 needs the existing `onClientAttached` keyframe request
+      instead. This also removes the acknowledgement latency.
+- [ ] **No client-side liveness bound on a stream.** Both URLSession
+      timeouts are unbounded, which is correct — a 15s inactivity timeout
+      killed idle previews — but it means only a peer that *closes* the
+      connection is detected. A dropped network or a wedged `quern-media`
+      leaves the window on its last frame with the server still believing the
+      preview is live. Fix: an idle watchdog in `MJPEGClient` plus a periodic
+      keepalive part from `HTTPStreamServer`, since a transport timeout
+      cannot tell "idle" from "gone".
+- [ ] **WDA supervision (#159).** Quern has none. The runner died three
+      times in one session.
+- [ ] **Wifi devices (#163) — re-diagnosed, and harder than it looked.** The
+      original theory (quern reads the tunnel address from the wrong place)
+      is wrong, and the suggested devicectl fallback cannot work. tunneld
+      *does* discover wifi devices and build tunnels for them, but those
+      tunnels have a **median lifetime of 2.0 seconds** across 11,587 of
+      them, against 32s for USB and 13+ hours for the one live wired tunnel.
+      `devicectl device info details` does report
+      `connectionProperties.tunnelIPAddress`, but that tunnel only lives as
+      long as the devicectl process. The real work is finding out why
+      Network-transport tunnels churn, given one in the log managed 13.7
+      hours. Measurements are on the issue.
+- [ ] **Recorder and stream through one capture.** `StreamPipeline` already
+      fans out to sinks; the preview path uses only the HTTP one.
+- [ ] Android on-device encoder, and the video-anchored timeline.
+
+### Known defects, deferred with reasons
+
+- [ ] **A failed `SimulatorFramebuffer.start()` leaves the successful half
+      registered.** If `register(on:)` throws for the second descriptor the
+      first stays registered and the state stays populated, with no `stop()`
+      to undo it. Harmless in `quern-media`, which exits; a library caller
+      that retries double-registers. Pre-existing.
+- [ ] **A concurrent second `stop()` returns before the first has finished
+      cleaning up.** Deliberately not fixed with a lock: a main-thread
+      `stop()` holding it inside `queue.sync`, while an `onFrame`-thread
+      `stop()` waits for it, deadlocks. The `stopped` flag is already set
+      before the early return, so frames are suppressed either way.
+- [ ] **`Recorder.finish()` discards the frame counts when it returns nil.**
+      A caller reporting a failed recording cannot say how much was in it.
+- [ ] **`MJPEGClient.buffer` and `announced` are unguarded** on the grounds
+      that only URLSession's serial delegate queue touches them. Verified
+      true today and enforced by nothing — a future `reconnect()` breaks it
+      silently.
+- [ ] **`Recorder.finishWritingOverride` is `internal`, not test-scoped**, so
+      anything in the module can swap the writer out.
+
+### Test coverage gaps
+
+- [ ] **`tools/ios-preview.swift` has no test target at all.** It is a
+      single-file `swiftc` script, which is why the 15s idle-preview defect
+      shipped. The MJPEG frame parser and the session-key resolution are both
+      pure functions that would test cheaply if the file were split.
+- [ ] **`ShutdownGuard` and the exit-status propagation are untested** — the
+      type lives in the executable target and nothing imports it.
+- [ ] **`HTTPStreamServer.StartFailure` is untested.** Neither `.notReady`
+      nor `.listenerFailed` appears in any test, though "a bind failure was
+      only logged, so a server that never came up still looked started" was
+      half the reason for the `.ready` wait. A test needs a reliably
+      unbindable port, which `allowLocalEndpointReuse` makes awkward.
+- [ ] **`RecordingSink.failure`** is public API with no test.
+
+### Decided against
+
+- **Porting `ios-preview --interactive`'s window layer into `quern-media`.**
+  The engine stays headless; the AppKit half stays where it is. Consolidating
+  would mean re-deriving the acknowledgement timing and inventing a simulator
+  enumeration source, to rewrite a feature nobody has complained about.
+- **Decoding WDA's MJPEG back to surfaces** to make it fit `FrameSource`.
+  That discards the only advantage an already-encoded source has. See
+  `Docs/source-options.md`.
 
 ## Traps that cost time — do not rediscover these
 
