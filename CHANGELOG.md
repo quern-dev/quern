@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Xcode 27 could not build WebDriverAgent at all, so physical devices stopped working.** Upstream WebDriverAgent declares an `IPHONEOS_DEPLOYMENT_TARGET` of 13.0 and Xcode 27 accepts nothing below 15.0, so every build failed in both `WebDriverAgentRunner` and `WebDriverAgentLib`. The failure was masked for existing users, because the build is skipped when the signing team already matches — a stale build from an older Xcode kept working right up until something forced a rebuild, and the forced path wipes derived data before building, so there was then nothing left to fall back on. Builds now pass the floor on the command line, where it reaches every target in the graph.
+
 ## [0.18.1] - 2026-09-15
 
 Four fixes, all the same shape: something failed and reported success, or
