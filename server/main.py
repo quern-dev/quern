@@ -361,6 +361,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.debug("Device warmup failed (non-fatal)", exc_info=True)
             return
+        # Local capture routes traffic through the proxy with no gate on this
+        # path -- the process list comes from config.json, written by a CLI
+        # command in an earlier process. Warn rather than refuse; see the
+        # function's docstring for why booting cannot be the thing that fails.
+        try:
+            from server.proxy.cert_preflight import warn_if_capture_lacks_trust
+
+            await warn_if_capture_lacks_trust(
+                device_controller, app.state.local_capture_processes,
+            )
+        except Exception:
+            logger.debug("Could not check CA trust at startup", exc_info=True)
+
         try:
             device_controller.refresh_active_device()
         except OSError:

@@ -16,6 +16,7 @@ from server.proxy.cert_preflight import (
     refusal_detail,
     simulators_without_cert,
     trust_is_stale,
+    warn_if_capture_lacks_trust,
 )
 
 
@@ -395,3 +396,46 @@ class TestOneUncheckableDeviceDoesNotUnRefuseTheRest:
         with self._trust_raising_on("BOOM", {}):
             missing = await simulators_without_cert(_Ctrl([_sim(udid="BOOM")]))
         assert missing == []
+
+
+class TestTheStartupPathSaysSomething:
+    """`quern enable-local-capture` writes config.json and the lifespan starts
+    the adapter from it, so nothing on that route passes the capture gate.
+
+    It cannot be gated the way the endpoints are -- there is no request to
+    refuse, and refusing to boot the server over one device's certificate is a
+    worse outcome than the failure it would prevent. So the requirement is only
+    that the state is no longer silent: before this, the server started
+    cleanly, printed `Local capture: MyApp`, captured nothing decryptable, and
+    said so only in `proxy_status`, which the person who ran the CLI never sees.
+    """
+
+    async def test_it_warns_when_capture_is_on_and_the_ca_is_not_trusted(
+        self, monkeypatch, caplog
+    ):
+        ctrl = _Ctrl([_sim()])
+        with _trust({"AAAA": False}):
+            with caplog.at_level("WARNING"):
+                missing = await warn_if_capture_lacks_trust(ctrl, ["MyApp"])
+        assert [d["udid"] for d in missing] == ["AAAA"]
+        assert "do(es) not trust" in caplog.text
+        assert "iPhone 16 Pro" in caplog.text, "the warning has to name the device"
+        assert "MyApp" in caplog.text, "and what is being captured"
+
+    async def test_it_is_quiet_when_the_ca_is_trusted(self, caplog):
+        ctrl = _Ctrl([_sim()])
+        with _trust({"AAAA": True}):
+            with caplog.at_level("WARNING"):
+                missing = await warn_if_capture_lacks_trust(ctrl, ["MyApp"])
+        assert missing == []
+        assert caplog.text == "", "a warning on the healthy path is noise"
+
+    async def test_it_does_not_ask_when_capture_is_off(self, caplog):
+        """The check costs a TrustStore query per booted simulator. With no
+        capture configured there is nothing to warn about, and warning anyway
+        would fire on every server start on every machine."""
+        ctrl = _Ctrl([_sim()])
+        with _trust({"AAAA": False}):
+            missing = await warn_if_capture_lacks_trust(ctrl, [])
+        assert missing == []
+        ctrl.list_devices.assert_not_awaited()

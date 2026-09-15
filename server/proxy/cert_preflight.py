@@ -134,9 +134,55 @@ def refusal_detail(missing: list[dict[str, str]]) -> dict:
             {
                 "action": "skip_cert_check",
                 "detail": (
-                    "Pass skip_cert_check to configure the proxy anyway -- "
-                    "correct when you are deliberately exercising TLS failure."
+                    "Pass skip_cert_check to proceed anyway -- correct when "
+                    "you are deliberately exercising TLS failure. Three "
+                    "endpoints share this refusal, so it does not name one."
                 ),
             },
         ],
     }
+
+
+async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[dict[str, str]]:
+    """Say so at startup when local capture is on and the CA is not trusted.
+
+    The boot-time counterpart to `_ensure_ca_is_trusted`, and deliberately a
+    weaker thing: it warns where the gate refuses.
+
+    It has to be weaker. The two API paths that begin routing can refuse,
+    because the caller is right there and a 428 is an answer to a request. This
+    path has no request. `quern enable-local-capture` writes `config.json` and
+    tells you to restart, and the lifespan builds the adapter from that file --
+    so by the time anyone can check trust, the decision was made in a previous
+    process, possibly days ago, against simulators that were not booted then.
+    Refusing to start the server over a certificate would take the whole debug
+    server down for a condition affecting one device, which is a worse outcome
+    than the silent HTTPS failure it would prevent.
+
+    So the point is only that the state stops being silent. Before this,
+    `quern enable-local-capture MyApp` against an untrusting simulator produced
+    a server that started cleanly, printed `Local capture: MyApp`, and captured
+    nothing decryptable -- with the sole report of the condition being a
+    `capture_without_cert` warning in `proxy_status`, which is HTTP-only and so
+    invisible to the person who ran the CLI command.
+
+    Returns the untrusting devices so a caller can test the decision rather
+    than the log line.
+    """
+    if not processes:
+        return []
+
+    missing = await simulators_without_cert(controller)
+    if not missing:
+        return []
+
+    logger.warning(
+        "Local capture is enabled for %s, but %s do(es) not trust the mitmproxy "
+        "CA. Every HTTPS request from those simulators will fail, and nothing in "
+        "the app will point at the proxy as the cause. Install it with the "
+        "install_proxy_cert tool, or run `quern set-auto-install-cert on` to have "
+        "Quern handle it from now on.",
+        ", ".join(processes),
+        ", ".join(f"{d['name']} ({d['udid'][:8]})" for d in missing),
+    )
+    return missing
