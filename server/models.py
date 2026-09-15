@@ -497,8 +497,13 @@ class StartProxyRequest(BaseModel):
 
     port: int | None = None
     listen_host: str | None = None
-    system_proxy: bool = False
+    system_proxy: bool | None = None
     """Configure the macOS system proxy as part of starting.
+
+    Optional rather than defaulted so an explicit ``null`` keeps meaning "not
+    requested". The untyped body this replaced read it with
+    ``body.get("system_proxy") is not None``, so a client sending null got a
+    listener and no system proxy; a plain ``bool`` turns that into a 422.
 
     Starting the listener alone routes nothing, which is why this endpoint was
     never gated. With this flag it calls the same `detect_and_configure` that

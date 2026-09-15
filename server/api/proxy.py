@@ -339,7 +339,7 @@ async def start_proxy(
     if adapter.is_running:
         raise HTTPException(status_code=409, detail="Proxy is already running")
 
-    want_system_proxy = body.system_proxy if body else False
+    want_system_proxy = bool(body.system_proxy) if body else False
 
     # Before anything is started. The gate raises, and refusing a request after
     # having started the listener would leave a side effect behind on the path

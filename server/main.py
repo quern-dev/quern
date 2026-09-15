@@ -450,6 +450,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown WDA client (cancels idle task, deletes sessions, kills port-forwards)
     # Note: does NOT kill xcodebuild processes — they persist across restarts
+    warmup = getattr(app.state, "_warmup_task", None)
+    if warmup and not warmup.done():
+        # It used to only warm caches, where an abrupt teardown cost nothing.
+        # It now installs a CA and then records that it did, and losing the
+        # loop between those two steps leaves the TrustStore holding a
+        # certificate that cert-state.json says is absent.
+        warmup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warmup
+
     if device_controller:
         await device_controller.wda_client.close()
 
@@ -1444,10 +1454,12 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
     It is not a human-only path: an agent has a shell, and the agent guide names
     this command.
 
-    Runs the preflight in-process rather than through the API. A `DeviceController`
-    is an object graph with no I/O in its constructor, and the whole check costs
-    under a second against five booted devices, so the CLI does not need an
-    authenticated HTTP client to ask the question the endpoints ask.
+    Runs the preflight in-process rather than through the API, so the CLI does
+    not need an authenticated HTTP client it has nowhere else. A
+    `DeviceController` costs almost nothing to build -- it reads the
+    active-device sidecar and nothing else -- and the check itself is about
+    0.9s, near enough all of it `list_devices()` enumerating simulators. That
+    is paid on every run of this command, booted simulators or not.
 
     Exits non-zero rather than returning, so a script or an agent that ignores
     the text still sees the failure.
@@ -1459,7 +1471,16 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
 
     from server.config import get_auto_install_cert
     from server.device.controller import DeviceController
+    from server.proxy import cert_manager
     from server.proxy.cert_preflight import simulators_without_cert
+
+    # No CA yet means no trust to check and nothing anyone could install. It is
+    # generated on the first proxy start (see lifecycle/setup.py), so on a fresh
+    # machine this command legitimately runs before it exists -- and refusing
+    # there would offer three resolutions of which two are impossible and the
+    # third reads as a workaround. `device.py` guards the same way.
+    if not cert_manager.get_cert_path().exists():
+        return
 
     async def _check():
         controller = DeviceController()
@@ -1521,18 +1542,24 @@ def _cmd_enable_local_capture(
     """Enable local capture mode for specific processes."""
     processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
 
+    current = get_local_capture_processes()
+    if current == processes:
+        # Before the gate on purpose. This command changes nothing, so there is
+        # no new routing to refuse -- and refusing here would contradict a
+        # config.json that already says capture is on, while the server carries
+        # on capturing. With auto_install_cert set it would also install a root
+        # CA on behalf of a no-op.
+        print(f"Local capture is already enabled for: {', '.join(processes)}")
+        return
+
     # Before the write. Refusing after config.json has changed would leave the
     # refusal and the persisted state disagreeing.
     _local_capture_cert_gate(processes, skip_cert_check)
 
-    current = get_local_capture_processes()
     removed = [p for p in current if p not in processes]
     if removed:
         print(f"  Removing from capture: {', '.join(removed)}")
         print("  (this sets the list rather than adding to it)")
-    if current == processes:
-        print(f"Local capture is already enabled for: {', '.join(processes)}")
-        return
 
     print("Enabling local capture mode.")
     print("This uses a macOS System Extension (mitmproxy-macos) to transparently")

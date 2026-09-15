@@ -1612,7 +1612,11 @@ class TestStartingTheSystemProxyIsGatedToo:
         self._no_trust(monkeypatch)
         monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
         monkeypatch.setattr(
-            "server.proxy.system_proxy.detect_and_configure", lambda *a, **k: None
+            # `server/api/proxy.py` does a module-scope `from ... import
+            # detect_and_configure`, so patching the source module leaves the
+            # handler calling the real one -- which shells out to networksetup
+            # and reconfigures the developer's Mac.
+            "server.api.proxy.detect_and_configure", lambda *a, **k: None
         )
 
         r = client.post(
@@ -1665,7 +1669,11 @@ class TestAutoInstallCertClearsEveryHttpGate:
     @pytest.fixture(autouse=True)
     def _no_real_system_proxy(self, monkeypatch):
         monkeypatch.setattr(
-            "server.proxy.system_proxy.detect_and_configure", lambda *a, **k: None
+            # `server/api/proxy.py` does a module-scope `from ... import
+            # detect_and_configure`, so patching the source module leaves the
+            # handler calling the real one -- which shells out to networksetup
+            # and reconfigures the developer's Mac.
+            "server.api.proxy.detect_and_configure", lambda *a, **k: None
         )
 
     def _adapter(self, app):
@@ -1741,3 +1749,62 @@ class TestAutoInstallCertClearsEveryHttpGate:
         )
         assert r.status_code == 500
         assert "auto_install_cert is set" in r.text
+
+
+class TestStartProxyKeepsItsOldContract:
+    """`body: dict` became a model, which is a behaviour change on a live
+    endpoint. These pin the parts that must not move."""
+
+    def _adapter(self, app):
+        adapter = MagicMock()
+        adapter.is_running = False
+        adapter.listen_host = "0.0.0.0"
+        adapter.listen_port = 9101
+        adapter.started_at = None
+        adapter._intercept_pattern = None
+        adapter._active_filter = None
+        adapter._mock_rules = []
+        adapter._held_flows = {}
+        adapter._error = None
+        adapter.get_bypass_patterns = MagicMock(return_value=[])
+        adapter.reconfigure = MagicMock()
+        adapter.stop = AsyncMock()
+        adapter.start = AsyncMock()
+        app.state.proxy_adapter = adapter
+        app.state.local_capture_processes = []
+        return adapter
+
+    def test_an_explicit_null_still_means_not_requested(
+        self, client, auth_headers, app
+    ):
+        """The old reader was `body.get("system_proxy") is not None`, so null
+        started a listener and left the system proxy alone. A plain `bool`
+        would 422 an external script that has been sending it for months."""
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/start", json={"system_proxy": None}, headers=auth_headers,
+        )
+        assert r.status_code == 200, r.text
+
+    def test_the_string_false_does_not_start_the_system_proxy(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        self._adapter(app)
+        called = []
+        monkeypatch.setattr(
+            "server.api.proxy.detect_and_configure",
+            lambda *a, **k: called.append(True),
+        )
+        r = client.post(
+            "/api/v1/proxy/start",
+            json={"system_proxy": "false"},
+            headers=auth_headers,
+        )
+        assert r.status_code in (200, 422), r.text
+        assert called == [], "the string 'false' configured the system proxy"
+
+    def test_a_bare_start_is_unchanged(self, client, auth_headers, app):
+        adapter = self._adapter(app)
+        r = client.post("/api/v1/proxy/start", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        adapter.start.assert_awaited_once()

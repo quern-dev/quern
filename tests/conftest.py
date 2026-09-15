@@ -219,3 +219,58 @@ def _default_xcode_available(monkeypatch):
         "server.lifecycle.setup.xcode_available",
     ):
         monkeypatch.setattr(path, _make_stub())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network_settings(monkeypatch):
+    """Fail any test that reconfigures the machine's network.
+
+    The path backstop above cannot see this: `networksetup` writes to system
+    preferences, not to a file the suite watches. Three tests reached it for a
+    week -- they patched `server.proxy.system_proxy.detect_and_configure` while
+    the handler does a module-scope `from ... import detect_and_configure`, so
+    the patch bound a name nobody calls and the real one ran.
+
+    It is the worse half of that class, too. `configure_system_proxy` records
+    what it changed through `update_state`, which the suite redirects to a temp
+    directory -- so the setting was applied to the real machine and the record
+    of it went somewhere that gets deleted. Quern's own `restore_from_state`
+    then has nothing to restore from, and the developer is left with an
+    interface pointed at a proxy that stops existing when the suite does.
+
+    Reads are left alone: `-getwebproxy` and friends are harmless, and
+    `detect_active_interface` legitimately runs during status checks.
+
+    The violation is recorded and re-raised at teardown, not only raised in
+    place. Both call sites wrap the configure in `except Exception` and log a
+    warning, so raising alone is swallowed by the code under test and the guard
+    reports nothing -- which is exactly what happened the first time this was
+    written. Raising still blocks the real call; the teardown is what makes it
+    a failure.
+    """
+    import subprocess
+
+    violations: list[str] = []
+    real_run = subprocess.run
+    _SETTERS = ("-setwebproxy", "-setsecurewebproxy", "-setwebproxystate",
+                "-setsecurewebproxystate", "-setproxybypassdomains",
+                "-setautoproxyurl", "-setautoproxystate")
+
+    def guarded(cmd, *args, **kwargs):
+        argv = cmd if isinstance(cmd, (list, tuple)) else [cmd]
+        parts = [str(a) for a in argv]
+        if parts and parts[0].split("/")[-1] == "networksetup":
+            if any(p in _SETTERS for p in parts):
+                violations.append(" ".join(parts))
+                raise AssertionError(f"blocked: {' '.join(parts)}")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded)
+    yield
+    assert not violations, (
+        "this test tried to change the machine's network settings: "
+        + "; ".join(violations)
+        + ". Patch the name the caller actually uses -- server/api/proxy.py "
+        "imports detect_and_configure at module scope, so patching "
+        "server.proxy.system_proxy binds a name nobody calls."
+    )

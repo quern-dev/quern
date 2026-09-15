@@ -547,8 +547,12 @@ refusal exists to prevent.`,
         .string()
         .optional()
         .describe("Host to listen on (default: 0.0.0.0)"),
+      // Accepts a real boolean or the two string spellings, and nothing else.
+      // `z.coerce.boolean()` was wrong in the dangerous direction -- every
+      // non-empty string is truthy, so "false" turned the system proxy ON --
+      // and a plain `z.boolean()` would reject "true", which used to work.
       system_proxy: z
-        .coerce.boolean()
+        .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
         .optional()
         .describe(
           "Configure macOS system proxy automatically (default: false). Only set to true if you need immediate capture without manual control. With this set, the call takes the same certificate check as configure_system_proxy and can refuse with 428 -- starting the listener alone routes nothing and is never refused."

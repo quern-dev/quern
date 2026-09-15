@@ -473,6 +473,28 @@ class TestTheStartupPathSaysSomething:
             "reports nothing anywhere the CLI user can see it"
         )
 
+        # One frame out, and the same bug. The check lives inside
+        # `_warmup_devices`, which is only ever reached because something
+        # schedules it -- replacing `create_task(_warmup_devices())` with `None`
+        # left the whole startup path dead and every test green.
+        scheduled = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (getattr(func, "attr", None) or getattr(func, "id", None)) != "create_task":
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Call):
+                    scheduled.add(
+                        getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
+                    )
+
+        assert "_warmup_devices" in scheduled, (
+            "nothing schedules _warmup_devices, so the startup cert check never "
+            "runs no matter what it contains"
+        )
+
 
 class TestTheCliCommandIsGatedToo:
     """`quern enable-local-capture` is the fourth routing boundary.
@@ -484,6 +506,26 @@ class TestTheCliCommandIsGatedToo:
     I/O to construct -- so the CLI does not need an HTTP client to ask the same
     question the endpoints ask.
     """
+
+    @pytest.fixture(autouse=True)
+    def _machine_state(self, monkeypatch, tmp_path):
+        """Pin what the CLI gate reads off the machine.
+
+        Two dependencies, both introduced by this branch and both invisible
+        locally. The CA-existence guard means these tests would pass on a
+        developer's Mac (which has ~/.mitmproxy) and fail on CI (which does
+        not), reporting the opposite of the behaviour under test. And the gate
+        now runs after the no-op early return, so a sibling test that persists
+        a capture list into the sandboxed config.json makes this one skip the
+        gate entirely -- which is how it passed alone and failed in the suite.
+        """
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\n")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        from server import main
+
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
 
     def _refuses(self, monkeypatch, missing):
         async def _missing(_controller):
@@ -597,6 +639,26 @@ class TestAutoInstallCertClearsEveryGate:
     def _consent(self, monkeypatch):
         monkeypatch.setattr("server.config.get_auto_install_cert", lambda: True)
 
+    @pytest.fixture(autouse=True)
+    def _machine_state(self, monkeypatch, tmp_path):
+        """Pin what the CLI gate reads off the machine.
+
+        Two dependencies, both introduced by this branch and both invisible
+        locally. The CA-existence guard means these tests would pass on a
+        developer's Mac (which has ~/.mitmproxy) and fail on CI (which does
+        not), reporting the opposite of the behaviour under test. And the gate
+        now runs after the no-op early return, so a sibling test that persists
+        a capture list into the sandboxed config.json makes this one skip the
+        gate entirely -- which is how it passed alone and failed in the suite.
+        """
+        ca = tmp_path / "mitmproxy-ca-cert.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\n")
+        monkeypatch.setattr("server.proxy.cert_manager.get_cert_path", lambda: ca)
+        from server import main
+
+        monkeypatch.setattr(main, "get_local_capture_processes", lambda: [])
+        monkeypatch.setattr(main, "read_state", lambda: None)
+
     @pytest.fixture
     def _untrusting(self, monkeypatch):
         async def _missing(_controller):
@@ -679,3 +741,55 @@ class TestAutoInstallCertClearsEveryGate:
         assert exc.value.code == 1
         assert wrote == [], "capture was enabled after the install failed"
         assert "installing the CA failed" in capsys.readouterr().out
+
+    def test_it_does_not_refuse_before_the_ca_exists(self, monkeypatch, tmp_path):
+        """The CA is generated on the first proxy start, so a fresh machine
+        reaches this command without one -- which is the ordering the README's
+        own example implies.
+
+        Refusing there would name three ways out of which two cannot be done:
+        you cannot install a CA that has not been generated, and
+        `set-auto-install-cert on` would then fail on the same missing file.
+        Shipping a refusal whose resolutions are unreachable is the exact bug
+        this branch exists to fix.
+        """
+        from server import main
+
+        called = []
+
+        async def _missing(_controller):
+            called.append(True)
+            return [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}]
+
+        monkeypatch.setattr(
+            "server.proxy.cert_preflight.simulators_without_cert", _missing
+        )
+        monkeypatch.setattr(
+            "server.proxy.cert_manager.get_cert_path",
+            lambda: tmp_path / "nope" / "mitmproxy-ca-cert.pem",
+        )  # overrides _machine_state
+        # No SystemExit, and it does not even ask.
+        main._local_capture_cert_gate(["MyApp"], skip_cert_check=False)
+        assert called == [], "it queried devices about a CA that does not exist"
+
+    def test_the_skip_flag_is_wired_from_the_command_line(self, monkeypatch):
+        """Dropping `args.skip_cert_check` at the dispatch left the whole suite
+        green: the flag was parsed, documented and honoured by the function,
+        with nothing pinning the wire between them."""
+        import sys
+
+        from server import main
+
+        seen = {}
+        monkeypatch.setattr(
+            main, "_cmd_enable_local_capture",
+            lambda processes, skip=False, **kw: seen.update(
+                processes=processes, skip=skip or kw.get("skip_cert_check", False)
+            ),
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["quern", "enable-local-capture", "MyApp", "--skip-cert-check"],
+        )
+        main.cli()
+        assert seen.get("processes") == ["MyApp"]
+        assert seen.get("skip") is True, "the --skip-cert-check flag never reached the command"
