@@ -78,16 +78,57 @@ def _select_asset_url(assets: list, version: str) -> str | None:
     return None
 
 
+def _newer_release(a: dict | None, b: dict | None) -> dict | None:
+    """Whichever of two GitHub release objects has the greater version.
+
+    Ordering is PEP 440 via ``packaging``, which already sorts
+    ``0.15.0-beta.1`` before ``0.15.0`` -- the behaviour wanted for
+    prereleases, and the reason not to hand-roll this.
+
+    A tag that will not parse is treated as the *lesser*, so a malformed one
+    cannot win by accident and offer itself as an update. If neither parses,
+    the first argument wins, which preserves the old "prefer the prerelease"
+    behaviour for a repo whose tags this cannot read at all.
+    """
+    if a is None or b is None:
+        return a or b
+
+    def _v(release: dict):
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            return Version(release.get("tag_name", "").lstrip("v"))
+        except (InvalidVersion, TypeError):
+            return None
+
+    va, vb = _v(a), _v(b)
+    if va is None and vb is None:
+        return a
+    if va is None:
+        return b
+    if vb is None:
+        return a
+    return b if vb > va else a
+
+
 def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
     """Fetch the latest release for the user's channel from GitHub.
 
     For ``stable``: hits ``/releases/latest``, which is GitHub-defined as
     the most recent release with ``prerelease: false``.
 
-    For ``beta``: hits ``/releases`` and picks the topmost entry with
-    ``prerelease: true``. Beta users get prereleases when they exist; if
-    there are none, returns the stable latest so beta users never see
-    older content than stable users.
+    For ``beta``: hits ``/releases`` and takes the newer of the most recent
+    prerelease and the most recent stable, so beta users never see older
+    content than stable users.
+
+    That comparison is the whole point, and it used to be an assumption. The
+    code took the topmost prerelease and fell back to stable only when there
+    were *none* -- which covers a repo that has never cut a beta, and not the
+    normal state of this one between beta cycles. With 0.18.0 stable and
+    0.15.0-beta.1 the newest prerelease, a beta user on 0.18.0 was told
+    ``Updating v0.18.0 -> v0.15.0-beta.1`` and downgraded three minor versions,
+    onto a source-only tarball with no menu-bar app. Then pinned there, because
+    the next check found current == latest and reported "already up to date".
 
     Returns ``(version, tarball_url)`` or None on failure.
     """
@@ -101,17 +142,18 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
             data = json.loads(resp.read().decode())
 
         if channel == "beta":
-            # /releases returns an array sorted newest-first. Pick the
-            # first prerelease entry; fall back to stable if there are
-            # no prereleases yet.
+            # /releases is sorted newest-first, but "newest prerelease" and
+            # "newest release" are different questions and the answer to the
+            # first can be older than the answer to the second.
             prerelease = next(
                 (r for r in data if r.get("prerelease") and not r.get("draft")),
                 None,
             )
-            data = prerelease if prerelease else next(
+            stable = next(
                 (r for r in data if not r.get("prerelease") and not r.get("draft")),
                 None,
             )
+            data = _newer_release(prerelease, stable)
             if data is None:
                 return None
 
@@ -348,6 +390,29 @@ def _update_via_tarball(project_root: Path) -> int:
     if current_version == latest_version:
         print(f"Already up to date (v{current_version}, channel '{channel}').")
         return 2  # No update needed
+
+    # Never move backwards. The equality check above treats "the version
+    # differs" as "there is an update", so any wrong answer from the resolver
+    # is acted on without question -- and one of them shipped: the beta channel
+    # offered the newest *prerelease* even when it was older than stable, which
+    # downgraded users three minor versions and pinned them there, since the
+    # next check then found current == latest.
+    #
+    # The resolver is fixed, but this is the guard that makes the next such bug
+    # a no-op instead of a downgrade. Unparseable versions fall through to the
+    # old behaviour rather than blocking a legitimate update.
+    if current_version:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            if Version(latest_version) < Version(current_version):
+                print(
+                    f"Channel '{channel}' offers v{latest_version}, which is older "
+                    f"than the installed v{current_version}. Not downgrading."
+                )
+                return 2
+        except (InvalidVersion, TypeError):
+            pass
 
     print(f"Updating v{current_version or 'unknown'} → v{latest_version} (channel '{channel}')...")
 

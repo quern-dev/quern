@@ -7,6 +7,7 @@ step must be skipped when the user isn't actually on that branch.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -318,9 +319,15 @@ def test_fetch_latest_release_stable_hits_releases_latest(monkeypatch):
 
 
 def test_fetch_latest_release_beta_picks_first_prerelease(monkeypatch):
-    """Beta channel must scan /releases and pick the first prerelease.
-    Stable entries newer than the topmost prerelease are deliberately
-    NOT chosen — that's how beta diverges from stable."""
+    """Beta scans /releases and takes the newest prerelease when it really is
+    the newest thing.
+
+    The docstring here used to say stable entries newer than the topmost
+    prerelease were "deliberately NOT chosen — that's how beta diverges from
+    stable". That was the bug written down as intent, and the fixture below
+    never tested it: its prerelease (0.13.6-beta.1) is newer than its stable
+    (0.13.5), so the claim was never exercised. See
+    `test_fetch_latest_release_beta_never_goes_older_than_stable`."""
     from server.lifecycle import updater
 
     def fake_urlopen(req, **kwargs):
@@ -1021,3 +1028,107 @@ class TestUpdateRefreshesTheCachedCheck:
 
         age_hours = (time.time() - uc.LAST_CHECK_FILE.stat().st_mtime) / 3600
         assert age_hours < 1, "a real answer should reset the rate limit"
+
+
+class TestBetaNeverOffersOlderContentThanStable:
+    """The channel exists so beta users see *more* recent content, never less.
+
+    Found live after cutting 0.18.0: with 0.15.0-beta.1 the newest prerelease
+    in the repo, a beta tarball user on 0.18.0 was told
+    `Updating v0.18.0 -> v0.15.0-beta.1` and downgraded three minor versions
+    onto a source-only tarball with no menu-bar app -- then pinned there, since
+    the next check found current == latest and said "already up to date".
+
+    That is the *normal* state of this repo between beta cycles, not an edge
+    case: stable moves on every release and prereleases only appear when a beta
+    is being prepared.
+    """
+
+    def _releases(self, monkeypatch, entries):
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(
+            updater.urllib.request, "urlopen", lambda req, **kw: _FakeUrlResp(entries),
+        )
+        return updater
+
+    def test_a_stale_prerelease_does_not_beat_a_newer_stable(self, monkeypatch):
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "v0.18.0", "tarball_url": "stable.tgz", "prerelease": False},
+            {"tag_name": "v0.15.0-beta.1", "tarball_url": "beta.tgz", "prerelease": True},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
+
+    def test_a_genuine_newer_prerelease_still_wins(self, monkeypatch):
+        """The fix must not collapse beta into stable."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "v0.19.0-beta.1", "tarball_url": "beta.tgz", "prerelease": True},
+            {"tag_name": "v0.18.0", "tarball_url": "stable.tgz", "prerelease": False},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.19.0-beta.1", "beta.tgz")
+
+    def test_a_prerelease_loses_to_its_own_final(self, monkeypatch):
+        """PEP 440 puts 0.18.0-beta.1 before 0.18.0, which is what we want and
+        the reason for not hand-rolling the comparison."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "v0.18.0", "tarball_url": "final.tgz", "prerelease": False},
+            {"tag_name": "v0.18.0-beta.1", "tarball_url": "beta.tgz", "prerelease": True},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.18.0", "final.tgz")
+
+    def test_an_unparseable_tag_cannot_win(self, monkeypatch):
+        """A malformed tag must not offer itself as an update by accident."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "v0.18.0", "tarball_url": "stable.tgz", "prerelease": False},
+            {"tag_name": "nightly", "tarball_url": "junk.tgz", "prerelease": True},
+        ])
+        assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
+
+
+class TestAnUpdateNeverMovesBackwards:
+    """The guard that makes the next resolver bug a no-op rather than a
+    downgrade. `current == latest` treats any difference as an update, so a
+    wrong answer is acted on without question."""
+
+    def _run(self, monkeypatch, tmp_path, current, offered):
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(updater, "_read_local_version", lambda root: current)
+        monkeypatch.setattr(
+            updater, "_fetch_latest_release", lambda channel: (offered, "x.tgz"),
+        )
+        monkeypatch.setattr("server.config.get_update_channel", lambda: "beta")
+        return updater._update_via_tarball(tmp_path)
+
+    def test_an_older_offer_is_refused(self, monkeypatch, tmp_path, capsys):
+        rc = self._run(monkeypatch, tmp_path, "0.18.0", "0.15.0-beta.1")
+        assert rc == 2, "it went ahead and downgraded"
+        assert "Not downgrading" in capsys.readouterr().out
+
+    def _got_past_the_guard(self, monkeypatch, tmp_path, capsys, current, offered):
+        """Did it reach the update, rather than refuse at the version check?
+
+        Asserted on the decision it printed, not on a return code: past the
+        guard the run proceeds to a download that fails on this fixture's fake
+        URL, and a test keyed to that failure would be testing the fixture.
+        """
+        with contextlib.suppress(Exception):
+            self._run(monkeypatch, tmp_path, current, offered)
+        out = capsys.readouterr().out
+        assert "Not downgrading" not in out, "a legitimate update was refused"
+        return out
+
+    def test_a_newer_offer_is_not_blocked(self, monkeypatch, tmp_path, capsys):
+        out = self._got_past_the_guard(
+            monkeypatch, tmp_path, capsys, "0.17.0", "0.18.0",
+        )
+        assert "Updating v0.17.0 → v0.18.0" in out
+
+    def test_an_unparseable_current_version_does_not_block(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """An unreadable local version must not wedge updates shut."""
+        out = self._got_past_the_guard(
+            monkeypatch, tmp_path, capsys, "not-a-version", "0.18.0",
+        )
+        assert "→ v0.18.0" in out
