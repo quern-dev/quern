@@ -347,10 +347,25 @@ class TestIsAvailableResolvesTheSamePath:
         return dev
 
     async def _available(self, monkeypatch, dev_dir) -> bool:
-        from server.device.sim_bridge import SimBridgeManager
+        """Answer only on the framework layout, with the host factored out.
 
-        monkeypatch.setenv("DEVELOPER_DIR", str(dev_dir))
-        return await SimBridgeManager().is_available()
+        `is_available` returns False for three different reasons, and two of
+        them are properties of whatever machine the suite runs on: no `swiftc`
+        on PATH, and whatever the real `xcode-select -p` prints. Left real,
+        `test_neither_layout_is_not_available` passes on any machine without
+        Swift installed -- returning False at the `which` guard, never reaching
+        the layout check it exists to exercise -- and the two positive tests
+        fail there outright.
+        """
+        from server.device import sim_bridge as sb
+
+        proc = AsyncMock()
+        proc.communicate.return_value = (str(dev_dir).encode(), b"")
+        monkeypatch.setattr(sb.shutil, "which", lambda _name: "/usr/bin/swiftc")
+        monkeypatch.setattr(
+            sb.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc),
+        )
+        return await sb.SimBridgeManager().is_available()
 
     async def test_the_xcode_27_layout_is_available(self, monkeypatch, tmp_path):
         """The regression. Against the pre-fix call site this returns False."""
@@ -466,6 +481,53 @@ class TestTheBinaryCacheIsKeyedOnContent:
         await mgr.ensure_binary()
         await mgr.ensure_binary()
         assert len(compiled) == 1, "it recompiled an unchanged source"
+
+    async def test_a_binary_with_no_stamp_is_rebuilt(self, monkeypatch, tmp_path):
+        """The upgrade path, and the one case with no stamp to compare against.
+
+        Every user who compiled before stamps existed has exactly this on
+        disk: a binary, and no `sim-bridge.sha256` beside it. If a missing
+        stamp were treated as a hit rather than a miss, those users would keep
+        the pre-fix binary indefinitely -- the dlopen failure goes to stderr,
+        the readiness handshake still completes, so `_sim_bridge_ok` goes True
+        and every gesture routes to a bridge that cannot resolve HID.
+
+        The four sibling tests all leave a stamp behind, so a regression that
+        reused an unstamped binary while still honouring stamped misses would
+        pass all of them.
+        """
+        mgr, _src = self._manager(monkeypatch, tmp_path, "// pre-fix")
+        compiled = []
+
+        async def fake_compile(*a, **k):
+            compiled.append(True)
+            mgr._binary_path.write_text("rebuilt")
+
+            class P:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"", b""
+
+            return P()
+
+        monkeypatch.setattr(
+            "server.device.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
+        )
+        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+
+        # What the upgrade leaves: a binary, and nothing recording what built it.
+        mgr._binary_path.write_text("the stale pre-fix binary")
+        assert not mgr._stamp_path.exists()
+
+        await mgr.ensure_binary()
+
+        assert compiled == [True], (
+            "an unstamped binary was reused, so every pre-stamp install keeps "
+            "the binary that cannot find SimulatorKit under Xcode 27"
+        )
+        assert mgr._binary_path.read_text() == "rebuilt"
+        assert mgr._stamp_path.exists(), "the rebuild did not record a stamp"
 
     async def test_a_failed_compile_does_not_record_a_stamp(self, monkeypatch, tmp_path):
         """A stamp written before the compile would mark a failed build current
