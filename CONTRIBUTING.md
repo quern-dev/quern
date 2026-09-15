@@ -238,6 +238,76 @@ a silent, persistent CA-install policy would be worse than the failure it
 prevents. Anything other than a literal boolean reads as unset, on both sides
 -- a typo should mean "ask me", never consent.
 
+## Verifying, reviewing, and mutation testing
+
+Three rules, each of which exists because skipping it cost a release cycle.
+
+### Live-test before opening a PR
+
+A green suite says the tests agree with the code. It does not say the thing
+works. Every expensive find in the 0.18.0 cycle came from running the software,
+and none of them would have been caught by any test that existed or that anyone
+would have thought to write:
+
+- The beta channel offered every tarball user a **downgrade** to a release three
+  minor versions old, and pinned them there. Found by resolving the channel
+  against the real GitHub API after the release was cut.
+- WDA's `/source` took **7.52s** on an iPhone 11 against a 6s budget, and the
+  response to a timeout is to destroy the runner — so one second of latency made
+  a physical device unautomatable. Found by timing the call. Three plausible
+  theories (USB re-enumeration, tunnel rotation, a broken WDA) were each
+  disproved by measurement first.
+- The `am start` failure markers were taken from an issue report and were
+  **wrong**: the spelling they used never appears on Android 10, and one was
+  unanchored enough to match a URL. Found by running it against a real device.
+
+So: exercise the actual path on the actual hardware, with an isolated
+`QUERN_STATE_DIR`, before the PR. Prove the failure exists before the fix and is
+gone after. If that is impossible, say so in the PR rather than leaving the
+reader to assume it was done.
+
+### Mutation-test, and never restore with `git checkout`
+
+A test that passes against the bug is worse than no test, and this repo ships
+them regularly — several commits exist only to fix tests that were green against
+the defect they named. Mutating the fix and watching the test fail is the only
+cheap proof.
+
+**Restore from a copy, not from git.** `git checkout -- <path>` restores to HEAD
+and silently deletes uncommitted work in that path. It happened twice in one
+session, each time destroying a fix that had just been written:
+
+```sh
+tmp=$(mktemp -d); git archive --format=tar HEAD | tar -x -C "$tmp"
+# run the suite from inside $tmp with this checkout's .venv/bin/python
+```
+
+Clear `__pycache__` between mutations: a same-size swap can leave stale bytecode,
+and the false result reads as "my fix does not work" while the source in front of
+you says otherwise.
+
+### Agent review runs in a worktree
+
+Launch any review agent that mutates code with `isolation: "worktree"`. A shared
+tree means two mutating agents cannot run at once, a mutating agent invalidates
+anything else being measured at the same time, and the agent is handed
+`git checkout` on a tree that may hold uncommitted work. Warning it off in the
+prompt is a workaround for shared state, not a safeguard.
+
+A worktree has no `.venv`, and does not need one: run with cwd inside it and the
+main checkout's venv imports `server` from the worktree, because cwd precedes
+site-packages on `sys.path`. Measured — 103 tests in 1.9s, and the TS-parsing
+tests work because they read `mcp/src/*.ts` rather than `node_modules`.
+
+It isolates **source only**. `~/.quern`, `~/.local/bin/quern`, MCP registrations
+and the Swift build cache under `CONFIG_DIR/bin` are shared from every checkout,
+so an agent that runs the app rather than the tests still needs
+`QUERN_STATE_DIR` and usually a sandboxed `HOME`.
+
+Give reviewers the failure mode to hunt, not just the diff. The briefs that found
+real defects named this repo's habit — tests that pass for the wrong reason — and
+listed concrete recent examples to calibrate against.
+
 ## Where the API is documented
 
 Deliberately not restated here. [`docs/api-reference.md`](docs/api-reference.md)
