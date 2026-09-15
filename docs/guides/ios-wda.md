@@ -64,9 +64,14 @@ When WDA setup discovers your account type, it includes warnings in the response
 When your agent interacts with a physical device (tap, screenshot, read screen), Quern automatically:
 
 1. Checks if a WDA driver process is running for that device
-2. If not, launches one
+2. If not, launches one with `xcodebuild test-without-building`
 3. Waits for WDA's HTTP server to respond
 4. Routes the command through WDA
+
+Step 2 **reinstalls the runner app every time**, even when it is already
+installed and working. That is normally invisible, but it means the driver
+cannot start whenever the device's install channel is unhealthy — see
+"Starting WDA without reinstalling" below.
 
 On iOS 17+, the connection goes through tunneld via IPv6. On older iOS, it uses a local port-forward over USB. This is transparent — you don't need to know or care which path is used.
 
@@ -150,8 +155,47 @@ When WDA fails to start, Quern parses the runner log and tells your agent what w
 | "No signing certificate" | Xcode doesn't have a valid cert | Xcode > Settings > Accounts > Manage Certificates |
 | "Maximum number of apps" | Free account slot limit | Wait 7 days for slots to free up, or use a paid account |
 | "Device is not available" | Device disconnected | Reconnect USB cable |
+| "Failed to install the app on the device", `IXRemoteErrorDomain`, "Connection interrupted" | The install channel is unhealthy. The runner itself is fine | Start it without reinstalling (below), or replug the device |
+| "WDA did not become responsive" with a healthy runner log | Something local is in the way — often a stale port forward holding the WDA port | Check `lsof -nP -iTCP:18100` before blaming WDA |
 
 Runner logs are at `~/.quern/wda/runner-<udid-prefix>.log` if you need to dig deeper.
+
+### Starting WDA without reinstalling
+
+Two failures look identical from the outside — "WDA did not become
+responsive" — but mean opposite things. Check the runner log first:
+
+- The log shows a **build or signing** problem → rebuild (`setup_wda`).
+- The log shows **`Failed to install the app on the device`** with
+  `IXRemoteErrorDomain` / `Connection interrupted` → do *not* rebuild.
+  The runner is already installed and healthy; only the install step is
+  failing, and every retry will fail the same way.
+
+Confirm the runner is really installed:
+
+```bash
+xcrun devicectl device info apps --device <hardware-udid> | grep -i quern
+# QuernDriver   dev.quern.driver.xctrunner   1.0   1
+```
+
+Then start it without going through `xcodebuild`:
+
+```bash
+pymobiledevice3 developer dvt xcuitest dev.quern.driver.xctrunner --udid <hardware-udid>
+```
+
+This drives the runner through `testmanagerd` directly, with no install
+step. WDA answers `/status` in under ten seconds and Quern picks it up on
+the next command — no restart of the server, no rebuild. Leave the process
+running; it hosts the session.
+
+Note the hardware UDID (the `00008030-...` form from `xcrun devicectl list
+devices`), not Quern's normalised UDID.
+
+**Do not try `devicectl device process launch` on the runner.** It reports
+success and nothing happens: an `.xctrunner` app is a stub, and XCTest
+needs `testmanagerd` to attach and drive the bundle. That is exactly what
+the `dvt xcuitest` command above provides.
 
 ## Known Limitations
 
