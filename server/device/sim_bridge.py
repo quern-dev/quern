@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import shutil
 import time
 from collections.abc import AsyncGenerator
@@ -79,6 +80,43 @@ def _find_source() -> Path | None:
     return None
 
 
+#: Where the SimulatorKit framework sits, relative to a developer directory.
+#:
+#: Xcode 27 moved it out of the developer directory altogether::
+#:
+#:     <= 26   Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework
+#:     27+     Xcode.app/Contents/SharedFrameworks/SimulatorKit.framework
+#:
+#: The second is a *sibling* of ``Developer`` rather than a relocation within
+#: it, so no search rooted at the developer directory reaches it. Both are
+#: checked rather than switching on a version: it costs one ``stat``, and it
+#: keeps working whichever layout the next Xcode ships.
+#:
+#: Kept in step with ``simulatorKitRelativePaths`` in ``tools/sim-bridge.swift``
+#: -- the Swift side dlopens the binary and this side decides whether to offer
+#: the backend at all, so the two disagreeing means advertising a backend that
+#: cannot load, which is exactly the state this fixes.
+SIMULATOR_KIT_RELATIVE_PATHS = (
+    "Library/PrivateFrameworks/SimulatorKit.framework",
+    "../SharedFrameworks/SimulatorKit.framework",
+)
+
+
+def find_simulator_kit(developer_dir: str | Path) -> Path | None:
+    """Return the SimulatorKit framework under *developer_dir*, or None.
+
+    Returns the path rather than a boolean so a caller can report *which*
+    layout it found, and so the answer cannot drift from the file that will
+    actually be loaded.
+    """
+    base = Path(developer_dir)
+    for relative in SIMULATOR_KIT_RELATIVE_PATHS:
+        candidate = Path(os.path.normpath(base / relative))
+        if candidate.exists():
+            return candidate
+    return None
+
+
 class SimBridgeManager:
     """Manages the sim-bridge subprocess lifecycle and communication."""
 
@@ -109,8 +147,7 @@ class SimBridgeManager:
             dev_dir = stdout.decode().strip()
             if not dev_dir:
                 return False
-            sim_kit = Path(dev_dir) / "Library" / "PrivateFrameworks" / "SimulatorKit.framework"
-            return sim_kit.exists()
+            return find_simulator_kit(dev_dir) is not None
         except Exception:
             return False
 

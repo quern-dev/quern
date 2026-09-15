@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from unittest.mock import AsyncMock
 
-from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
+from server.device.sim_bridge import (
+    SIMULATOR_KIT_RELATIVE_PATHS,
+    SimBridgeBackend,
+    SimBridgeManager,
+    find_simulator_kit,
+)
 
 
 def _backend_with_send(send_impl):
@@ -203,3 +210,91 @@ class TestDescribeAllNested:
         assert result[0]["children"][0]["AXLabel"] == "Hi"
         # Only one call — no probing path
         assert mgr.send.await_count == 1
+
+
+class TestSimulatorKitDiscovery:
+    """Xcode 27 moved SimulatorKit out of the developer directory.
+
+    Before this, `is_available()` looked only under
+    `<dev>/Library/PrivateFrameworks`, so on Xcode 27 it reported the backend
+    unavailable while the framework sat one level up in `Contents/SharedFrameworks`.
+    Every simulator HID call — tap, type, swipe, press — failed as a result.
+    """
+
+    def _make_framework(self, root: Path, relative: str) -> Path:
+        """Create a stand-in framework directory and return it."""
+        path = Path(os.path.normpath(root / relative))
+        path.mkdir(parents=True)
+        return path
+
+    def test_finds_the_pre_27_layout(self, tmp_path):
+        dev = tmp_path / "Xcode.app" / "Contents" / "Developer"
+        dev.mkdir(parents=True)
+        expected = self._make_framework(
+            dev, "Library/PrivateFrameworks/SimulatorKit.framework"
+        )
+        assert find_simulator_kit(dev) == expected
+
+    def test_finds_the_xcode_27_layout(self, tmp_path):
+        """The regression case: a sibling of Developer, not a child."""
+        dev = tmp_path / "Xcode.app" / "Contents" / "Developer"
+        dev.mkdir(parents=True)
+        expected = self._make_framework(
+            dev, "../SharedFrameworks/SimulatorKit.framework"
+        )
+        assert find_simulator_kit(dev) == expected
+        # Spelled out, because the whole bug is that this is *outside* dev.
+        assert "SharedFrameworks" in str(expected)
+        assert "Developer" not in expected.name
+
+    def test_returns_none_when_neither_layout_is_present(self, tmp_path):
+        """Distinguishable from "found it": None, not a path that may not exist.
+
+        `is_available()` turns this into the decision to offer the backend at
+        all, so a truthy answer here advertises a backend that cannot load.
+        """
+        dev = tmp_path / "Xcode.app" / "Contents" / "Developer"
+        dev.mkdir(parents=True)
+        assert find_simulator_kit(dev) is None
+
+    def test_a_missing_developer_directory_is_not_an_error(self, tmp_path):
+        """A machine with no Xcode must answer None rather than raise.
+
+        `is_available()` is called from `check_tools()`, which backs `/tools`
+        and `quern doctor`; an exception here takes the whole health report
+        down over an absence that is entirely normal.
+        """
+        assert find_simulator_kit(tmp_path / "nonexistent") is None
+
+    def test_prefers_the_legacy_layout_when_both_exist(self, tmp_path):
+        """Deterministic on a machine carrying both.
+
+        Not a configuration anyone plans, but beta Xcodes have shipped
+        transitional layouts before, and "whichever the filesystem lists first"
+        is not an answer that reproduces.
+        """
+        dev = tmp_path / "Xcode.app" / "Contents" / "Developer"
+        dev.mkdir(parents=True)
+        legacy = self._make_framework(
+            dev, "Library/PrivateFrameworks/SimulatorKit.framework"
+        )
+        self._make_framework(dev, "../SharedFrameworks/SimulatorKit.framework")
+        assert find_simulator_kit(dev) == legacy
+
+    def test_the_swift_side_checks_the_same_two_layouts(self):
+        """The Python and Swift halves must not drift apart.
+
+        Python decides whether to *offer* the backend; Swift decides what to
+        `dlopen`. If one learns about a new layout and the other does not, the
+        server either advertises a backend that cannot load or refuses one that
+        works — and both failures look like this bug did.
+        """
+        source = Path(__file__).resolve().parents[1] / "tools" / "sim-bridge.swift"
+        text = source.read_text()
+        for relative in SIMULATOR_KIT_RELATIVE_PATHS:
+            # The Swift constant names the binary inside the bundle; the Python
+            # one names the bundle. Compare the part they share.
+            assert relative.replace(".framework", "") in text, (
+                f"tools/sim-bridge.swift does not look for {relative!r}; the "
+                "Swift and Python halves of SimulatorKit discovery have drifted"
+            )
