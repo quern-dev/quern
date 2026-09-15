@@ -252,6 +252,31 @@ echo "==> Assembling release tarball: $TARBALL"
 mkdir -p "$STAGE" "$(dirname "$TARBALL")"
 git -C "$REPO_ROOT" archive --format=tar "$TAG" | tar -x -C "$STAGE"
 cp -R "$APP" "$STAGE/Quern.app"
+
+# Build the MCP wrapper into the staged tree, so the tarball ships a ready
+# dist/ and a tarball install never needs npm.
+#
+# It used to need it on every start, and that bricked installs. The server
+# calls _ensure_mcp_built, which shells out to npm -- and the menubar app
+# launches the server from a GUI context, which inherits launchd's minimal PATH
+# rather than a shell's. A node installed by fnm or nvm is unreachable from
+# there, and unreachable in a way no static PATH list can fix: fnm's directory
+# is named for the pid of the shell that asked for it. So `quern start` worked
+# from a terminal and the menubar app could not start the server at all. See
+# #193.
+#
+# Built from the staged tag source rather than the working tree, so dist/
+# matches the src/ being shipped. The output is version-independent -- the MCP
+# server reads its version from package.json at runtime -- so this does not
+# care that it runs after the version bump.
+echo "==> Building MCP wrapper into the tarball"
+( cd "$STAGE/mcp" && npm ci --no-audit --no-fund && npm run build )
+for f in dist/index.js dist/launcher.cjs; do
+  [[ -f "$STAGE/mcp/$f" ]] || { echo "error: MCP build produced no $f" >&2; exit 1; }
+done
+# node_modules is a build input, not a shipped artifact, and it is enormous.
+rm -rf "$STAGE/mcp/node_modules"
+
 tar -czf "$TARBALL" -C "$WORK" "$PREFIX"
 
 echo "==> Uploading asset to release $TAG"

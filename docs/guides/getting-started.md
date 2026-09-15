@@ -113,7 +113,9 @@ If you installed manually, run `quern mcp-install` to register.
 
 ### Other MCP Clients
 
-Point your client at: `node ~/.local/share/quern/mcp/dist/index.js`
+Point your client at: `node ~/.local/share/quern/mcp/dist/launcher.cjs`
+
+Use `launcher.cjs` rather than `index.js`. It checks the Node version first and tells you which binary it is running under if that version is too old — worth having, because MCP clients do not always pick the node you expect.
 
 The MCP wrapper auto-discovers the running server via `~/.quern/state.json` — no URL or API key configuration needed.
 

@@ -188,17 +188,30 @@ def _ensure_python_deps(
 
 
 def _ensure_mcp_built(quiet: bool = False) -> bool:
-    """Build the MCP TypeScript server.
+    """Ensure ``mcp/dist/index.js`` is current, building it if it is not.
 
-    Always runs ``npm run build`` to ensure dist/ is up to date.
-    Runs ``npm install`` first when node_modules/ is missing or
-    package.json is newer than node_modules/.
+    Decides whether a build is needed *before* reaching for npm, and returns
+    early when it is not. Release tarballs now ship a prebuilt ``dist/``, so for
+    a tarball install the answer is normally "nothing to do" and npm is never
+    invoked -- which matters because npm is frequently unreachable from the
+    process that calls this. The menubar app launches the server from a GUI
+    context, which inherits launchd's minimal PATH rather than a shell's, and a
+    node installed by fnm or nvm lives in a directory no static PATH list can
+    name: fnm's contains the pid of the shell that asked for it. `quern setup`
+    records node's path as None for exactly that reason. So "just add it to the
+    search path" is not available as a fix.
+
+    Never raises. Every caller already treats a failed build as survivable --
+    MCP tools go stale, the server still runs -- but that intent only worked for
+    the failures this function anticipated. A *missing* npm raised instead of
+    returning False, which crashed `quern start` outright, and the guard for it
+    was added at one of three call sites rather than here. See #193.
 
     Args:
         quiet: When True, only print on actual build or failure.
 
     Returns:
-        True if the build succeeded, False on failure.
+        True if dist/ is current (or was made current), False on failure.
     """
     import subprocess
 
@@ -217,28 +230,8 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
             print("Warning: mcp/src/ not found — skipping MCP build")
         return False
 
-    # Install node_modules if missing or stale (package.json newer than sentinel file)
-    node_modules = mcp_dir / "node_modules"
-    stamp = node_modules / ".install-stamp"
-    pkg_json = mcp_dir / "package.json"
-    needs_install = (
-        not node_modules.exists()
-        or not stamp.exists()
-        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
-    )
-    if needs_install:
-        if not quiet:
-            print("Installing MCP server dependencies...")
-        result = subprocess.run(
-            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
-            capture_output=quiet,
-        )
-        if result.returncode != 0:
-            print("Error: npm install failed for MCP server")
-            return False
-        stamp.touch()
-
-    # Build only if dist is missing or any source file is newer than dist/index.js
+    # Is a build needed at all? Asked first, because answering "no" is what lets
+    # a tarball install start on a machine with no reachable npm.
     needs_build = not dist_file.exists()
     if not needs_build:
         dist_mtime = dist_file.stat().st_mtime
@@ -247,25 +240,64 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
                 needs_build = True
                 break
 
-    if needs_build:
+    if not needs_build:
+        if not quiet:
+            print("MCP server up to date")
+        return True
+
+    # From here npm is required. Anything it does wrong is reported, not raised:
+    # a missing binary is OSError, a slow install is TimeoutExpired, and neither
+    # is a reason for the server to fail to start.
+    node_modules = mcp_dir / "node_modules"
+    stamp = node_modules / ".install-stamp"
+    pkg_json = mcp_dir / "package.json"
+    needs_install = (
+        not node_modules.exists()
+        or not stamp.exists()
+        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
+    )
+
+    try:
+        if needs_install:
+            if not quiet:
+                print("Installing MCP server dependencies...")
+            result = subprocess.run(
+                ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
+                capture_output=quiet,
+            )
+            if result.returncode != 0:
+                print("Error: npm install failed for MCP server")
+                return False
+            stamp.touch()
+
         if not quiet:
             print("Building MCP server...")
         result = subprocess.run(
             ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
             capture_output=quiet,
         )
-        if result.returncode != 0:
-            print("Error: npm run build failed for MCP server")
-            return False
-        if not quiet:
-            print("MCP server built successfully")
-    elif not quiet:
-        print("MCP server up to date")
+    except (OSError, subprocess.SubprocessError) as exc:
+        # OSError covers the one that reached a user: npm absent from a
+        # GUI-launched process's PATH, which is FileNotFoundError.
+        print(f"Error: could not build the MCP server: {exc}")
+        if not dist_file.exists():
+            print(
+                "  MCP tools will be unavailable until this is built. Node 22+ "
+                "and npm are needed, and a GUI launch may not see a node "
+                "installed by fnm or nvm — running `quern start` from a "
+                "terminal once is usually enough."
+            )
+        return False
 
+    if result.returncode != 0:
+        print("Error: npm run build failed for MCP server")
+        return False
+    if not quiet:
+        print("MCP server built successfully")
     return True
 
 
-def _install_json_mcpservers(config_path: Path, mcp_index: Path) -> tuple[bool, str]:
+def _install_json_mcpservers(config_path: Path, mcp_entry: Path) -> tuple[bool, str]:
     """Install quern-debug into a config file that uses the mcpServers JSON format.
 
     Used by claude-code, claude-desktop, and cursor.
@@ -290,7 +322,7 @@ def _install_json_mcpservers(config_path: Path, mcp_index: Path) -> tuple[bool, 
     existing = config["mcpServers"].get("quern-debug")
     config["mcpServers"]["quern-debug"] = {
         "command": "node",
-        "args": [str(mcp_index)],
+        "args": [str(mcp_entry)],
     }
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -299,7 +331,7 @@ def _install_json_mcpservers(config_path: Path, mcp_index: Path) -> tuple[bool, 
     return True, f"{verb} quern-debug in {config_path}"
 
 
-def _install_opencode(mcp_index: Path) -> tuple[bool, str]:
+def _install_opencode(mcp_entry: Path) -> tuple[bool, str]:
     """Install quern into ~/.config/opencode/opencode.json."""
     import json
 
@@ -320,7 +352,7 @@ def _install_opencode(mcp_index: Path) -> tuple[bool, str]:
     existing = config["mcp"].get("quern")
     config["mcp"]["quern"] = {
         "type": "local",
-        "command": ["node", str(mcp_index)],
+        "command": ["node", str(mcp_entry)],
     }
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -370,7 +402,7 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
     return "".join(lines)
 
 
-def _install_codex(mcp_index: Path) -> tuple[bool, str]:
+def _install_codex(mcp_entry: Path) -> tuple[bool, str]:
     """Install quern into ~/.codex/config.toml."""
     config_path = Path.home() / ".codex" / "config.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +411,7 @@ def _install_codex(mcp_index: Path) -> tuple[bool, str]:
     existing = "[mcp_servers.quern]" in existing_text
 
     fields = {
-        "command": f'"{str(mcp_index)}"',
+        "command": f'"{str(mcp_entry)}"',
         "args": "[]",
         "enabled": "true",
     }
@@ -616,7 +648,14 @@ def _cmd_mcp_install() -> int:
         print("Error: could not find project root")
         return 1
 
-    mcp_index = project_root / "mcp" / "dist" / "index.js"
+    # The launcher, not the ESM entry. `launcher.cjs` is CommonJS on purpose so
+    # it parses on ancient Node, checks the major version, and prints which
+    # binary it is running under and how to point the client at a newer one.
+    # Registering `index.js` bypassed that gate entirely: a too-old Node gave a
+    # raw ESM syntax error instead. That was survivable while everyone built
+    # dist/ locally -- having built it proved a working Node -- but tarballs now
+    # ship it prebuilt, so the first Node to meet this file may be the wrong one.
+    mcp_entry = project_root / "mcp" / "dist" / "launcher.cjs"
 
     # Build the MCP server
     if not _ensure_mcp_built(quiet=False):
@@ -627,13 +666,13 @@ def _cmd_mcp_install() -> int:
     )
 
     dispatch = {
-        "claude-code":    lambda: _install_json_mcpservers(Path.home() / ".claude.json", mcp_index),
-        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_index),
+        "claude-code":    lambda: _install_json_mcpservers(Path.home() / ".claude.json", mcp_entry),
+        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_entry),
         "cursor":         lambda: _install_json_mcpservers(
-            Path.home() / ".cursor" / "mcp.json", mcp_index,
+            Path.home() / ".cursor" / "mcp.json", mcp_entry,
         ),
-        "opencode":       lambda: _install_opencode(mcp_index),
-        "codex":          lambda: _install_codex(mcp_index),
+        "opencode":       lambda: _install_opencode(mcp_entry),
+        "codex":          lambda: _install_codex(mcp_entry),
     }
 
     all_ok = True
