@@ -110,9 +110,25 @@ For each item, ask "did this release change what this file asserts?" — not
 - [ ] **`macos/QuernMenuBar/README.md`** — build and release steps for the app.
 - [ ] **`CHANGELOG.md`** — rename `Unreleased`, date it, add the link ref.
 - [ ] **Run the sync** — `python3 scripts/sync-docs.py --repo <quern>` in the
-      quern.dev checkout, and commit what it changes. A guide corrected in this
+      quern.dev checkout, then commit **and push** it. A guide corrected in this
       repo and never synced leaves the site serving the old text; that happened
-      once for a week.
+      once for a week. Pushing is the deploy, so an unpushed sync is the same
+      as no sync. `--check` exits 1 on drift and names the pages, which is the
+      quick way to see whether this step is needed at all.
+- [ ] **Commit and push the doc pass itself.** Easy to skip, because the
+      checklist above produces edits and says nothing about landing them — and
+      the tag is cut from `main`, so anything still sitting in the working tree
+      is not in the release. The tarball is archived from the tag; whatever is
+      stale at that moment ships.
+- [ ] **Write `RELEASE_NOTES.md`** — step 5 below feeds it to
+      `gh release create --notes-file`, and nothing else in this document tells
+      you to create it. Write it from the CHANGELOG entry while that is still
+      fresh.
+
+      It is a scratch file and **must stay untracked**: it is in `.gitignore`
+      for a reason. A `git add -A` swept one into #152, where CodeRabbit
+      reviewed it as documentation and reported its command count as wrong. The
+      published notes live on the Release, not in the repo.
 - [ ] **Pick the version deliberately.** New commands, new config fields, or a
       call that now refuses where it used to succeed are a minor bump, not a
       patch — regardless of how the work was framed while doing it.
@@ -121,8 +137,12 @@ For each item, ask "did this release change what this file asserts?" — not
 
 ```sh
 # 1. Bump version, finalize CHANGELOG, commit on main.
+#    The documentation pass above should already be committed and pushed;
+#    this step is only the version and the CHANGELOG.
 git switch main
 # (edit pyproject.toml, mcp/package.json, mcp/package-lock.json, CHANGELOG.md)
+# mcp/package-lock.json carries the version twice -- the root "version" and
+# the "" package entry. Both, or `npm ci` reinstalls the old one.
 git commit -am "Bump version to vN.M.K and finalize CHANGELOG"
 git push origin main
 
@@ -142,6 +162,7 @@ git fetch origin
 git rev-parse origin/release/stable origin/release/beta origin/main   # expect three identical SHAs
 
 # 5. Now create the GitHub Release.
+# RELEASE_NOTES.md is the untracked scratch file written during the doc pass.
 gh release create vN.M.K --title "vN.M.K — short release headline" --notes-file RELEASE_NOTES.md
 
 # 6. Attach the menu-bar app asset, using the app staged in step 0.
