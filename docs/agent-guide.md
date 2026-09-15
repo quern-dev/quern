@@ -115,9 +115,16 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). Use `set_local_capture` to change the process list at runtime without restarting the server.
 - **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
 
-**`configure_system_proxy` can refuse, and that refusal is not an error to retry.** It returns **428** when a booted simulator does not trust the mitmproxy CA, because capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and three ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, or pass `skip_cert_check` to proceed anyway.
+**`set_local_capture` sets the list rather than adding to it.** Asked to capture one app, sending just that process name drops everything already being captured. The usual casualty is web traffic: `MobileSafari` and `com.apple.WebKit.Networking` are defaults applied only when nothing is specified, so naming your app removes them and web-view traffic stops being captured with no error. Read `local_capture` from `proxy_status` first and pass the existing entries alongside the new one. The response reports what was dropped — check it.
 
-Ask the user which they want. Installing a certificate authority persists across sessions and outlives the capture window, so it needs their say-so — the same way `update_quern` does. `skip_cert_check` is the right answer when they are deliberately exercising TLS-failure paths.
+Name the process that actually makes the requests. Safari's traffic leaves through `com.apple.WebKit.Networking`, not `MobileSafari`, and so does every in-app web view, so a list with `MobileSafari` alone captures nothing.
+
+**Three tools can refuse, and that refusal is not an error to retry.** `configure_system_proxy`, `set_local_capture`, and `start_proxy` **when called with `system_proxy: true`** all return **428** when a booted simulator does not trust the mitmproxy CA. Capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and three ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, or pass `skip_cert_check` to proceed anyway.
+
+**Do not route around it.** The three share one gate, so reaching the configured state by another tool recreates exactly the failure the refusal exists to prevent. In particular, `start_proxy {system_proxy: true}` after `configure_system_proxy` refused is the same action by another name — it used to work, and that was the bug. Starting the proxy *without* that flag is never refused, because binding a listener routes nothing; nor is disabling local capture with an empty `processes` list, since that is how you leave the broken state rather than enter it.
+
+Ask the user which resolution they want. Installing a certificate authority persists across sessions and outlives the capture window, so it needs their say-so — the same way `update_quern` does. `skip_cert_check` is the right answer when they are deliberately exercising TLS-failure paths.
+
 
 **Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
 1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database. Defaults to **booted simulators only**; pass `state="all"` or `device_type="device"` to check shutdown sims or physical devices
@@ -492,7 +499,19 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **"Proxy not running"** — Check with `proxy_status` and call `start_proxy` if needed.
 
-**"No flows captured"** — Check `proxy_status` first; a `capture_without_cert` warning there means a booted simulator does not trust the CA, which fails HTTPS silently. Otherwise: If `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. If local capture is not enabled, the device may not be configured to route through the proxy. Check `proxy_setup_guide` for device configuration steps. Also check for certificate pinning in the app.
+**"No flows captured"** — Check `proxy_status` first, in this order:
+
+1. `tls_rejections` — clients that refused the certificate we offered, with the host, the resolved process and simulator UDID, and the TLS alert verbatim. This is the direct evidence, and it distinguishes the two causes that look identical from the outside: `unknown ca` means the device does not trust the CA, while any other alert on a device that does usually means the app pins its certificate. Don't reinstall a certificate to fix pinning.
+2. A `capture_without_cert` warning, and `cert_trust_stale` on a device in `cert_setup` — the second means that device's recorded `cert_installed: true` is contradicted by the device itself, which is what an erase leaves behind.
+3. Otherwise: if `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. Check that the list actually contains the process making the requests, since setting it replaces it. If local capture is not enabled, the device may not be configured to route through the proxy; check `proxy_setup_guide` for device configuration steps.
+
+An empty `tls_rejections` with no flows means the traffic is not reaching the proxy at all, rather than being refused once it does — a routing problem, not a certificate one.
+
+**"The screen summary is empty on a physical device"** — `element_count: 0` with no error, while `take_screenshot` plainly shows a populated screen. The accessibility tree and screenshots take different paths, so the device looks alive and unreadable at once.
+
+The usual cause is that WDA's `/source` read exceeded its budget. That is not just a slow call: quern reads a timeout as evidence the runner is hung and restarts it, which returns an empty tree — so it repeats on every call and looks permanent. An iPhone 11 on iOS 26 takes about 7.5s to answer on its home screen, which is why the budget for older chips is 10s and 5s elsewhere.
+
+Pass `source_timeout` (15–25) on `get_screen_summary` or `get_ui_tree` when a device is slower than that, or a screen is unusually dense. It does not restart anything. `strategy: "skeleton"` skips the `/source` read entirely and returns navigation chrome only, which is the right answer for maps with many pins.
 
 **"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
 

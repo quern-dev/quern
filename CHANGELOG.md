@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-15
+
+Certificate trust is the theme. Quern knew whether a device trusted its CA and
+told you anyway when it did not, in four different places; this release makes
+the record subordinate to the device, refuses capture that cannot work, and
+records the handshakes that were previously invisible.
+
+### Added
+- **Refused handshakes are recorded.** A client that rejects our certificate never becomes a flow — the handshake dies before there is an HTTP request to report — so a device that did not trust the CA left no trace anywhere: no flow, no error, and `proxy_status` reporting no warnings. Measured against a simulator that refused `www.apple.com` and said so on its own screen while quern recorded nothing. `proxy_status` now carries `tls_rejections`, each naming the host, the resolved process and simulator, and the TLS alert **verbatim**. The alert is kept rather than interpreted because it is the only thing separating "this device does not trust the CA" (`unknown ca`) from "this app pins its certificate" — two causes with identical symptoms and completely different fixes, and reporting the second as the first sends someone to reinstall a certificate that was never the problem. Bounded, cleared when the proxy starts as well as when it stops, and never written back to any device's recorded trust: one hostile client on the network should not be able to mark a device untrusted.
+- **`quern enable-local-capture --skip-cert-check`.** The CLI now takes the same certificate check the API does, so it needs the same way past it. See below for why the CLI is gated at all.
+
+### Changed
+- **Enabling capture refuses when a booted simulator does not trust the CA, on every path that starts routing.** Capturing through a device that does not trust the certificate fails every HTTPS request from it, and the symptom — a blank screen, an app that appears to have no network — points nowhere near the proxy. Both halves of that state are quern's own, so it now refuses to create it. The refusal is **428**, names the devices, and offers three resolutions rather than one: install the certificate, set `auto_install_cert` so quern handles it from now on, or pass `skip_cert_check` to proceed anyway. Offering only the first railroads every user into trusting a MITM root CA, which is the outcome the refusal exists to make deliberate.
+
+  Four surfaces reach that state and all four are now covered. `configure_system_proxy` has had the check since it was written. `set_local_capture` had none, which is the path a field report actually took — every HTTPS request failing, and an hour spent concluding that staging authentication was down. `start_proxy` with `system_proxy: true` calls the same system-proxy configuration one line after the other endpoint's preflight and had no preflight of its own, so the refusal was routable around in a single call. And `quern enable-local-capture` writes `config.json` in one process while the lifespan starts routing from it in another; it runs the preflight in-process and exits non-zero rather than writing.
+
+  Server startup is the one place that cannot refuse — the decision was made in an earlier process, possibly days earlier, and failing to boot over one device's certificate is worse than the state it would prevent. It warns instead, naming the devices and the processes being captured.
+
+- **`auto_install_cert` answers the question at all five.** With it set, each of those paths installs the CA and proceeds instead of refusing. It does not make a failed install succeed: that is reported everywhere — 500 from the endpoints, a non-zero exit from the CLI, a named warning at startup — because enabling capture that cannot work is the state the whole mechanism exists to prevent.
+- **Certificate trust is read from the device, never from a record.** `is_cert_installed` always queries the simulator's TrustStore; the hour-long cache in front of it is gone, along with its `verify` parameter. Measured before removing it: the cache saved 0.11 ms, ran *after* a 9 ms `openssl` call that no cache skipped, and could never be reached by Android at all — while costing an hour in which an erased simulator went on reporting `cert_installed: true`. Deleted rather than fixed, because a correct branch that is easy to reach by accident is not a fix.
+- **Erasing a simulator withdraws the trust claim.** An erase recreates the TrustStore empty while quern's record goes on saying the CA is installed — and that record is what every reader falls back to for a device it cannot query. `installed_at` and the recorded Wi-Fi proxy config survive deliberately: they are still true of the device, and they are what tells a later reader it *had* the CA.
+- **`proxy_status` flags a contradicted record per device.** `cert_trust_stale` says this device's stored `cert_installed: true` is no longer true. A warning elsewhere in the response was not enough: someone looking at one device should not have to correlate it against a list somewhere else, which is exactly what the field report did before concluding the backend was down.
+- **`set_local_capture` says what it dropped.** It replaces the list rather than adding to it, which is right for `set` and was invisible — the response echoes only the new list, so removing a process looked identical to adding one. The defaults are the usual casualty: they apply only when nothing is specified, so naming one process silently stops web-view traffic being captured. The API logs what went, and the CLI prints it.
+- **`/source` gets a budget real hardware can meet** — 10s for A13 and older, 5s elsewhere, up from 6s and 3s. Measured at 7.52s on an iPhone 11 running iOS 26.6.2, on its home screen. The old value did not merely make the call slow: a timeout is read as evidence WDA has hung, and the response is to restart the driver, which returns an empty tree with no error and repeats on every call. One second of latency made a physical device unautomatable.
+
+### Fixed
+- **Booting a simulator no longer installs a root CA without consent.** `boot_device` installed whenever the CA file existed, with no reference to `auto_install_cert` at all — a setting that defaults to off precisely because a silent, persistent CA-install policy is worse than the failure it prevents. Verified on a real simulator: TrustStore empty before the call, holding our CA after it, with the setting off.
+- **Verification no longer erases the fields it has no opinion about.** `is_cert_installed` rebuilt each entry from the four things it had just learned and wrote that over the whole record, so every check erased `installed_at` — and since the cache was deleted and every caller verifies, that happened almost immediately after any install. It took `wifi_proxy_configs` with it, which is a physical device's recorded proxy host and client IP. `update_cert_state` now merges per field: omission preserves, naming overwrites even with `None`.
+- **Physical devices are kept away from the simulator verifier.** Widening verification to every booted device sent phones to a `CoreSimulator` TrustStore path that does not exist for them, which answered `false` for a device that genuinely trusted the CA — and then wrote that false into the record. A stale read would have become state corruption.
+- **`quern update` refreshes the update check by asking, not by inferring.** The menu bar kept offering an update that had already been applied: nothing in the update path cleared the cached result, and the 24-hour rate limit stopped anything correcting it for a day. It now forces a real check on the paths where the run completed. Inferring from the return code was tried first and was worse — one of its three meanings is "your checkout is behind its release branch", where an update genuinely *is* available, so the optimistic write hid a real one. A refresh that cannot reach the network leaves the previous answer alone and does not buy a day of silence.
+- **The update check sends the channel.** `quern.dev` compares against the channel's pointer branch, so omitting it made the endpoint assume stable — a beta user sitting at the stable pointer while beta was ahead was told there was nothing to update to.
+- **A tool's own version is no longer outranked by a warning on stderr.** `pymobiledevice3` prints a dependency warning naming urllib3 before its version reaches stdout, and the streams were merged, so quern reported urllib3's version as pymobiledevice3's — and doctor offered an upgrade that could never change the number. The streams are kept apart and stdout is asked first; stderr is still read, but only when stdout yields nothing. The warning itself is now surfaced rather than discarded: the environment is still wrong, and saying nothing about it is quieter than the loud failure but no better.
+- **`quern update --tools` says who runs each command.** A bare command on its own line above "Run `quern update --tools` to apply these" read as homework; the reporter ran it and found quern running the same command on the next line of output. Every offered command now says `will run:`, and a `sudo` one says it will ask for a password. A deferred upgrade — skipped because there is no terminal to prompt on — is no longer reported as having *failed*, which sent the reader looking for a broken tool when what they needed was a terminal.
+- **Python 3.14 is tested in CI.** `requires-python` had no upper bound, so it was already claimed and merely unverified.
+
+
 ## [0.17.0] - 2026-09-13
 
 ### Added
@@ -440,6 +476,7 @@ First versioned release — MVP with iOS and Android support.
 - `quern --version` command.
 
 [Unreleased]: https://github.com/quern-dev/quern/compare/v0.17.0...main
+[0.18.0]: https://github.com/quern-dev/quern/releases/tag/v0.18.0
 [0.17.0]: https://github.com/quern-dev/quern/releases/tag/v0.17.0
 [0.16.1]: https://github.com/quern-dev/quern/releases/tag/v0.16.1
 [0.16.0]: https://github.com/quern-dev/quern/releases/tag/v0.16.0

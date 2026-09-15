@@ -186,11 +186,51 @@ cannot be captured through quern, which is not what this proxy is for.
 **The same rule governs the CA.** Installing a MITM root certificate authority
 is a *larger* commitment than a system-proxy toggle, not a smaller one: it
 persists across sessions, outlives the capture window that motivated it, and
-the user has to know it happened in order to undo it. So
-`configure_system_proxy` refuses with 428 when a booted simulator does not
-trust the CA, names the devices, and offers three ways out rather than one --
-offering only "install the certificate" railroads every user into trusting a
-CA, which is the outcome the refusal exists to make deliberate.
+the user has to know it happened in order to undo it. So enabling capture
+refuses with 428 when a booted simulator does not trust the CA, names the
+devices, and offers three ways out rather than one -- offering only "install
+the certificate" railroads every user into trusting a CA, which is the outcome
+the refusal exists to make deliberate.
+
+Every path that begins routing a device's traffic through the proxy shares one
+`_ensure_ca_is_trusted` helper: `configure_system_proxy`, `set_local_capture`,
+and `start_proxy` when `system_proxy` is set. The second had no gate at all
+until 0.18.0, which is how a field report reached exactly the failure the first
+one exists to prevent -- and the third was found during that work, reachable in
+one call from the tool the refusal had just told the caller to stop using. A
+guard on one path does not cover its siblings, twice over now, so a new capture
+path calls the helper rather than repeating the block.
+
+Only *enabling* is gated. Refusing to disable capture would trap someone in the
+state they are trying to leave, and starting the bare listener routes nothing.
+
+Two surfaces cannot use the helper and are handled in kind. `quern
+enable-local-capture` writes `config.json` in one process and the lifespan
+starts routing from it in another, so it runs the same preflight in-process --
+a `DeviceController` needs no server -- and refuses before the write, exiting
+non-zero. Server startup cannot refuse at all: the decision was made in an
+earlier process and failing to boot over one device's certificate is worse than
+the state it prevents, so it warns, and installs when `auto_install_cert` says
+to.
+
+**`auto_install_cert` means the same thing at all five.** A setting honoured in
+four of five places is worse than one honoured nowhere: it works until the day
+the user takes the fifth path. What it does not buy is a failed install
+succeeding -- that is reported everywhere, because enabling capture that cannot
+work is the state all of this exists to prevent.
+
+**A trust record is not trust.** `is_cert_installed` always asks the device;
+there is no cache in front of it, and the `verify` parameter is gone. The cache
+it replaced saved 0.11 ms and cost an hour in which an erased simulator went on
+reporting `cert_installed: true`. A reader may report the record *as* the
+record -- `/proxy/cert/status` does, and says so -- but rendering it as current
+fact is the defect. `cert_trust_stale` in `proxy_status` is how a contradicted
+record is reported without the stored field disagreeing with the file.
+
+`update_cert_state` merges per field: **omission preserves, naming overwrites
+even with None.** So a caller writes what it actually learned, never a whole
+`model_dump()` -- naming a field is how you clear it, and a verification that
+dumps the model erases the fields it has no opinion about.
 
 `auto_install_cert` in `~/.quern/config.json` answers the question once. It is
 surfaced in `proxy_status` and in the menu-bar app's Settings pane on purpose:

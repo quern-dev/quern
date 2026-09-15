@@ -14,7 +14,9 @@ Your agent will make sure the proxy certificate is installed on the simulator, e
 
 ### Local Capture (The Default)
 
-Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. Safari and WebKit networking are typically enabled by default (configured in `~/.quern/config.json`). When you start debugging an app, ask your agent to add your app's process name to the capture list.
+Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. Safari and WebKit networking are enabled by default (configured in `~/.quern/config.json`). When you start debugging an app, ask your agent to add your app's process name to the capture list.
+
+Say **add**, and check what comes back. Setting the list replaces it, so an agent that sends only your app's name drops the web-view defaults, and page traffic quietly stops being captured. Quern reports what a change removed — in the response, in the server log, and on the CLI — but the request itself is perfectly valid, so nothing refuses it.
 
 **Why this is the right default:**
 - Your Mac's browser and other apps are unaffected
@@ -45,7 +47,9 @@ quern set-auto-install-cert on
 
 That setting also appears in the menu-bar app's Settings window, under Network capture, so it is visible and reversible from the same place. `quern set-auto-install-cert` with no argument prints the current setting.
 
-The cert persists across app installs and simulator reboots — it's only lost if you erase the simulator entirely. If you've recently erased a simulator or created a new one, Quern detects that the cert is gone and asks again.
+The cert persists across app installs and simulator reboots — it's only lost if you erase the simulator entirely. Quern asks the simulator itself every time rather than trusting what it recorded earlier, so an erase is noticed at once: erasing through Quern withdraws the trust claim as it happens, and an erase from anywhere else is caught by the next check. Either way you are asked again rather than left capturing traffic that cannot succeed.
+
+Booting a simulator through Quern does **not** install the certificate on its own. Only enabling capture does, and only when `auto_install_cert` is on — otherwise you are asked. A root certificate authority installed as a side effect of booting a device is not something you would have been told about.
 
 ## Per-Simulator Traffic Isolation
 
@@ -79,12 +83,13 @@ Local capture adds minimal overhead — a few milliseconds per request for the T
 ## Troubleshooting
 
 **No traffic appearing:**
-- Ask your agent to check the proxy status and verify the cert is installed
-- Make sure local capture includes your app's process name (not just Safari)
+- Ask your agent to check the proxy status. It reports every handshake a client refused — the host, which simulator and process refused it, and the TLS alert. That is the direct evidence, and it says which of the two causes below you have
+- Make sure local capture includes your app's process name. Setting that list replaces it, so adding your app may have removed the web-view defaults
 - Check if your app uses certificate pinning
 
 **Traffic appears but bodies are encrypted/empty:**
-- The cert isn't installed or trusted. Ask your agent to reinstall it.
+- If the refusals say `unknown ca`, the cert isn't installed or trusted. Ask your agent to reinstall it.
+- Any other alert, on a simulator that does trust the CA, is usually the app pinning its certificate — reinstalling won't help, and the fix is in the app's build.
 
 **System Extension prompt not appearing:**
 - On macOS Ventura+, check System Settings > Privacy & Security > Network Extensions

@@ -330,7 +330,8 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 - **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
 - **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
 - **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
-- **Certificate management** — check, install, and verify mitmproxy CA certificates. Quern asks before installing one: capturing through a device that does not trust the CA fails every HTTPS request with nothing pointing at the proxy, so enabling capture refuses in that state rather than creating it. `quern set-auto-install-cert on` answers the question once
+- **Certificate management** — check, install, and verify mitmproxy CA certificates. Trust is read from the device every time rather than from a record, so an erased simulator is noticed rather than reported as still trusting the CA. Quern asks before installing one: capturing through a device that does not trust the CA fails every HTTPS request with nothing pointing at the proxy, so enabling capture refuses in that state rather than creating it. `quern set-auto-install-cert on` answers the question once
+- **Refused handshakes are recorded** — a client that rejects the certificate never becomes a flow, so it used to leave no trace anywhere. `proxy_status` now reports each rejection with the host, the process and simulator that refused, and the TLS alert verbatim — which is what separates "this device does not trust the CA" from "this app pins its certificate", two causes with identical symptoms and different fixes
 - **LLM summaries** — traffic digests grouped by host with error highlights
 
 **Proxy setup for simulators:**
@@ -342,14 +343,16 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 
 Local capture requires approving the **Mitmproxy Redirector** system extension in **System Settings > Privacy & Security** on first use.
 
-By default, `enable-local-capture` captures Safari traffic only. To capture your own app's traffic, pass its process name(s):
+With no arguments, `enable-local-capture` captures web traffic — `MobileSafari` and `com.apple.WebKit.Networking`. Naming processes **replaces** that list rather than adding to it, so pass everything you want captured:
 
 ```bash
-quern enable-local-capture MyApp              # your app
-quern enable-local-capture MyApp com.apple.WebKit.Networking  # app + WebKit networking
+quern enable-local-capture MyApp                                # your app, and nothing else
+quern enable-local-capture MyApp com.apple.WebKit.Networking    # your app and web views
 ```
 
-The process name is usually the target name in Xcode. You can also update the list at runtime via the `set_local_capture` MCP tool without restarting the server.
+The process name is usually the target name in Xcode. Name the process that actually makes the requests: Safari's traffic and every in-app web view's leave through `com.apple.WebKit.Networking`, so `MobileSafari` on its own captures nothing. The command prints what a change drops, since removing a process otherwise looks exactly like adding one.
+
+You can also update the list at runtime via the `set_local_capture` MCP tool without restarting the server.
 
 **Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` per device if the stored config no longer matches the current network, and `network_state` (refreshed by a ~15s background poll) reports the current SSID/IP plus a `last_changed_at` timestamp so the response surfaces *when* the network shifted, not just that it's currently mismatched. When the laptop and physical devices travel together between locations, this lets agents notice the change and prompt for proxy reconfiguration without anyone having to remember to ask.
 

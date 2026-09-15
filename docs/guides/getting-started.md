@@ -141,7 +141,7 @@ Optional config at `~/.quern/config.json`:
 ```
 
 - **default_device_family**: When your agent asks for a device without specifying what kind, default to this. Usually "iPhone".
-- **local_capture**: Process names for transparent network capture. Safari and WebKit are a good default — your agent can add your app's process name when it starts a debugging session.
+- **local_capture**: Process names for transparent network capture. Safari and WebKit are a good default — your agent can add your app's process name when it starts a debugging session. It is the whole list, not a set of additions: a process not named here is not captured.
 
 ## Where Things Live
 

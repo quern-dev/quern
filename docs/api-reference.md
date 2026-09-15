@@ -58,13 +58,13 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `start_capture_session` | POST | `/api/v1/proxy/capture/start` | Start a capture session to bracket a UI action |
 | `stop_capture_session` | POST | `/api/v1/proxy/capture/stop` | Stop the session and return only the flows from that window |
 | `proxy_status` | GET | `/api/v1/proxy/status` | Proxy status and config |
-| `start_proxy` | POST | `/api/v1/proxy/start` | Start the proxy |
+| `start_proxy` | POST | `/api/v1/proxy/start` | Start the proxy. With `system_proxy: true` it also configures the macOS system proxy and takes the same certificate check as `configure_system_proxy` — **428** when a booted simulator does not trust the CA; pass `skip_cert_check` to proceed. Starting the listener alone is never refused |
 | `stop_proxy` | POST | `/api/v1/proxy/stop` | Stop the proxy |
 | `proxy_setup_guide` | GET | `/api/v1/proxy/setup-guide` | Device setup instructions |
 | `verify_proxy_setup` | POST | `/api/v1/proxy/cert/verify` | Verify CA cert installation (defaults to booted simulators) |
 | `install_proxy_cert` | POST | `/api/v1/proxy/cert/install` | Install CA certificate on simulators and emulators |
 | `record_device_proxy_config` | POST | `/api/v1/proxy/device-proxy-config` | Record a physical device's Wi-Fi proxy config (per SSID) |
-| `set_local_capture` | POST | `/api/v1/proxy/local-capture` | Set local capture process list |
+| `set_local_capture` | POST | `/api/v1/proxy/local-capture` | Set local capture process list — replaces it, so unnamed processes are dropped. Returns **428** when enabling capture and a booted simulator does not trust the mitmproxy CA; pass `skip_cert_check` to proceed anyway. Disabling (empty list) is never refused |
 | `set_bypass` | POST | `/api/v1/proxy/bypass` | Add domain patterns to the bypass allowlist |
 | `clear_bypass` | DELETE | `/api/v1/proxy/bypass` | Remove bypass patterns, or clear all |
 | `configure_system_proxy` | POST | `/api/v1/proxy/configure-system` | Auto-configure macOS system proxy. Returns **428** when a booted simulator does not trust the mitmproxy CA; pass `skip_cert_check` to proceed anyway |

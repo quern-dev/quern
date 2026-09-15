@@ -92,3 +92,12 @@ You do not have to wait for it. `quern check-updates` asks now, and the
 menu-bar app has **Check for Updates** for the same thing — worth knowing on
 beta, where releases land closer together than the once-a-day check. Both keep
 working even if you turn the automatic check off.
+
+Running an update refreshes that answer itself, so the notice does not go on
+offering a version you have already installed. It asks rather than assuming:
+the run knows what it pulled, but not whether the channel moved again while it
+was working, and a checkout sitting behind its release branch has a real update
+outstanding after a run that did nothing. If the refresh cannot reach the
+network the previous answer is left alone and the next automatic check is not
+suppressed — an update that could not confirm anything should not buy a day of
+silence.
