@@ -482,3 +482,270 @@ def test_help_is_a_command_not_only_a_flag():
     )
     assert proc.returncode == 0, f"`quern help` exited {proc.returncode}"
     assert "usage: quern" in (proc.stdout + proc.stderr), "usage line names the wrong program"
+
+
+# --------------------------------------------------------------------------
+# The MCP surface has to keep up with the endpoints it posts to
+# --------------------------------------------------------------------------
+#
+# Not a documentation check like the rest of this file, but the same failure:
+# a surface that falls behind the code with nothing to notice. The MCP tools
+# are the one surface with no compiler and no caller to complain, and
+# `skip_cert_check` fell behind there for a whole release cycle.
+
+CAPTURE_GATE = "_ensure_ca_is_trusted"
+
+# HTTP methods that can carry a body worth checking.
+_ROUTE_METHODS = {"get", "post", "put", "delete", "patch"}
+
+
+def _unwrap_annotation(ann: ast.AST | None) -> str | None:
+    """The bare model name behind `X`, `X | None`, `Optional[X]`, `Annotated[X, ...]`.
+
+    Every one of these spellings appears or could appear on a handler, and a
+    check that understands only the first two reports "takes no typed body"
+    about a handler that plainly has one -- which sends the reader looking for
+    a bug in their own code.
+    """
+    seen = 0
+    while ann is not None and seen < 10:
+        seen += 1
+        if isinstance(ann, ast.Name):
+            return ann.id
+        if isinstance(ann, ast.BinOp):  # X | None
+            ann = ann.left
+        elif isinstance(ann, ast.Subscript):  # Optional[X], Annotated[X, ...]
+            base = getattr(ann.value, "id", None) or getattr(ann.value, "attr", None)
+            if base not in {"Optional", "Annotated"}:
+                return None
+            ann = ann.slice.elts[0] if isinstance(ann.slice, ast.Tuple) else ann.slice
+        else:
+            return None
+    return None
+
+
+def _calls(node: ast.AST, name: str) -> bool:
+    """Does this function call `name`, as a bare name or an attribute?
+
+    A handler in another module reaches the gate as `proxy._ensure_ca_is_trusted`,
+    which is an `ast.Attribute` -- invisible to a check that only reads
+    `func.id`, and exactly the shape a future gated path would take.
+    """
+    for n in ast.walk(node):
+        if not isinstance(n, ast.Call):
+            continue
+        func = n.func
+        if isinstance(func, ast.Name) and func.id == name:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == name:
+            return True
+    return False
+
+
+def _decorator_path(dec: ast.AST) -> str | None:
+    """The route path off `@router.post("/x")` or `@router.post(path="/x")`."""
+    if not isinstance(dec, ast.Call):
+        return None
+    if not (isinstance(dec.func, ast.Attribute) and dec.func.attr in _ROUTE_METHODS):
+        return None
+    if dec.args:
+        value = getattr(dec.args[0], "value", None)
+        if isinstance(value, str):
+            return value
+    for kw in dec.keywords:
+        if kw.arg == "path":
+            value = getattr(kw.value, "value", None)
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def gate_guarded_routes() -> dict[str, str | None]:
+    """{full path: body model name} for every handler that calls the gate.
+
+    Walks all of `server/`, not one file: `proxy_certs.py` and
+    `proxy_intercept.py` already mount under the same `/api/v1/proxy` prefix,
+    so a cert-adjacent capture path landing in one of them is the realistic
+    future case rather than a hypothetical one.
+
+    Asserts its own floor rather than leaving that to a sibling test. A parse
+    that silently finds nothing makes every caller trivially true, and a guard
+    living in a separate test protects the suite without protecting the
+    assertions that actually range over this.
+    """
+    routes: dict[str, str | None] = {}
+    for py_file in sorted(SERVER_DIR.rglob("*.py")):
+        text = py_file.read_text()
+        if CAPTURE_GATE not in text:
+            continue
+        prefix_match = re.search(r'APIRouter\(\s*prefix="([^"]*)"', text)
+        prefix = prefix_match.group(1) if prefix_match else ""
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            if not _calls(node, CAPTURE_GATE):
+                continue
+            for dec in node.decorator_list:
+                path = _decorator_path(dec)
+                if path is None:
+                    continue
+                # Found by type, not by the parameter being spelled `body`.
+                # Keying on the name reports "takes no typed body" about a
+                # handler that plainly has one, which is a worse failure than
+                # not checking it -- it describes the reader's code back to
+                # them incorrectly.
+                model = None
+                for arg in [*node.args.args, *node.args.kwonlyargs]:
+                    candidate = _unwrap_annotation(arg.annotation)
+                    if candidate and candidate != "Request" and candidate[0].isupper():
+                        model = candidate
+                routes[_normalize_path(prefix + path)] = model
+
+    if len(routes) < 2:
+        raise AssertionError(
+            f"expected the shared capture gate on at least the two known paths, "
+            f"found {routes or 'nothing'}. If {CAPTURE_GATE} was renamed, rename "
+            f"it here too; if the parse broke, every check below went vacuous."
+        )
+    return routes
+
+
+def _skip_strings(src: str, i: int) -> int:
+    """Index just past a string literal starting at `i`, else `i`."""
+    quote = src[i]
+    if quote not in "\"'`":
+        return i
+    j = i + 1
+    while j < len(src):
+        if src[j] == "\\":
+            j += 2
+            continue
+        if src[j] == quote:
+            return j + 1
+        j += 1
+    return j
+
+
+def _balanced(src: str, open_idx: int) -> int:
+    """Index of the `)` matching the `(` at `open_idx`, ignoring strings.
+
+    Parens inside a `.describe()` string are common ("(default: false)"), so a
+    naive counter miscounts on prose. Strings are skipped wholesale.
+    """
+    depth = 0
+    i = open_idx
+    while i < len(src):
+        c = src[i]
+        if c in "\"'`":
+            i = _skip_strings(src, i)
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def tool_registrations() -> dict[str, tuple[str, str]]:
+    """{tool name: (its inputSchema source, everything after it)}.
+
+    The schema is delimited by matching parentheses rather than by a `}, async`
+    literal. Three tool files use the fully expanded handler form, which
+    contains no such literal -- against those, a literal split silently returns
+    the whole remainder and a parameter mentioned anywhere in the handler body
+    reads as a declared one.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for ts_file in sorted(MCP_TOOLS_DIR.glob("*.ts")):
+        text = ts_file.read_text()
+        for chunk in text.split("server.registerTool(")[1:]:
+            name_match = re.match(r'\s*"([a-z_0-9]+)"', chunk)
+            if not name_match:
+                continue
+            key = chunk.find("inputSchema:")
+            if key == -1:
+                out[name_match.group(1)] = ("", chunk)
+                continue
+            open_paren = chunk.find("(", key)
+            close = _balanced(chunk, open_paren) if open_paren != -1 else -1
+            if close == -1:
+                out[name_match.group(1)] = ("", chunk)
+                continue
+            out[name_match.group(1)] = (chunk[key:close], chunk[close:])
+    return out
+
+
+def tools_posting_to(path: str) -> dict[str, tuple[str, str]]:
+    return {
+        name: parts
+        for name, parts in tool_registrations().items()
+        if f'"{path}"' in parts[0] + parts[1]
+    }
+
+
+def test_the_capture_gate_is_found_on_both_known_paths():
+    """The floor, asserted where a reader will look for it. `gate_guarded_routes`
+    raises on its own, so this is a named restatement rather than the guard."""
+    routes = gate_guarded_routes()
+    assert "/api/v1/proxy/local-capture" in routes
+    assert "/api/v1/proxy/configure-system" in routes
+
+
+def test_the_schema_parse_finds_a_real_schema_for_every_tool():
+    """Guards the TS half. A parse returning empty schemas would make the
+    parameter check below pass for every tool without reading anything."""
+    empty = [
+        name for name, (schema, _) in tool_registrations().items()
+        if "inputSchema" not in schema
+    ]
+    assert not empty, f"could not locate an inputSchema for: {_format(set(empty))}"
+
+
+def test_every_gated_endpoint_accepts_the_skip():
+    """The HTTP half: the body model behind each gated path has the field the
+    refusal names."""
+    import server.models as models
+
+    for path, model_name in gate_guarded_routes().items():
+        assert model_name, (
+            f"{path} calls the capture gate but takes no typed body, so there "
+            f"is nowhere for skip_cert_check to live"
+        )
+        model = getattr(models, model_name)
+        assert "skip_cert_check" in model.model_fields, (
+            f"{path} refuses with 428 naming skip_cert_check, but {model_name} "
+            f"has no such field"
+        )
+
+
+def test_every_gated_endpoint_offers_the_skip_to_agents():
+    """The half that shipped broken. A tool posting to a gated path must both
+    declare `skip_cert_check` and forward it.
+
+    Declaring without forwarding is the worse of the two failures: validation
+    accepts the field, the request omits it, the same 428 comes back, and the
+    agent has done exactly what the error told it to.
+    """
+    for path in gate_guarded_routes():
+        posting = tools_posting_to(path)
+        assert posting, f"no MCP tool posts to {path}"
+        for name, (schema, handler) in posting.items():
+            assert "skip_cert_check" in schema, (
+                f"{name} posts to {path}, which refuses with 428 and tells the "
+                f"caller to pass skip_cert_check -- but the tool's schema is "
+                f"strict and does not accept it"
+            )
+            # Past the arrow, so the destructuring pattern does not count as
+            # forwarding. `async ({ skip_cert_check: skipCertCheck }) => {`
+            # mentions the field while doing nothing with it, and deleting the
+            # line that puts it in the body leaves that mention behind.
+            arrow = handler.split("=> {", 1)
+            assert len(arrow) == 2, f"{name}: cannot find the handler body"
+            assert "skip_cert_check" in arrow[1], (
+                f"{name} declares skip_cert_check but never puts it in the "
+                f"request body, so passing it changes nothing -- the same 428 "
+                f"comes back after the agent did exactly what it was told"
+            )

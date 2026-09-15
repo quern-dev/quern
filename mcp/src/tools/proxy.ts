@@ -918,10 +918,13 @@ SETS THE LIST, does not add to it. Whatever is not named is dropped, so read
 proxy_status first and pass the processes already there alongside the new one.
 Told "capture MyApp", sending ["MyApp"] silently stops capturing everything
 else -- most often the web-view defaults, which are applied only when nothing
-is specified. The response reports what was dropped.
+is specified. The response echoes only the new list, so it cannot tell you
+what went missing; the drop is recorded as a warning in the server log, which
+query_logs(source: "server") will show you.
 
 CERTIFICATE CHECK. Enabling capture refuses with HTTP 428 when a booted
-simulator does not trust the mitmproxy CA, exactly as configure_system_proxy
+simulator does not trust the mitmproxy CA and auto_install_cert is off. With
+that setting on it installs the CA instead of refusing, exactly as configure_system_proxy
 does and for the same reason: routing a process's traffic through the proxy
 from a device that does not trust the CA fails every HTTPS request from it with
 no indication the proxy is the cause. The refusal is NOT transient and retrying
@@ -965,11 +968,19 @@ extension in System Settings > Privacy & Security.`,
         ],
       };
     } catch (e) {
+      // The "is it running?" hint is for a transport failure. A refusal the
+      // server deliberately returned -- the 428 above says in terms that
+      // retrying will not clear it -- is not helped by being told the server
+      // may be down, and reads as a contradiction of the advice it follows.
+      const message = e instanceof Error ? e.message : String(e);
+      const served = /^HTTP \d{3}:/.test(message);
       return {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: served
+              ? `Error: ${message}`
+              : `Error: ${message}\n\nIs Quern running? Start it with: quern-debug-server`,
           },
         ],
         isError: true,
