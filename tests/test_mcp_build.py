@@ -218,3 +218,41 @@ class TestClientsAreRegisteredOnTheVersionGate:
         )
         assert not any(a.endswith("dist/index.js") for a in args)
         assert str(root) in args[0]
+
+
+class TestSetupUsesTheSameDecision:
+    """`_build_mcp` was a near-copy of `_ensure_mcp_built` with the same three
+    defects, and `run_setup` calls it unguarded -- so `quern update` had a
+    second route into the crash that took down `quern start`."""
+
+    def test_setup_does_not_crash_when_npm_is_missing(self, project):
+        from server.lifecycle.setup import CheckStatus, _build_mcp
+
+        with patch("subprocess.run", side_effect=FileNotFoundError(2, "nope", "npm")):
+            result = _build_mcp(project)
+
+        assert result.status is CheckStatus.ERROR, (
+            "a missing npm escaped _build_mcp, so `quern setup` and "
+            "`quern update` end in a traceback"
+        )
+        assert "terminal" in (result.detail or "")
+
+    def test_setup_skips_npm_when_the_build_is_current(self, project):
+        from server.lifecycle.setup import CheckStatus, _build_mcp
+
+        _ship_dist(project)
+        with patch("subprocess.run", side_effect=AssertionError("npm was invoked")):
+            result = _build_mcp(project)
+        assert result.status is CheckStatus.OK
+
+    def test_setup_requires_the_launcher_too(self, project):
+        """The narrow check, in the second place it lived."""
+        dist = _ship_dist(project)
+        (dist / "launcher.cjs").unlink()
+
+        from server.lifecycle.setup import _build_mcp
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0)
+            _build_mcp(project)
+        assert run.call_count > 0, "setup reported a dist/ with no launcher as current"

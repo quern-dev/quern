@@ -451,73 +451,43 @@ def _add_to_path(shell_rc: Path, directory: Path) -> bool:
 
 
 def _build_mcp(project_root: Path) -> CheckResult:
-    """Build the MCP TypeScript server (npm install + npm run build)."""
-    mcp_dir = project_root / "mcp"
-    src_dir = mcp_dir / "src"
-    dist_file = mcp_dir / "dist" / "index.js"
+    """Build the MCP TypeScript server, reporting it as a setup check.
 
-    if not src_dir.exists():
+    Delegates rather than reimplementing. This was a near-copy of
+    `_ensure_mcp_built` and carried every defect that one had: it ran
+    `npm install` before deciding whether a build was needed, judged freshness
+    from `dist/index.js` alone, and let a missing npm raise. That last one is
+    not theoretical here -- `run_setup` calls this unguarded, and `quern update`
+    calls `run_setup`, so the crash that took down `quern start` (#193) had a
+    second route into the updater.
+
+    Two copies of a decision drift, and the one a reader happens to open wins.
+    """
+    mcp_dir = project_root / "mcp"
+    if not (mcp_dir / "src").exists():
         return CheckResult(
             name="MCP server",
             status=CheckStatus.WARNING,
             message="mcp/src/ not found — skipped",
         )
 
-    node_modules = mcp_dir / "node_modules"
-    stamp = node_modules / ".install-stamp"
-    pkg_json = mcp_dir / "package.json"
-    needs_install = (
-        not node_modules.exists()
-        or not stamp.exists()
-        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
-    )
+    from server.__main__ import _ensure_mcp_built
 
-    if needs_install:
-        print("    Installing MCP server dependencies...")
-        result = subprocess.run(
-            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir),
-            stdin=subprocess.DEVNULL, timeout=120,
-        )
-        if result.returncode != 0:
-            return CheckResult(
-                name="MCP server",
-                status=CheckStatus.ERROR,
-                message="npm install failed",
-                detail="Try manually: cd mcp && npm install",
-            )
-        stamp.touch()
-
-    needs_build = not dist_file.exists()
-    if not needs_build:
-        dist_mtime = dist_file.stat().st_mtime
-        for src_file in src_dir.rglob("*"):
-            if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
-                needs_build = True
-                break
-
-    if needs_build:
-        print("    Building MCP server...")
-        result = subprocess.run(
-            ["npm", "run", "build"], cwd=str(mcp_dir),
-            stdin=subprocess.DEVNULL, timeout=60,
-        )
-        if result.returncode != 0:
-            return CheckResult(
-                name="MCP server",
-                status=CheckStatus.ERROR,
-                message="npm run build failed",
-                detail="Try manually: cd mcp && npm run build",
-            )
+    if _ensure_mcp_built(quiet=False):
         return CheckResult(
             name="MCP server",
             status=CheckStatus.OK,
-            message="Built successfully",
+            message="Up to date",
         )
-
     return CheckResult(
         name="MCP server",
-        status=CheckStatus.OK,
-        message="Up to date",
+        status=CheckStatus.ERROR,
+        message="build failed",
+        detail=(
+            "Try manually: cd mcp && npm install && npm run build. If npm is "
+            "not found, note that a GUI launch does not see a node installed "
+            "by fnm or nvm — run this from a terminal."
+        ),
     )
 
 
