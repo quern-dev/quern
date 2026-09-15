@@ -17,10 +17,10 @@ up can be counted separately from what a person noticed.
 
 | Finding | Status |
 |---|---|
-| F1 `/tools` can hang on a wedged device CLI | open, unfiled |
-| F2 `/tools` availability has no third state | open, unfiled |
-| F3 mock DELETE reports success for an unknown id | open, unfiled |
-| F4 `level` is an undocumented severity floor | open, unfiled |
+| F1 `/tools` can hang on a wedged device CLI | [#180](https://github.com/quern-dev/quern/issues/180) |
+| F2 `/tools` availability has no third state | [#181](https://github.com/quern-dev/quern/issues/181) |
+| F3 mock DELETE reports success for an unknown id | [#182](https://github.com/quern-dev/quern/issues/182) |
+| F4 `level` is an undocumented severity floor | [#183](https://github.com/quern-dev/quern/issues/183) |
 | F5 sim-bridge failure becomes a bodyless 500 | [#178](https://github.com/quern-dev/quern/issues/178) |
 | F6 backend selection latched at startup | [#179](https://github.com/quern-dev/quern/issues/179) |
 | F7 Xcode 27 moved SimulatorKit | fixed, [#176](https://github.com/quern-dev/quern/pull/176) |
@@ -30,7 +30,7 @@ up can be counted separately from what a person noticed.
 
 ## F1 — `SimctlBackend.is_available()` can hang `/tools` indefinitely
 
-**Status:** open — mechanism confirmed by reading; live symptom observed once.
+**Status:** filed as [#180](https://github.com/quern-dev/quern/issues/180) — open — mechanism confirmed by reading; live symptom observed once.
 
 `server/device/simctl.py:60` probes availability by running `xcrun simctl help`
 and awaiting it:
@@ -77,7 +77,7 @@ fails (rather than skipping) when `/tools` does not answer inside 25s.
 
 ## F2 — `/tools` reports availability with no freshness signal
 
-**Status:** open — design observation, lower confidence than F1.
+**Status:** filed as [#181](https://github.com/quern-dev/quern/issues/181) — open — design observation, lower confidence than F1.
 
 Related to F1 but distinct. `check_tools()` returns a flat `dict[str, bool]`.
 `tool_sites()` deliberately does not fold into it, and its docstring explains
@@ -97,7 +97,7 @@ may already draw on `/api/v1/device/tools/sites`, which carries `diagnostic` and
 
 ## F3 — `DELETE /api/v1/proxy/mocks/{rule_id}` reports success for a rule that never existed
 
-**Status:** confirmed — reproduced by a test on 2026-09-15, server v0.17.0.
+**Status:** filed as [#182](https://github.com/quern-dev/quern/issues/182) — confirmed — reproduced by a test on 2026-09-15, server v0.17.0.
 
 ```
 DELETE /api/v1/proxy/mocks/e16d6dcc-be41-4597-8891-37f941641871
@@ -144,7 +144,7 @@ empty set is legitimately a success.
 
 ## F4 — `level` is a severity floor, and nothing says so
 
-**Status:** open — documentation, low severity, but with direct evidence.
+**Status:** filed as [#183](https://github.com/quern-dev/quern/issues/183) — open — documentation, low severity, but with direct evidence.
 
 `GET /api/v1/logs/query?level=error` returns `fault` entries too. That is
 correct and deliberate: `server/storage/ring_buffer.py:125` filters on
