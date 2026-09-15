@@ -97,15 +97,34 @@ def resolve_target() -> ServerTarget:
     if key:
         source += " + QUERN_API_KEY"
     else:
-        key_path = REAL_QUERN_DIR / "api-key"
-        try:
-            key = key_path.read_text().strip() or None
-        except OSError:
-            key = None
+        key, key_source = _read_key()
         if key:
-            source += " + ~/.quern/api-key"
+            source += f" + {key_source}"
 
     return ServerTarget(url=url, api_key=key, source=source)
+
+
+def _read_key() -> tuple[str | None, str]:
+    """Find the API key, checking both places a real install keeps it.
+
+    `~/.quern/api-key` is the documented location and `state.json` carries an
+    `api_key` field holding the same value -- `tools/probe-app/selftest.py`
+    reads the latter. Checking only one would make the suite unrunnable on a
+    machine where that one is missing, for no reason other than which file
+    someone happened to look in.
+    """
+    try:
+        key = (REAL_QUERN_DIR / "api-key").read_text().strip()
+        if key:
+            return key, "~/.quern/api-key"
+    except OSError:
+        pass
+
+    state = _read_json(REAL_QUERN_DIR / "state.json") or {}
+    key = (state.get("api_key") or "").strip()
+    if key:
+        return key, "~/.quern/state.json"
+    return None, ""
 
 
 def _url_from_port(state: dict | None) -> str | None:

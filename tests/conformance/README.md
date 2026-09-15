@@ -112,11 +112,11 @@ Status as of the current branch.
 | 7 | Intercept & replay | `test_intercept.py` | todo |
 | 8 | Device pool: resolve, ensure, active | `test_device_pool.py` | todo |
 | 9 | Device lifecycle: boot, shutdown, erase | `test_device_lifecycle.py` | todo (erase is destructive) |
-| 10 | App install / launch / terminate / list | `test_apps.py` | todo — needs fixture app |
-| 11 | UI: tree, tap, type, swipe, scroll, wait | `test_ui.py` | todo — needs fixture app |
+| 10 | App install / launch / terminate / list | `test_apps.py` | todo — drives QuernProbe |
+| 11 | UI: tree, tap, type, swipe, scroll, wait | `test_ui.py` | todo — drives QuernProbe |
 | 12 | Screenshots, annotation, timeline | `test_screenshots.py` | todo |
-| 13 | App state checkpoints & plist | `test_app_state.py` | todo — needs fixture app |
-| 14 | Landmarks & screen identification | `test_landmarks.py` | todo — needs fixture app |
+| 13 | App state checkpoints & plist | `test_app_state.py` | todo — drives QuernProbe |
+| 14 | Landmarks & screen identification | `test_landmarks.py` | todo — drives QuernProbe |
 | 15 | Device configuration (locale, font, density, GPS) | `test_device_config.py` | todo |
 | 16 | Certificates & trust | `test_certs.py` | todo — destructive |
 | 17 | Builds & crash parsing | `test_builds.py` | todo |
@@ -124,14 +124,50 @@ Status as of the current branch.
 | 19 | WDA lifecycle | `test_wda.py` | todo — physical tier |
 | 20 | Android-specific backends | `test_android.py` | todo |
 
-### What blocks the rest
+### The fixture apps already exist
 
-Categories 10, 11, 13 and 14 need an app whose labels, plist keys and log output
-are known and stable. Driving Settings or Safari instead makes the assertions
-fuzzy and ages them against every OS release. Two fixture apps are the agreed
-approach — one SwiftUI, one Kotlin, mirrored so a single test body can assert the
-same behaviour across both backends. They do not exist yet; that is the next
-piece of work.
+Categories 10, 11, 13 and 14 need an app whose identifiers, plist keys and log
+output are known and stable. **QuernProbe** is that app, and it is already in
+this repo — a mirrored pair, which is exactly the shape this suite wants:
+
+| | iOS | Android |
+|---|---|---|
+| Source | `tools/probe-app/` (UIKit, 11 Swift files) | `tools/probe-app-android/` (Kotlin, 8 fragments) |
+| Bundle / package | `com.quern.probe` | `com.quern.probe` |
+| Build | `./build.sh [--install [udid]]`, bare `swiftc` into a hand-assembled bundle — no Xcode project | `./build.sh [--install [serial]]`, Gradle; finds its own JDK |
+| Self-test | `selftest.py`, drives the app over Quern's REST API | `selftest.py` |
+| Both | `tools/run-probes.py` runs whichever platform has a device | |
+
+It is deterministic, offline, and every interactive element carries a stable
+accessibility identifier. It was not built speculatively: it is the fixture that
+isolated the HID shift-drop bug on iOS, and its Android counterpart exists
+because `am start` exits 0 when it cannot resolve an intent, which is how #78
+hid — `open_url` reporting success for a URL nothing could open.
+
+**Adopting it, rather than duplicating it, is the next piece of work.** Three
+things need doing:
+
+1. **An identifier contract module.** The two apps mirror each other but diverge
+   where the platforms genuinely differ — iOS has `control_segment` and
+   `control_stepper`, Android has `control_checkbox`; `field_secure` is
+   `field_password`; Android mirrors its slider into `control_slider_value`
+   because `SeekBar` exposes its value inconsistently across API levels. A
+   per-platform identifier map lets one test body cover the common core and
+   declare the differences instead of branching on them ad hoc.
+2. **A build/install fixture.** Session-scoped, role-aware, skipping with a
+   usable reason when the toolchain is missing rather than failing.
+3. **Reconciling with `selftest.py`.** The two self-tests already cover typing
+   fidelity, hardware-keyboard toggling, tab navigation, switch state and scroll
+   rows. That work should be absorbed rather than reimplemented — and the
+   helpers in them are worth lifting wholesale, particularly iOS `goto()`, which
+   encodes three non-obvious facts about driving a UIKit tab bar: the bar shows
+   five items and the rest go into More, the More tab keeps its own navigation
+   stack, and "More" names two different elements. Note also that
+   `scroll_to_find` defaults on, so asking for an absent label burns the full
+   60-second timeout instead of failing.
+
+The iOS app builds clean today (verified on this branch; it warns about
+targeting iOS 16 against a macOS 27 sysroot, which is expected).
 
 ## Findings
 

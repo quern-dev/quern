@@ -259,6 +259,101 @@ def test_protected_operations_reject_a_wrong_token(
     )
 
 
+def test_protected_operations_reject_a_wrong_x_api_key(
+    quern: QuernClient, probeable: list[tuple[str, str, dict]]
+) -> None:
+    """The second accepted scheme needs the same sweep as the first.
+
+    `server/auth.py` accepts *either* `Authorization: Bearer <key>` or
+    `X-API-Key: <key>`, checked in that order by separate branches. A sweep of
+    only the bearer path would leave the whole `X-API-Key` branch uncovered, and
+    a hole there is reachable by anyone — `tools/probe-app/selftest.py` uses
+    that header in preference to the bearer one, so it is not a legacy
+    alternative nobody sends.
+    """
+    headers = {"X-API-Key": "conformance-probe-not-a-real-key"}
+    holes = []
+    for method, path, _ in probeable:
+        try:
+            resp = quern.request(
+                method,
+                _fill(path),
+                authenticated=False,
+                headers=headers,
+                json=_POISON_BODY if method != "GET" else None,
+                timeout=20.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            holes.append(f"{method} {path} -> transport error {exc!r}")
+            continue
+        if resp.status_code not in _AUTH_REJECTIONS:
+            holes.append(f"{method} {path} -> {resp.status_code}")
+
+    assert not holes, (
+        f"{len(holes)} operation(s) accepted an invalid X-API-Key:\n  "
+        + "\n  ".join(holes)
+    )
+
+
+def test_an_empty_x_api_key_header_is_not_accepted(
+    quern: QuernClient, authenticated: None
+) -> None:
+    """Send `X-API-Key:` with nothing after it.
+
+    `server/auth.py` compares `request.headers.get("X-API-Key", "")` against the
+    configured key by equality. The default for a missing header is the empty
+    string, so the comparison is only safe while the configured key is itself
+    non-empty — an empty key would make every request with no header compare
+    equal and authenticate. This cannot verify that directly without starting a
+    server with an empty key, but it does pin the reachable half: an empty
+    header must never be accepted.
+    """
+    resp = quern.get(
+        "/api/v1/system/channel",
+        authenticated=False,
+        headers={"X-API-Key": ""},
+        timeout=15.0,
+    )
+    assert resp.status_code in _AUTH_REJECTIONS, (
+        f"an empty X-API-Key header was accepted ({resp.status_code})"
+    )
+
+
+def test_both_documented_schemes_accept_the_real_key(
+    quern: QuernClient, authenticated: None
+) -> None:
+    """The control for the `X-API-Key` sweep.
+
+    Without it, a server that had dropped `X-API-Key` support entirely would
+    make the sweep above pass for the wrong reason — every request rejected,
+    including the valid ones — and this suite would report the scheme as sound
+    while callers using it were locked out.
+    """
+    assert quern.target.api_key, "no key resolved"
+
+    bearer = quern.get(
+        "/api/v1/system/channel",
+        authenticated=False,
+        headers={"Authorization": f"Bearer {quern.target.api_key}"},
+        timeout=15.0,
+    )
+    assert bearer.is_success, (
+        f"Authorization: Bearer was rejected with {bearer.status_code}"
+    )
+
+    api_key_header = quern.get(
+        "/api/v1/system/channel",
+        authenticated=False,
+        headers={"X-API-Key": quern.target.api_key},
+        timeout=15.0,
+    )
+    assert api_key_header.is_success, (
+        f"X-API-Key was rejected with {api_key_header.status_code}; "
+        "server/auth.py documents it as supported and "
+        "tools/probe-app/selftest.py relies on it"
+    )
+
+
 def test_a_valid_token_is_actually_accepted(
     quern: QuernClient, authenticated: None
 ) -> None:
