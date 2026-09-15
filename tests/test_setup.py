@@ -1927,13 +1927,28 @@ class TestDecliningTheVenvStopsThere:
             setup, "create_venv", lambda *a, **k: created.append(True) or True,
         )
 
+        # The load-bearing assertion. `run_setup` returns 1 for plenty of
+        # reasons in a sandbox, so an exit code alone does not show it stopped
+        # *here* -- with the return removed it falls through, every later check
+        # runs against an interpreter with no dependencies, and the run still
+        # ends in 1. Pinning the first check past the venv block is what
+        # distinguishes "stopped" from "carried on and failed anyway".
+        reached = []
+        monkeypatch.setattr(
+            setup, "check_mitmdump", lambda *a, **k: reached.append(True),
+        )
+
         rc = setup.run_setup()
 
+        assert reached == [], (
+            "setup carried on past the venv it was told not to create, which "
+            "is how this surfaced as ModuleNotFoundError several hundred lines "
+            "later"
+        )
         assert rc == 1, "declining was reported as success"
         assert created == [], "it created a venv after being told not to"
         out = capsys.readouterr().out
         assert "Declined" in out, "the summary does not say why it stopped"
-        assert "ModuleNotFoundError" not in out
         assert "httpx" not in out, (
             "the failure surfaced as a missing dependency rather than the "
             "decision that caused it"
