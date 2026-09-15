@@ -195,12 +195,16 @@ ANDROID = ProbeContract(
 CONTRACTS = {"ios": IOS, "android": ANDROID}
 
 
-#: Tabs on the iOS bar, in order. The bar shows five and pushes the rest into a
-#: More list with its own navigation stack, so which side of that line a tab
-#: falls on changes how it is reached. Recorded here because it is a property of
-#: the app, not of any one test.
-IOS_BAR_TABS = ("text", "controls", "scroll", "links", "logs")
-IOS_MORE_TABS = ("location", "web", "diag")
+#: Tabs reachable directly on the iOS bar, in order.
+#:
+#: A UITabBar shows at most five *items*, and when there are more tabs than that
+#: the fifth item is "More" rather than a tab -- so eight tabs means four are on
+#: the bar and the other four are behind More, which keeps its own navigation
+#: stack. Counting "five on the bar" is the easy mistake: it is five items, four
+#: tabs. Measured against the live screen, which reports exactly
+#: `Text, Controls, Scroll, Links, More`.
+IOS_BAR_TABS = ("text", "controls", "scroll", "links")
+IOS_MORE_TABS = ("logs", "location", "web", "diag")
 
 
 class ProbeUnavailable(RuntimeError):

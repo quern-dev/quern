@@ -256,9 +256,8 @@ as unavailable is not the one it uses.
 
 ## F7 — Xcode 27 moved SimulatorKit, and all simulator HID automation is broken
 
-**Status:** confirmed — 2026-09-15, Xcode 27.0, server v0.17.0. **This is the
-most severe finding so far: tap, type, swipe and press do not work on a
-simulator at all.**
+**Status:** **fixed** on `fix/xcode-27-simulatorkit-path` (commit `d67fc26`).
+Found 2026-09-15 against Xcode 27.0, server v0.17.0.
 
 Xcode 27 relocated the framework:
 
@@ -415,3 +414,43 @@ subprocess.run(["adb", "-s", adb_serial, "shell", "input", "keyevent", ...])
 — and uiautomator2 3.7.0 exposes `Device.clear_text()` directly (confirmed
 present). The fix is to call it on the handle already in hand, not to install
 anything.
+
+### F7 resolution
+
+Fixed on `fix/xcode-27-simulatorkit-path`, branched from `main`. Both layouts
+are now checked, in one resolver per language rather than a constant repeated at
+each call site — `find_simulator_kit()` in `server/device/sim_bridge.py` and
+`simulatorKitPath(at:)` in `tools/sim-bridge.swift`. Each returns the path it
+found rather than a boolean, so the availability answer cannot drift from the
+file that actually gets `dlopen`ed. No version switch: two `stat`s, and the next
+Xcode can move it again without this needing to know.
+
+Checked before relying on it, rather than assuming a move is only a move:
+
+```
+$ nm -gU .../Contents/SharedFrameworks/SimulatorKit.framework/SimulatorKit \
+    | grep IndigoHIDMessageForTrackpadEventFromHIDEventRef
+000000000000c154 T _IndigoHIDMessageForTrackpadEventFromHIDEventRef
+```
+
+**Verified live**, not only by unit test. With a server running from the fix
+branch and the cached `~/.quern/bin/sim-bridge` binary deleted so it recompiled
+from the patched source:
+
+| | before | after |
+|---|---|---|
+| `/tools` → `sim_bridge` | `false` | `true` |
+| `test_ui.py -k ios` | 21 failed, 4 passed | **0 failed, 24 passed** |
+
+Mutation-tested: removing the `../SharedFrameworks` entry from a `git archive`
+copy fails `test_finds_the_xcode_27_layout` and nothing else.
+
+Two things this did **not** fix, deliberately:
+
+* **idb is still broken.** It is third-party and looks in the old location
+  itself. It no longer matters here because sim-bridge is preferred when
+  available, but a machine without sim-bridge — no `swiftc`, say — still has no
+  working HID path on Xcode 27.
+* **F5 and F6 stand.** The bodyless 500 and the latched startup decision are
+  separate defects that this bug merely exposed. F6 in particular is why the
+  failure survived an Xcode upgrade in the first place.
