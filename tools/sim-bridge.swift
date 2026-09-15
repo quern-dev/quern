@@ -43,10 +43,17 @@ func loadFrameworks() {
     }
 
     let dev = developerDir()
-    let simKit = (dev as NSString)
-        .appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit")
-    if dlopen(simKit, RTLD_NOW | RTLD_GLOBAL) == nil {
-        logErr("SimulatorKit load failed: \(dlerrorString())")
+    if let simKit = simulatorKitPath(at: dev) {
+        if dlopen(simKit, RTLD_NOW | RTLD_GLOBAL) == nil {
+            logErr("SimulatorKit load failed: \(dlerrorString())")
+        }
+    } else {
+        // Name both layouts: "not found" against a developer directory that
+        // plainly contains Xcode sends the reader looking in the wrong place.
+        logErr("""
+            SimulatorKit not found under \(dev). Looked for \
+            \(simulatorKitRelativePaths.joined(separator: " and ")).
+            """)
     }
 
     let axPath = "/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation"
@@ -76,10 +83,39 @@ private func xcodeSelectDir() -> String? {
     return out.isEmpty ? nil : out
 }
 
+/// Where the SimulatorKit binary sits, relative to a developer directory.
+///
+/// Xcode 27 moved it out of the developer directory altogether:
+///
+///   <= 26  Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework
+///   27+    Xcode.app/Contents/SharedFrameworks/SimulatorKit.framework
+///
+/// The second is a *sibling* of `Developer`, not a relocation within it, so
+/// nothing rooted at the developer directory can reach it without stepping up
+/// a level. Both are checked rather than switching on a version: it costs one
+/// `stat`, and it keeps working whichever layout the next Xcode ships.
+private let simulatorKitRelativePaths = [
+    "Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit",
+    "../SharedFrameworks/SimulatorKit.framework/SimulatorKit",
+]
+
+/// The SimulatorKit binary for this developer directory, or nil if absent.
+///
+/// Returns the path rather than a yes/no so that every caller loads the file it
+/// actually found. Answering "yes it exists" and leaving each caller to rebuild
+/// the path from a constant is how three call sites came to disagree with
+/// reality at once.
+func simulatorKitPath(at dev: String) -> String? {
+    for relative in simulatorKitRelativePaths {
+        let path = ((dev as NSString).appendingPathComponent(relative) as NSString)
+            .standardizingPath
+        if FileManager.default.fileExists(atPath: path) { return path }
+    }
+    return nil
+}
+
 private func hasSimulatorKit(at dev: String) -> Bool {
-    let path = (dev as NSString)
-        .appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit")
-    return FileManager.default.fileExists(atPath: path)
+    return simulatorKitPath(at: dev) != nil
 }
 
 private func scanApplications() -> String? {
@@ -690,10 +726,8 @@ func nextTouchId() -> UInt32 {
 func resolveHIDSymbols() -> Bool {
     if hidSymbolsResolved { return true }
     let dev = developerDir()
-    let kitPath = (dev as NSString).appendingPathComponent(
-        "Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"
-    )
-    guard let kit = dlopen(kitPath, RTLD_NOW) else { return false }
+    guard let kitPath = simulatorKitPath(at: dev),
+          let kit = dlopen(kitPath, RTLD_NOW) else { return false }
     let dyld = UnsafeMutableRawPointer(bitPattern: -2)
     guard let pCreateDig = dlsym(dyld, "IOHIDEventCreateDigitizerEvent"),
           let pCreateFin = dlsym(dyld, "IOHIDEventCreateDigitizerFingerEvent"),
