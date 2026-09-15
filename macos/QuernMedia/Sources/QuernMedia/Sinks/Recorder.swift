@@ -15,6 +15,7 @@ public final class Recorder {
         case writerRejectedInput
         case writerFailed(String)
         case finishTimedOut(TimeInterval)
+        case neverStarted
 
         public var description: String {
             switch self {
@@ -23,6 +24,8 @@ public final class Recorder {
             case .writerFailed(let m): return "AVAssetWriter failed: \(m)"
             case .finishTimedOut(let t):
                 return "AVAssetWriter did not finish writing within \(t)s"
+            case .neverStarted:
+                return "no keyframe ever reached the recorder, so nothing was written"
             }
         }
     }
@@ -139,8 +142,15 @@ public final class Recorder {
     public func finish(timeout: TimeInterval = 60) -> Summary? {
         lock.lock()
         guard started, !finished else {
+            // "Nothing was captured" and "the recording failed" are different
+            // answers, and a bare nil cannot tell them apart -- a caller that
+            // treats every nil as a failure reports a broken recording when
+            // there simply was not one. A second finish after a successful
+            // one leaves whatever reason is already there alone.
+            let neverStarted = !started && !finished
             finished = true
             lock.unlock()
+            if neverStarted { note(.neverStarted) }
             return nil
         }
         finished = true
@@ -191,16 +201,20 @@ public final class Recorder {
     var finishWritingOverride: ((@escaping () -> Void) -> Void)?
 
     private func finishWriting(_ completion: @escaping () -> Void) {
-        if let finishWritingOverride {
-            finishWritingOverride(completion)
+        lock.lock()
+        let override = finishWritingOverride
+        lock.unlock()
+        if let override {
+            override(completion)
             return
         }
         writer.finishWriting(completionHandler: completion)
     }
 
-    /// Non-nil when the writer refused to start, or could not be finished --
-    /// for callers that want to report why rather than silently produce
-    /// nothing. A nil `finish()` always leaves a reason here.
+    /// Non-nil when the writer refused to start, could not be finished, or
+    /// never had anything to write. A `finish()` returning nil always leaves
+    /// a reason here, except for a repeat call after a successful one, which
+    /// leaves the previous state untouched.
     public var failure: Failure? {
         lock.lock()
         defer { lock.unlock() }

@@ -52,6 +52,10 @@ _RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
 STREAM_BASE_PORT = 8422
 # A cold `quern-media` has to attach to the simulator framebuffer first.
 STREAM_START_TIMEOUT = 20.0
+# Gap between consecutive adds. CoreMediaIO races when several capture
+# sessions start at once; a constant so tests can drive several adds without
+# paying for it.
+ADD_STAGGER_SECONDS = 1.0
 
 _INFO_PLIST = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -595,8 +599,8 @@ class PreviewManager:
             self._active[key] = preview
             self._positions.add(position)
 
-            # Stagger: wait 1s before allowing the next add
-            await asyncio.sleep(1.0)
+            # Stagger: give CoreMediaIO a moment before the next add
+            await asyncio.sleep(ADD_STAGGER_SECONDS)
 
             return preview
 

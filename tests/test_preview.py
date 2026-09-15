@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 from collections import deque
 
@@ -301,12 +300,13 @@ class TestSimulatorStreams:
             return "/tmp/quern-media"
 
         async def _refuse(*_args, **_kwargs):
-            # Stubbed, because _wait_until_serving otherwise dials
-            # 127.0.0.1:8422 for real. Anything already listening on that port
-            # -- including a quern-media left over from a manual test -- makes
-            # the connect succeed, and the test then fails inside _send with
-            # "Preview process not running", which has nothing to do with the
-            # behaviour under test.
+            # Stubbed because _wait_until_serving otherwise dials loopback for
+            # real, and CONTRIBUTING is explicit that tests do not touch the
+            # machine. Being honest about the blast radius: the dial targets a
+            # port find_available_port just found free, so in practice it gets
+            # ECONNREFUSED anyway and the tests pass either way. This removes
+            # the dependency on that reasoning staying true, not an observed
+            # failure.
             raise ConnectionRefusedError("nothing is listening (stubbed)")
 
         monkeypatch.setattr(mgr, "_ensure_process", _no_process)
@@ -393,6 +393,13 @@ class TestSimulatorStreams:
         )
 
         launched: dict = {}
+        asked: dict = {}
+
+        real_find = preview.find_available_port
+
+        def _find(preferred, **kwargs):
+            asked.update(kwargs)
+            return real_find(preferred, **kwargs)
 
         async def _no_process():
             return None
@@ -424,9 +431,16 @@ class TestSimulatorStreams:
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
         monkeypatch.setattr(preview.asyncio, "open_connection", _connect)
         monkeypatch.setattr(mgr, "_send", _send)
+        monkeypatch.setattr(preview, "find_available_port", _find)
 
         record = asyncio.run(mgr.add_simulator("SIM2"))
-        assert launched["port"] != preview.STREAM_BASE_PORT
+
+        # Asserted on the exclude set rather than on the resulting number.
+        # find_available_port probes by real bind(), so on a host where
+        # something already holds STREAM_BASE_PORT the assertion
+        # `launched["port"] != STREAM_BASE_PORT` is satisfied by the host and
+        # passes with the exclude set removed entirely -- verified.
+        assert asked["exclude"] == {preview.STREAM_BASE_PORT}
         assert record.stream_port == launched["port"]
 
 
@@ -459,6 +473,51 @@ class TestIdentityResolution:
         """It is what a person reads off the menu."""
         mgr = self._available(("iPhone 11", "AAA"))
         assert mgr._resolve_device("iPhone 11").cmio_id == "AAA"
+
+    def test_two_phones_of_one_model_get_separate_sessions(self, monkeypatch):
+        """The property the re-key exists for, asserted on the session table
+        rather than on the lookup helper.
+
+        Resolving the right device is not enough: `_active`, `_pending` and
+        `_positions` have to be keyed by id too. Keyed by name, the second add
+        finds the name already taken and hands back the first phone's preview,
+        and unplugging either closes the other's window. Verified that this
+        fails when `_add_device` keys on `device.name`.
+        """
+        from server.device import preview
+        from server.device.preview import PreviewDeviceInfo
+
+        mgr = PreviewManager()
+        mgr._available = [
+            PreviewDeviceInfo(name="iPhone 15 Pro", cmio_id="AAA"),
+            PreviewDeviceInfo(name="iPhone 15 Pro", cmio_id="BBB"),
+        ]
+        sent: list = []
+
+        async def _no_process():
+            return None
+
+        async def _send(cmd):
+            sent.append(cmd)
+            mgr._dispatch_event(
+                {"event": "added", "key": cmd["key"], "id": cmd["id"]}
+            )
+
+        monkeypatch.setattr(preview, "ADD_STAGGER_SECONDS", 0)
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(mgr, "_send", _send)
+
+        async def run():
+            await mgr.add("AAA")
+            await mgr.add("BBB")
+
+        asyncio.run(run())
+
+        assert set(mgr._active) == {"AAA", "BBB"}, (
+            f"both phones should hold a session, got {sorted(mgr._active)}"
+        )
+        assert [c["key"] for c in sent] == ["AAA", "BBB"]
+        assert len(mgr._positions) == 2, "the second window reused the first's slot"
 
     def test_add_routes_a_simulator_udid_to_a_stream(self, monkeypatch):
         """One entry point for both kinds: a udid is not a capture device, and
@@ -508,25 +567,47 @@ class TestIdentityResolution:
 
 class TestTeardownFailureReporting:
     def test_a_failing_teardown_is_logged_not_swallowed(self, caplog):
-        """The teardown is fire-and-forget, so an exception inside it would
-        otherwise appear only as "Task exception was never retrieved" at
-        collection time -- naming neither the stream nor the cause."""
+        """Driven through the real window_closed path, not by attaching the
+        callback by hand.
+
+        A version that built its own task and attached
+        `_report_background_failure` itself passed with every production
+        wiring deleted -- it only ever tested the one static method. This
+        fails unless the handler actually attaches the callback.
+        """
         import logging
+
+        from server.device import preview
 
         async def run():
             mgr = PreviewManager()
 
-            async def boom():
+            async def boom(_key):
                 raise OSError("terminate failed")
 
-            task = asyncio.create_task(boom(), name="stop-stream[SIM]")
-            task.add_done_callback(mgr._report_background_failure)
-            with contextlib.suppress(OSError):
-                await task
+            mgr._streams["SIM"] = preview._StreamProcess(
+                process=_LiveStreamProcess(), port=8422, log=deque(maxlen=20)
+            )
+            mgr._stop_stream = boom
+            mgr._dispatch_event({"event": "window_closed", "key": "SIM"})
+            await asyncio.sleep(0.05)
 
         with caplog.at_level(logging.ERROR):
             asyncio.run(run())
 
-        assert any(
-            "stop-stream[SIM]" in r.getMessage() for r in caplog.records
-        ), "the teardown failure was never reported"
+        # Matched on this module's logger, not on the text alone. With no
+        # callback attached, asyncio itself logs "Task exception was never
+        # retrieved" when the task is collected, and that message embeds the
+        # task repr -- including name='stop-stream[SIM]'. A substring check
+        # therefore passed with every production wiring deleted, which is the
+        # same proxy-assertion trap this test was rewritten to escape.
+        reported = [
+            r for r in caplog.records
+            if r.name == "quern-debug-server.preview"
+            and "Background task" in r.getMessage()
+            and "stop-stream[SIM]" in r.getMessage()
+        ]
+        assert reported, (
+            "the teardown failure was not reported by the manager; "
+            f"records seen: {[(r.name, r.getMessage()[:60]) for r in caplog.records]}"
+        )

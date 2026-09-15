@@ -42,13 +42,21 @@ public final class SimulatorFramebuffer: FrameSource {
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
 
-    /// Marks `queue`, so `stop()` can tell whether it is already on it.
-    private static let queueKey = DispatchSpecificKey<Void>()
+    /// Marks `queue` with *this instance's* identity.
+    ///
+    /// The value carries the identity, not merely the key's presence. A
+    /// shared key with a `Void` value answered "yes, you are on my queue"
+    /// while standing on any *other* instance's queue — so stopping source A
+    /// from inside source B's frame callback ran A's cleanup inline on B's
+    /// queue, mutating A's descriptors while A's own queue was iterating
+    /// them. That is the race the queue hop exists to prevent, reintroduced
+    /// by the check meant to avoid deadlocking on it.
+    private static let queueKey = DispatchSpecificKey<ObjectIdentifier>()
 
     public init(udid: String, onFrame: @escaping (CapturedFrame) -> Void) {
         self.udid = udid
         self.onFrame = onFrame
-        queue.setSpecific(key: Self.queueKey, value: ())
+        queue.setSpecific(key: Self.queueKey, value: ObjectIdentifier(self))
     }
 
     public func start() throws {
@@ -136,7 +144,7 @@ public final class SimulatorFramebuffer: FrameSource {
         // `onFrame` runs on this queue, so a consumer that stops the source
         // from inside its own frame callback is already here -- and
         // `queue.sync` onto the serial queue you are standing on deadlocks.
-        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+        if DispatchQueue.getSpecific(key: Self.queueKey) == ObjectIdentifier(self) {
             cleanup()
         } else {
             queue.sync(execute: cleanup)

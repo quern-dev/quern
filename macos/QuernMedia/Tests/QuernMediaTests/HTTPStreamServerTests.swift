@@ -4,7 +4,37 @@ import Network
 import Testing
 @testable import QuernMedia
 
-private func freePort() -> UInt16 { UInt16.random(in: 42_000...46_000) }
+/// A port nothing on this host is using.
+///
+/// Six tests bind one of these. Picking at random and hoping meant a
+/// collision with anything already listening made `start()` throw, and the
+/// test then failed for a reason with nothing to do with what it was testing.
+private func freePort() -> UInt16 {
+    for _ in 0..<64 {
+        let candidate = UInt16.random(in: 42_000...46_000)
+        if portIsFree(candidate) { return candidate }
+    }
+    return UInt16.random(in: 42_000...46_000)
+}
+
+private func portIsFree(_ port: UInt16) -> Bool {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    // Deliberately no SO_REUSEADDR: the question is whether this port is
+    // usable right now, and reuse would answer yes for one in TIME_WAIT.
+    let bound = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    return bound == 0
+}
 
 private func captured(_ surface: IOSurface, frame i: Int) -> CapturedFrame {
     CapturedFrame(
