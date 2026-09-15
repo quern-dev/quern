@@ -152,6 +152,17 @@ the copy to trust, and the one to update.
   page, and it was also the finding that exposed one of our own tests asserting
   the bug as expected behaviour.
 
+- **A draft PR is never reviewed either, and it hangs the merge.** CodeRabbit
+  does not auto-review a draft, and `gh pr merge` cannot merge one, so
+  `merge-pr.sh` asks for a review that never arrives and waits indefinitely. The
+  tell is misleading in the same way as the stacked case: `scripts/cr-findings.sh`
+  returns *completely empty*, which is indistinguishable from "reviewed, found
+  nothing". Measured on #176 — zero reviews, two bot acknowledgements, and a
+  merge script killed after minutes of silence; `gh pr ready 176` produced a
+  review in about two minutes, and it found two real defects. Check
+  `gh pr view <n> --json isDraft` before starting a merge, and treat an empty
+  findings list as a question rather than an answer.
+
 - **Merging a PR: use `scripts/merge-pr.sh <number>`**, not `gh pr merge`. `.coderabbit.yaml` sets `auto_review.enabled: true` with `auto_incremental_review: false`, so a review fires when a PR is *opened* and never again — **pushing to an open PR does not trigger one**. That is deliberate: review runs are capped per hour, and re-reviewing every push spends the budget on intermediate states nobody merges. The consequence is that an "0 unresolved threads" reading goes stale the moment you push, not because a new review contradicted it but because the code moved out from under it, and it still reads exactly like all-clear. The script refuses to merge unless the newest review is newer than the newest commit, and internally runs `pr-review-status.py --ask`, which requests the missing review when the head has moved past it. `--force` overrides deliberately. `scripts/pr-review-status.py` is the same check on its own; don't pipe it if you care about the exit code — `| sed` or `| tee` reports the pipe's status, not the script's, which reads as success.
 
 ## Design decisions worth knowing

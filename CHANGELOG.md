@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-09-15
+
+Three fixes, all from the Xcode 27 upgrade, and all of which reported success while doing nothing useful.
+
 ### Fixed
+- **Physical-device screen reads returned an empty tree after upgrading to Xcode 27.** `get_screen_summary` and `get_ui_tree` reported `element_count: 0` with no error, while a screenshot plainly showed a populated screen. Rebuilding WebDriverAgent under Xcode 27 moved an iPhone 11's `/source` response from 7.5s to 10.2s — same device, same screen, same Quern — which put it over its 10s budget, and Quern reads a timeout as evidence the runner is hung and restarts it. The budgets are now 20s for A13-era and older chips and 10s for everything newer, each sized from measurement with 1.5x headroom rather than set just above the last observation, which is what let both of them go under water twice. An iPhone 15 Pro was measured at 4.4-5.3s depending on screen density, so the previous 5s default straddled a current device: whether you got a tree came down to which screen you were on.
 - **Xcode 27 could not build WebDriverAgent at all, so physical devices stopped working.** Upstream WebDriverAgent declares an `IPHONEOS_DEPLOYMENT_TARGET` of 13.0 and Xcode 27 accepts nothing below 15.0, so every build failed in both `WebDriverAgentRunner` and `WebDriverAgentLib`. The failure was masked for existing users, because the build is skipped when the signing team already matches — a stale build from an older Xcode kept working right up until something forced a rebuild, and the forced path wipes derived data before building, so there was then nothing left to fall back on. Builds now pass the floor on the command line, where it reaches every target in the graph.
 - **Xcode 27 moved SimulatorKit, so sim-bridge stopped working — quietly.** Xcode 27 relocated `SimulatorKit.framework` from `Developer/Library/PrivateFrameworks` to `Contents/SharedFrameworks`, and sim-bridge looked only in the old place. The bad part was the reporting: a binary compiled before the move still completes the readiness handshake and logs its `dlopen` failure to stderr alone, so `sim_bridge` read as available and every gesture was routed to a bridge that could not resolve HID. Before the relocation a genuinely unavailable bridge reported `sim_bridge: false` and callers fell back to idb. Both layouts are now searched, the compiled binary is cached against a hash of its source rather than its mtime — `git archive` gives tarball files their *commit* time, so an upgrade could leave a newer-looking stale binary in place — and the Python and Swift halves resolve symlinked developer directories the same way.
 
@@ -493,6 +498,7 @@ First versioned release — MVP with iOS and Android support.
 - `quern --version` command.
 
 [Unreleased]: https://github.com/quern-dev/quern/compare/v0.18.1...main
+[0.18.2]: https://github.com/quern-dev/quern/releases/tag/v0.18.2
 [0.18.1]: https://github.com/quern-dev/quern/releases/tag/v0.18.1
 [0.18.0]: https://github.com/quern-dev/quern/releases/tag/v0.18.0
 [0.17.0]: https://github.com/quern-dev/quern/releases/tag/v0.17.0
