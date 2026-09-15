@@ -9,7 +9,22 @@ seen once under conditions that have since passed, it says so: a finding that
 overstates its own evidence wastes the time of whoever picks it up.
 
 Status key: **open** (stands, needs triage) · **confirmed** (reproduced
-deliberately) · **dismissed** (investigated, not a bug) · **fixed**.
+deliberately) · **filed** (has a GitHub issue) · **dismissed** (investigated, not
+a bug) · **fixed**.
+
+Filed issues carry the `found-by-conformance` label, so what this suite turned
+up can be counted separately from what a person noticed.
+
+| Finding | Status |
+|---|---|
+| F1 `/tools` can hang on a wedged device CLI | open, unfiled |
+| F2 `/tools` availability has no third state | open, unfiled |
+| F3 mock DELETE reports success for an unknown id | open, unfiled |
+| F4 `level` is an undocumented severity floor | open, unfiled |
+| F5 sim-bridge failure becomes a bodyless 500 | [#178](https://github.com/quern-dev/quern/issues/178) |
+| F6 backend selection latched at startup | [#179](https://github.com/quern-dev/quern/issues/179) |
+| F7 Xcode 27 moved SimulatorKit | fixed, [#176](https://github.com/quern-dev/quern/pull/176) |
+| F8 Android `clear_text` deletes one character | [#177](https://github.com/quern-dev/quern/issues/177) |
 
 ---
 
@@ -165,7 +180,7 @@ rather than a caller.
 
 ## F5 — a sim-bridge failure escapes as an undiagnosable HTTP 500
 
-**Status:** confirmed — reproduced on 2026-09-15, server v0.17.0.
+**Status:** filed as [#178](https://github.com/quern-dev/quern/issues/178) — confirmed — reproduced on 2026-09-15, server v0.17.0.
 
 `POST /api/v1/device/ui/tap-element` returns `500` with the body
 `Internal Server Error` and nothing else. The traceback in `~/.quern/server.log`:
@@ -207,7 +222,7 @@ narrow test, because the defect is that *every* tap-driven endpoint 500s.
 
 ## F6 — backend selection is latched at startup and never re-checked
 
-**Status:** confirmed — root cause of F5's trigger, on this machine.
+**Status:** filed as [#179](https://github.com/quern-dev/quern/issues/179) — confirmed — root cause of F5's trigger, on this machine.
 
 `server/main.py:298` records the decision once, at startup:
 
@@ -319,7 +334,7 @@ unmistakable — every interaction test fails while every read test passes.
 
 ## F8 — `clear_text` on Android deletes one character and reports success
 
-**Status:** confirmed — reproduced directly on 2026-09-15 against a Pixel 3 XL
+**Status:** filed as [#177](https://github.com/quern-dev/quern/issues/177) — confirmed — reproduced directly on 2026-09-15 against a Pixel 3 XL
 (Android 10), server v0.17.0.
 
 ```
@@ -454,3 +469,16 @@ Two things this did **not** fix, deliberately:
 * **F5 and F6 stand.** The bodyless 500 and the latched startup decision are
   separate defects that this bug merely exposed. F6 in particular is why the
   failure survived an Xcode upgrade in the first place.
+
+### F8 — prior art
+
+Filed noting that [#98](https://github.com/quern-dev/quern/issues/98) (closed,
+2026-09-04) was the *same* defect on the web path: select-then-single-backspace
+where the selection silently does not take, one character goes, and the call
+reports `ok`. That fix hardened the web branch of `controller_ui.clear_text`
+with verification (`_clear_web_input`) and a refusal (`_MAX_DELETE`), and left
+the native branch — which has no check at all — untouched. The Android backend
+has the identical construction.
+
+Worth remembering when reading a closed issue as coverage: #98 is closed and
+accurate, and the same bug was live on another backend the whole time.
