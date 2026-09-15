@@ -37,16 +37,15 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
-# seconds, for everything newer than A13.
+# seconds, for everything newer than A13. Measured at 5.15-5.34s across four
+# samples on an iPhone 15 Pro (A17 Pro, iOS 26), WDA built with Xcode 27, home
+# screen -- a *denser* tree than the iPhone 11's, 714KB against 448KB, in half
+# the time.
 #
-# Unlike the slow budget below, this one is **not** measured: no modern device
-# has been timed under Xcode 27. It was raised from 5.0 on the reasoning that
-# the toolchain shift which doubled the iPhone 11's /source time was not
-# device-specific, so a modern device is likely slower too -- likely, not known.
-# Most screens answer in under 2s and the penalty for guessing low is severe
-# (see the cascade below), so erring high costs little.
-#
-# Worth measuring on an A16/A17 before treating this number as meaningful.
+# Which means the 5.0 this replaces was under water too: a modern device sat
+# just above it, so `element_count: 0` was already the normal outcome on an
+# iPhone 15 Pro. Confirmed by asking for the old budget explicitly and getting
+# an empty tree, then 641 elements at this one.
 SOURCE_TIMEOUT = 10.0
 # seconds, for A13 and older devices.
 #

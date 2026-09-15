@@ -3020,6 +3020,25 @@ class TestSourceTimeoutCoversRealHardware:
             f"nothing"
         )
 
+    #: Measured on a physical iPhone 15 Pro (A17 Pro), iOS 26, home screen,
+    #: WDA built with Xcode 27. Four samples, 5.15-5.34s -- against a *larger*
+    #: tree than the iPhone 11's (714KB vs 448KB) in half the time.
+    OBSERVED_A17 = 5.34
+
+    def test_a_modern_device_gets_more_than_the_measured_time(self):
+        """The old 5.0 default was under water on an A17 too.
+
+        It was raised on the assumption that the Xcode 27 slowdown was not
+        device-specific; measuring an A17 turned that assumption into a fact.
+        A budget of 5.0 sits *below* the observed 5.34s, which is why an
+        iPhone 15 Pro returned `element_count: 0` on the default path."""
+        assert SOURCE_TIMEOUT >= self.OBSERVED_A17 * 1.5, (
+            f"the default {SOURCE_TIMEOUT}s leaves no room above the "
+            f"{self.OBSERVED_A17}s measured on an A17. Clearing the last "
+            f"measurement by a hair is exactly how both of these budgets ended "
+            f"up under water within a day of being set"
+        )
+
     def test_the_slow_budget_has_real_headroom(self):
         """Not merely above the measurement. Both constants have been under
         water within a day of being set from the last observation, so the test
