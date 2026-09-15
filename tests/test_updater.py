@@ -1097,6 +1097,32 @@ class TestBetaNeverOffersOlderContentThanStable:
         ])
         assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
 
+    def test_a_repo_of_only_malformed_tags_offers_nothing(self, monkeypatch):
+        """Selection is not comparison. `_newer_release` treats an unparseable
+        tag as the lesser, which is right when ranking two -- but with a single
+        candidate there is nothing to lose to, so `nightly` was returned as the
+        answer. `_update_via_tarball` then catches `InvalidVersion` around its
+        own guard and carries on, so this really would have downloaded and
+        installed it."""
+        updater = self._releases(monkeypatch, [
+            {"tag_name": "nightly", "tarball_url": "junk.tgz", "prerelease": True},
+            {"tag_name": "rolling", "tarball_url": "junk2.tgz", "prerelease": False},
+        ])
+        assert updater._fetch_latest_release("beta") is None
+
+    def test_a_malformed_latest_stable_offers_nothing(self, monkeypatch):
+        """`/releases/latest` returns one object and never passes through the
+        selection above, so it needs validating on its own."""
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(
+            updater.urllib.request, "urlopen",
+            lambda req, **kw: _FakeUrlResp(
+                {"tag_name": "nightly", "tarball_url": "junk.tgz", "prerelease": False},
+            ),
+        )
+        assert updater._fetch_latest_release("stable") is None
+
     def test_an_unparseable_tag_cannot_win(self, monkeypatch):
         """A malformed tag must not offer itself as an update by accident."""
         updater = self._releases(monkeypatch, [

@@ -65,6 +65,16 @@ def _find_sdk_tool(name: str, subdir: str = "platform-tools") -> str | None:
 #: what an explicit package that is not installed produces. Matched against
 #: stdout and stderr together, because which stream carries it varies by
 #: Android version.
+#: The subset that really does mean "nothing can open this".
+#:
+#: Separate from the detection list because `Error: Activity not started` is
+#: also how Android reports a resolved activity that refused to launch, and
+#: "no app handled it" is the wrong thing to tell someone in that case.
+_AM_START_UNRESOLVED = (
+    "unable to resolve Intent",
+    "Error: Activity class",
+)
+
 _AM_START_FAILURES = (
     "Error: Activity not started",
     "unable to resolve Intent",
@@ -788,10 +798,18 @@ rm -rf /data/local/tmp/tmp-ca-copy
                     ),
                     combined.strip(),
                 )
-                raise DeviceError(
-                    f"No app on {serial} handled {url}: {detail}",
-                    tool="adb",
+                # Detection stays broad; the *diagnosis* does not. "Activity
+                # not started" also covers a resolved intent that was refused
+                # -- a permission denial, most often -- and telling someone no
+                # app handled their URL sends them to install one when the app
+                # is right there and said no.
+                unhandled = any(m in combined for m in _AM_START_UNRESOLVED)
+                summary = (
+                    f"No app on {serial} handled {url}"
+                    if unhandled
+                    else f"Could not launch {url} on {serial}"
                 )
+                raise DeviceError(f"{summary}: {detail}", tool="adb")
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.

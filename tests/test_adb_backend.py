@@ -321,8 +321,13 @@ class TestOpenUrlReportsAnUnhandledUrl:
         )
         with pytest.raises(DeviceError) as exc:
             await backend.open_url("emulator-5554", "nope://x")
-        assert "unable to resolve Intent" in str(exc.value), (
+        message = str(exc.value)
+        assert "unable to resolve Intent" in message, (
             "the message should carry adb's own reason, not a paraphrase"
+        )
+        assert "No app" in message, (
+            "this really is the nothing-can-open-it case, and saying so is the "
+            "whole point of separating it from a refused launch"
         )
 
     async def test_the_not_started_marker_alone_is_enough(self, monkeypatch):
@@ -425,3 +430,24 @@ class TestOpenUrlReportsAnUnhandledUrl:
             assert marker.startswith("Error:") or marker == "unable to resolve Intent", (
                 f"{marker!r} is loose enough to match echoed input"
             )
+
+    async def test_a_refused_launch_is_not_called_an_unhandled_url(self, monkeypatch):
+        """`Error: Activity not started` also covers a resolved activity that
+        declined to launch -- a permission denial, most often. Telling someone
+        no app handled their URL sends them to install one that is already
+        there and said no."""
+        from server.models import DeviceError
+
+        backend = self._backend(
+            monkeypatch,
+            "Starting: Intent { act=android.intent.action.VIEW dat=https://x/ }\n"
+            "Error: Activity not started, you do not have permission to access it.",
+        )
+        with pytest.raises(DeviceError) as exc:
+            await backend.open_url("emulator-5554", "https://x/")
+        message = str(exc.value)
+        assert "Could not launch" in message
+        assert "No app" not in message, (
+            "a refused launch was diagnosed as nothing being able to open it"
+        )
+        assert "permission" in message, "adb's own reason was dropped"

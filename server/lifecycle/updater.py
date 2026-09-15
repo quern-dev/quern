@@ -18,6 +18,10 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the runtime import stays inside the function, as elsewhere here
+    from packaging.version import Version
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -78,8 +82,28 @@ def _select_asset_url(assets: list, version: str) -> str | None:
     return None
 
 
+def _parses(release: dict) -> bool:
+    """Whether this release's tag is a version we can compare."""
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        Version((release.get("tag_name") or "").lstrip("v"))
+    except InvalidVersion:
+        return False
+    return True
+
+
 def _best_release(releases: list) -> dict | None:
-    """The highest-versioned release in a list, or None if it is empty."""
+    """The highest-versioned release in a list, or None if it is empty.
+
+    Malformed tags are not filtered here on purpose. `_newer_release` already
+    treats an unparseable tag as the lesser, so one never beats a usable
+    candidate; and when *every* candidate is malformed the winner is caught by
+    the validation in `_fetch_latest_release`, which has to exist anyway for the
+    stable path (`/releases/latest` returns a single object and never reaches
+    this function). Filtering here as well was a second mechanism for the same
+    guarantee, and no test could tell the two apart.
+    """
     best = None
     for release in releases:
         best = _newer_release(best, release)
@@ -101,7 +125,7 @@ def _newer_release(a: dict | None, b: dict | None) -> dict | None:
     if a is None or b is None:
         return a or b
 
-    def _v(release: dict):
+    def _v(release: dict) -> Version | None:
         from packaging.version import InvalidVersion, Version
 
         try:
@@ -173,7 +197,16 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
             if data is None:
                 return None
 
-        tag = data.get("tag_name", "")
+        if not _parses(data):
+            # Covers the stable path too, which takes whatever
+            # `/releases/latest` names without passing through `_best_release`.
+            print(
+                f"Error: the latest release on '{channel}' has an unusable tag "
+                f"({data.get('tag_name')!r}); not updating."
+            )
+            return None
+
+        tag = data.get("tag_name") or ""
         version = tag.lstrip("v")
         # Prefer an uploaded asset tarball (``quern-<version>.tar.gz``) — it
         # bundles the signed/notarized menu-bar Quern.app alongside the source

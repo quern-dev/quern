@@ -488,7 +488,7 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.17.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.18.1...main
 [0.18.1]: https://github.com/quern-dev/quern/releases/tag/v0.18.1
 [0.18.0]: https://github.com/quern-dev/quern/releases/tag/v0.18.0
 [0.17.0]: https://github.com/quern-dev/quern/releases/tag/v0.17.0
