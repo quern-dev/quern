@@ -21,6 +21,7 @@ alone would have made the first bug easier to hit.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -265,36 +266,95 @@ class TestABuildFailureSaysWhatWentWrong:
 
 class TestTheFreeAccountWarningKeepsTheBudgetsApart:
     """Two Apple limits, two remedies, and merging them sends people to wait
-    out a week for a condition waiting does not affect."""
+    out a week for a condition waiting does not affect.
 
-    def _warnings(self):
-        import inspect
-        return inspect.getsource(wda.setup_wda)
+    These call `setup_wda` and read the warnings it produces. The first version
+    asserted substrings of `inspect.getsource`, which tests that the file
+    contains certain characters -- deleting the entire warning block passed all
+    four, and would have passed if the text lived in a comment.
+    """
 
-    def test_it_does_not_call_the_device_limit_an_app_id_limit(self):
-        src = self._warnings()
-        assert "2 of your ~3 App ID slots" not in src, (
-            "the install limit (3 apps on a device) is described as an App ID "
-            "limit (10 registrations per 7 days); they are different budgets "
-            "with different remedies"
+    async def _warnings(self, monkeypatch, tmp_path, team_type="Free"):
+        monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "build_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "install_wda", AsyncMock(return_value=None))
+        monkeypatch.setattr(wda, "customize_wda", AsyncMock(return_value=None))
+        monkeypatch.setattr(wda, "discover_signing_identities", lambda: [
+            {"team_id": "TEAM123", "team_type": team_type, "name": "Test"},
+        ])
+        monkeypatch.setattr(wda, "_runner_app_signature_valid", AsyncMock(return_value=True))
+        monkeypatch.setattr(wda, "read_wda_state", lambda: {"cloned": True})
+        monkeypatch.setattr(wda, "save_wda_state", lambda st: None)
+        result = await wda.setup_wda("UDID-1", "18.0")
+        return "\n".join(result.get("warnings", []))
+
+    async def test_a_free_account_is_warned_at_all(self, monkeypatch, tmp_path):
+        """The mutation that survived the first version: making the whole block
+        unreachable. Nothing noticed, because nothing read the output."""
+        text = await self._warnings(monkeypatch, tmp_path)
+        assert text.strip(), "a free account got no warnings at all"
+
+    async def test_a_paid_account_is_not_warned(self, monkeypatch, tmp_path):
+        text = await self._warnings(monkeypatch, tmp_path, team_type="Individual")
+        assert "Free Apple developer account" not in text
+
+    async def test_the_two_budgets_carry_their_own_numbers(self, monkeypatch, tmp_path):
+        """Pinned exactly, because every one of these survived mutation as a
+        substring check: the limits, what quern spends, and what is left."""
+        text = await self._warnings(monkeypatch, tmp_path)
+        assert "10 per rolling 7 days" in text
+        assert "registers 2 App IDs" in text
+        assert "installs 1 app on the device" in text
+        assert "leaving 2 for your own" in text
+
+    async def test_only_the_app_id_budget_clears_by_waiting(self, monkeypatch, tmp_path):
+        """The distinction the whole correction exists for. Inverting either
+        half of it previously survived."""
+        text = await self._warnings(monkeypatch, tmp_path)
+        assert "that one\n            clears by waiting" in text or "clears by waiting" in text
+        assert "does NOT clear by waiting" in text
+        assert "delete a free-signed app from the device" in text.lower()
+
+    async def test_it_names_the_offloaded_app_trap(self, monkeypatch, tmp_path):
+        text = await self._warnings(monkeypatch, tmp_path)
+        assert "offloaded" in text.lower()
+
+
+class TestTheSpecificDiagnosisWinsOverTheGenericOne:
+    """Xcode reports the device-install limit as the *reason* provisioning
+    failed, then the signing step emits the generic "no profiles found" line as
+    well. First-match-wins over a table ordered generic-first answers the
+    specific condition with a remedy that cannot clear it -- a rebuild.
+
+    That is the bug two commits in this branch removed, reintroduced by a third
+    through table position alone.
+    """
+
+    BOTH = (
+        "error: The maximum number of apps for free development profiles has "
+        "been reached. (in target 'WebDriverAgentRunner')\n"
+        "error: No profiles for 'dev.quern.driver.xctrunner' were found: Xcode "
+        "couldn't find any iOS App Development provisioning profiles matching "
+        "'dev.quern.driver.xctrunner'."
+    )
+
+    def test_the_device_limit_wins_when_both_errors_appear(self):
+        d = wda._diagnose_signing_output(self.BOTH) or ""
+        assert "3 apps installed on one device" in d, (
+            f"answered the device-install limit with the generic profile "
+            f"remedy: {d[:120]}"
+        )
+        assert "force:true" not in d, (
+            "told a user to force a rebuild for a limit a rebuild cannot clear"
         )
 
-    def test_it_gives_the_remedy_that_clears_the_device_limit(self):
-        src = self._warnings()
-        assert "delete a free-signed app from the device" in src.lower(), (
-            "the 3-app limit is cleared by deleting an app, not by waiting"
+    def test_the_generic_one_still_answers_on_its_own(self):
+        only_generic = (
+            "error: No profiles for 'x' were found: Xcode couldn't find any iOS "
+            "App Development provisioning profiles matching 'x'."
         )
-
-    def test_it_names_the_offloaded_app_trap(self):
-        """Xcode counts offloaded apps toward the three, including Apple's own,
-        which is why this fires on a device that looks nearly empty."""
-        assert "offloaded" in self._warnings().lower()
-
-    def test_it_states_what_wda_itself_costs(self):
-        """A free-account user has three slots and quern takes one of them for
-        as long as they use it. Better said at setup than discovered later."""
-        src = self._warnings()
-        assert "leaving 2 for your own" in src
+        assert "No provisioning profile matches" in (
+            wda._diagnose_signing_output(only_generic) or "")
 
 
 class TestTheRealFailuresXcodebuildProduces:
@@ -338,3 +398,98 @@ class TestTheRealFailuresXcodebuildProduces:
     def test_neither_falls_through_to_raw_xcodebuild(self):
         for log in (self.NO_ACCOUNTS, self.NO_PROFILES):
             assert wda._diagnose_signing_output(log) is not None
+
+
+class TestBothPathsShareTheLookup:
+    """The commit's thesis was "both paths share one lookup now", and only the
+    build path was covered -- deleting the call from the runner-log path
+    survived the whole suite.
+    """
+
+    def test_the_runner_log_path_consults_it(self, tmp_path):
+        log = tmp_path / "runner-UDID.log"
+        log.write_text(
+            "2026-01-01 Testing failed:\n"
+            "error: The maximum number of apps for free development profiles "
+            "has been reached.\n"
+        )
+        diagnosis = wda._diagnose_runner_failure(log)
+
+        assert diagnosis is not None, (
+            "the runner-log path stopped consulting the shared table, so the "
+            "half of the refactor it was named for is gone"
+        )
+        assert "3 apps installed on one device" in diagnosis
+
+    def test_an_unrecognised_runner_log_is_not_guessed_at(self, tmp_path):
+        log = tmp_path / "runner-UDID.log"
+        log.write_text("x" * 200 + "\nsomething nobody has catalogued\n")
+        assert wda._diagnose_runner_failure(log) is None
+
+
+class TestTheGuideAgreesWithTheMessages:
+    """A correction pinned only in the source it was made in.
+
+    The first version asserted the old wording could not return -- inside
+    `setup_wda` alone. The guide those messages point readers at still said
+    "Wait 7 days for slots to free up" in a troubleshooting table keyed on the
+    very error string the message rewrote, so following the corrected advice
+    led to the uncorrected page.
+    """
+
+    GUIDE = Path(__file__).resolve().parent.parent / "docs" / "guides" / "ios-wda.md"
+
+    def test_the_guide_does_not_offer_waiting_for_the_device_limit(self):
+        text = self.GUIDE.read_text()
+        assert "Wait 7 days for slots to free up" not in text
+        assert "2 of your ~3 App ID slots" not in text
+        assert "uses **2 slots**" not in text
+
+    def test_the_guide_keeps_the_two_budgets_apart(self):
+        text = self.GUIDE.read_text()
+        assert "10 per rolling 7 days" in text
+        assert "3 at once" in text
+        assert "deleting a free-signed app from the device" in text
+
+
+class TestAFailedProbeDoesNotLeaveTheOldFingerprint:
+    """CONTRIBUTING: a success marker must not survive a failure, and not
+    writing it is insufficient when it may already be current from an earlier
+    success.
+
+    The window in which the probe fails is xcodebuild hanging during Xcode's
+    first-launch tasks (#180) -- which is exactly when the toolchain has just
+    changed, so the stale value is most likely to be wrong precisely when it
+    matters.
+    """
+
+    async def test_an_unreadable_toolchain_clears_a_previous_value(
+        self, tmp_path, monkeypatch,
+    ):
+        repo = tmp_path / "WebDriverAgent"
+        (repo / "WebDriverAgent.xcodeproj").mkdir(parents=True)
+        state = {"cloned": True, "build_xcode": "26C1234"}
+        saved: dict = {}
+
+        async def ok(*a, **k):
+            class P:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"", b""
+            return P()
+
+        monkeypatch.setattr(wda, "WDA_REPO", repo)
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "build")
+        monkeypatch.setattr(wda, "read_wda_state", lambda: dict(state))
+        monkeypatch.setattr(wda, "save_wda_state", lambda st: saved.update(st))
+        monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())
+        monkeypatch.setattr(wda, "_xcode_build_id", AsyncMock(return_value=None))
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", ok)
+
+        await wda.build_wda("TEAM123")
+
+        assert "build_xcode" not in saved, (
+            "the previous build's fingerprint survived a build it did not "
+            f"produce: {saved.get('build_xcode')!r}"
+        )

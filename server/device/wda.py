@@ -482,9 +482,18 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     # What this artifact was built *with*, so the next run can tell whether it
     # still matches. Written only here, after a build that returned zero.
     state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    # Cleared, not merely skipped, when the probe fails. Leaving the previous
+    # value would describe *this* artifact with the fingerprint of the one
+    # before it -- and the window in which the probe fails is xcodebuild hanging
+    # during Xcode's first-launch tasks (#180), which is exactly when the
+    # toolchain has just changed. CONTRIBUTING: a success marker must not
+    # survive a failure, and not writing it is insufficient when it may already
+    # be current from an earlier success.
     xcode = await _xcode_build_id()
     if xcode:
         state["build_xcode"] = xcode
+    else:
+        state.pop("build_xcode", None)
     save_wda_state(state)
 
     return True
@@ -719,25 +728,32 @@ _RUNNER_FAILURE_PATTERNS = [
         "add the Apple ID for this team, then retry.",
     ),
     (
-        # The most common signing failure there is, and it was not matched.
-        # On a free account this is what an expired 7-day profile looks like.
+        "The maximum number of apps for free development profiles has been reached",
+        "Free Apple developer account limit reached: a free profile may sign at "
+        "most 3 apps installed on one device at a time. Delete a free-signed "
+        "app from the device, or use a paid developer account.\n"
+        "Note that Xcode counts *offloaded* apps toward the three, so the "
+        "device can look emptier than it is — check Settings > General > "
+        "iPhone Storage for offloaded apps.\n"
+        "This is not the separate 10-App-IDs-per-7-days registration limit; "
+        "waiting does not clear this one.",
+    ),
+    (
+        # Deliberately *after* the max-apps entry. Xcode reports the
+        # device-install limit as the reason automatic provisioning failed,
+        # and the signing step then emits this generic line as well -- so
+        # first-match-wins would answer the specific condition with the
+        # generic remedy, which is a rebuild that cannot clear it. Specific
+        # before generic, and the ordering is covered by a test.
+        #
+        # On a free account with slots to spare, this is what an expired
+        # 7-day profile looks like.
         "were found: Xcode couldn't find any",
         "No provisioning profile matches this build. On a free account that "
         "usually means the 7-day profile expired — re-run setup_wda with "
         "force:true. Otherwise check that the signing team is still present in "
         "Xcode > Settings > Accounts, and that its certificate has not been "
         "revoked.",
-    ),
-    (
-        "The maximum number of apps for free development profiles has been reached",
-        "Free Apple developer account limit reached: a free profile may sign at "
-        "most 3 apps installed on one device at a time. Delete a free-signed "
-        "app from the device, or use a paid developer account.\n"
-        "Note that Xcode counts *offloaded* apps toward the three, including "
-        "Apple's own, so the device can look emptier than it is — check "
-        "Settings > General > iPhone Storage for offloaded apps.\n"
-        "This is not the separate 10-App-IDs-per-7-days registration limit; "
-        "waiting does not clear this one.",
     ),
     (
         "Device is not available",
@@ -1169,9 +1185,8 @@ async def setup_wda(
             "once, leaving 2 for your own. That limit does NOT clear by "
             "waiting: delete a free-signed app from the device, or use a paid "
             "account ($99/yr). Xcode counts offloaded apps toward the three "
-            "as well, including Apple's own, so check Settings > General > "
-            "iPhone Storage if the device looks emptier than the error "
-            "suggests.",
+            "as well, so check Settings > General > iPhone Storage if the "
+            "device looks emptier than the error suggests.",
             "- The device must trust the developer profile: "
             "Settings > General > VPN & Device Management "
             "> tap your profile > Trust.",
