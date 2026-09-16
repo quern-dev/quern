@@ -301,6 +301,31 @@ class TestTheBackendIsNotLatchedAtStartup:
             await ctrl.refresh_sim_bridge_availability(max_age=300)
         assert probe.await_count == 1, "a cached answer was re-probed"
 
+    async def test_a_freshly_booted_machine_does_not_serve_an_empty_cache(self):
+        """`time.monotonic()` counts from boot, so it is legitimately near zero
+        on a machine that just started.
+
+        With 0.0 as the "never checked" sentinel, `monotonic() - 0.0 < max_age`
+        is true for the first `max_age` seconds of uptime -- so an unpopulated
+        cache reads as fresh and the backend is never probed at all. The two
+        tests around this one cannot see it: they pass on any machine with more
+        than five minutes of uptime, which is every developer machine and no CI
+        runner. All four Python versions failed on the same commit.
+        """
+        ctrl = self._controller()
+        probe = AsyncMock(return_value=True)
+        with (
+            patch.object(ctrl.sim_bridge_manager, "is_available", probe),
+            patch("server.device.controller.time.monotonic", return_value=12.0),
+        ):
+            result = await ctrl.refresh_sim_bridge_availability(max_age=300)
+
+        assert probe.await_count == 1, (
+            "an answer that was never established was served as cached, because "
+            "the machine had only just booted"
+        )
+        assert result is True
+
     async def test_a_stale_answer_is_re_probed(self):
         ctrl = self._controller()
         probe = AsyncMock(return_value=True)
