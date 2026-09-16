@@ -295,3 +295,46 @@ class TestTheFreeAccountWarningKeepsTheBudgetsApart:
         as long as they use it. Better said at setup than discovered later."""
         src = self._warnings()
         assert "leaving 2 for your own" in src
+
+
+class TestTheRealFailuresXcodebuildProduces:
+    """Verbatim from running the real command, not paraphrased.
+
+    Both of these were missing until a live test looked. The fixture cases in
+    the class above were written from the pattern table, so they could only
+    confirm what was already known -- which is the whole limitation of testing
+    a matcher against strings you copied out of it.
+    """
+
+    #: `xcodebuild build-for-testing … -allowProvisioningUpdates` with a team
+    #: Xcode has never seen. The flag matters: without it the same build says
+    #: "Automatic signing is disabled", and build_wda always passes it.
+    NO_ACCOUNTS = (
+        "/path/WebDriverAgent.xcodeproj: error: No Accounts: Add a new account "
+        "in Accounts settings. (in target 'WebDriverAgentRunner' from project "
+        "'WebDriverAgent')"
+    )
+
+    #: The same run, second error. On a free account this is what an expired
+    #: 7-day profile looks like.
+    NO_PROFILES = (
+        "/path/WebDriverAgent.xcodeproj: error: No profiles for "
+        "'dev.quern.driver.xctrunner' were found: Xcode couldn't find any iOS "
+        "App Development provisioning profiles matching "
+        "'dev.quern.driver.xctrunner'. (in target 'WebDriverAgentRunner')"
+    )
+
+    def test_a_missing_apple_id_is_named(self):
+        assert "no Apple ID signed in" in (wda._diagnose_signing_output(self.NO_ACCOUNTS) or "")
+
+    def test_a_missing_profile_is_named_and_mentions_expiry(self):
+        d = wda._diagnose_signing_output(self.NO_PROFILES) or ""
+        assert "No provisioning profile matches" in d
+        assert "7-day profile expired" in d, (
+            "on a free account this failure *is* the expiry, and that is the "
+            "one guess worth offering"
+        )
+
+    def test_neither_falls_through_to_raw_xcodebuild(self):
+        for log in (self.NO_ACCOUNTS, self.NO_PROFILES):
+            assert wda._diagnose_signing_output(log) is not None

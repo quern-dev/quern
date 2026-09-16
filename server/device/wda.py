@@ -711,6 +711,24 @@ _RUNNER_FAILURE_PATTERNS = [
         "a valid Apple Development certificate exists for this team.",
     ),
     (
+        # Found by running the real command: with -allowProvisioningUpdates,
+        # which is what build_wda passes, a team Xcode has never seen produces
+        # this rather than "No Account for Team".
+        "No Accounts: Add a new account in Accounts settings",
+        "Xcode has no Apple ID signed in. Open Xcode > Settings > Accounts and "
+        "add the Apple ID for this team, then retry.",
+    ),
+    (
+        # The most common signing failure there is, and it was not matched.
+        # On a free account this is what an expired 7-day profile looks like.
+        "were found: Xcode couldn't find any",
+        "No provisioning profile matches this build. On a free account that "
+        "usually means the 7-day profile expired — re-run setup_wda with "
+        "force:true. Otherwise check that the signing team is still present in "
+        "Xcode > Settings > Accounts, and that its certificate has not been "
+        "revoked.",
+    ),
+    (
         "The maximum number of apps for free development profiles has been reached",
         "Free Apple developer account limit reached: a free profile may sign at "
         "most 3 apps installed on one device at a time. Delete a free-signed "
