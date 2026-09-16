@@ -11,7 +11,6 @@ import shutil
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger("quern-debug-server.config")
@@ -333,27 +332,44 @@ def clear_plist_watch_config(bundle_id: str) -> bool:
     return True
 
 
-@lru_cache(maxsize=1)
 def quern_cmd() -> str:
-    """How to invoke quern, from where the reader is standing.
+    """How to invoke quern, spelled for where the reader is actually standing.
 
-    Almost every message that names a command is read in one of two places, and
-    the right spelling differs. After `quern setup` there is a wrapper at
-    `~/.local/bin/quern`, so `./quern doctor` is needlessly awkward -- and for a
-    tarball install it is wrong, because the reader is not necessarily standing
-    in the extracted directory. Before setup, or when it bailed early, there is
-    no wrapper and `quern setup` names a command the reader does not have.
+    Three answers, because there are three situations and only one of them
+    tolerates a guess.
 
-    So the answer is decided when the message is built, not when it is written.
+    * **`quern`** -- there is a wrapper on PATH, so the bare name works from
+      anywhere. This is the normal state after `quern setup`.
+    * **`./quern`** -- no wrapper, but the reader's working directory *is* the
+      project. A developer in a clone before first setup.
+    * **the absolute path** -- no wrapper, and the reader is somewhere else.
 
-    `which` rather than `WRAPPER_PATH.exists()`: the wrapper can exist while
-    `~/.local/bin` is absent from PATH, and CONTRIBUTING documents that as a
-    live failure -- zsh caches its first resolution, so what `type -a` reports
-    and what actually runs can disagree. What matters is whether typing `quern`
-    works, which is what `which` answers.
+    That third case is the one this exists for. An install script drops quern in
+    `~/.local/share/quern` and leaves the terminal wherever it was, so a tarball
+    user told to run `./quern setup` is being pointed at a file that is not in
+    their directory -- and they are the least likely person to work out why. The
+    absolute path is longer and it is correct.
 
-    Cached: this is called while building error strings, and the answer cannot
-    change within a process that has already started. `quern_cmd.cache_clear()`
-    after installing the wrapper, which `setup` does.
+    `shutil.which` rather than `WRAPPER_PATH.exists()`: the wrapper can exist
+    while `~/.local/bin` is off PATH, which CONTRIBUTING documents as a live
+    failure, and what matters is whether typing `quern` works.
+
+    Deliberately not cached. The answer depends on PATH, on whether the wrapper
+    exists, and on the current directory -- and all three move: setup installs
+    the wrapper mid-run, uninstall removes it, and anything may `chdir`. A cache
+    here would need invalidating at each of those, which is three chances to
+    miss one. A PATH scan while building an error string is not worth that.
     """
-    return "quern" if shutil.which("quern") else "./quern"
+    if shutil.which("quern"):
+        return "quern"
+    # server/config.py -> server/ -> project root. Derived from this file rather
+    # than searched for, so it holds wherever the tree has been moved to.
+    wrapper = Path(__file__).resolve().parent.parent / "quern"
+    if not wrapper.exists():
+        return "quern"  # nothing better to offer; naming a missing file is worse
+    try:
+        if Path.cwd().resolve() == wrapper.parent:
+            return "./quern"
+    except OSError:
+        pass  # cwd can be deleted out from under a process
+    return str(wrapper)

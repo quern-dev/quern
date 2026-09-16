@@ -18,8 +18,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 from server.config import quern_cmd
 
 SERVER = Path(__file__).resolve().parent.parent / "server"
@@ -40,65 +38,69 @@ ALLOWED = {
 
 
 class TestTheCommandIsResolvedNotAssumed:
+    """Three situations, three answers. Only one tolerates a guess."""
+
     def test_it_is_bare_when_the_wrapper_is_on_path(self, monkeypatch):
-        monkeypatch.setattr("server.config.shutil.which", lambda _n: "/home/u/.local/bin/quern")
-        quern_cmd.cache_clear()
+        monkeypatch.setattr(
+            "server.config.shutil.which", lambda _n: "/home/u/.local/bin/quern",
+        )
         assert quern_cmd() == "quern"
 
-    def test_it_is_relative_when_the_wrapper_is_not_on_path(self, monkeypatch):
-        """Before setup, or after it bailed early, there is no wrapper -- and a
-        message saying `quern setup` names a command the reader cannot run."""
+    def test_it_is_relative_only_when_the_reader_is_standing_in_the_project(
+        self, monkeypatch,
+    ):
         monkeypatch.setattr("server.config.shutil.which", lambda _n: None)
-        quern_cmd.cache_clear()
+        root = Path(__file__).resolve().parent.parent
+        monkeypatch.chdir(root)
         assert quern_cmd() == "./quern"
+
+    def test_it_is_absolute_when_the_reader_is_somewhere_else(
+        self, monkeypatch, tmp_path,
+    ):
+        """The case that makes this more than cosmetic.
+
+        An install script drops quern in `~/.local/share/quern` and leaves the
+        terminal wherever it was. Telling that user to run `./quern setup`
+        points at a file that is not in their directory -- and they are the
+        least likely person to work out why.
+        """
+        monkeypatch.setattr("server.config.shutil.which", lambda _n: None)
+        monkeypatch.chdir(tmp_path)
+        answer = quern_cmd()
+        assert answer.startswith("/"), f"{answer!r} is not runnable from here"
+        assert answer.endswith("/quern")
+        assert Path(answer).exists()
 
     def test_it_asks_path_rather_than_the_wrapper_file(self, monkeypatch):
         """`which`, not `WRAPPER_PATH.exists()`.
 
         The wrapper can exist while `~/.local/bin` is absent from PATH, which
         CONTRIBUTING documents as a live failure -- zsh caches its first
-        resolution, so `type -a` and what actually runs can disagree. What
-        matters is whether typing `quern` works.
+        resolution, so `type -a` and what actually runs can disagree.
         """
         asked = []
         monkeypatch.setattr(
             "server.config.shutil.which", lambda n: asked.append(n) or None,
         )
-        quern_cmd.cache_clear()
         quern_cmd()
         assert asked == ["quern"]
 
-    def test_installing_the_wrapper_invalidates_the_answer(self, monkeypatch, tmp_path):
-        """Setup is the one process where the answer changes mid-run.
-
-        Every check before `install_wrapper_script` talks to someone with no
-        `quern` on PATH; every message after it does not. A cached answer from
-        the start of the run would go on saying `./quern` for the rest of a
-        setup that has just made `quern` work.
+    def test_the_answer_is_not_frozen_for_the_process(self, monkeypatch, tmp_path):
+        """It depends on PATH, on the wrapper existing, and on the directory --
+        and all three move. Setup installs the wrapper partway through its own
+        run; uninstall removes it; anything may chdir. A cached answer would
+        need invalidating at each, which is three chances to miss one.
         """
-        from server.lifecycle import setup as s
-
-        present = {"on_path": False}
+        on_path = {"yes": False}
         monkeypatch.setattr(
             "server.config.shutil.which",
-            lambda _n: "/home/u/.local/bin/quern" if present["on_path"] else None,
+            lambda _n: "/home/u/.local/bin/quern" if on_path["yes"] else None,
         )
-        quern_cmd.cache_clear()
-        assert quern_cmd() == "./quern"
-
-        venv_python = tmp_path / ".venv" / "bin" / "python"
-        venv_python.parent.mkdir(parents=True)
-        venv_python.touch()
-        wrapper = tmp_path / "bin" / "quern"
-        wrapper.parent.mkdir(parents=True)
-        monkeypatch.setattr(s, "WRAPPER_PATH", wrapper)
-        monkeypatch.setattr(s, "_find_project_root", lambda: tmp_path)
-        monkeypatch.setattr(s, "_prompt_yn", lambda *_a, **_k: False)
-        present["on_path"] = True
-        s.install_wrapper_script()
-
-        assert quern_cmd() == "quern", (
-            "the wrapper was installed and messages still say ./quern"
+        monkeypatch.chdir(tmp_path)
+        before = quern_cmd()
+        on_path["yes"] = True
+        assert before != quern_cmd(), (
+            "the wrapper appeared mid-process and the advice did not change"
         )
 
 
@@ -162,8 +164,3 @@ class TestNoMessageHardcodesTheRelativeForm:
             )
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    quern_cmd.cache_clear()
-    yield
-    quern_cmd.cache_clear()

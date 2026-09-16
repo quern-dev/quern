@@ -534,11 +534,9 @@ WRAPPER_PATH = Path.home() / ".local" / "bin" / "quern"
 def install_wrapper_script() -> CheckResult:
     """Install quern wrapper script to ~/.local/bin.
 
-    Clears `quern_cmd`'s cache on the way out. Setup is the one process where
-    the answer changes mid-run: every check before this point is talking to
-    someone with no `quern` on PATH, and every message after it is not. A cached
-    answer from the start of the run would keep telling people to type `./quern`
-    for the rest of a setup that has just made `quern` work.
+    Messages built after this point start saying `quern` rather than a path,
+    because `quern_cmd` resolves per call rather than caching -- setup is
+    precisely the process where the right answer changes partway through.
     """
     local_bin = WRAPPER_PATH.parent
     wrapper_path = WRAPPER_PATH
@@ -575,7 +573,6 @@ exec "{venv_python}" -m server "$@"
     try:
         wrapper_path.write_text(wrapper_content)
         wrapper_path.chmod(0o755)  # Make executable
-        quern_cmd.cache_clear()
 
         # Check if ~/.local/bin is in PATH
         path_env = os.environ.get("PATH", "")
