@@ -117,16 +117,34 @@ def test_shift_characters_survive_typing(fresh_probe, probe_id) -> None:
 
 
 def test_clearing_a_named_field_empties_it(fresh_probe, probe_id) -> None:
+    """After clearing, the typed text must be gone.
+
+    Asserted as "the content is gone" rather than "the field reads empty",
+    because an empty field does not read empty on either platform: it reports
+    its placeholder. iOS uses the identifier (`field_default`), Android uses a
+    shorter hint (`default`), and Android exposes no separate hint attribute at
+    all — an empty EditText simply reports the hint in `text`.
+
+    The earlier version allowed `identifier`, which quietly covered iOS and
+    failed on Android against a field that had been cleared correctly. That is
+    the same mistake #177 fixed in the implementation, made once more in the
+    test that was supposed to catch it.
+    """
     probe = fresh_probe
     probe.goto("text")
     identifier = probe_id(probe, Ids.FIELD_DEFAULT)
 
-    probe.type_text(identifier, "to-be-cleared")
+    typed = "to-be-cleared"
+    probe.type_text(identifier, typed)
+    assert probe.text_of(identifier) == typed, "the text never landed"
+
     probe.clear_text(identifier)
 
-    got = probe.text_of(identifier)
-    assert got in ("", None, identifier), (
-        f"{identifier} still holds {got!r} after clear"
+    got = probe.text_of(identifier) or ""
+    assert typed not in got, f"{identifier} still holds {got!r} after clear"
+    assert not (got and got in typed), (
+        f"{identifier} holds {got!r}, which is a fragment of what was typed — "
+        "a partial clear, not a placeholder"
     )
 
 
