@@ -593,14 +593,33 @@ class TestSelectAllAndDelete:
         next `type_text` appends to the leftovers, and the failure surfaces
         somewhere else entirely as a mismatched string.
         """
-        device = self._device(["to-be-cleared", "to-be-cleare"])
+        # Three reads: before, after, and the settle check that follows an
+        # ambiguous result. The field keeps shrinking, which a hint never does.
+        device = self._device(["to-be-cleared", "to-be-cleare", "to-be-clear"])
         backend = self._backend_with_device(device)
 
         with pytest.raises(DeviceError) as excinfo:
             await backend.select_all_and_delete("serial", 10.0, 20.0)
 
-        assert "12 of 13 character(s)" in str(excinfo.value)
-        assert "to-be-cleare" in str(excinfo.value)
+        assert "incrementally" in str(excinfo.value)
+        assert "13 character(s) -> 12 -> 11" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_a_hint_that_is_a_substring_of_the_content_is_not_a_failure(self):
+        """The case that shipped broken in the first version of this fix.
+
+        `field_email` is hinted 'email'. Clearing 'email@example.com' out of it
+        leaves 'email' — the hint — which *is* a substring of the original, so a
+        "what remains is a fragment" check calls a correct clear a failure.
+        Measured live: HTTP 500 on a field that had emptied perfectly.
+
+        A hint does not move when cleared again, which is what separates it from
+        a clear that is removing one character at a time.
+        """
+        device = self._device(["email@example.com", "email", "email"])
+        backend = self._backend_with_device(device)
+
+        await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
 
     @pytest.mark.asyncio
     async def test_hint_text_left_behind_is_not_mistaken_for_leftovers(self):
@@ -612,7 +631,7 @@ class TestSelectAllAndDelete:
         which the first version of this fix did, in live testing, on a field it
         had cleared correctly.
         """
-        device = self._device(["ABCDEFGHIJKLMNOP", "default"])
+        device = self._device(["ABCDEFGHIJKLMNOP", "default"])  # not a substring
         backend = self._backend_with_device(device)
 
         await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise

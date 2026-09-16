@@ -213,7 +213,6 @@ def _patch_ime_setup(device, apk_path: Path) -> None:
     logger.debug("Patched _setup_ime to use Quern Driver APK")
 
 
-
 def _focused_text(device) -> str:
     """Text of the focused node, or "" when there is nothing to read.
 
@@ -573,8 +572,8 @@ class U2Backend:
         `input keyevent` given several keycodes sends them *in sequence, not as
         a chord*, so Shift was never held and nothing was ever selected: the
         caret went to the start, then to the end, and the single `KEYCODE_DEL`
-        backspaced one character. Measured on a Pixel 3 XL -- 50 characters in,
-        49 characters out, `{"status": "ok"}` (#177).
+        backspaced one character. Measured on a Pixel 3 XL -- 36 characters in,
+        35 characters out, `{"status": "ok"}` (#177).
 
         `clear_text()` broadcasts `ADB_KEYBOARD_CLEAR_TEXT` to the AdbKeyboard
         IME, which is the same path `type_text` already relies on, so it clears
@@ -599,22 +598,32 @@ class U2Backend:
             after = _focused_text(device)
 
             # An empty EditText reports its *hint* in `text` -- Android exposes
-            # no separate hint attribute, and uiautomator surfaces none, so a
-            # cleared field is indistinguishable from one containing the hint by
-            # reading alone. Measured: an empty `field_default` reads as
-            # 'default'. Asserting "after must be empty" therefore fails on
-            # every hinted field on the platform, which is what the first
-            # version of this did.
+            # no separate hint attribute and uiautomator surfaces none, so a
+            # cleared field cannot be told from one containing the hint by
+            # reading alone. Measured: an empty `field_default` reads 'default'.
+            # Asserting "after must be empty" therefore fails on every hinted
+            # field on the platform.
             #
-            # What the bug actually looks like is leftover *original* content:
-            # 36 characters in, 35 out. So the check is whether what remains is
-            # a shortened piece of what was there, which a hint will not be.
+            # Nor is "what remains is a fragment of what was there" enough. A
+            # hint is routinely a fragment of its own field's contents: clearing
+            # 'email@example.com' out of a field hinted 'email' leaves 'email',
+            # which is a substring of the original. Measured -- that check
+            # returned 500 on a field it had emptied correctly.
+            #
+            # What separates the two is that a *correct* clear is idempotent and
+            # an incremental one is not. #177's bug removed one character per
+            # call, so clearing again shrinks the field again; a hint does not
+            # move. Only the ambiguous case pays for the extra round trip.
             if after and after != before and after in before:
-                raise DeviceError(
-                    f"clear_text left {len(after)} of {len(before)} character(s) "
-                    f"in the field: {after[:40]!r}",
-                    tool="u2",
-                )
+                device.clear_text()
+                settled = _focused_text(device)
+                if settled != after:
+                    raise DeviceError(
+                        f"clear_text is removing text incrementally, not "
+                        f"clearing: {len(before)} character(s) -> {len(after)} "
+                        f"-> {len(settled)}",
+                        tool="u2",
+                    )
 
         try:
             await asyncio.to_thread(_do)
