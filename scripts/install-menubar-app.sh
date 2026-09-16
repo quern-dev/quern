@@ -163,6 +163,10 @@ else
   # Only reachable via --skip-wrapper-check. Saying the app starts the server
   # here would be the one claim we know to be false for this exact install.
   echo "Without $WRAPPER it cannot start or control the server."
-  echo "Run './quern setup' when you want that."
+  # By path, and with the cd: this branch is reached precisely because the
+  # wrapper is missing, so the reader has no `quern` and is not necessarily
+  # standing in the repo either.
+  echo "Run it when you want that:"
+  echo "    cd \"$REPO_ROOT\" && ./quern setup"
 fi
 echo "Quit it from its menu bar icon; 'open $DEST' brings it back."

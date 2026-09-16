@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import secrets
+import shlex
 import shutil
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -372,4 +373,7 @@ def quern_cmd() -> str:
             return "./quern"
     except OSError:
         pass  # cwd can be deleted out from under a process
-    return str(wrapper)
+    # Quoted, because this is the only branch that can contain a space and it
+    # is the one people are meant to paste. `shlex.quote` is a no-op for
+    # `quern` and `./quern`, so the common answers are unchanged.
+    return shlex.quote(str(wrapper))

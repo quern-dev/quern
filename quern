@@ -26,11 +26,20 @@ root="$(cd -P "$(dirname "$src")" && pwd)"
 # this the reply is `No module named server`, prefixed with whichever python3
 # was first on PATH, pointing the reader at their interpreter.
 #
-# PYTHONPATH rather than `cd "$root"`: relative paths in the arguments, like a
-# project directory to build, are resolved against the caller's cwd and must
-# keep working.
+# `-P` as well, and it is load-bearing rather than belt-and-braces: `-m` puts
+# the caller's cwd at sys.path[0], *ahead* of PYTHONPATH. Quern's users are by
+# design standing in their own app repositories, and `server/` is an ordinary
+# name for a directory in one -- so without this, their package shadows ours and
+# the reply is `No module named server.__main__`. `-P` drops cwd from the path
+# while leaving the process there, so relative arguments like a project
+# directory to build still resolve against it. That is why this is not
+# `cd "$root"`.
+#
+# A `:` in the install path would still defeat PYTHONPATH, which is
+# colon-separated. Unfixable here and vanishingly rare; the venv branch above,
+# which is the state after setup, does not care.
 python="$root/.venv/bin/python"
 if [ -x "$python" ]; then
     exec "$python" -m server "$@"
 fi
-exec env PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" python3 -m server "$@"
+exec env PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m server "$@"

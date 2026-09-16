@@ -678,7 +678,7 @@ def build_preview_app() -> CheckResult:
             # already present. Say what happens next instead.
             _run(["xcode-select", "--install"])
             print("    A macOS installer dialog should have opened.")
-            print("    Re-run `quern setup` once it finishes to build the app.")
+            print(f"    Re-run `{quern_cmd()} setup` once it finishes to build the app.")
         return result
 
     try:
@@ -1042,7 +1042,10 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             where = (
                 f"The app is at {location}."
                 if location
-                else "The app could not be located; re-run `quern setup` to fetch it again."
+                else (
+                    "The app could not be located; re-run "
+                    f"`{quern_cmd()} setup` to fetch it again."
+                )
             )
             return CheckResult(
                 name="Menu-bar app",
@@ -2139,7 +2142,7 @@ def _print_unasked() -> None:
     for question in _UNASKED:
         print(f"    • {question}")
     print()
-    for line in run_it_yourself(["quern", "setup"]):
+    for line in run_it_yourself([quern_cmd(), "setup"]):
         print(f"  {line}")
     print()
 
