@@ -13,9 +13,12 @@ success for a URL nothing could open (#78). The app is the only honest witness.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from tests.conformance.probe import SCROLL_ROW_COUNT, Ids
+from tests.conformance.client import ServerLogWindow
+from tests.conformance.probe import SCROLL_ROW_COUNT, Ids, ScrollTracer
 
 #: Mixed case, an underscore, a shifted digit and a symbol. This exact shape is
 #: what exposed the HID shift-drop bug the iOS probe app was built to isolate,
@@ -230,11 +233,12 @@ def test_the_app_records_the_control_change(probe, probe_id) -> None:
 
 def test_the_first_row_is_visible_without_scrolling(probe) -> None:
     probe.goto("scroll")
+    probe.scroll_reset(to="top")
     first = probe.contract.row_identifier(0)
     if first is None:
         pytest.skip("rows are not individually identified on this platform")
     assert probe.element(first) is not None, (
-        f"{first} is not on screen at rest"
+        f"{first} is not on screen at the top of the list"
     )
 
 
@@ -245,41 +249,129 @@ def test_the_last_row_needs_scrolling_to_reach(probe) -> None:
     without scrolling and the test below would prove nothing.
     """
     probe.goto("scroll")
+    probe.scroll_reset(to="top")
     last = probe.contract.row_identifier(SCROLL_ROW_COUNT - 1)
     if last is None:
         pytest.skip("rows are not individually identified on this platform")
     assert probe.element(last) is None, (
-        f"{last} is on screen without scrolling; the scroll fixture is not "
-        "taller than the viewport"
+        f"{last} is on screen at the top of the list; the scroll fixture is "
+        "not taller than the viewport"
+    )
+
+
+def test_the_reset_control_returns_the_list_to_a_known_position(probe) -> None:
+    """The reset itself needs a test, because everything else now trusts it.
+
+    A reset that silently did nothing would make the scroll tests start
+    wherever the previous one left off — and they would still pass most of the
+    time, which is the worst version of that.
+    """
+    probe.goto("scroll")
+
+    probe.scroll_reset(to="bottom")
+    bottom = probe.viewport()
+    assert bottom is not None, "no rows visible after resetting to the bottom"
+    assert bottom.last == SCROLL_ROW_COUNT - 1, (
+        f"reset to bottom left the list at {bottom}, not showing the last row"
+    )
+
+    probe.scroll_reset(to="top")
+    top = probe.viewport()
+    assert top is not None, "no rows visible after resetting to the top"
+    assert top.first == 0, f"reset to top left the list at {top}"
+
+    # Not `offset_px == 0`: the offset is origin-relative, so at the top it is
+    # minus the container's own y — -116 on iOS, -507 on Android. Asserting
+    # zero fails on a correct reset, which it did. What must hold is that the
+    # two resets are far apart and the top one is the smaller.
+    assert top.offset_px < bottom.offset_px, (
+        f"reset to top ({top}) is not above reset to bottom ({bottom})"
     )
 
 
 def test_scroll_to_element_brings_an_offscreen_row_into_view(probe) -> None:
     """Known to fail intermittently on iOS — issue #84, not a flaky test.
 
-    Roughly one run in two or three: `row_60` is present, the call sweeps for
-    ~90-180s, and reports it does not exist. Measured here at 91.4s passing and
-    183.2s failing on 0.18.2, with `max_swipes=25` — 2.5x the default budget, so
-    the ceiling is not what is being hit.
+    Measured mechanism: the sweep's travel per swipe (17-18 rows) is almost
+    exactly the viewport span (17-18 rows), so the overlap margin is zero to one
+    row. `_ios_scroll_to_element` then queries *immediately* after each swipe,
+    while the fling is still decelerating, so the sampled window is not the
+    settled one. Rows fall through the seam: with a settle delay, three sweeps
+    sampled every row; without one, the same three missed rows 24, 57-58 and
+    110-111.
 
     Deliberately not marked `xfail` or retried. A release run should report a
-    known bug as a failure: an agent that waits three minutes to be told a
-    visible element is absent is the user-facing behaviour, and hiding it here
-    would make the suite quieter and less true. Android passes consistently.
+    known bug as a failure: waiting three minutes to be told a visible element
+    is absent is the user-facing behaviour, and hiding it would make the suite
+    quieter and less true. Android passes consistently.
+
+    On failure the viewport trace below says which rows were never sampled, so
+    the report distinguishes "the list did not move" from "the target was
+    scrolled past between reads". Quern's screenshot timeline runs alongside
+    it, so each traced action has a picture at a known offset — with the caveat
+    that the timeline captures per HTTP request, and `scroll_to_element` does
+    all its swiping inside one.
     """
     probe.goto("scroll")
+    probe.scroll_reset(to="top")
+
     target_index = 60
     target = probe.contract.row_identifier(target_index)
     if target is None:
         pytest.skip("rows are not individually identified on this platform")
 
+    tracer = ScrollTracer(probe, screenshots=True)
+    server_log = ServerLogWindow()
+    server_log.start()
+    phase_started = datetime.now(UTC)
+    tracer.sample("before")
     assert probe.element(target) is None, (
-        f"{target} was already visible; pick a row further down"
+        f"{target} was already visible at the top of the list; pick a row "
+        "further down"
     )
-    probe.scroll_to(identifier=target, max_swipes=25)
-    assert probe.element(target) is not None, (
-        f"scroll_to_element reported success but {target} is still not in the "
-        "tree"
+
+    # The call fails in more than one way and every one of them needs the
+    # trace. A clean 404 is the documented miss; a read timeout is what
+    # actually happened the first time this ran, and it bypassed the reporting
+    # entirely — the failure arrived as an httpx traceback with no viewport
+    # data at all, which is the exact problem this test exists to avoid.
+    outcome = "found"
+    try:
+        probe.scroll_to(identifier=target, max_swipes=25)
+    except AssertionError as exc:
+        outcome = f"scroll_to_element refused: {str(exc).splitlines()[0]}"
+    except Exception as exc:  # noqa: BLE001 - transport failure is a result here
+        outcome = f"scroll_to_element never returned: {exc!r}"
+    tracer.sample("after scroll_to")
+
+    if outcome == "found" and probe.element(target) is not None:
+        return
+
+    # Failed. Sweep manually with a settle delay so the report can say whether
+    # the row exists at all and where it actually sits — the difference between
+    # a broken fixture and a scroll that skipped it.
+    probe.scroll_reset(to="top")
+    tracer.sample("reset")
+    for step in range(14):
+        vp = tracer.sample(f"manual swipe {step + 1}")
+        if vp is not None and vp.first <= target_index <= vp.last:
+            break
+        probe.swipe_down()
+
+    # Four views of the same window, deliberately reported together. Each one
+    # alone leaves an obvious counter-explanation standing: the viewport trace
+    # cannot say whether the script asked for the right thing, the action log
+    # cannot say what the screen did, and neither can say what the server was
+    # doing during the three minutes it held the request open.
+    pytest.fail(
+        "\n".join([
+            f"{target} did not come into view.",
+            f"  outcome: {outcome}",
+            tracer.report(target=target_index),
+            probe.client.action_log(since=phase_started),
+            server_log.report(),
+        ]),
+        pytrace=False,
     )
 
 
@@ -291,14 +383,22 @@ def test_scroll_to_element_does_not_tap_what_it_scrolls_to(probe) -> None:
     want the call.
     """
     probe.goto("scroll")
-    target = probe.contract.row_identifier(40)
+    probe.scroll_reset(to="top")
+
+    # Row 20, not something distant. This test is about scroll-without-tap, and
+    # a far target makes it fail for #84's reasons instead — one bug should not
+    # be able to fail two tests for different stated reasons.
+    target = probe.contract.row_identifier(20)
     if target is None:
         pytest.skip("rows are not individually identified on this platform")
 
     probe.scroll_to(identifier=target, max_swipes=25)
-    element = probe.element(target)
-    assert element is not None
-    assert probe.element(probe.contract.id_for(Ids.SCROLL_CONTAINER)) is not None, (
+    assert probe.element(target) is not None, (
+        f"{target} did not come into view; this test cannot check the "
+        "no-tap property without it"
+    )
+    container = probe.contract.id_for(Ids.SCROLL_CONTAINER)
+    assert probe.element(container) is not None, (
         "the scroll container is gone — scrolling appears to have navigated away"
     )
 

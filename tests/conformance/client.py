@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -149,14 +150,30 @@ def _read_json(path: Path) -> dict | None:
 
 @dataclass
 class Call:
-    """One request/response pair, kept for the run report."""
+    """One request/response pair, timestamped, for the run report.
+
+    Recorded on every request rather than only on failure. The point is
+    correlation: a viewport sample or a screenshot is only interpretable
+    against what the script was *doing* at that moment, and reconstructing that
+    after the fact from a pytest traceback is guesswork.
+
+    `started_at` is wall-clock UTC on purpose, not a monotonic offset -- it has
+    to line up with the server's own log lines and with screenshot timestamps,
+    neither of which knows when this process started.
+    """
 
     method: str
     path: str
     status: int
     elapsed_ms: float
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     #: Populated only on transport failure.
     error: str | None = None
+
+    def __str__(self) -> str:
+        stamp = self.started_at.strftime("%H:%M:%S.%f")[:-3]
+        outcome = self.error or self.status
+        return f"{stamp}  {self.elapsed_ms:>8.0f}ms  {self.method:<6} {self.path}  -> {outcome}"
 
 
 class QuernClient:
@@ -200,6 +217,7 @@ class QuernClient:
 
         import time
 
+        started_at = datetime.now(UTC)
         started = time.perf_counter()
         try:
             resp = self._client.request(
@@ -212,11 +230,14 @@ class QuernClient:
         except httpx.HTTPError as exc:
             elapsed = (time.perf_counter() - started) * 1000
             self.calls.append(
-                Call(method, path, status=-1, elapsed_ms=elapsed, error=repr(exc))
+                Call(method, path, status=-1, elapsed_ms=elapsed,
+                     started_at=started_at, error=repr(exc))
             )
             raise
         elapsed = (time.perf_counter() - started) * 1000
-        self.calls.append(Call(method, path, resp.status_code, elapsed))
+        self.calls.append(
+            Call(method, path, resp.status_code, elapsed, started_at=started_at)
+        )
         return resp
 
     def get(self, path: str, **kw: Any) -> httpx.Response:
@@ -258,6 +279,20 @@ class QuernClient:
                 f"{method} {path} -> {resp.status_code} with non-JSON body: "
                 f"{_body_text(resp)}"
             ) from exc
+
+    def action_log(self, since: datetime | None = None) -> str:
+        """Every request this client made, in order, with timings.
+
+        `since` trims it to one phase of a test; without it the whole session is
+        rendered, which on a session-scoped client is usually too much.
+        """
+        calls = [c for c in self.calls if since is None or c.started_at >= since]
+        if not calls:
+            return "script actions: none recorded"
+        total = sum(c.elapsed_ms for c in calls)
+        lines = [f"script actions ({len(calls)}, {total / 1000:.1f}s in-call):"]
+        lines.extend(f"  {call}" for call in calls)
+        return "\n".join(lines)
 
     def close(self) -> None:
         self._client.close()
@@ -326,3 +361,74 @@ def check_health(client: QuernClient) -> HealthReport:
     else:
         report.authenticated = True
     return report
+
+
+class ServerLogWindow:
+    """Captures the server's own log lines written during a block of work.
+
+    The third leg of a trace. The script knows what it asked for and the
+    viewport samples know what the screen did; only the server knows what it
+    was doing in between -- and for a call like `scroll_to_element` that spends
+    three minutes inside one request, that gap is the entire interesting part.
+
+    Reads `~/.quern/server.log` by byte offset rather than querying an endpoint.
+    The `[PERF]` lines the API layer emits go to Python's logger and land in
+    that file; they are not in the ring buffer, so `/api/v1/logs/query` cannot
+    see them. The cost is that this only works against a server on this
+    machine -- stated here rather than discovered later, because a remote run
+    will silently get an empty window.
+    """
+
+    #: Lines worth showing by default. The server is chatty and most of it is
+    #: unrelated to whatever the test was doing.
+    DEFAULT_PATTERNS = ("[PERF]", "scroll", "swipe", "settle", "ERROR", "Traceback")
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or (REAL_QUERN_DIR / "server.log")
+        self._offset: int | None = None
+
+    def __enter__(self) -> ServerLogWindow:
+        self.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def start(self) -> None:
+        """Mark the current end of the log, so only new lines are read."""
+        try:
+            self._offset = self.path.stat().st_size
+        except OSError:
+            self._offset = None
+
+    def lines(self, patterns: tuple[str, ...] | None = None) -> list[str]:
+        if self._offset is None:
+            return []
+        try:
+            with self.path.open("r", errors="replace") as handle:
+                handle.seek(self._offset)
+                fresh = handle.read().splitlines()
+        except OSError:
+            return []
+        wanted = self.DEFAULT_PATTERNS if patterns is None else patterns
+        if not wanted:
+            return fresh
+        return [line for line in fresh if any(p in line for p in wanted)]
+
+    def report(self, patterns: tuple[str, ...] | None = None, limit: int = 60) -> str:
+        if self._offset is None:
+            return (
+                f"server log: not readable at {self.path} "
+                "(a remote server's log is not visible from here)"
+            )
+        found = self.lines(patterns)
+        if not found:
+            return (
+                "server log: nothing matched during this window — the server "
+                "logged no per-step progress for the work it just did"
+            )
+        head = found[:limit]
+        text = "\n".join(f"  {line}" for line in head)
+        if len(found) > limit:
+            text += f"\n  … {len(found) - limit} more line(s)"
+        return f"server log ({len(found)} line(s)):\n{text}"

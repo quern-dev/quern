@@ -56,6 +56,8 @@ class Ids:
 
     # Scroll tab
     SCROLL_CONTAINER = "scroll_container"
+    SCROLL_TO_TOP = "scroll_to_top"
+    SCROLL_TO_BOTTOM = "scroll_to_bottom"
 
     # Links tab
     LINK_COUNT = "link_count"
@@ -138,6 +140,8 @@ IOS = ProbeContract(
         Ids.SHOW_SHEET: "control_show_sheet",
         Ids.CONTROL_READOUT: "control_value_log",
         Ids.SCROLL_CONTAINER: "scroll_table",
+        Ids.SCROLL_TO_TOP: "scroll_to_top",
+        Ids.SCROLL_TO_BOTTOM: "scroll_to_bottom",
         Ids.LINK_COUNT: "link_count",
         Ids.LINK_LAST_URI: "link_last_uri",
         Ids.LOG_START: "log_start",
@@ -175,6 +179,8 @@ ANDROID = ProbeContract(
         Ids.SHOW_SHEET: None,
         Ids.CONTROL_READOUT: "control_readout",
         Ids.SCROLL_CONTAINER: "scroll_list",
+        Ids.SCROLL_TO_TOP: "scroll_to_top",
+        Ids.SCROLL_TO_BOTTOM: "scroll_to_bottom",
         Ids.LINK_COUNT: "link_count",
         Ids.LINK_LAST_URI: "link_last_uri",
         Ids.LOG_START: "log_start",
@@ -519,3 +525,294 @@ class ProbeDriver:
             f"the probe app did not show {sentinel!r} within {timeout_s:.0f}s "
             f"after launch. On screen instead: {summary.text[:400]}"
         )
+
+    # -- scroll fixture ----------------------------------------------------
+
+    def viewport(self) -> Viewport | None:
+        """Where the scroll list currently sits, read from the tree.
+
+        Returns None when no rows are on screen -- a different answer from
+        "position zero", and the distinction matters when a test is trying to
+        work out whether it is even looking at the scroll tab.
+        """
+        rows: list[tuple[int, float, float]] = []
+        readout = ""
+        container = self.contract.id_for(Ids.SCROLL_CONTAINER)
+        for element in self.ui_tree().get("elements") or []:
+            if container and element.get("identifier") == container:
+                readout = element.get("value") or ""
+            if (element.get("label") or "").startswith("rows ") and not readout:
+                readout = element["label"]          # Android carries it on a label
+            index = self._row_index(element)
+            frame = element.get("frame")
+            if index is None or not frame:
+                continue
+            rows.append((index, frame.get("y", 0.0), frame.get("height", 0.0)))
+        if not rows:
+            return None
+        rows.sort()
+        first, first_y, height = rows[0]
+        return Viewport(
+            first=first, last=rows[-1][0], row_height=height or 1.0,
+            offset_px=first * (height or 1.0) - first_y,
+            app_readout=readout,
+        )
+
+    def _row_index(self, element: dict) -> int | None:
+        """Pull the row number out of whichever field this platform uses.
+
+        iOS puts it in the identifier (`row_12`); Android's RecyclerView
+        recycles views, so every row shares the id `row_label` and the index
+        lives in the label instead.
+        """
+        for key in ("identifier", "label"):
+            value = element.get(key) or ""
+            if value.startswith("row_"):
+                tail = value[4:]
+                if tail.isdigit():
+                    return int(tail)
+        return None
+
+    def swipe_down(self, *, settle: float = 0.9) -> None:
+        """One sweep-sized swipe, with the geometry the server's loop uses.
+
+        `_ios_scroll_to_element` swipes from 0.72 to 0.30 of screen height with
+        a 0.3s duration. Matching it here means a manual sweep measures the same
+        travel the real loop gets, rather than a number that only describes this
+        helper. The settle delay is the deliberate difference: it is what the
+        server does *not* do, and comparing the two is the whole diagnostic.
+        """
+        import time
+
+        frame = None
+        for element in self.ui_tree().get("elements") or []:
+            if element.get("type") in ("Application", "Window") and element.get("frame"):
+                frame = element["frame"]
+                break
+        height = (frame or {}).get("height") or 874.0
+        width = (frame or {}).get("width") or 402.0
+        self.client.json_ok(
+            "POST", "/api/v1/device/ui/swipe",
+            json={
+                "udid": self.udid,
+                "start_x": width / 2, "start_y": height * 0.72,
+                "end_x": width / 2, "end_y": height * 0.30,
+                "duration": 0.3,
+            },
+            timeout=90.0,
+        )
+        time.sleep(settle)
+
+    def scroll_reset(self, *, to: str = "top") -> None:
+        """Jump the list to a known end, so a scroll test starts where it says.
+
+        Uses the fixture's own button rather than swiping back, because a swipe
+        loop to return to the top is itself the thing under test -- resetting
+        with it would make a scroll bug hide its own starting conditions. The
+        jump is unanimated on both platforms for the same reason.
+
+        This matters more than it looks: scroll position survives a tab switch,
+        so without an explicit reset the second test to touch this tab starts
+        wherever the first one left it.
+        """
+        logical = Ids.SCROLL_TO_TOP if to == "top" else Ids.SCROLL_TO_BOTTOM
+        identifier = self.contract.id_for(logical)
+        if identifier is None:  # pragma: no cover - both platforms define it
+            raise AssertionError(f"no {logical!r} control in the {self.contract.platform} app")
+        self.tap(identifier, skip_stability_check=True)
+        import time
+        time.sleep(0.4)
+
+
+# -- scroll viewport tracing -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Viewport:
+    """Which rows of the scroll fixture are on screen, and where it sits.
+
+    Derived from the tree rather than from a screenshot. The rows are numbered
+    and a recycling list keeps only the visible ones, so the tree already says
+    exactly where the viewport is -- and `offset_px` turns that into a single
+    scalar with sub-row precision, which is what makes travel per swipe
+    measurable rather than merely describable.
+    """
+
+    first: int
+    last: int
+    row_height: float
+    #: Content offset: `first * row_height - first_row_y`, increasing downward.
+    #:
+    #: **Origin-relative, so only differences are meaningful.** At the top of
+    #: the list it equals minus the container's own y -- -116 on iOS, -507 on
+    #: Android, where the units are pixels and the chrome above the list is
+    #: taller. Subtracting two samples cancels the origin, which is the whole
+    #: point: it measures travel with sub-row precision, where the row range
+    #: alone cannot tell a half-scrolled row from a whole one.
+    offset_px: float
+    #: Seconds since the tracer started. A scroll that takes 183s and one that
+    #: takes 17s are different failures, and the per-sample spacing shows where
+    #: the time went -- a tree read costs ~1.8s, which is most of why sampling
+    #: perturbs what it measures.
+    at: float = 0.0
+    #: The fixture's own answer, read from the scroll container's
+    #: accessibilityValue: "rows 47-63 of 200". Collected as a cross-check
+    #: rather than as the measurement. If this disagrees with the row range
+    #: derived from the tree, the tree read is stale -- which is a different
+    #: bug from the scroll skipping, and without both numbers they are
+    #: indistinguishable.
+    app_readout: str = ""
+
+    @property
+    def span(self) -> int:
+        """Rows visible at once. The width of one sample's window."""
+        return self.last - self.first + 1
+
+    def __str__(self) -> str:
+        text = f"rows {self.first}-{self.last} (span {self.span}, {self.offset_px:.0f}px)"
+        if self.app_readout and self.app_readout != f"rows {self.first}-{self.last} of 200":
+            text += f"  app says {self.app_readout!r}"
+        return text
+
+
+class ScrollTracer:
+    """Records viewport samples so a scroll failure can be read afterwards.
+
+    A scroll test that fails says "row 60 never appeared". That is true and
+    useless: it does not say whether the list moved, how far each swipe carried
+    it, or whether the target was skipped over between samples. The trace turns
+    the same failure into a table someone can diagnose from.
+    """
+
+    def __init__(self, driver: ProbeDriver, *, screenshots: bool = False):
+        import datetime
+        import time
+
+        self.driver = driver
+        self.started = time.monotonic()
+        self.started_wall = datetime.datetime.now(datetime.UTC)
+        self.samples: list[tuple[str, Viewport | None]] = []
+        self.timeline: dict | None = None
+        self._timeline_active = False
+        if screenshots:
+            self.start_screenshots()
+
+    def start_screenshots(self) -> None:
+        """Turn on Quern's screenshot timeline for the life of this trace.
+
+        The timeline middleware captures an image after every UI *action
+        endpoint*, so the pictures line up with the calls this test makes.
+
+        One limitation worth knowing before reading a trace: it sees HTTP
+        requests, not the server's internal work. `scroll_to_element` performs
+        up to 75 swipes inside a single request, and the timeline captures one
+        screenshot when that request returns -- not one per swipe. So the
+        pictures document the manual sweep, and the server's own loop stays a
+        black box that only the before/after viewport samples describe.
+        """
+        response = self.driver.client.post(
+            "/api/v1/device/screenshot/timeline/start",
+            json={"udid": self.driver.udid}, timeout=60.0,
+        )
+        # 409 means someone else's timeline is already running; a trace is not
+        # worth stealing it, and the viewport data stands on its own.
+        self._timeline_active = response.is_success
+
+    def stop_screenshots(self) -> None:
+        if not self._timeline_active:
+            return
+        self._timeline_active = False
+        response = self.driver.client.post(
+            "/api/v1/device/screenshot/timeline/stop", timeout=90.0,
+        )
+        if response.is_success:
+            self.timeline = response.json()
+
+    def sample(self, note: str = "") -> Viewport | None:
+        import dataclasses
+        import time
+
+        vp = self.driver.viewport()
+        if vp is not None:
+            vp = dataclasses.replace(vp, at=time.monotonic() - self.started)
+        self.samples.append((note, vp))
+        return vp
+
+    def report(self, target: int | None = None) -> str:
+        """Render the trace, naming the gaps a target could have fallen through."""
+        self.stop_screenshots()
+        if not self.samples:
+            return "no viewport samples recorded"
+
+        lines = ["viewport trace:"]
+        seen: set[int] = set()
+        previous: Viewport | None = None
+        for note, vp in self.samples:
+            if vp is None:
+                lines.append(f"  {note or 'sample':<22} (no rows visible)")
+                continue
+            seen.update(range(vp.first, vp.last + 1))
+            travel = ""
+            gap = ""
+            if previous is not None:
+                travel = f"  travel {vp.offset_px - previous.offset_px:+8.0f}px"
+                if vp.first > previous.last + 1:
+                    gap = f"   *** never sampled: rows {previous.last + 1}-{vp.first - 1} ***"
+            lines.append(f"  {vp.at:>6.1f}s  {note or 'sample':<20} {vp}{travel}{gap}")
+            previous = vp
+
+        if seen:
+            missed = sorted(set(range(min(seen), max(seen) + 1)) - seen)
+            if missed:
+                lines.append(
+                    f"  {len(missed)} row(s) never appeared in any sample: {missed}"
+                )
+            if target is not None:
+                lines.append(
+                    f"  target row {target}: "
+                    + ("SEEN at least once" if target in seen
+                       else "NEVER sampled — it was scrolled past between reads")
+                )
+
+        lines.extend(self._screenshot_lines())
+        return "\n".join(lines)
+
+    def _screenshot_lines(self) -> list[str]:
+        """Correlate the captured images with the trace, by elapsed time.
+
+        Screenshot timestamps are wall-clock ISO strings and the viewport
+        samples are seconds-since-start, so they are converted to the same
+        origin here. Without that the two lists sit side by side and the reader
+        does the arithmetic -- which is exactly the work this is supposed to
+        remove.
+        """
+        if not self.timeline:
+            return []
+        entries = self.timeline.get("entries") or []
+        if not entries:
+            return [
+                f"screenshots: none captured (timeline "
+                f"{self.timeline.get('session_id', '?')} recorded 0 actions)"
+            ]
+
+        import datetime
+
+        lines = [
+            f"screenshots ({len(entries)}) in {self.timeline.get('output_dir', '?')}:"
+        ]
+        for entry in entries:
+            stamp = entry.get("timestamp", "")
+            offset = ""
+            try:
+                when = datetime.datetime.fromisoformat(stamp)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=datetime.UTC)
+                offset = f"{(when - self.started_wall).total_seconds():>6.1f}s"
+            except (TypeError, ValueError):
+                offset = "     ?"
+            name = str(entry.get("screenshot", "")).rsplit("/", 1)[-1]
+            lines.append(
+                f"  {offset}  {entry.get('action', '?'):<28} "
+                f"[{entry.get('status_code', '?')}]  {name}"
+            )
+        return lines
