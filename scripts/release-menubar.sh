@@ -245,6 +245,24 @@ if ! git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   exit 1
 fi
 
+# Run a command under a time limit, without assuming GNU coreutils.
+#
+# `timeout` is not on a stock macOS -- it arrives with Homebrew coreutils, which
+# this script has no business requiring. Absent, the call fails, `|| true`
+# swallows it, and the check below reports "the wrapper did not answer" for a
+# wrapper that answers perfectly well: a release aborted with a misleading
+# reason. Perl ships with macOS and its alarm() is the portable fallback.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  else
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  fi
+}
+
 echo "==> Assembling release tarball: $TARBALL"
 # Source tree at the tag (respects .gitignore/.gitattributes), then drop the
 # signed app in at the top level. Single $PREFIX/ dir so the updater's
@@ -291,7 +309,7 @@ echo "==> Building MCP wrapper into the tarball"
 # caught the missing dependencies above.
 echo "==> Verifying the staged MCP wrapper answers"
 handshake='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-check","version":"1"}}}'
-reply=$(printf '%s\n' "$handshake" | ( cd "$STAGE/mcp" && timeout 30 node dist/launcher.cjs 2>&1 ) || true)
+reply=$(printf '%s\n' "$handshake" | ( cd "$STAGE/mcp" && run_bounded 30 node dist/launcher.cjs 2>&1 ) || true)
 case "$reply" in
   *'"serverInfo"'*) echo "  MCP wrapper answered initialize" ;;
   *) echo "error: staged MCP wrapper did not answer initialize:" >&2

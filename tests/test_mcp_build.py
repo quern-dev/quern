@@ -365,3 +365,36 @@ class TestEveryRegistrationShapePointsAtTheLauncher:
             "launcher -- the version gate is the only thing standing between a "
             "wrong node and a raw syntax error"
         )
+
+
+class TestADependencyBumpReinstalls:
+    """A lockfile-only change is the usual shape of a dependency bump."""
+
+    @pytest.mark.parametrize("manifest", ["package.json", "package-lock.json"])
+    def test_a_newer_manifest_forces_an_install_not_just_a_build(self, project, manifest):
+        """`npm run build` installs nothing, so a rebuild without a reinstall
+        compiles against the previous modules."""
+        import os
+        import time
+
+        nm = project / "mcp" / "node_modules"
+        nm.mkdir(parents=True)
+        (nm / ".install-stamp").touch()
+        f = project / "mcp" / manifest
+        f.write_text("{}\n")
+        later = time.time() + 100
+        os.utime(f, (later, later))
+
+        seen = []
+
+        def fake_run(cmd, **_kw):
+            seen.append(list(cmd[:2]))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            entry._ensure_mcp_built(quiet=True)
+
+        assert ["npm", "install"] in seen, (
+            f"a newer {manifest} rebuilt without reinstalling, so tsc compiled "
+            f"against the previous modules: {seen}"
+        )

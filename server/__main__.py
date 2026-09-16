@@ -269,11 +269,18 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
     # is a reason for the server to fail to start.
     node_modules = mcp_dir / "node_modules"
     stamp = node_modules / ".install-stamp"
-    pkg_json = mcp_dir / "package.json"
+    # Both manifests, not just package.json. A lockfile-only change -- the usual
+    # shape of a dependency bump -- would otherwise trigger a rebuild without a
+    # reinstall, and `npm run build` does not install anything, so `tsc` would
+    # compile against the previous modules.
+    manifests = [mcp_dir / "package.json", mcp_dir / "package-lock.json"]
     needs_install = (
         not node_modules.exists()
         or not stamp.exists()
-        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
+        or any(
+            f.stat().st_mtime >= stamp.stat().st_mtime
+            for f in manifests if f.exists()
+        )
     )
 
     try:
