@@ -391,7 +391,7 @@ class SimBridgeManager:
 
         try:
             result = await asyncio.wait_for(self._pending_response, timeout=30.0)
-        except (TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError) as exc:
             # The command was already written, so a response may still be in
             # flight. There is no correlation between request and response --
             # _dispatch resolves whatever future is current -- so if we simply
@@ -407,6 +407,21 @@ class SimBridgeManager:
             self._pending_response = None
             await self._kill_process()
             self._cleanup_state()
+
+            # Cancellation gets the same cleanup and a different exit. Converting
+            # it into a RuntimeError swallowed the cancellation: a caller that
+            # cancelled this task -- `_run_until_client_leaves` does, when the
+            # client has disconnected -- saw a RuntimeError escape instead, so
+            # its 499 path was never reached and the error claimed a timeout
+            # that had not happened.
+            #
+            # Re-raised after the kill, not before: the stale-response hazard
+            # described above is identical whichever way the wait ended, and a
+            # cancellation that skipped the cleanup would leave exactly the
+            # uncorrelated response this guards against.
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+
             raise RuntimeError(
                 f"sim-bridge command timed out: {cmd.get('cmd')}. The command was "
                 f"already sent, so it may have executed — this outcome is ambiguous "
