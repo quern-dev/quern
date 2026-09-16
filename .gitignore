@@ -45,3 +45,8 @@ macos/QuernMenuBar/build/
 # Written per release and not part of the tree; the published notes live on the
 # GitHub release. It reached a PR once by way of `git add -A`.
 RELEASE_NOTES.md
+
+# A stray `-` at the root: a tool told to write to stdout with `-o -` or `> -`
+# creates a file instead. One got committed and shipped in every release
+# tarball for two weeks before anyone noticed.
+/-

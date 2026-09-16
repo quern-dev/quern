@@ -57,12 +57,20 @@ class DeviceController(DeviceControllerUI):
         self.sim_bridge_manager = SimBridgeManager()
         self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
         self._sim_bridge_ok = False
-        #: When `_sim_bridge_ok` was last established. Latching it at startup
-        #: and never re-checking is #179: Xcode 27 moved SimulatorKit under a
-        #: running server, and it went on routing every tap to a backend that
-        #: could no longer work, while `/tools` correctly reported it
-        #: unavailable. The server and its own health endpoint disagreed.
-        self._sim_bridge_checked_at: float = 0.0
+        #: When `_sim_bridge_ok` was last established, or None if never.
+        #:
+        #: Latching it at startup and never re-checking is #179: Xcode 27 moved
+        #: SimulatorKit under a running server, and it went on routing every tap
+        #: to a backend that could no longer work, while `/tools` correctly
+        #: reported it unavailable.
+        #:
+        #: None rather than 0.0, because `time.monotonic()` counts from boot and
+        #: so legitimately *is* near zero on a machine that just started. With
+        #: 0.0 as the sentinel, "never checked" and "checked at boot" are the
+        #: same value, and the staleness test reads an unpopulated cache as
+        #: fresh for the first `max_age` seconds of uptime. CI caught this; no
+        #: developer machine has an uptime short enough to see it.
+        self._sim_bridge_checked_at: float | None = None
         self._tools_cache: tuple[float, dict[str, bool]] | None = None
         #: Serialises probe-and-adopt. /tools and the periodic refresh can run
         #: at once, and without this an older sample can land after a newer one
@@ -287,7 +295,7 @@ class DeviceController(DeviceControllerUI):
         # so warning on that too would put a WARNING in every startup log for
         # the most ordinary event there is -- and a warning that always fires
         # is one nobody reads when it matters.
-        established = self._sim_bridge_checked_at > 0
+        established = self._sim_bridge_checked_at is not None
         if established and ok != self._sim_bridge_ok:
             logger.warning(
                 "sim-bridge backend became %s under a running server; UI "
@@ -308,7 +316,10 @@ class DeviceController(DeviceControllerUI):
         """
         import time
 
-        if time.monotonic() - self._sim_bridge_checked_at < max_age:
+        if (
+            self._sim_bridge_checked_at is not None
+            and time.monotonic() - self._sim_bridge_checked_at < max_age
+        ):
             return self._sim_bridge_ok
         await self._probe_sim_bridge(adopt=True)
         return self._sim_bridge_ok
