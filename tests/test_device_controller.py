@@ -578,7 +578,7 @@ class TestGetUIElements:
         assert elements[0].type == "Application"
         assert elements[1].label == "Settings"
         ctrl.idb.describe_all.assert_called_once_with(
-            "AAAA-1111", snapshot_depth=None, source_timeout=None
+            "AAAA-1111", snapshot_depth=None, source_timeout=None, probe=True
         )
 
     async def test_with_explicit_udid(self):
@@ -588,7 +588,7 @@ class TestGetUIElements:
         elements, udid = await ctrl.get_ui_elements(udid="BBBB-2222")
         assert udid == "BBBB-2222"
         ctrl.idb.describe_all.assert_called_once_with(
-            "BBBB-2222", snapshot_depth=None, source_timeout=None
+            "BBBB-2222", snapshot_depth=None, source_timeout=None, probe=True
         )
 
 

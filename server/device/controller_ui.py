@@ -358,17 +358,26 @@ class DeviceControllerUI:
         y_far = screen_height * 0.72
         y_near = screen_height * 0.30
 
-        async def _fetch() -> UIElement | None:
-            # probe_containers=False: this runs once per swipe, up to 75 times,
-            # and the probe is 92% of a describe_all (fetch ~200ms against
-            # ~3.5s). What it buys is hidden children of tab bars and nav bars;
-            # what this sweep looks for is a row in a scroll container, which is
-            # always in the static tree. Paying it here turned a 75-swipe budget
-            # into seven minutes.
+        async def _fetch(probe: bool = False) -> UIElement | None:
+            """Look for the target. Probing off by default, and on when cold.
+
+            Inside the sweep this runs once per swipe, up to 75 times, and the
+            container probe is 92% of a `describe_all` (~200ms fetch against
+            ~3.5s). What it buys is hidden children of tab bars and nav bars;
+            what the sweep hunts is a row in a scroll container, always present
+            in the static tree. Paying it per swipe turned a 75-swipe budget
+            into seven minutes.
+
+            The *first* lookup is different. A caller may ask to scroll to an
+            element that only probing can see -- a tab-bar item is exactly that
+            -- and skipping the probe there would hide it from the one read that
+            could have found it without scrolling at all, sending the sweep off
+            to hunt something no amount of swiping reveals.
+            """
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=label, filter_identifier=identifier,
-                probe_containers=False,
+                probe_containers=probe,
             )
             matches = find_element(els, label=label, identifier=identifier)
             return matches[0] if matches else None
@@ -421,38 +430,16 @@ class DeviceControllerUI:
             await self._ui_backend(resolved).swipe(resolved, mid_x, y1, mid_x, y2, 0.3)
             self._invalidate_ui_cache(resolved)
 
-        # tap_element has just run the identical filtered query and found
-        # nothing, so repeating it here spends a full describe_all (~1.8s)
-        # re-learning what the caller already knows. scroll_to_element calls in
-        # cold with no prior read, so it still needs this check.
-        el = None if target_known_absent else await _fetch()
-        if el is not None and _visible(el):
-            return el
-
-        last_cy: float | None = None
-        stalls = 0
-        # Progress detection for the blind branch. Sampling costs a tree read,
-        # so it is bounded: a screen that cannot scroll reveals itself in the
-        # first couple of swipes, and after that the cost would be pure waste on
-        # a container that is scrolling perfectly well.
-        # Set on the first blind iteration and compared on the next, so a
-        # static screen costs two swipes rather than the full budget. Seeding it
-        # from the caller's tree was tried and dropped: tap_element's read is
-        # filtered to the missing target, so the list is always empty there.
-        blind_signature: tuple | None = None
-        progress_checked = False
-        blind_down = max_swipes          # sweep down for the first budget...
-        blind_total = max_swipes * 3     # ...then up for twice as long
-
-        # Per-step trace, kept in memory and emitted only when the sweep gives
-        # up. Silent on success by design: this loop can run 75 times and a log
-        # line per swipe would drown the file for the case nobody is debugging.
-        # But returning None after three minutes with no record of what was
-        # tried is why #84 has been reproducible and undiagnosable at the same
-        # time -- the failure is precisely the case with nothing to read.
         sweep_trace: list[str] = []
         sweep_started = time.perf_counter()
         blind_steps = 0
+        # Set before any work, not at the loop, so the cold lookup and the
+        # screen-dimension reads fall inside the budget too. Those are cheap on
+        # a simulator and are not cheap on a physical device, where a single
+        # /source read has been measured at 10.7s.
+        deadline = sweep_started + (
+            self._SCROLL_DEADLINE_S if deadline_s is None else deadline_s
+        )
 
         def _note(event: str) -> None:
             sweep_trace.append(f"{time.perf_counter() - sweep_started:7.2f}s {event}")
@@ -481,10 +468,38 @@ class DeviceControllerUI:
             f"swipe y {y_far:.0f}->{y_near:.0f}"
         )
 
-        deadline = sweep_started + (
-            self._SCROLL_DEADLINE_S if deadline_s is None else deadline_s
-        )
+        # tap_element has just run the identical filtered query and found
+        # nothing, so repeating it here spends a full describe_all (~1.8s)
+        # re-learning what the caller already knows. scroll_to_element calls in
+        # cold with no prior read, so it still needs this check.
+        if time.perf_counter() >= deadline:
+            _give_up("deadline reached before the first lookup")
+            return None
+        el = None if target_known_absent else await _fetch(probe=True)
+        if el is not None and _visible(el):
+            return el
 
+        last_cy: float | None = None
+        stalls = 0
+        # Progress detection for the blind branch. Sampling costs a tree read,
+        # so it is bounded: a screen that cannot scroll reveals itself in the
+        # first couple of swipes, and after that the cost would be pure waste on
+        # a container that is scrolling perfectly well.
+        # Set on the first blind iteration and compared on the next, so a
+        # static screen costs two swipes rather than the full budget. Seeding it
+        # from the caller's tree was tried and dropped: tap_element's read is
+        # filtered to the missing target, so the list is always empty there.
+        blind_signature: tuple | None = None
+        progress_checked = False
+        blind_down = max_swipes          # sweep down for the first budget...
+        blind_total = max_swipes * 3     # ...then up for twice as long
+
+        # Per-step trace, kept in memory and emitted only when the sweep gives
+        # up. Silent on success by design: this loop can run 75 times and a log
+        # line per swipe would drown the file for the case nobody is debugging.
+        # But returning None after three minutes with no record of what was
+        # tried is why #84 has been reproducible and undiagnosable at the same
+        # time -- the failure is precisely the case with nothing to read.
         for _step in range(max_swipes * 3):
             if time.perf_counter() >= deadline:
                 _give_up(
@@ -557,6 +572,11 @@ class DeviceControllerUI:
                     # otherwise targets above the viewport report not_found.
                     if signature == blind_signature:
                         await _swipe(y_near, y_far)
+                        # Settle first, for the same reason the search fetch
+                        # does: a signature taken mid-fling describes a screen
+                        # that is still moving, and this one decides whether
+                        # anything here scrolls at all.
+                        await self.wait_for_settle(udid=resolved, timeout=2.5)
                         reverse = await _signature()
                         if reverse is not None and reverse != blind_signature:
                             blind_signature = reverse  # it moves; carry on
@@ -1059,8 +1079,7 @@ class DeviceControllerUI:
         else:
             raw = await backend.describe_all(
                 resolved, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout,
-                **({} if probe_containers else {"probe": False}),
+                source_timeout=source_timeout, probe=probe_containers,
             )
 
         # Parse strategy:

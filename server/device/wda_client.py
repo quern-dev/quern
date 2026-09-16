@@ -854,6 +854,10 @@ class WdaBackend:
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        # Accepted for interface parity with SimBridgeBackend and IdbBackend,
+        # and ignored: XCUITest's /source enumerates container children, so there is
+        # nothing to probe and nothing for the caller to switch off.
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
 

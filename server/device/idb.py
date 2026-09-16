@@ -154,6 +154,7 @@ class IdbBackend:
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
@@ -204,7 +205,10 @@ class IdbBackend:
             )
 
         # Find empty containers before flattening (which pops children)
-        empty_containers = probing.find_empty_containers(data)
+        # `probe=False` returns the static tree alone. See SimBridgeBackend for
+        # what that costs and why a caller would skip it; this backend probes
+        # the same way and pays the same price.
+        empty_containers = probing.find_empty_containers(data) if probe else []
 
         # Before flatten
         t5 = time.perf_counter()

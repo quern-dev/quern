@@ -200,3 +200,67 @@ async def test_the_sweep_gives_up_when_its_deadline_passes(controller):
         f"the deadline had already passed but the sweep still made "
         f"{controller.swipes} swipe(s)"
     )
+
+
+@pytest.mark.asyncio
+async def test_every_backend_accepts_the_probe_keyword():
+    """`describe_all(probe=...)` must exist on all four, not just sim-bridge.
+
+    `_native_ui_elements` passes `probe=` on every call, and `_ui_backend`
+    returns `U2Backend` for Android, `WdaBackend` for physical iOS, and
+    `IdbBackend` when sim-bridge is unavailable — which is the state a machine
+    is in whenever SimulatorKit cannot be found. A keyword only one backend
+    accepted raised `TypeError` before fetching anything, so `scroll_to_element`
+    crashed outright on three of the four.
+
+    Checked by signature rather than by calling, so it covers the backends this
+    suite has no device for.
+    """
+    import inspect
+
+    from server.device.idb import IdbBackend
+    from server.device.sim_bridge import SimBridgeBackend
+    from server.device.u2_client import U2Backend
+    from server.device.wda_client import WdaBackend
+
+    for backend in (SimBridgeBackend, IdbBackend, WdaBackend, U2Backend):
+        params = inspect.signature(backend.describe_all).parameters
+        assert "probe" in params, (
+            f"{backend.__name__}.describe_all has no `probe` parameter; "
+            "_native_ui_elements passes it unconditionally, so this raises "
+            "TypeError before any UI is read"
+        )
+        assert params["probe"].default is True, (
+            f"{backend.__name__}.describe_all defaults probe to "
+            f"{params['probe'].default!r}; every existing caller expects the "
+            "probing behaviour it had before the keyword existed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_first_lookup_probes_even_though_the_sweep_does_not(controller):
+    """A caller can ask to scroll to something only probing can see.
+
+    Tab-bar items are exactly that on an iOS simulator: absent from the static
+    tree, recovered by probing. Skipping the probe on the cold read would hide
+    the target from the one lookup that could have found it without scrolling,
+    and send the sweep hunting something no amount of swiping reveals.
+    """
+    seen: list[bool] = []
+
+    async def _spy(*_a, **kw):
+        seen.append(kw.get("probe_containers", True))
+        return ([], "SIM")
+
+    controller.get_ui_elements = _spy  # type: ignore[method-assign]
+    controller.scrolls = True
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=1,
+    )
+
+    assert seen, "no lookup happened at all"
+    assert seen[0] is True, "the cold lookup skipped probing"
+    assert all(p is False for p in seen[1:]), (
+        f"a sweep lookup probed: {seen} — that is the 3.5s-per-swipe cost this "
+        "fix exists to remove"
+    )

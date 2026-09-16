@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Coroutine
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -475,8 +477,12 @@ async def swipe(request: Request, body: SwipeRequest):
 
 
 async def _run_until_client_leaves(
-    request: Request, coro, *, what: str, poll_s: float = 2.0,
-):
+    request: Request,
+    coro: Coroutine[Any, Any, Any],
+    *,
+    what: str,
+    poll_s: float = 2.0,
+) -> Any:
     """Run a long device operation, and abandon it if the caller disconnects.
 
     Uvicorn does not cancel a handler when its client goes away, so a request
@@ -511,6 +517,15 @@ async def _run_until_client_leaves(
                 raise HTTPException(
                     status_code=499, detail=f"{what} cancelled: client disconnected",
                 )
+    except asyncio.CancelledError:
+        # This coroutine was cancelled, not the client's connection. Cancel the
+        # work and let the cancellation propagate rather than converting it into
+        # a 499, which would report the caller as having disconnected when it
+        # was the server shutting the request down.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise
     finally:
         if not task.done():
             task.cancel()
