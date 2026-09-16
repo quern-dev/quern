@@ -413,7 +413,6 @@ class DeviceControllerUI:
 
         last_cy: float | None = None
         stalls = 0
-        blind_steps = 0
         # Progress detection for the blind branch. Sampling costs a tree read,
         # so it is bounded: a screen that cannot scroll reveals itself in the
         # first couple of swipes, and after that the cost would be pure waste on
@@ -427,7 +426,44 @@ class DeviceControllerUI:
         blind_down = max_swipes          # sweep down for the first budget...
         blind_total = max_swipes * 3     # ...then up for twice as long
 
-        for _ in range(max_swipes * 3):
+        # Per-step trace, kept in memory and emitted only when the sweep gives
+        # up. Silent on success by design: this loop can run 75 times and a log
+        # line per swipe would drown the file for the case nobody is debugging.
+        # But returning None after three minutes with no record of what was
+        # tried is why #84 has been reproducible and undiagnosable at the same
+        # time -- the failure is precisely the case with nothing to read.
+        sweep_trace: list[str] = []
+        sweep_started = time.perf_counter()
+        blind_steps = 0
+
+        def _note(event: str) -> None:
+            sweep_trace.append(f"{time.perf_counter() - sweep_started:7.2f}s {event}")
+
+        def _give_up(reason: str) -> None:
+            """Log the whole sweep at the point it fails, and say why.
+
+            One block rather than N lines: the interesting thing is the shape of
+            the sweep -- how far each step travelled and what each fetch saw --
+            and that only reads as a sequence.
+            """
+            _note(f"GIVING UP: {reason}")
+            # blind_steps, not len(sweep_trace): the trace holds several lines
+            # per swipe, so reporting its length reads as a step count several
+            # times the real one and makes the budget look wrong.
+            logger.info(
+                "ios scroll-to-element: %s after %d swipe(s) in %.1fs, "
+                "target %s\n  %s",
+                reason, blind_steps, time.perf_counter() - sweep_started,
+                identifier or label, "\n  ".join(sweep_trace),
+            )
+
+        _note(
+            f"start: target={identifier or label!r} max_swipes={max_swipes} "
+            f"budget={max_swipes * 3} screen={screen_width:.0f}x{screen_height:.0f} "
+            f"swipe y {y_far:.0f}->{y_near:.0f}"
+        )
+
+        for _step in range(max_swipes * 3):
             if el is not None and el.frame is not None:
                 # Located but off-screen: swipe straight toward it. Direction
                 # mirrors _visible's two out-of-view cases.
@@ -440,10 +476,7 @@ class DeviceControllerUI:
                 if last_cy is not None and abs(cy - last_cy) < 2:
                     stalls += 1
                     if stalls >= 2:
-                        logger.info(
-                            "ios scroll-to-element: target off-screen but container "
-                            "won't scroll further (cy=%.0f) — aborting", cy,
-                        )
+                        _give_up(f"container won't scroll further (cy={cy:.0f})")
                         return None
                 else:
                     stalls = 0
@@ -451,9 +484,14 @@ class DeviceControllerUI:
             else:
                 # Not located (recycled/lazy row): blind sweep, down then up.
                 if blind_steps >= blind_total:
+                    _give_up(f"blind sweep exhausted {blind_total} steps")
                     return None
                 y1, y2 = (y_far, y_near) if blind_steps < blind_down else (y_near, y_far)
                 blind_steps += 1
+                _note(
+                    f"blind step {blind_steps}/{blind_total} "
+                    f"({'down' if y1 > y2 else 'up'}) swipe {y1:.0f}->{y2:.0f}"
+                )
                 last_cy = None
                 stalls = 0
                 if blind_steps == 1 and not progress_checked:
@@ -488,15 +526,27 @@ class DeviceControllerUI:
                         # A swipe over scrollable content always moves geometry.
                         # Identical positions mean nothing scrolled, so the
                         # remaining budget would repeat this exact no-op.
-                        logger.info(
-                            "ios scroll-to-element: screen unchanged after a swipe "
-                            "— nothing scrollable here, aborting after %d", blind_steps,
-                        )
+                        _give_up("screen unchanged after a swipe — nothing scrollable")
                         return None
                     blind_signature = signature
 
             el = await _fetch()
+            if el is None:
+                # The case that matters. A recycling list drops off-screen rows
+                # entirely, so "not matched" means either the target is not on
+                # this screen or it was mid-fling when the tree was read -- and
+                # this fetch is *not* settled (the wait below runs only once
+                # something has already been found). Without this line a failed
+                # sweep records nothing at all about what it looked at.
+                _note("  fetch: target not in tree (unsettled read)")
+            elif not _visible(el):
+                _note(
+                    f"  fetch: found but not visible (y={el.frame['y']:.0f} "
+                    f"top_safe={top_safe:.0f})" if el.frame
+                    else "  fetch: found but not visible (no frame)"
+                )
             if el is not None and _visible(el):
+                _note("  fetch: found and visible — settling to confirm")
                 # Settle and re-confirm: a swipe can leave the container
                 # rubber-banding, so the immediate frame may be an over-scroll
                 # bounce that snaps back out of view. Re-fetching once settled
@@ -514,6 +564,7 @@ class DeviceControllerUI:
                 # out loud rather than passed off as a settled read.
                 stability = await self.wait_for_settle(udid=resolved, timeout=3.0)
                 if not stability["settled"]:
+                    _note(f"  never settled ({stability.get('reason')})")
                     logger.info(
                         "ios scroll-to-element: screen never settled (%s) — "
                         "using coordinates that may still be moving",
@@ -521,8 +572,14 @@ class DeviceControllerUI:
                     )
                 el = await _fetch()
                 if el is not None and _visible(el):
+                    _note("  confirmed after settle — returning")
                     return el
+                # Found, then gone. This is the over-scroll bounce the settle
+                # exists to reject, and it is worth naming: it looks identical
+                # to "never found" in the return value.
+                _note("  confirm failed after settle — target moved back out of view")
 
+        _give_up("budget exhausted")
         return None
 
     async def _try_fast_path_element_check(
