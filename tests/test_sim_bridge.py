@@ -578,3 +578,62 @@ class TestTheTwoHalvesAgreeOnSymlinkedDeveloperDirs:
             "report unavailable for an Xcode that works"
         )
         assert found.name == "SimulatorKit.framework"
+
+
+class TestDescribeAllProbeSkip:
+    """`probe=False` is a performance escape hatch with a correctness cost.
+
+    The probe finds hidden children of containers the static walk reports as
+    childless. Skipping it is right only when the caller knows its target is in
+    the static tree, so the flag has to actually reach the probing decision --
+    and it has to survive the poisoned-tree retry, or a caller that opted out
+    silently pays again on recovery.
+    """
+
+    def _backend(self, nested, probe_calls):
+        mgr = SimBridgeManager()
+        backend = SimBridgeBackend(mgr)
+        backend._fetch_nested = AsyncMock(return_value=nested)  # type: ignore[method-assign]
+
+        async def _describe_point(udid, x, y):
+            probe_calls.append((x, y))
+            return None
+
+        backend.describe_point = _describe_point  # type: ignore[method-assign]
+        return backend
+
+    #: A container the static walk reports as childless, so it gets probed.
+    #: Shaped to match `is_probeable_container`: a Group whose label names it a
+    #: tab bar, with no enumerated children. This is the real tab-bar case, not
+    #: an invented one -- an invented shape would make the default-probing test
+    #: pass or fail for reasons unrelated to the flag.
+    PROBEABLE = [{
+        "type": "Group", "AXLabel": "Tab Bar", "children": [],
+        "frame": {"x": 0, "y": 800, "width": 400, "height": 80},
+    }]
+
+    @pytest.mark.asyncio
+    async def test_probing_happens_by_default(self):
+        calls: list = []
+        backend = self._backend(self.PROBEABLE, calls)
+        await backend.describe_all("udid")
+        assert calls, "the default call did not probe an empty container"
+
+    @pytest.mark.asyncio
+    async def test_probe_false_skips_the_hit_tests(self):
+        calls: list = []
+        backend = self._backend(self.PROBEABLE, calls)
+        await backend.describe_all("udid", probe=False)
+        assert calls == [], (
+            f"probe=False still issued {len(calls)} describe_point call(s); "
+            "this is 92% of the cost the flag exists to avoid"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_static_tree_is_still_returned_when_probing_is_skipped(self):
+        """Skipping the probe must not skip the answer."""
+        calls: list = []
+        backend = self._backend(self.PROBEABLE, calls)
+        result = await backend.describe_all("udid", probe=False)
+        assert len(result) == 1
+        assert result[0]["type"] == "Group"

@@ -480,7 +480,8 @@ class SimBridgeBackend:
 
     async def describe_all(
         self, udid: str, *, snapshot_depth: int | None = None,
-        source_timeout: float | None = None, _recovered: bool = False,
+        source_timeout: float | None = None, probe: bool = True,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Return flat list of UI elements.
 
@@ -490,15 +491,34 @@ class SimBridgeBackend:
         hit-tests, then flattens and merges. Mirrors the behavior of
         `IdbBackend.describe_all` so downstream consumers don't need to
         care which backend is active.
+
+        `probe=False` skips the container probing and returns the static tree
+        alone. That is not a small saving: measured on an 8-tab app, the probe
+        is **92% of the call** -- fetch 164-310ms against probe ~3.55s -- and
+        the reason is structural rather than incidental. Each container gets a
+        20-point horizontal hit-test sweep, and `send()` is serialised behind a
+        lock because the wire protocol carries no request IDs, so the
+        `asyncio.gather` below reads as parallel and executes one at a time.
+
+        Skip it when the caller knows its target is in the static tree. A
+        recycling list's rows are; a tab bar's hidden SwiftUI children are
+        exactly what probing exists to find. Defaulting to True keeps every
+        existing caller's answer identical.
         """
         async with self._mgr.admit():
             start = time.perf_counter()
 
             nested = await self._fetch_nested(udid)
+            fetched_at = time.perf_counter()
             empty_containers = probing.find_empty_containers(nested)
             flat = probing.flatten_nested(nested)
 
-            if empty_containers:
+            if empty_containers and not probe:
+                logger.debug(
+                    "[PERF] sim-bridge.describe_all: skipping %d container probe(s) "
+                    "at the caller's request", len(empty_containers),
+                )
+            if empty_containers and probe:
                 logger.info(
                     "[PERF] sim-bridge.describe_all: probing %d empty containers",
                     len(empty_containers),
@@ -511,9 +531,19 @@ class SimBridgeBackend:
                 probed = [el for batch in probe_results for el in batch]
                 probing.merge_probed_into_flat(flat, probed)
 
+            # Split reported, not just the total. The probe fan-out is a
+            # 20-hit-test horizontal sweep per container and `send()` is
+            # lock-serialised -- the wire protocol has no request IDs -- so the
+            # `asyncio.gather` above looks parallel and executes one at a time.
+            # A single total hides which half to optimise; measured here, the
+            # probe is most of it.
+            now = time.perf_counter()
             logger.info(
-                "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms elements=%d",
-                (time.perf_counter() - start) * 1000, len(flat),
+                "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms "
+                "(fetch=%.1fms probe=%.1fms over %d container(s)) elements=%d",
+                (now - start) * 1000, (fetched_at - start) * 1000,
+                (now - fetched_at) * 1000,
+                len(empty_containers) if probe else 0, len(flat),
             )
 
             # An XCUITest or WDA run leaves this simulator's accessibility
@@ -529,7 +559,8 @@ class SimBridgeBackend:
                 if await ax_recovery.reset_bridge(udid):
                     return await self.describe_all(
                         udid, snapshot_depth=snapshot_depth,
-                        source_timeout=source_timeout, _recovered=True,
+                        source_timeout=source_timeout, probe=probe,
+                        _recovered=True,
                     )
 
             return flat
