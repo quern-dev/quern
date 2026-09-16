@@ -16,8 +16,21 @@ root="$(cd -P "$(dirname "$src")" && pwd)"
 
 # Prefer the project venv: it carries the editable install, so `-m server`
 # resolves from any cwd. Without one -- before setup has run -- fall back to
-# python3, which still works from the clone and is where setup is run from.
+# python3 and put the project on PYTHONPATH, because `-m` otherwise searches the
+# *caller's* cwd and finds nothing.
+#
+# That fallback used to assume setup is run from inside the project. It is not:
+# the install script leaves quern in ~/.local/share/quern and the terminal
+# wherever it was, so the first command a tarball user runs is by absolute path
+# -- which is exactly what quern's own messages now tell them to type. Without
+# this the reply is `No module named server`, prefixed with whichever python3
+# was first on PATH, pointing the reader at their interpreter.
+#
+# PYTHONPATH rather than `cd "$root"`: relative paths in the arguments, like a
+# project directory to build, are resolved against the caller's cwd and must
+# keep working.
 python="$root/.venv/bin/python"
-[ -x "$python" ] || python="python3"
-
-exec "$python" -m server "$@"
+if [ -x "$python" ]; then
+    exec "$python" -m server "$@"
+fi
+exec env PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" python3 -m server "$@"
