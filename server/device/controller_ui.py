@@ -348,9 +348,16 @@ class DeviceControllerUI:
         y_near = screen_height * 0.30
 
         async def _fetch() -> UIElement | None:
+            # probe_containers=False: this runs once per swipe, up to 75 times,
+            # and the probe is 92% of a describe_all (fetch ~200ms against
+            # ~3.5s). What it buys is hidden children of tab bars and nav bars;
+            # what this sweep looks for is a row in a scroll container, which is
+            # always in the static tree. Paying it here turned a 75-swipe budget
+            # into seven minutes.
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=label, filter_identifier=identifier,
+                probe_containers=False,
             )
             matches = find_element(els, label=label, identifier=identifier)
             return matches[0] if matches else None
@@ -879,6 +886,7 @@ class DeviceControllerUI:
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
+        probe_containers: bool = True,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
 
@@ -889,6 +897,7 @@ class DeviceControllerUI:
         elements, resolved = await self._native_ui_elements(
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
+            probe_containers=probe_containers,
         )
         return self._merge_web_overlay(
             resolved, elements,
@@ -906,6 +915,7 @@ class DeviceControllerUI:
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
+        probe_containers: bool = True,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -994,6 +1004,7 @@ class DeviceControllerUI:
             raw = await backend.describe_all(
                 resolved, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout,
+                **({} if probe_containers else {"probe": False}),
             )
 
         # Parse strategy:
