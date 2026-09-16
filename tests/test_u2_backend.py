@@ -14,6 +14,7 @@ from server.device.u2_client import (
     _normalize_node,
     _parse_bounds,
 )
+from server.models import DeviceError
 
 # ---------------------------------------------------------------------------
 # Unit tests: normalization helpers
@@ -521,3 +522,161 @@ class TestParseElementsIntegration:
         assert button.identifier == "btn_login"
         assert button.frame is not None
         assert button.frame["width"] == 200.0
+
+
+class TestSelectAllAndDelete:
+    """#177: the field must actually empty, and a partial clear must be reported.
+
+    The defect this replaced synthesised keystrokes with `input keyevent`, which
+    sends several keycodes in sequence rather than as a chord — so Shift was
+    never held, nothing was selected, and a single `KEYCODE_DEL` removed one
+    character while the call returned ok.
+    """
+
+    def _backend_with_device(self, device):
+        backend = U2Backend()
+        backend._connect = MagicMock(return_value=device)  # type: ignore[method-assign]
+        return backend
+
+    #: One focused EditText, as uiautomator dumps it. `hint` is the attribute
+    #: that makes emptiness decidable: an empty field reports its hint in
+    #: `text`, so text == hint means empty and nothing else does.
+    DUMP = (
+        '<?xml version="1.0" encoding="UTF-8"?><hierarchy>'
+        '<node class="android.widget.FrameLayout" focused="true" text="" hint=""/>'
+        '<node class="android.widget.EditText" focused="true"'
+        ' text="{text}" hint="{hint}"/>'
+        "</hierarchy>"
+    )
+
+    def _device(self, text="", hint="", dump=None):
+        device = MagicMock()
+        device.dump_hierarchy.return_value = (
+            dump if dump is not None else self.DUMP.format(text=text, hint=hint)
+        )
+        return device
+
+    @pytest.mark.asyncio
+    async def test_clears_through_the_ime_not_keystrokes(self):
+        """One atomic clear, and no shelling out to `adb shell input`."""
+        device = self._device(text="hint", hint="hint")
+        backend = self._backend_with_device(device)
+
+        with patch("subprocess.run") as run:
+            await backend.select_all_and_delete("serial", 10.0, 20.0)
+
+        device.clear_text.assert_called_once()
+        assert not run.called, (
+            "still shelling out to adb; `input keyevent` cannot hold a modifier "
+            "across keycodes, which is the bug"
+        )
+
+    @pytest.mark.asyncio
+    async def test_focuses_the_field_before_clearing(self):
+        """The tap decides *which* field is cleared; order is load bearing."""
+        device = self._device(text="hint", hint="hint")
+        backend = self._backend_with_device(device)
+        calls = []
+        device.click.side_effect = lambda *a, **k: calls.append("click")
+        device.clear_text.side_effect = lambda *a, **k: calls.append("clear")
+
+        await backend.select_all_and_delete("serial", 10.0, 20.0)
+
+        assert calls == ["click", "clear"], f"expected click then clear, got {calls}"
+        device.click.assert_called_once_with(10, 20)
+
+    @pytest.mark.asyncio
+    async def test_a_partial_clear_raises_rather_than_reporting_ok(self):
+        """The guard #98 added to the web path, which the native path never had.
+
+        Without it a clear that removes 12 of 13 characters returns success, the
+        next `type_text` appends to the leftovers, and the failure surfaces
+        somewhere else entirely as a mismatched string.
+        """
+        device = self._device(text="to-be-cleare", hint="default")
+        backend = self._backend_with_device(device)
+
+        with pytest.raises(DeviceError) as excinfo:
+            await backend.select_all_and_delete("serial", 10.0, 20.0)
+
+        assert "12 character(s)" in str(excinfo.value)
+        assert "to-be-cleare" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_a_clear_that_removes_nothing_is_rejected(self):
+        """The no-op case, which a before/after comparison cannot see.
+
+        Both reviewers of #199 flagged it: if the clear removes nothing, before
+        and after are identical and any diff-based check reads that as "no
+        leftovers". Comparing against the hint decides it outright — a
+        populated field does not equal its hint.
+        """
+        device = self._device(text="email@example.com", hint="email")
+        backend = self._backend_with_device(device)
+
+        with pytest.raises(DeviceError) as excinfo:
+            await backend.select_all_and_delete("serial", 10.0, 20.0)
+        assert "17 character(s)" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_a_hint_that_is_a_substring_of_the_content_is_not_a_failure(self):
+        """The case that shipped broken in the first version of this fix.
+
+        `field_email` is hinted 'email'. Clearing 'email@example.com' out of it
+        leaves 'email' — the hint — which *is* a substring of the original, so a
+        "what remains is a fragment" check calls a correct clear a failure.
+        Measured live: HTTP 500 on a field that had emptied perfectly.
+
+        A hint does not move when cleared again, which is what separates it from
+        a clear that is removing one character at a time.
+        """
+        device = self._device(text="email", hint="email")
+        backend = self._backend_with_device(device)
+
+        await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_hint_text_left_behind_is_not_mistaken_for_leftovers(self):
+        """An empty Android EditText reports its *hint* in `text`.
+
+        Measured on a Pixel 3 XL: `field_default` reads as 'default' when
+        empty, and uiautomator exposes no separate hint attribute. Requiring
+        the field to read empty fails on every hinted field on the platform --
+        which the first version of this fix did, in live testing, on a field it
+        had cleared correctly.
+        """
+        device = self._device(text="default", hint="default")
+        backend = self._backend_with_device(device)
+
+        await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_clearing_an_already_empty_field_is_not_a_failure(self):
+        """Both reads return the hint, unchanged. Clearing twice is legitimate."""
+        device = self._device(text="default", hint="default")
+        backend = self._backend_with_device(device)
+
+        await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_field_is_not_reported_as_a_failure(self):
+        """"Could not look" is not "did not clear".
+
+        Raising when the read-back itself fails would report a failure on the
+        strength of a lookup that never ran — the same distinction the landmark
+        matcher draws for web URLs.
+        """
+        device = MagicMock()
+        device.dump_hierarchy.side_effect = RuntimeError("no hierarchy")
+        backend = self._backend_with_device(device)
+
+        await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_a_connection_failure_still_surfaces_as_a_device_error(self):
+        backend = U2Backend()
+        backend._connect = MagicMock(side_effect=RuntimeError("adb gone"))  # type: ignore[method-assign]
+
+        with pytest.raises(DeviceError) as excinfo:
+            await backend.select_all_and_delete("serial", 1.0, 2.0)
+        assert "Clear text failed" in str(excinfo.value)
