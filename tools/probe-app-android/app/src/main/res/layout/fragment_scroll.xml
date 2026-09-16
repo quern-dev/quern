@@ -1,5 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.recyclerview.widget.RecyclerView
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/scroll_list"
-    android:layout_width="match_parent" android:layout_height="match_parent" />
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+
+    <!-- Reset controls, mirroring the iOS nav-bar buttons. Android has no
+         navigation bar here, so this row does cost the list a little height;
+         acceptable, because the scroll-travel measurement that cares about
+         viewport height (#84) is an iOS problem. -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content">
+        <Button android:id="@+id/scroll_to_top"
+            android:text="Top" android:contentDescription="scroll_to_top"
+            android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <Button android:id="@+id/scroll_to_bottom"
+            android:text="Bottom" android:contentDescription="scroll_to_bottom"
+            android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <TextView android:id="@+id/scroll_position"
+            android:contentDescription="scroll_position"
+            android:padding="12dp" android:textSize="14sp"
+            android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/scroll_list"
+        android:layout_width="match_parent" android:layout_height="match_parent" />
+</LinearLayout>

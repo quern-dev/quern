@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -17,8 +18,34 @@ class ScrollFragment : Fragment() {
     ): View {
         val root = inflater.inflate(R.layout.fragment_scroll, container, false)
         val list = root.findViewById<RecyclerView>(R.id.scroll_list)
-        list.layoutManager = LinearLayoutManager(requireContext())
+        val manager = LinearLayoutManager(requireContext())
+        list.layoutManager = manager
         list.adapter = RowAdapter()
+
+        val readout = root.findViewById<TextView>(R.id.scroll_position)
+        fun publish() {
+            val lo = manager.findFirstVisibleItemPosition()
+            val hi = manager.findLastVisibleItemPosition()
+            val text = if (lo < 0) "rows - of $ROWS" else "rows $lo-$hi of $ROWS"
+            readout.text = text
+            readout.contentDescription = text
+        }
+
+        // scrollToPosition, not smoothScrollToPosition: an animated jump is a
+        // scroll like any other, so a test that resets and reads immediately
+        // would sample the animation instead of the destination.
+        root.findViewById<Button>(R.id.scroll_to_top).setOnClickListener {
+            manager.scrollToPositionWithOffset(0, 0)
+            list.post { publish() }
+        }
+        root.findViewById<Button>(R.id.scroll_to_bottom).setOnClickListener {
+            manager.scrollToPositionWithOffset(ROWS - 1, 0)
+            list.post { publish() }
+        }
+        list.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) = publish()
+        })
+        list.post { publish() }
         return root
     }
 
