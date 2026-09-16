@@ -510,6 +510,21 @@ class DeviceControllerUI:
 
             await _swipe(y1, y2)
 
+            # Let the fling stop before looking. The search fetch used to read
+            # mid-flight, which is how #84 lost a row it had already found: the
+            # fetch caught it in motion, the fling carried it out of view, and
+            # the confirm below correctly rejected a sighting that was real when
+            # it was taken.
+            #
+            # This was affordable only after the probe skip in the previous
+            # commit. Before it, a step cost ~3.9s and that latency was
+            # accidentally doing this job; removing it made the loop swipe five
+            # times in three seconds and the list never stopped moving at all,
+            # which is how this became visible.
+            settle = await self.wait_for_settle(udid=resolved, timeout=2.5)
+            if not settle["settled"]:
+                _note(f"  did not settle before fetch ({settle.get('reason')})")
+
             if el is None and not progress_checked and blind_signature is not None:
                 progress_checked = True
                 signature = await _signature()
@@ -581,10 +596,30 @@ class DeviceControllerUI:
                 if el is not None and _visible(el):
                     _note("  confirmed after settle — returning")
                     return el
-                # Found, then gone. This is the over-scroll bounce the settle
-                # exists to reject, and it is worth naming: it looks identical
-                # to "never found" in the return value.
-                _note("  confirm failed after settle — target moved back out of view")
+
+                # Found, then gone. The old code treated this as never having
+                # seen the target and swept onward -- away from a row it had
+                # just located, burning the rest of the budget and reporting
+                # not_found for an element it had in hand twice (#84).
+                #
+                # The target is not gone, it is just past, by less than one
+                # swipe -- one swipe is all that moved since we saw it. So
+                # nudging back is both cheap and well-founded: half a swipe the
+                # other way, then re-check. Bounded to one attempt per sighting
+                # so a genuinely absent element cannot make the sweep oscillate.
+                _note("  confirm failed after settle — nudging back toward it")
+                y_back1, y_back2 = (y_near, y_far) if y1 > y2 else (y_far, y_near)
+                midpoint = (y_back1 + y_back2) / 2
+                await self._ui_backend(resolved).swipe(
+                    resolved, mid_x, y_back1, mid_x, midpoint, 0.3,
+                )
+                self._invalidate_ui_cache(resolved)
+                await self.wait_for_settle(udid=resolved, timeout=3.0)
+                el = await _fetch()
+                if el is not None and _visible(el):
+                    _note("  recovered after nudging back — returning")
+                    return el
+                _note("  nudge did not recover it; resuming the sweep")
 
         _give_up("budget exhausted")
         return None
