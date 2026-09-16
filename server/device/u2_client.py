@@ -213,6 +213,21 @@ def _patch_ime_setup(device, apk_path: Path) -> None:
     logger.debug("Patched _setup_ime to use Quern Driver APK")
 
 
+
+def _focused_text(device) -> str:
+    """Text of the focused node, or "" when there is nothing to read.
+
+    "Could not look" is not "was empty", but for this caller the distinction
+    collapses safely: with no reading, the verification below simply does not
+    fire. Raising here instead would report a clear as failed on the strength
+    of a lookup that never ran.
+    """
+    try:
+        return device(focused=True).info.get("text") or ""
+    except Exception:
+        logger.debug("clear_text: could not read the focused field", exc_info=True)
+        return ""
+
 class U2Backend:
     """Manages Android UI automation via uiautomator2.
 
@@ -545,34 +560,65 @@ class U2Backend:
         y: float,
         element_type: str | None = None,
     ) -> None:
-        """Clear text in a field by selecting all and deleting."""
+        """Empty the text field at (x, y), and confirm that it emptied.
+
+        Clears through uiautomator2's IME broadcast rather than by synthesising
+        keystrokes. The previous implementation opened a u2 connection, used it
+        only for the focusing tap, and then shelled out to::
+
+            input keyevent KEYCODE_MOVE_HOME
+            input keyevent --longpress KEYCODE_SHIFT_LEFT KEYCODE_MOVE_END
+            input keyevent KEYCODE_DEL
+
+        `input keyevent` given several keycodes sends them *in sequence, not as
+        a chord*, so Shift was never held and nothing was ever selected: the
+        caret went to the start, then to the end, and the single `KEYCODE_DEL`
+        backspaced one character. Measured on a Pixel 3 XL -- 50 characters in,
+        49 characters out, `{"status": "ok"}` (#177).
+
+        `clear_text()` broadcasts `ADB_KEYBOARD_CLEAR_TEXT` to the AdbKeyboard
+        IME, which is the same path `type_text` already relies on, so it clears
+        in one operation with nothing to hold across calls.
+
+        The read-back is the other half, and the more important one. #98 fixed
+        this same defect on the iOS web path and hardened it with verification;
+        the native path was left with no check at all, which is why this went
+        unnoticed. Clearing is *setup* -- it runs before the interesting part of
+        a test -- so a silent partial clear surfaces later as a mismatched
+        string in an unrelated assertion.
+        """
 
         def _do():
             device = self._connect(udid)
-            # Tap the field to focus it
-            device.click(int(x), int(y))
-            # Select all via Ctrl+A keycode combo, then delete
-            # On Android: use keyevent sequence
-            import subprocess
-            adb_serial = udid
-            # Long press to trigger selection mode, then select all
-            subprocess.run(
-                ["adb", "-s", adb_serial, "shell", "input", "keyevent",
-                 "KEYCODE_MOVE_HOME"],
-                capture_output=True, timeout=5,
-            )
-            subprocess.run(
-                ["adb", "-s", adb_serial, "shell", "input", "keyevent",
-                 "--longpress", "KEYCODE_SHIFT_LEFT", "KEYCODE_MOVE_END"],
-                capture_output=True, timeout=5,
-            )
-            subprocess.run(
-                ["adb", "-s", adb_serial, "shell", "input", "keyevent",
-                 "KEYCODE_DEL"],
-                capture_output=True, timeout=5,
-            )
+            device.click(int(x), int(y))  # focus the field the caller named
+
+            # `focused=True` throughout: the tap above decided which field this
+            # is, and re-deriving it from coordinates could read a different one.
+            before = _focused_text(device)
+            device.clear_text()
+            after = _focused_text(device)
+
+            # An empty EditText reports its *hint* in `text` -- Android exposes
+            # no separate hint attribute, and uiautomator surfaces none, so a
+            # cleared field is indistinguishable from one containing the hint by
+            # reading alone. Measured: an empty `field_default` reads as
+            # 'default'. Asserting "after must be empty" therefore fails on
+            # every hinted field on the platform, which is what the first
+            # version of this did.
+            #
+            # What the bug actually looks like is leftover *original* content:
+            # 36 characters in, 35 out. So the check is whether what remains is
+            # a shortened piece of what was there, which a hint will not be.
+            if after and after != before and after in before:
+                raise DeviceError(
+                    f"clear_text left {len(after)} of {len(before)} character(s) "
+                    f"in the field: {after[:40]!r}",
+                    tool="u2",
+                )
 
         try:
             await asyncio.to_thread(_do)
+        except DeviceError:
+            raise
         except Exception as e:
             raise DeviceError(f"Clear text failed: {e}", tool="u2") from e
