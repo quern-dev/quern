@@ -4,10 +4,10 @@ Manages a macOS LaunchDaemon that runs `pymobiledevice3 remote tunneld`,
 providing RemoteXPC tunnels for iOS 17+ developer services (screenshots, etc.).
 
 Usage:
-    ./quern tunneld install    # Install LaunchDaemon (prompts for sudo)
-    ./quern tunneld uninstall  # Remove LaunchDaemon
-    ./quern tunneld status     # Show daemon status and connected devices
-    ./quern tunneld restart    # Restart the daemon
+    quern tunneld install    # Install LaunchDaemon (prompts for sudo)
+    quern tunneld uninstall  # Remove LaunchDaemon
+    quern tunneld status     # Show daemon status and connected devices
+    quern tunneld restart    # Restart the daemon
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+
+from server.config import quern_cmd
 
 logger = logging.getLogger("quern-debug-server.tunneld")
 
@@ -356,7 +358,7 @@ async def tunneld_health() -> TunneldHealth:
         return TunneldHealth(
             status="not_installed",
             detail="LaunchDaemon is not installed",
-            remedy="./quern tunneld install",
+            remedy=f"{quern_cmd()} tunneld install",
         )
 
     serving = await is_tunneld_running()
@@ -388,7 +390,7 @@ async def tunneld_health() -> TunneldHealth:
             status="stopped", serving=False, launchd_state=state, pid=pid,
             program=program,
             detail=f"installed but not running (launchd state: {state or 'unknown'})",
-            remedy="./quern tunneld install",
+            remedy=f"{quern_cmd()} tunneld install",
         )
 
     # Order matters, and it is not a tie-break between independent faults.
@@ -414,7 +416,10 @@ async def tunneld_health() -> TunneldHealth:
             status="binary_drift", serving=True, launchd_state=state, pid=pid,
             program=program,
             detail=f"serving from {program}, but quern resolves {binary}",
-            remedy="./quern tunneld install  (re-freezes the plist onto the resolved binary)",
+            remedy=(
+                f"{quern_cmd()} tunneld install"
+                "  (re-freezes the plist onto the resolved binary)"
+            ),
         )
 
     drift = installed_plist_drift()
@@ -423,7 +428,7 @@ async def tunneld_health() -> TunneldHealth:
             status="stale_plist", serving=True, launchd_state=state, pid=pid,
             program=program,
             detail=f"serving, but the installed plist is outdated — {drift}",
-            remedy="./quern tunneld install",
+            remedy=f"{quern_cmd()} tunneld install",
         )
 
     return TunneldHealth(
@@ -658,7 +663,7 @@ def install_daemon() -> int:
 
         print("tunneld LaunchDaemon installed successfully.")
         print(f"  Logs: {LOG_PATH}")
-        print("  Check status: ./quern tunneld status")
+        print(f"  Check status: {quern_cmd()} tunneld status")
         return 0
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -738,7 +743,7 @@ def recover_wedged_tunneld(non_interactive: bool = False) -> bool:
 def _grant_user() -> str:
     """The human the grant is for, not the identity running the installer.
 
-    `sudo ./quern tunneld grant-recovery` is the natural way to run something
+    `sudo quern tunneld grant-recovery` is the natural way to run something
     that writes to /etc/sudoers.d, and under sudo `getpass.getuser()` is root.
     Taking that at face value would write a rule granting root permission to do
     what root can already do, report success, and leave the actual user still
@@ -940,7 +945,7 @@ def _print_status() -> int:
             # every healthy install to reinstall -- a passing check reading as
             # a failed one, advising the exact command the guard below refuses
             # on a home-on-external machine.
-            print("             Reinstall to migrate: ./quern tunneld install")
+            print(f"             Reinstall to migrate: {quern_cmd()} tunneld install")
 
     running, devices = _tunneld_devices()
 
@@ -959,7 +964,7 @@ def _print_status() -> int:
         print("  Install pymobiledevice3: pipx install pymobiledevice3")
     elif not plist_installed:
         print()
-        print("  Install daemon: ./quern tunneld install")
+        print(f"  Install daemon: {quern_cmd()} tunneld install")
 
     print()
     return 0
@@ -979,7 +984,7 @@ def _restart_daemon() -> int:
     """
     if not PLIST_PATH.exists():
         print("tunneld LaunchDaemon is not installed.")
-        print("Install it first: ./quern tunneld install")
+        print(f"Install it first: {quern_cmd()} tunneld install")
         return 1
 
     print("Restarting tunneld (requires sudo)...")
@@ -1008,9 +1013,9 @@ def _restart_daemon() -> int:
 
 
 def cli_tunneld(args: list[str]) -> int:
-    """Handle ./quern tunneld subcommands. Returns exit code."""
+    """Handle `quern tunneld` subcommands. Returns exit code."""
     if not args or args[0] in ("-h", "--help", "help"):
-        print("Usage: ./quern tunneld <command>")
+        print(f"Usage: {quern_cmd()} tunneld <command>")
         print()
         print("Commands:")
         print("  install          Install tunneld as a LaunchDaemon (requires sudo)")
@@ -1040,5 +1045,5 @@ def cli_tunneld(args: list[str]) -> int:
         return revoke_recovery_grant()
     else:
         print(f"Unknown command: {cmd}")
-        print("Run './quern tunneld --help' for usage.")
+        print(f"Run '{quern_cmd()} tunneld --help' for usage.")
         return 1

@@ -132,7 +132,7 @@ The top stack frames show where the crash happened. Your agent can cross-referen
 You can run a command whenever a crash is detected:
 
 ```bash
-./quern start --on-crash 'curl -X POST https://your-webhook.example.com -d @-'
+quern start --on-crash 'curl -X POST https://your-webhook.example.com -d @-'
 ```
 
 The full crash report (JSON) is piped to stdin. The hook runs with a 60-second timeout.

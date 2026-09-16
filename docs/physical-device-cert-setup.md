@@ -8,7 +8,7 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 
 1. **Server must listen on all interfaces** so the device can reach it over Wi-Fi:
    ```bash
-   ./quern stop && ./quern start --host 0.0.0.0
+   quern stop && quern start --host 0.0.0.0
    ```
 
 2. **Cert endpoint is unauthenticated** — `/api/v1/proxy/cert` is whitelisted in `server/auth.py`. No API key needed from Safari.

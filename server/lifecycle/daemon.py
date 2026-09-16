@@ -16,7 +16,7 @@ import sys
 import time
 
 from server import get_version
-from server.config import CONFIG_DIR
+from server.config import CONFIG_DIR, quern_cmd
 from server.lifecycle.state import is_server_healthy, read_state
 
 LOG_FILE = CONFIG_DIR / "server.log"
@@ -169,7 +169,7 @@ def _print_status(state: dict) -> None:
         drift = PLIST_PATH.exists() and installed_plist_drift()
         if drift:
             print(f"  Warning:    tunneld plist is outdated — {drift}.")
-            print("              Run: ./quern tunneld install")
+            print(f"              Run: {quern_cmd()} tunneld install")
     except Exception:
         pass  # never let an opportunistic check block the banner
 

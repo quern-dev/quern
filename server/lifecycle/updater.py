@@ -1,11 +1,11 @@
-"""./quern update — pull latest changes and rebuild.
+"""quern update — pull latest changes and rebuild.
 
 Supports two install modes:
   - Git clone (developers): updates via git pull --ff-only
   - Release tarball (users): downloads latest GitHub release
 
 Usage:
-    ./quern update
+    quern update
 """
 
 from __future__ import annotations

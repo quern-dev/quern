@@ -76,6 +76,8 @@ curl -fsSL https://quern.dev/install.sh | bash
 
 This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, installs a Claude Code pre-commit checklist hook (see below), and adds `quern` to `~/.local/bin` on your PATH.
 
+**After this, run `quern` from anywhere** — you do not need to be in the install directory, and you do not need to know where it is. Everything below is written that way. If your shell reports `command not found: quern` in the session you installed from, run `rehash` (zsh) or open a new terminal: the shell caches where commands live and does not notice a new one appearing.
+
 #### Pre-commit checklist hook
 
 Setup also installs a Claude Code `PreToolUse` hook into `~/.claude/settings.json` that surfaces a short checklist whenever an agent runs `git commit` in a project that uses Quern (signaled by a `.quern/knowledge/` directory at the project root). The reminder covers KB drift, landmark verification, and other discipline that's easy to forget when committing app or KB changes. It stays silent in projects that don't use Quern.
@@ -92,9 +94,13 @@ mkdir -p ~/.local/share
 tar -xzf quern-*.tar.gz -C ~/.local/share
 mv ~/.local/share/quern-* ~/.local/share/quern
 cd ~/.local/share/quern
-python3 -m server setup
-.venv/bin/python -m server mcp-install
+./quern setup
+./quern mcp-install
 ```
+
+`./quern` here because you are standing in the extracted directory and there is
+nothing on your PATH yet. Setup is what puts `quern` there; afterwards, run it
+from anywhere as `quern`.
 
 </details>
 
@@ -486,6 +492,10 @@ git clone https://github.com/quern-dev/quern.git
 cd quern
 ./quern setup                # creates venv, installs deps, checks tools, adds quern to ~/.local/bin
 ./quern mcp-install          # builds MCP server, adds to ~/.claude.json
+
+# `./quern` while you are in the clone. After setup, `quern` works from
+# anywhere — but keep using `./quern` here if you have several checkouts, since
+# the bare name resolves to whichever one setup last pointed it at.
 
 # Enable the repo's git hooks (one-time, per clone)
 git config core.hooksPath scripts/git-hooks

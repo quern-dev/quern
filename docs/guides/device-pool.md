@@ -74,7 +74,7 @@ The tunneld daemon creates persistent IPv6 tunnels to iOS 17+ devices. It's a La
 If it's not running, iOS 17+ physical device features fall back to older mechanisms (which may or may not work depending on the operation). If you're having trouble with physical devices on iOS 17+, check:
 
 ```bash
-./quern tunneld status
+quern tunneld status
 ```
 
 ## Android Devices in the Pool

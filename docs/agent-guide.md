@@ -254,12 +254,12 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 **Key insight**: Crashes leave traces in multiple places. Cross-referencing sources is where you find root causes.
 
-**Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `./quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
+**Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
 
 **Crash hooks**: Use `--on-crash '<command>'` to run a shell command whenever a crash is detected. The full `CrashReport` JSON is piped to the command's stdin. The hook runs in the background with a 60-second timeout and never blocks the server. Example:
 
 ```bash
-./quern start --on-crash 'cat > /tmp/last_crash.json'
+quern start --on-crash 'cat > /tmp/last_crash.json'
 ```
 
 ---
