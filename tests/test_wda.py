@@ -1152,3 +1152,104 @@ class TestWdaStartStopApi:
             )
 
         assert resp.status_code == 400
+
+
+class TestTheDeploymentTargetIsOverridden:
+    """Xcode 27 refuses to build upstream WebDriverAgent.
+
+    The vendored project declares `IPHONEOS_DEPLOYMENT_TARGET = 13.0`, and
+    Xcode 27 accepts only 15.0 and above:
+
+        error: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to
+        13.0, but the range of supported deployment target versions is 15.0 to
+        27.0.x. (in target 'WebDriverAgentRunner')
+
+    Without the override every physical-device build fails, and the failure is
+    masked for existing users because `build_wda` skips when the team matches --
+    so a stale build from an older Xcode keeps working until something forces a
+    rebuild, and then there is nothing to fall back to.
+
+    Overridden on the command line because that layer outranks the project's
+    own settings and so reaches every target in the graph, including the
+    WebDriverAgentLib dependency that the no-flag build also rejects.
+    """
+
+    async def _captured_args(self, tmp_path, force=False):
+        repo = tmp_path / "WebDriverAgent"
+        repo.mkdir()
+        (repo / "WebDriverAgent.xcodeproj").mkdir()
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            return _mock_process()
+
+        with (
+            patch("server.device.wda.read_wda_state", return_value={"cloned": True}),
+            patch("server.device.wda.save_wda_state"),
+            patch("server.device.wda.WDA_REPO", repo),
+            patch("server.device.wda.WDA_DERIVED", tmp_path / "build"),
+            patch("server.device.wda.asyncio.create_subprocess_exec", fake_exec),
+            patch("server.device.wda._post_process_runner_app", AsyncMock()),
+        ):
+            await build_wda("TEAM123", force=force)
+        return captured["args"]
+
+    @staticmethod
+    def _deployment_target(args):
+        """The override, asserted to be a build setting and not an option value.
+
+        Membership alone is not enough: moved one slot to the right it becomes
+        the argument to `-destination`, xcodebuild exits 64 without building,
+        and a test that only greps the argv list still passes.
+        """
+        setting = next(
+            (a for a in args if str(a).startswith("IPHONEOS_DEPLOYMENT_TARGET=")), None,
+        )
+        assert setting is not None, (
+            "xcodebuild was invoked without a deployment-target override, so "
+            "Xcode 27 will reject the vendored project's 13.0"
+        )
+        index = args.index(setting)
+        assert not str(args[index - 1]).startswith("-"), (
+            f"{setting} follows {args[index - 1]!r}, so xcodebuild consumes it "
+            "as that option's value rather than as a build setting"
+        )
+        return tuple(int(part) for part in setting.split("=", 1)[1].split("."))
+
+    @pytest.mark.parametrize("force", [False, True])
+    async def test_xcodebuild_is_given_a_supported_deployment_target(
+        self, tmp_path, force
+    ):
+        """Both build paths, because `force=True` is the one users run.
+
+        `setup_wda` and the docs tell free-account users to force a rebuild
+        weekly, and that path wipes derived data before building -- so an
+        override that only covers the default path fails exactly where there is
+        no previous build left to fall back on.
+        """
+        version = self._deployment_target(
+            await self._captured_args(tmp_path, force=force)
+        )
+        assert version >= (15, 0), (
+            f"{version} is below the 15.0 floor Xcode 27 enforces"
+        )
+
+    @pytest.mark.parametrize("force", [False, True])
+    async def test_it_does_not_claim_more_than_quern_supports(self, tmp_path, force):
+        """The floor is a build constraint, not a capability claim.
+
+        Xcode 27 stamps the outer Runner app from its own XCTRunner template at
+        17.0 regardless of this setting, so everything in [15.0, 17.0] behaves
+        identically and the low end is free. Above 17.0 the inner .xctest
+        becomes the binding floor and a build flag silently narrows the
+        supported device range -- which quern documents as iOS 15 and up.
+        """
+        version = self._deployment_target(
+            await self._captured_args(tmp_path, force=force)
+        )
+        assert version <= (17, 0), (
+            f"{version} is above the 17.0 ceiling, so it would narrow the "
+            "device range rather than just satisfy the compiler"
+        )

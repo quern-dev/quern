@@ -7,6 +7,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.pmd3")
@@ -101,10 +102,13 @@ class Pmd3Backend:
     """Manages physical iOS device operations via pymobiledevice3 subprocess calls."""
 
     async def is_available(self) -> bool:
-        """Check if pymobiledevice3 is available."""
+        """Check that pymobiledevice3 is installed *and* answers."""
         from server.device.tunneld import find_pymobiledevice3_binary
 
-        return find_pymobiledevice3_binary() is not None
+        binary = find_pymobiledevice3_binary()
+        if binary is None:
+            return False
+        return await probe_command(str(binary), "version", tool="pymobiledevice3")
 
     async def screenshot(self, uuid: str) -> bytes:
         """Capture a screenshot from a physical device via pymobiledevice3.

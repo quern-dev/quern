@@ -1,6 +1,6 @@
 [project]
 name = "quern-debug-server"
-version = "0.18.0"
+version = "0.18.2"
 description = "Debug log capture and AI context server"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -57,6 +57,11 @@ dependencies = [
     "fb-idb>=1.1.0",
     "uiautomator2>=3.2",                # inherited
     "pyyaml>=6.0",                      # inherited
+    # Direct, though it arrives transitively via pymobiledevice3 anyway. The
+    # updater compares release versions with it, and a comparison that silently
+    # stopped working would offer users a downgrade -- see _newer_release. This
+    # project declares what it imports.
+    "packaging>=21.0",
 ]
 
 [project.optional-dependencies]

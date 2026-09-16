@@ -42,8 +42,33 @@ def _mock_proc(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
 class TestIsAvailable:
     async def test_available(self):
         backend = IdbBackend()
-        with patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"):
+        with (
+            patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"),
+            patch("server.device.idb.probe_command", AsyncMock(return_value=True)),
+        ):
             assert await backend.is_available() is True
+
+    async def test_a_present_binary_that_does_not_answer_is_unavailable(self):
+        backend = IdbBackend()
+        with (
+            patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"),
+            patch("server.device.idb.probe_command", AsyncMock(return_value=False)),
+        ):
+            assert await backend.is_available() is False
+
+    async def test_the_probe_gets_the_companion_environment(self):
+        """Probed bare, the patched companion dies in dyld and a *working*
+        install reports as broken. See #190."""
+        backend = IdbBackend()
+        with (
+            patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"),
+            patch("server.device.idb.probe_command", AsyncMock(return_value=True)) as probe,
+        ):
+            await backend.is_available()
+        env = probe.await_args.kwargs["env"]
+        assert "DYLD_FRAMEWORK_PATH" in env, (
+            "the probe ran idb without the framework path the runtime supplies"
+        )
 
     async def test_not_available(self):
         backend = IdbBackend()

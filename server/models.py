@@ -1489,7 +1489,22 @@ class WifiProxyNetworkConfig(BaseModel):
 class DeviceCertState(BaseModel):
     """State of mitmproxy CA certificate installation for a device."""
 
-    name: str
+    #: Optional, because a writer that does not know the name omits it.
+    #:
+    #: Required until 0.18.1, which made a recorded Wi-Fi proxy config
+    #: invisible. `record_device_proxy_config` writes the config and nothing
+    #: else -- it has no device name to hand -- so building this model raised,
+    #: `_get_proxy_status` caught it, and the device vanished from `cert_setup`
+    #: entirely. Everything that record exists to feed went with it:
+    #: `wifi_proxy_stale`, `active_wifi_network`, and the host/port/client_ip a
+    #: user set up by hand. The only trace was a log line calling the entry
+    #: "invalid stored fields", which points at corruption rather than at a
+    #: field nobody wrote.
+    #:
+    #: It also contradicted the rule 4b7bbf0 established on the write side:
+    #: omit a name you do not know rather than assert "Unknown Device". This is
+    #: the read side catching up.
+    name: str | None = None
     cert_installed: bool = False
     fingerprint: str | None = None
     installed_at: str | None = None  # ISO 8601 timestamp

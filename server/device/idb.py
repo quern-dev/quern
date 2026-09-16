@@ -12,6 +12,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.device import probing
+from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
 logger = logging.getLogger("quern-debug-server.idb")
@@ -62,8 +63,20 @@ class IdbBackend:
         return env
 
     async def is_available(self) -> bool:
-        """Check if idb CLI is available."""
-        return self._find_idb() is not None
+        """Check that the idb CLI is installed *and* answers.
+
+        Probed with `_companion_env()` rather than a bare environment. The
+        patched companion resolves its frameworks through `DYLD_FRAMEWORK_PATH`,
+        so a probe that omits it reports a *working* install as broken -- the
+        same defect as claiming a dead one works, just facing the other way.
+        See #190.
+        """
+        binary = self._find_idb()
+        if binary is None:
+            return False
+        return await probe_command(
+            binary, "--help", env=self._companion_env(), tool="idb",
+        )
 
     async def _run(self, *args: str) -> tuple[str, str]:
         """Run an idb command and return (stdout, stderr).

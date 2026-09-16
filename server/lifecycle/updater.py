@@ -18,6 +18,10 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the runtime import stays inside the function, as elsewhere here
+    from packaging.version import Version
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -78,16 +82,91 @@ def _select_asset_url(assets: list, version: str) -> str | None:
     return None
 
 
+def _parses(release: dict) -> bool:
+    """Whether this release's tag is a version we can compare."""
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        Version((release.get("tag_name") or "").lstrip("v"))
+    except InvalidVersion:
+        return False
+    return True
+
+
+def _best_release(releases: list) -> dict | None:
+    """The highest-versioned release in a list, or None if it is empty.
+
+    Malformed tags are not filtered here on purpose. `_newer_release` already
+    treats an unparseable tag as the lesser, so one never beats a usable
+    candidate; and when *every* candidate is malformed the winner is caught by
+    the validation in `_fetch_latest_release`, which has to exist anyway for the
+    stable path (`/releases/latest` returns a single object and never reaches
+    this function). Filtering here as well was a second mechanism for the same
+    guarantee, and no test could tell the two apart.
+    """
+    best = None
+    for release in releases:
+        best = _newer_release(best, release)
+    return best
+
+
+def _newer_release(a: dict | None, b: dict | None) -> dict | None:
+    """Whichever of two GitHub release objects has the greater version.
+
+    Ordering is PEP 440 via ``packaging``, which already sorts
+    ``0.15.0-beta.1`` before ``0.15.0`` -- the behaviour wanted for
+    prereleases, and the reason not to hand-roll this.
+
+    A tag that will not parse is treated as the *lesser*, so a malformed one
+    cannot win by accident and offer itself as an update. If neither parses,
+    the first argument wins, which preserves the old "prefer the prerelease"
+    behaviour for a repo whose tags this cannot read at all.
+    """
+    if a is None or b is None:
+        return a or b
+
+    def _v(release: dict) -> Version | None:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            # `or ""` rather than a default: a JSON `"tag_name": null` gives
+            # None from `.get`, and `.lstrip` on it raises AttributeError, which
+            # is not in the tuple below and escapes to `_fetch_latest_release`'s
+            # broad handler -- reported as "could not fetch release info", so
+            # the whole update fails instead of falling back to the candidate
+            # that parsed fine.
+            return Version((release.get("tag_name") or "").lstrip("v"))
+        except InvalidVersion:
+            return None
+
+    va, vb = _v(a), _v(b)
+    if va is None and vb is None:
+        return a
+    if va is None:
+        return b
+    if vb is None:
+        return a
+    return b if vb > va else a
+
+
 def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
     """Fetch the latest release for the user's channel from GitHub.
 
     For ``stable``: hits ``/releases/latest``, which is GitHub-defined as
     the most recent release with ``prerelease: false``.
 
-    For ``beta``: hits ``/releases`` and picks the topmost entry with
-    ``prerelease: true``. Beta users get prereleases when they exist; if
-    there are none, returns the stable latest so beta users never see
-    older content than stable users.
+    For ``beta``: hits ``/releases`` and takes the newer of the most recent
+    prerelease and the most recent stable, so beta users never see older
+    content than stable users.
+
+    That comparison is the whole point, and it used to be an assumption. The
+    code took the topmost prerelease and fell back to stable only when there
+    were *none* -- which covers a repo that has never cut a beta, and not the
+    normal state of this one between beta cycles. With 0.18.0 stable and
+    0.15.0-beta.1 the newest prerelease, a beta user on 0.18.0 was told
+    ``Updating v0.18.0 -> v0.15.0-beta.1`` and downgraded three minor versions,
+    onto a source-only tarball with no menu-bar app. Then pinned there, because
+    the next check found current == latest and reported "already up to date".
 
     Returns ``(version, tarball_url)`` or None on failure.
     """
@@ -101,21 +180,33 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
             data = json.loads(resp.read().decode())
 
         if channel == "beta":
-            # /releases returns an array sorted newest-first. Pick the
-            # first prerelease entry; fall back to stable if there are
-            # no prereleases yet.
-            prerelease = next(
-                (r for r in data if r.get("prerelease") and not r.get("draft")),
-                None,
+            # /releases is sorted newest-first, but "newest prerelease" and
+            # "newest release" are different questions and the answer to the
+            # first can be older than the answer to the second.
+            # The *highest-versioned* of each kind, not the topmost.
+            # `/releases` is ordered by `created_at`, so a hotfix published
+            # after a newer release sits above it and would win its category.
+            live = [r for r in data if not r.get("draft")]
+            prerelease = _best_release(
+                [r for r in live if r.get("prerelease")],
             )
-            data = prerelease if prerelease else next(
-                (r for r in data if not r.get("prerelease") and not r.get("draft")),
-                None,
+            stable = _best_release(
+                [r for r in live if not r.get("prerelease")],
             )
+            data = _newer_release(prerelease, stable)
             if data is None:
                 return None
 
-        tag = data.get("tag_name", "")
+        if not _parses(data):
+            # Covers the stable path too, which takes whatever
+            # `/releases/latest` names without passing through `_best_release`.
+            print(
+                f"Error: the latest release on '{channel}' has an unusable tag "
+                f"({data.get('tag_name')!r}); not updating."
+            )
+            return None
+
+        tag = data.get("tag_name") or ""
         version = tag.lstrip("v")
         # Prefer an uploaded asset tarball (``quern-<version>.tar.gz``) — it
         # bundles the signed/notarized menu-bar Quern.app alongside the source
@@ -348,6 +439,48 @@ def _update_via_tarball(project_root: Path) -> int:
     if current_version == latest_version:
         print(f"Already up to date (v{current_version}, channel '{channel}').")
         return 2  # No update needed
+
+    # Never move backwards *by accident*. The equality check above treats "the
+    # version differs" as "there is an update", so any wrong answer from the
+    # resolver is acted on without question -- and one of them shipped: the beta
+    # channel offered the newest *prerelease* even when it was older than
+    # stable, which downgraded users three minor versions and pinned them there,
+    # since the next check then found current == latest.
+    #
+    # Going backwards *on purpose* is a different thing, and the one case of it
+    # is documented: `quern set-channel stable && quern update` from a beta
+    # build, mid beta cycle, where the newest stable genuinely is older than
+    # what is installed. Refusing that leaves a tarball user with no way back to
+    # stable, and -- because rc 2 reads as "already up to date" -- told the move
+    # succeeded. That is the failure this whole release is about, so it is worth
+    # being precise rather than blunt here.
+    #
+    # Hence: a prerelease going to the stable channel is the deliberate case and
+    # is allowed. Everything else backwards is the resolver being wrong.
+    # Unparseable versions fall through rather than wedging updates shut.
+    if current_version:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            installed = Version(current_version)
+            offered = Version(latest_version)
+            leaving_beta = installed.is_prerelease and channel == "stable"
+            if offered < installed and not leaving_beta:
+                print(
+                    f"Channel '{channel}' offers v{latest_version}, which is older "
+                    f"than the installed v{current_version}. Not downgrading."
+                )
+                print(
+                    "This usually means the channel is resolving the wrong "
+                    "release. Nothing has been changed."
+                )
+                # Not rc 2: that is mapped to "already up to date", and this is
+                # the opposite -- an update that was wanted and did not happen.
+                # A refusal reported as success is what put people on a stale
+                # build without noticing in the first place.
+                return 1
+        except (InvalidVersion, TypeError):
+            pass
 
     print(f"Updating v{current_version or 'unknown'} → v{latest_version} (channel '{channel}')...")
 

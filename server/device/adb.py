@@ -8,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
+from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.adb")
@@ -57,6 +58,36 @@ def _find_sdk_tool(name: str, subdir: str = "platform-tools") -> str | None:
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+#: Failures `am start` reports in its output while still exiting 0.
+#:
+#: "Activity not started" covers an unresolvable intent; "does not exist" is
+#: what an explicit package that is not installed produces. Matched against
+#: stdout and stderr together, because which stream carries it varies by
+#: Android version.
+#: The subset that really does mean "nothing can open this".
+#:
+#: Separate from the detection list because `Error: Activity not started` is
+#: also how Android reports a resolved activity that refused to launch, and
+#: "no app handled it" is the wrong thing to tell someone in that case.
+_AM_START_UNRESOLVED = (
+    "unable to resolve Intent",
+    "Error: Activity class",
+)
+
+_AM_START_FAILURES = (
+    "Error: Activity not started",
+    "unable to resolve Intent",
+    # Anchored to the `Error:` line on purpose. `am start` echoes the URL back
+    # in its `Starting: Intent { ... dat=<url> }` line, so a bare "does not
+    # exist" could be matched out of a URL on a successful launch. Measured on a
+    # Pixel 3 XL (Android 10), the missing-package case actually reports
+    # "unable to resolve Intent" and this spelling never appeared -- it is kept
+    # for the versions that do emit it, which is all the more reason not to let
+    # it match loosely.
+    "Error: Activity class",
+)
 
 
 class AdbBackend:
@@ -183,9 +214,27 @@ class AdbBackend:
             except ValueError:
                 return api_str, ""
 
-    async def is_available(self) -> bool:
-        """Check if adb is available."""
+    def is_installed(self) -> bool:
+        """Whether adb is on disk. Cheap, and says nothing about health.
+
+        Split from `is_available` because the two questions have different
+        callers. Control flow -- "should I try the Android path at all?" --
+        wants this: it runs on hot paths, and the command it guards will fail
+        on its own terms if the binary is broken. Reporting wants the probe.
+        """
         return self._adb_path is not None
+
+    async def is_available(self) -> bool:
+        """Check that adb is installed *and* answers.
+
+        Was a path lookup, which reports a corrupt or half-installed binary as
+        healthy -- the shape #181 exists to fix, and one this cannot express
+        either, but it can at least stop claiming a tool works without ever
+        asking it.
+        """
+        if not self.is_installed():
+            return False
+        return await probe_command(str(self._adb_path), "version", tool="adb")
 
     async def _get_device_property(self, serial: str, prop: str) -> str:
         """Get a single device property via getprop."""
@@ -212,7 +261,7 @@ class AdbBackend:
         AVDs from ``emulator -list-avds`` so that unbooted emulators
         appear in the device list.
         """
-        if not await self.is_available():
+        if not self.is_installed():
             return []
 
         try:
@@ -750,7 +799,36 @@ rm -rf /data/local/tmp/tmp-ca-copy
         ]
         if package:
             args.append(package)
-        await self._run_adb_for_device(*args)
+        stdout, stderr = await self._run_adb_for_device(*args)
+
+        # `am start` exits 0 when nothing can handle the intent, and says so
+        # only in its output -- so discarding that made an unhandled URL
+        # byte-for-byte identical to a successful dispatch. iOS raises here,
+        # which is what made the Android silence surprising rather than merely
+        # unhelpful.
+        combined = f"{stdout}\n{stderr}"
+        for marker in _AM_START_FAILURES:
+            if marker in combined:
+                detail = next(
+                    (
+                        line.strip()
+                        for line in combined.splitlines()
+                        if marker in line
+                    ),
+                    combined.strip(),
+                )
+                # Detection stays broad; the *diagnosis* does not. "Activity
+                # not started" also covers a resolved intent that was refused
+                # -- a permission denial, most often -- and telling someone no
+                # app handled their URL sends them to install one when the app
+                # is right there and said no.
+                unhandled = any(m in combined for m in _AM_START_UNRESOLVED)
+                summary = (
+                    f"No app on {serial} handled {url}"
+                    if unhandled
+                    else f"Could not launch {url} on {serial}"
+                )
+                raise DeviceError(f"{summary}: {detail}", tool="adb")
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.

@@ -31,10 +31,25 @@ def _make_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
 class TestIsAvailable:
     async def test_available(self):
         backend = Pmd3Backend()
-        with patch(
-            "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3"),
+            ),
+            patch("server.device.pmd3.probe_command", AsyncMock(return_value=True)),
         ):
             assert await backend.is_available() is True
+
+    async def test_a_present_binary_that_does_not_answer_is_unavailable(self):
+        backend = Pmd3Backend()
+        with (
+            patch(
+                "server.device.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3"),
+            ),
+            patch("server.device.pmd3.probe_command", AsyncMock(return_value=False)),
+        ):
+            assert await backend.is_available() is False
 
     async def test_not_available(self):
         backend = Pmd3Backend()

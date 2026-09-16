@@ -1890,3 +1890,199 @@ class TestOtherQuernOnPath:
         assert result.status is CheckStatus.WARNING
         assert str(clone_copy) in result.detail
         assert "rehash" in result.detail
+
+
+def _stub_the_checks_before_the_venv(monkeypatch):
+    """Get `run_setup` as far as the venv block, on any machine.
+
+    Two things sit in front of it and both bite.
+
+    `check_homebrew` halts the run outright when brew is missing, so on a
+    machine without it these tests never reach the code they name -- and every
+    assertion about "it stopped" is satisfied by the *Homebrew* stop. That is
+    how `TestAFailedVenvRecreateStopsThere` passed with its fix fully reverted.
+
+    `check_python` is worse than a false pass: the venv tests answer yes to
+    every prompt, and the Python check offers a Homebrew install. `_brew_install`
+    calls `subprocess.run(["brew", "install", ...])` directly rather than through
+    the patched `_run`, so nothing in the test or in conftest stops a real
+    install. Latent only because the suite runs on a supported interpreter --
+    which is exactly what the recreate branch under test assumes is not the case.
+    """
+    from server.lifecycle import setup
+    from server.lifecycle.setup import CheckResult, CheckStatus
+
+    monkeypatch.setattr(
+        setup, "check_homebrew",
+        lambda *a, **k: CheckResult(
+            name="Homebrew", status=CheckStatus.OK, message="stubbed",
+        ),
+    )
+    monkeypatch.setattr(
+        setup, "check_python",
+        lambda *a, **k: CheckResult(
+            name="Python", status=CheckStatus.OK, message="stubbed",
+        ),
+    )
+    monkeypatch.setattr(
+        setup, "_brew_install",
+        lambda *a, **k: pytest.fail("a test shelled out to a real `brew install`"),
+    )
+
+
+class TestDecliningTheVenvStopsThere:
+    """Answering "no" to the venv prompt used to fall through to the block
+    commented "we're inside the venv", which reports the check OK.
+
+    It is not inside a venv, so the run continued until the first third-party
+    import and died with `ModuleNotFoundError: No module named 'httpx'` --
+    several hundred lines from the decision that caused it, naming a dependency
+    the user never mentioned. A deliberate "no" is not an error to be reported
+    as a missing module.
+
+    This is also where an *unaskable* prompt lands: with no terminal
+    `_prompt_yn` declines rather than hanging, so a GUI or piped setup arrives
+    here without anyone having said anything.
+    """
+
+    def _decline(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup
+
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: False)
+        # Not in a venv.
+        monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+        return setup
+
+    def test_it_exits_nonzero_instead_of_continuing(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        setup = self._decline(monkeypatch, tmp_path)
+        created = []
+        monkeypatch.setattr(
+            setup, "create_venv", lambda *a, **k: created.append(True) or True,
+        )
+
+        # The load-bearing assertion. `run_setup` returns 1 for plenty of
+        # reasons in a sandbox, so an exit code alone does not show it stopped
+        # *here* -- with the return removed it falls through, every later check
+        # runs against an interpreter with no dependencies, and the run still
+        # ends in 1. Pinning the first check past the venv block is what
+        # distinguishes "stopped" from "carried on and failed anyway".
+        reached = []
+        monkeypatch.setattr(
+            setup, "check_mitmdump", lambda *a, **k: reached.append(True),
+        )
+
+        rc = setup.run_setup()
+
+        assert reached == [], (
+            "setup carried on past the venv it was told not to create, which "
+            "is how this surfaced as ModuleNotFoundError several hundred lines "
+            "later"
+        )
+        assert rc == 1, "declining was reported as success"
+        assert created == [], "it created a venv after being told not to"
+        out = capsys.readouterr().out
+        assert "Declined" in out, "the summary does not say why it stopped"
+        assert "httpx" not in out, (
+            "the failure surfaced as a missing dependency rather than the "
+            "decision that caused it"
+        )
+
+    def test_an_unasked_prompt_still_gets_the_no_terminal_report(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """Without a terminal every prompt declines rather than hanging, so a
+        menu-bar or `curl | bash` setup on a machine with no venv lands on this
+        exit *every time* -- and the early return skipped the block that names
+        what was never asked and says to run setup in a terminal. Being told you
+        "declined" a question nobody put to you is the worse half of that."""
+        from server.lifecycle import setup
+
+        setup_mod = self._decline(monkeypatch, tmp_path)
+        monkeypatch.setattr(setup_mod, "create_venv", lambda *a, **k: True)
+
+        # Record the question the way the real no-terminal path does, rather
+        # than pre-seeding the list: `run_setup` clears `_UNASKED` on entry, so
+        # anything seeded beforehand is gone by the time the branch runs.
+        def declines_and_records(question, *a, **k):
+            setup._UNASKED.append(question.strip())
+            return False
+
+        monkeypatch.setattr(setup_mod, "_prompt_yn", declines_and_records)
+
+        setup_mod.run_setup()
+
+        out = capsys.readouterr().out
+        assert "No virtual environment found. Create one?" in out, (
+            "the block naming what was never asked was skipped by the early exit"
+        )
+        assert "declined without asking" in out
+        assert "quern setup" in out, "it does not say how to answer the question"
+
+
+class TestAFailedVenvRecreateStopsThere:
+    """One branch above the declined-venv fix, the same shape.
+
+    "Recreate venv with X?" accepted -> the old venv is deleted -> `create_venv`
+    fails -> execution fell through to the branch that prints "Virtual
+    environment found but not activated" about a directory that no longer
+    exists, then re-execs into it. That returns -1, so `quern setup` exits 255
+    with no summary, no CheckResult and no guidance, having just destroyed the
+    user's environment.
+    """
+
+    def test_it_reports_instead_of_re_execing_into_nothing(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from server.lifecycle import setup
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+
+        reexeced = []
+        _stub_the_checks_before_the_venv(monkeypatch)
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: True)
+        monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
+        monkeypatch.setattr(
+            setup, "_reexec_in_venv", lambda *a, **k: reexeced.append(True) or -1,
+        )
+
+        # The branch only runs for a venv built with an unsupported Python when
+        # a better one exists: venv on 3.14 (> PYTHON_MAX), best is 3.12.
+        monkeypatch.setattr(setup, "_find_best_python", lambda *a, **k: "python3.12")
+
+        def fake_run(cmd, *a, **k):
+            if str(cmd[0]).endswith(".venv/bin/python"):
+                return 0, "Python 3.14.0", ""
+            return 0, "Python 3.12.0", ""
+
+        monkeypatch.setattr(setup, "_run", fake_run)
+
+        # Not inside a venv, so the block is reached at all.
+        monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+
+        rc = setup.run_setup()
+
+        assert reexeced == [], (
+            "it re-execed into a venv it had just deleted, which exits 255 with "
+            "no explanation"
+        )
+        assert rc == 1, "the failure did not reach the exit code"
+        out = capsys.readouterr().out
+        assert "Could not recreate the venv" in out, (
+            "it stopped, but reported nothing -- the bug was exiting 255 with no "
+            "summary, no CheckResult and no guidance, and a negative assertion "
+            "alone does not pin that"
+        )
+        assert "found but not activated" not in out, (
+            "it described a deleted directory as present"
+        )

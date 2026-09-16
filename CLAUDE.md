@@ -21,6 +21,9 @@ they are the ones that actually cost time, not because they are more important.
 - **Commit messages.** No `Co-Authored-By`, no AI attribution. The `commit-msg`
   hook enforces it; enable hooks with
   `git config core.hooksPath scripts/git-hooks`.
+- **Restoring a mutation.** Never `git checkout -- <path>` to undo one; it
+  deletes uncommitted work in that path, and it has twice. Mutate a
+  `git archive` copy instead. See *Verifying, reviewing, and mutation testing*.
 - **Exit codes from the review scripts.** Don't pipe `pr-review-status.py` if
   you care about its status — `| sed` or `| tee` reports the pipe's exit code,
   not the script's, and that reads as success.

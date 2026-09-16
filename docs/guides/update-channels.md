@@ -38,10 +38,13 @@ moves you.
 
 What that update does depends on how you installed Quern:
 
-- **Installed with the install script (tarball):** the updater takes whichever
-  GitHub Release is the newest one marked as a prerelease. If there are no
-  prereleases at the moment, it falls back to the latest stable, so you are
-  never served *older* content than a stable user.
+- **Installed with the install script (tarball):** the updater compares the
+  newest prerelease against the newest stable release and takes whichever is
+  actually newer, so you are never served *older* content than a stable user.
+  Between beta cycles that usually means you are on the same build as stable —
+  which is the point, not a fault. Until 0.18.1 it simply took the newest
+  prerelease, which after a few stable releases meant beta users were offered a
+  downgrade.
 - **Installed as a git clone:** your checkout has to be on the branch your
   channel tracks — `release/beta` for beta. Any other branch, including `main`,
   is treated the same way: `quern update` tells you how far ahead the release
@@ -61,6 +64,12 @@ What that update does depends on how you installed Quern:
 quern set-channel stable
 quern update
 ```
+
+Mid beta cycle the newest stable can be *older* than the beta build you are
+running, and that move is allowed — it is the one time an update deliberately
+goes backwards. Any other backwards move is refused, because the only thing
+that produces one is the channel resolving the wrong release, and a silent
+downgrade is how you end up on a stale build without noticing.
 
 On a tarball install that is all of it. **On a git clone you also have to move
 the checkout back**, because `set-channel` changes your preference and nothing

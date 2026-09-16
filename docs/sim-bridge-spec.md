@@ -301,6 +301,27 @@ server/device/idb.py            — Existing idb backend (kept as fallback)
    the idb fallback remains available, and the community (baguette, AXe, XcodeBuildMCP)
    collectively tracks breakages.
 
+   Realized in Xcode 27, and the shape is worth recording because the prediction
+   was right about the cause and wrong about the consequence. `SimulatorKit.framework`
+   moved from `Developer/Library/PrivateFrameworks` to `Contents/SharedFrameworks`
+   — up a level, out of the developer directory. Both paths are now searched
+   rather than switching on a version: it costs one `stat`, and it keeps working
+   whichever layout the next Xcode ships.
+
+   Two lessons that generalise beyond this instance:
+
+   - **The failure was silent, which is worse than the breakage.** A binary
+     compiled before the move still completes the readiness handshake and logs
+     its `dlopen` failure to stderr alone, so `sim_bridge` read as *available*
+     and every gesture routed to a bridge that could not resolve HID. A private
+     framework that fails to load has to fail the availability check, not just
+     the operation.
+   - **"The idb fallback remains available" is the assumption to check, not to
+     rely on.** idb is itself an aging dependency with the same exposure —
+     Homebrew's `idb-companion` is a 2022 build that now collides with the OS's
+     own FrontBoard framework, and quern's patched build has its own packaging
+     problems. A fallback nobody exercises is not a fallback.
+
 2. **Code signing** — Some private APIs check the caller's code signature. `xcrun simctl
    spawn` works because simctl is Apple-signed. Our binary is ad-hoc signed.
    Baguette works fine ad-hoc, so this is likely not an issue for the APIs we use.

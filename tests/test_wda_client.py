@@ -3001,8 +3001,14 @@ class TestSourceTimeoutCoversRealHardware:
     a device that cannot be automated until someone relaunches WDA by hand.
     """
 
-    #: Measured on a physical iPhone 11, iOS 26.6.2, home screen, first call.
-    OBSERVED_IPHONE_11 = 7.52
+    #: Measured on a physical iPhone 11, iOS 26.6.2, home screen.
+    #:
+    #: 7.52s against a WDA built with Xcode 26; 10.19-10.35s across three
+    #: samples once the same WDA was rebuilt under Xcode 27, on the same device
+    #: and the same screen. The higher figure is the one to hold the budget
+    #: against, and the fact that it moved at all is why #170 wants this
+    #: derived per device rather than pinned to whatever was last observed.
+    OBSERVED_IPHONE_11 = 10.35
 
     def test_a_slow_device_gets_more_than_the_measured_time(self):
         backend = WdaBackend()
@@ -3012,6 +3018,40 @@ class TestSourceTimeoutCoversRealHardware:
             f"an iPhone 11 takes {self.OBSERVED_IPHONE_11}s to answer /source; a "
             f"{timeout}s budget means every call restarts the driver and returns "
             f"nothing"
+        )
+
+    #: Measured on a physical iPhone 15 Pro (A17 Pro), iOS 26, home screen,
+    #: WDA built with Xcode 27. Four samples, 5.15-5.34s -- against a *larger*
+    #: tree than the iPhone 11's (714KB vs 448KB) in half the time. The same
+    #: device on a 150KB screen answered in 4.37-4.58s, so this is the busy end
+    #: of the range rather than the whole of it, and it is the end a budget has
+    #: to cover.
+    OBSERVED_A17 = 5.34
+
+    def test_a_modern_device_gets_more_than_the_measured_time(self):
+        """The old 5.0 default straddled an A17 rather than clearing it.
+
+        It was raised on the assumption that the Xcode 27 slowdown was not
+        device-specific; measuring an A17 turned that assumption into a fact.
+        A budget of 5.0 sits *below* the observed 5.34s but above the 4.4s the
+        same phone manages on a light screen -- so whether an iPhone 15 Pro got
+        a tree or `element_count: 0` came down to which screen it was on, which
+        is worse than a clean failure and much harder to report."""
+        assert SOURCE_TIMEOUT >= self.OBSERVED_A17 * 1.5, (
+            f"the default {SOURCE_TIMEOUT}s leaves no room above the "
+            f"{self.OBSERVED_A17}s measured on an A17. Clearing the last "
+            f"measurement by a hair is exactly how both of these budgets ended "
+            f"up under water within a day of being set"
+        )
+
+    def test_the_slow_budget_has_real_headroom(self):
+        """Not merely above the measurement. Both constants have been under
+        water within a day of being set from the last observation, so the test
+        pins a margin rather than a threshold."""
+        assert SOURCE_TIMEOUT_SLOW >= self.OBSERVED_IPHONE_11 * 1.5, (
+            f"{SOURCE_TIMEOUT_SLOW}s leaves no room above the observed "
+            f"{self.OBSERVED_IPHONE_11}s -- which is how this has already been "
+            f"wrong twice"
         )
 
     def test_a_modern_device_gets_the_shorter_budget(self):

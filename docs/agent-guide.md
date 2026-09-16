@@ -509,9 +509,11 @@ An empty `tls_rejections` with no flows means the traffic is not reaching the pr
 
 **"The screen summary is empty on a physical device"** — `element_count: 0` with no error, while `take_screenshot` plainly shows a populated screen. The accessibility tree and screenshots take different paths, so the device looks alive and unreadable at once.
 
-The usual cause is that WDA's `/source` read exceeded its budget. That is not just a slow call: quern reads a timeout as evidence the runner is hung and restarts it, which returns an empty tree — so it repeats on every call and looks permanent. An iPhone 11 on iOS 26 takes about 7.5s to answer on its home screen, which is why the budget for older chips is 10s and 5s elsewhere.
+The usual cause is that WDA's `/source` read exceeded its budget. That is not just a slow call, and it compounds twice. Quern reads a timeout as evidence the runner is hung and restarts it, which returns an empty tree. And WDA serializes requests, so the abandoned call keeps running on the device and the *next* one queues behind it — which is why retrying with a larger timeout can still fail, and why the failure looks permanent rather than intermittent. Give the device a moment to drain before retrying.
 
-Pass `source_timeout` (15–25) on `get_screen_summary` or `get_ui_tree` when a device is slower than that, or a screen is unusually dense. It does not restart anything. `strategy: "skeleton"` skips the `/source` read entirely and returns navigation chrome only, which is the right answer for maps with many pins.
+The budgets are 20s for A13-era and older chips and 10s for everything newer. Both are sized from measurement with headroom: an iPhone 11 on iOS 26 takes about 10.2s to answer on its home screen, and an iPhone 15 Pro 4.4–5.3s depending on how dense the screen is. Expect these to move when *Xcode* moves rather than when the device does — the same iPhone 11 answered in 7.5s before WDA was rebuilt under Xcode 27, on identical hardware and the same screen.
+
+Pass `source_timeout` (30–45) on `get_screen_summary` or `get_ui_tree` when a device is slower than that, or a screen is unusually dense. It does not restart anything. `strategy: "skeleton"` skips the `/source` read entirely and returns navigation chrome only, which is the right answer for maps with many pins.
 
 **"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
 

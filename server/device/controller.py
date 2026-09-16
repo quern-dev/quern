@@ -57,6 +57,18 @@ class DeviceController(DeviceControllerUI):
         self.sim_bridge_manager = SimBridgeManager()
         self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
         self._sim_bridge_ok = False
+        #: When `_sim_bridge_ok` was last established. Latching it at startup
+        #: and never re-checking is #179: Xcode 27 moved SimulatorKit under a
+        #: running server, and it went on routing every tap to a backend that
+        #: could no longer work, while `/tools` correctly reported it
+        #: unavailable. The server and its own health endpoint disagreed.
+        self._sim_bridge_checked_at: float = 0.0
+        self._tools_cache: tuple[float, dict[str, bool]] | None = None
+        #: Serialises probe-and-adopt. /tools and the periodic refresh can run
+        #: at once, and without this an older sample can land after a newer one
+        #: -- leaving `_ui_backend` on the wrong backend until the next refresh,
+        #: up to 300s of taps going somewhere they should not.
+        self._sim_bridge_lock = asyncio.Lock()
         self.__active_udid: str | None = None
         # What was last persisted, so an assignment that changes nothing can
         # skip the write entirely. Separate from __active_udid, which is
@@ -185,19 +197,121 @@ class DeviceController(DeviceControllerUI):
             return
         self._active_udid = udid
 
-    async def check_tools(self) -> dict[str, bool]:
-        """Check availability of CLI tools."""
+    async def check_tools(
+        self, *, adopt: bool = False, max_age: float = 0.0,
+    ) -> dict[str, bool]:
+        """Check availability of CLI tools.
+
+        Every probe is bounded and runs concurrently. Sequentially, the shared
+        budget would be per tool and `/tools` could take seven times as long to
+        answer on a machine where several are wedged -- and `/tools` not
+        answering is the bug this came from (#180).
+
+        The values are booleans, so "installed but not responding" arrives here
+        as False, indistinguishable from "not installed". The probe logs the
+        difference; expressing it is #181.
+        """
+        import time
+
         from server.device.tunneld import is_tunneld_running
 
-        return {
-            "simctl": await self.simctl.is_available(),
-            "idb": await self.idb.is_available(),
-            "devicectl": await self.devicectl.is_available(),
-            "pymobiledevice3": await self.pmd3.is_available(),
-            "tunneld": await is_tunneld_running(),
-            "adb": await self.adb.is_available(),
-            "sim_bridge": await self.sim_bridge_manager.is_available(),
-        }
+        # `max_age` exists because this is no longer cheap. Seven probes, six of
+        # them subprocesses, and `GET /api/v1/device/list` calls it on every
+        # request to report tool availability alongside the devices -- which for
+        # an agent driving the MCP tool is a hot path. Callers that *report*
+        # health (/tools, startup) pass 0 and always measure; callers that
+        # merely include it in a larger response can accept a few seconds old.
+        if max_age > 0 and self._tools_cache is not None:
+            cached_at, cached = self._tools_cache
+            if time.monotonic() - cached_at < max_age:
+                return dict(cached)
+
+        names = (
+            "simctl", "idb", "devicectl", "pymobiledevice3",
+            "tunneld", "adb", "sim_bridge",
+        )
+        results = await asyncio.gather(
+            self.simctl.is_available(),
+            self.idb.is_available(),
+            self.devicectl.is_available(),
+            self.pmd3.is_available(),
+            is_tunneld_running(),
+            self.adb.is_available(),
+            self._probe_sim_bridge(adopt=adopt),
+            return_exceptions=True,
+        )
+        tools: dict[str, bool] = {}
+        for name, result in zip(names, results, strict=True):
+            if isinstance(result, BaseException):
+                # One probe raising must not take the health endpoint down with
+                # it -- reporting six tools and an error beats reporting none.
+                logger.warning("%s availability probe failed: %r", name, result)
+                tools[name] = False
+            else:
+                tools[name] = bool(result)
+
+        self._tools_cache = (time.monotonic(), dict(tools))
+        return tools
+
+    async def _probe_sim_bridge(self, *, adopt: bool) -> bool:
+        """Probe the sim-bridge backend, optionally adopting the result.
+
+        Adopting is opt-in rather than a side effect of measuring. It is the
+        cheap half of #179 -- a /tools call re-syncs a server left routing to a
+        backend the same response calls unavailable -- but it decides which
+        backend serves every subsequent tap, and no operator associates
+        *listing devices* with re-selecting one.
+
+        The probe and the adoption are one critical section. They are not the
+        only caller: the periodic refresh runs the same pair, and interleaved,
+        a slower older probe can land after a faster newer one and leave
+        `_ui_backend` wrong until the next refresh.
+        """
+        async with self._sim_bridge_lock:
+            ok = await self.sim_bridge_manager.is_available()
+            if adopt:
+                self._adopt_sim_bridge_state(ok)
+            return ok
+
+    def _adopt_sim_bridge_state(self, ok: bool) -> None:
+        """Record a freshly measured sim-bridge availability, loudly on change.
+
+        A backend flipping under a running server is not routine: it means the
+        toolchain moved, and the log line is the only warning anyone gets
+        before gestures start going somewhere else.
+        """
+        import time
+
+        # Only a *change* is worth a warning, and only after a first answer
+        # exists to change from. Every server boot establishes this from False,
+        # so warning on that too would put a WARNING in every startup log for
+        # the most ordinary event there is -- and a warning that always fires
+        # is one nobody reads when it matters.
+        established = self._sim_bridge_checked_at > 0
+        if established and ok != self._sim_bridge_ok:
+            logger.warning(
+                "sim-bridge backend became %s under a running server; UI "
+                "automation will now use %s. The toolchain moved: this is the "
+                "only notice before gestures start going somewhere else.",
+                "available" if ok else "unavailable",
+                "sim-bridge" if ok else "idb",
+            )
+        self._sim_bridge_ok = ok
+        self._sim_bridge_checked_at = time.monotonic()
+
+    async def refresh_sim_bridge_availability(self, max_age: float = 300.0) -> bool:
+        """Re-probe the sim-bridge backend when the cached answer is stale.
+
+        `max_age` exists so this is safe to call often: the probe spawns
+        `xcode-select`, which is cheap but not free, and UI operations select a
+        backend on a synchronous path that cannot await.
+        """
+        import time
+
+        if time.monotonic() - self._sim_bridge_checked_at < max_age:
+            return self._sim_bridge_ok
+        await self._probe_sim_bridge(adopt=True)
+        return self._sim_bridge_ok
 
     async def tool_sites(self) -> list:
         """Every install site quern uses, with versions and provenance.
@@ -475,7 +589,7 @@ class DeviceController(DeviceControllerUI):
 
         if name:
             # Check if name matches an Android AVD first
-            if await self.adb.is_available():
+            if self.adb.is_installed():
                 avds = await self.adb.list_avds()
                 if name in avds:
                     serial = await self.adb.boot_emulator(name, headless=headless)

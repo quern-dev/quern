@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`quern doctor` could hang instead of answering.** The `/tools` endpoint behind it probed every device CLI with no timeout, and `xcrun simctl help` *hangs* rather than erroring while Xcode's first-launch tasks run — which is the normal state of a machine for some minutes after an Xcode upgrade. Every probe is now bounded, and they run concurrently, so one wedged tool no longer holds up the rest.
+- **Tools were reported as working without ever being asked.** `adb`, `idb`, `pymobiledevice3` and the patched `idb_companion` all answered from "a file exists at this path", so a truncated download or a half-extracted archive read as a healthy install — and because the patched companion is preferred over a system one, a broken copy would shadow a working one while claiming to be fine. Each is now run and has to answer. A tool that is present but not responding still reports as unavailable rather than as its own state; that distinction is the remaining half of the work.
+- **An Xcode upgrade under a running server left it using the wrong backend.** Which backend serves simulator UI automation was decided once at startup and never revisited, so when Xcode 27 moved `SimulatorKit` mid-session the server went on routing every tap to a backend that could no longer work — indefinitely, and while its own health endpoint correctly reported that backend unavailable. Any `quern doctor` or `quern status` now re-syncs it, and it is re-checked periodically regardless.
+
+## [0.18.2] - 2026-09-15
+
+Three fixes, all from the Xcode 27 upgrade, and all of which reported success while doing nothing useful.
+
+### Fixed
+- **Physical-device screen reads returned an empty tree after upgrading to Xcode 27.** `get_screen_summary` and `get_ui_tree` reported `element_count: 0` with no error, while a screenshot plainly showed a populated screen. Rebuilding WebDriverAgent under Xcode 27 moved an iPhone 11's `/source` response from 7.5s to 10.2s — same device, same screen, same Quern — which put it over its 10s budget, and Quern reads a timeout as evidence the runner is hung and restarts it. The budgets are now 20s for A13-era and older chips and 10s for everything newer, each sized from measurement with 1.5x headroom rather than set just above the last observation, which is what let both of them go under water twice. An iPhone 15 Pro was measured at 4.4-5.3s depending on screen density, so the previous 5s default straddled a current device: whether you got a tree came down to which screen you were on.
+- **Xcode 27 could not build WebDriverAgent at all, so physical devices stopped working.** Upstream WebDriverAgent declares an `IPHONEOS_DEPLOYMENT_TARGET` of 13.0 and Xcode 27 accepts nothing below 15.0, so every build failed in both `WebDriverAgentRunner` and `WebDriverAgentLib`. The failure was masked for existing users, because the build is skipped when the signing team already matches — a stale build from an older Xcode kept working right up until something forced a rebuild, and the forced path wipes derived data before building, so there was then nothing left to fall back on. Builds now pass the floor on the command line, where it reaches every target in the graph.
+- **Xcode 27 moved SimulatorKit, so sim-bridge stopped working — quietly.** Xcode 27 relocated `SimulatorKit.framework` from `Developer/Library/PrivateFrameworks` to `Contents/SharedFrameworks`, and sim-bridge looked only in the old place. The bad part was the reporting: a binary compiled before the move still completes the readiness handshake and logs its `dlopen` failure to stderr alone, so `sim_bridge` read as available and every gesture was routed to a bridge that could not resolve HID. Before the relocation a genuinely unavailable bridge reported `sim_bridge: false` and callers fell back to idb. Both layouts are now searched, the compiled binary is cached against a hash of its source rather than its mtime — `git archive` gives tarball files their *commit* time, so an upgrade could leave a newer-looking stale binary in place — and the Python and Swift halves resolve symlinked developer directories the same way.
+
+## [0.18.1] - 2026-09-15
+
+Four fixes, all the same shape: something failed and reported success, or
+reported it somewhere the reader would never look.
+
+### Fixed
+- **Beta users were being offered a downgrade.** The updater took the newest *prerelease* on the beta channel even when it was older than the newest stable release — the normal state of this repo between beta cycles. With 0.18.0 out and `0.15.0-beta.1` the most recent prerelease, a beta user on 0.18.0 was told `Updating v0.18.0 → v0.15.0-beta.1` and taken back three minor versions, onto a source-only tarball with no menu-bar app. It was also one-way: afterwards the installed version matched what the channel offered, so every later check reported "already up to date" and left them there. The two candidates are now compared and the newer wins. Switching back to stable from a beta build still works, and is the one backwards move that is deliberate; any other is refused rather than applied, because the only thing that produces one is the channel resolving the wrong release.
+- **A recorded Wi-Fi proxy config was invisible.** Recording a physical device's proxy setup writes the config and nothing else — there is no device name to hand — and the response model required one, so building the entry failed and the device was dropped from `proxy_status` entirely. Everything that record exists to feed went with it: whether the config had gone stale, which network it belonged to, and the host, port and address you typed into Settings by hand. The only trace was a log line calling the entry "invalid stored fields", which points at corruption rather than at a field nobody wrote.
+- **`open_url` on Android reported success for a URL nothing could handle.** `am start` exits 0 when no app resolves the intent and says so only in its output, which was discarded — so the response was byte-for-byte identical to a successful launch. iOS has always failed loudly here, which is what made the Android silence surprising rather than merely unhelpful. It now reports adb's own reason.
+- **Declining the virtualenv prompt during setup failed later, somewhere else.** Answering no fell through to code that assumes a virtualenv exists, reported that check as passing, and then ended the run with `ModuleNotFoundError: No module named 'httpx'` — naming a dependency nobody mentioned, hundreds of lines from the decision that caused it. It now stops where the decision was made and says what to run. The same exit also covers a setup with no terminal, where every prompt declines without being asked; that case now names the questions it could not put to you.
+- **A failed virtualenv rebuild no longer leaves you with nothing.** Agreeing to recreate a virtualenv built with an unsupported Python deleted the old one first; if the rebuild then failed, setup announced it was "found but not activated", tried to run inside the directory it had just removed, and exited 255 with no summary and no guidance.
+
+
 ## [0.18.0] - 2026-09-15
 
 Certificate trust is the theme. Quern knew whether a device trusted its CA and
@@ -475,7 +502,9 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.17.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.18.1...main
+[0.18.2]: https://github.com/quern-dev/quern/releases/tag/v0.18.2
+[0.18.1]: https://github.com/quern-dev/quern/releases/tag/v0.18.1
 [0.18.0]: https://github.com/quern-dev/quern/releases/tag/v0.18.0
 [0.17.0]: https://github.com/quern-dev/quern/releases/tag/v0.17.0
 [0.16.1]: https://github.com/quern-dev/quern/releases/tag/v0.16.1

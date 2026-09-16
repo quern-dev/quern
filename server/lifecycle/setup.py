@@ -97,17 +97,30 @@ class SetupReport:
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
-    """Run a command and return (returncode, stdout, stderr)."""
+def _run(
+    cmd: list[str], timeout: int = 30, env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Run a command and return (returncode, stdout, stderr).
+
+    ``env`` replaces the child's environment wholesale, for the tools that
+    cannot start without a runtime fix-up.
+    """
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            cmd, capture_output=True, text=True, timeout=timeout, env=env,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
-    except FileNotFoundError:
-        return -1, "", f"Command not found: {cmd[0]}"
     except subprocess.TimeoutExpired:
         return -1, "", f"Command timed out: {' '.join(cmd)}"
+    except (OSError, subprocess.SubprocessError) as e:
+        # Base classes, not the subclasses we happened to see first. A file
+        # that exists but cannot be exec'd raises neither FileNotFoundError nor
+        # TimeoutExpired: a truncated binary raises OSError (Exec format
+        # error), one that lost its exec bit in extraction raises
+        # PermissionError. Those are precisely the corruptions the callers
+        # probe *for*, so letting them escape turns a health check into a
+        # traceback out of `quern setup` and `quern update`.
+        return -1, "", f"Could not run {cmd[0]}: {e}"
 
 
 def _which(name: str) -> str | None:
@@ -1652,10 +1665,48 @@ def check_idb() -> CheckResult:
     )
 
 
+def _companion_probe_env(companion: Path) -> dict[str, str]:
+    """The environment the patched companion needs in order to start.
+
+    It resolves its frameworks through ``DYLD_FRAMEWORK_PATH``, which
+    ``IDBController._companion_env`` supplies at runtime. A probe that omits it
+    reports a perfectly good install as broken, so this mirrors that function
+    rather than running the binary bare. See #190.
+    """
+    import os
+
+    fw = companion.parent / "Frameworks"
+    env = os.environ.copy()
+    env["DYLD_FRAMEWORK_PATH"] = f"{fw}:{fw / 'PackageFrameworks'}"
+    return env
+
+
 def check_idb_companion() -> CheckResult:
     """Check for idb_companion, preferring the patched build in ~/.quern/bin/."""
     quern_companion = CONFIG_DIR / "bin" / "idb_companion"
     if quern_companion.is_file():
+        # Existence is not health. This reported OK for anything occupying the
+        # path, so a truncated download or a half-extracted tarball read as a
+        # working install -- and because the patched copy is *preferred*, it
+        # would shadow a working system one while claiming to be fine (#190).
+        rc, _, _ = _run(
+            [str(quern_companion), "--version"],
+            timeout=10,
+            env=_companion_probe_env(quern_companion),
+        )
+        if rc != 0:
+            return CheckResult(
+                name="idb_companion",
+                status=CheckStatus.ERROR,
+                message=f"installed but not running ({quern_companion})",
+                detail=(
+                    "The binary is present but exited "
+                    f"{rc} when asked for its version. Re-run './quern setup' "
+                    "to reinstall it; until then simulator UI automation will "
+                    "fall back to whatever else is available."
+                ),
+                fixable=True,
+            )
         return CheckResult(
             name="idb_companion",
             status=CheckStatus.OK,
@@ -2092,6 +2143,29 @@ def _reexec_in_venv(venv_path: Path) -> int:
     return result.returncode
 
 
+def _print_unasked() -> None:
+    """Name the questions nobody was asked, if there were any.
+
+    A function rather than inline at the end of `run_setup`, because the early
+    exits need it too. Without a terminal every prompt declines rather than
+    hanging, so a menu-bar or `curl | bash` setup on a machine with no venv
+    lands on the declined-venv exit *every time* -- and was told it "declined"
+    something it was never asked, with no pointer to run setup where it can be.
+    """
+    if not _UNASKED:
+        return
+    # Named, not counted. "3 questions were skipped" tells the reader they
+    # missed something without telling them what, which is the same dead
+    # end as saying nothing.
+    print("  Setup had no terminal, so these were declined without asking:")
+    for question in _UNASKED:
+        print(f"    • {question}")
+    print()
+    for line in run_it_yourself(["quern", "setup"]):
+        print(f"  {line}")
+    print()
+
+
 def run_setup() -> int:
     """Run the interactive setup. Returns 0 on success, 1 on errors."""
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
@@ -2191,6 +2265,32 @@ def run_setup() -> int:
                             _shutil.rmtree(venv_path)
                             if create_venv(project_root):
                                 return _reexec_in_venv(venv_path)
+                            # The venv has been deleted and not replaced. Falling
+                            # through from here reached the branch below, which
+                            # prints "Virtual environment found but not
+                            # activated" -- of a directory that no longer exists
+                            # -- and then re-execs into it, returning -1 and
+                            # exiting 255 with no summary and no guidance. Same
+                            # shape as the declined-venv fall-through, one branch
+                            # up: a prompt accepted, and execution continuing
+                            # into code that assumes it worked.
+                            report.add(CheckResult(
+                                name="Virtual env",
+                                status=CheckStatus.ERROR,
+                                message=f"Could not recreate the venv with {best}",
+                                detail=(
+                                    f"The previous virtualenv at {venv_path} has "
+                                    "been removed and the replacement could not "
+                                    "be built, so there is no environment to run "
+                                    "in.\nTo build one by hand:\n"
+                                    f"  {best} -m venv {venv_path}\n"
+                                    f"  source {venv_path}/bin/activate\n"
+                                    '  pip install -e ".[dev]"'
+                                ),
+                            ))
+                            report.print_summary()
+                            _print_unasked()
+                            return 1
 
             # Venv exists but not activated — re-exec inside it
             print("    Virtual environment found but not activated.")
@@ -2213,6 +2313,33 @@ def run_setup() -> int:
                     ))
                     report.print_summary()
                     return 1
+            else:
+                # Declining used to fall through to the block below, which is
+                # commented "we're inside the venv" and reports the check OK.
+                # It is not inside a venv, so the next third-party import ended
+                # setup with `ModuleNotFoundError: No module named 'httpx'` --
+                # several hundred lines from the decision that caused it, and
+                # naming a dependency the user never mentioned.
+                #
+                # This branch is also where an *unaskable* prompt lands: with no
+                # terminal, `_prompt_yn` declines rather than hanging, so a GUI
+                # or piped setup arrives here without anyone having said no.
+                report.add(CheckResult(
+                    name="Virtual env",
+                    status=CheckStatus.ERROR,
+                    message="Declined — nothing further can run",
+                    detail=(
+                        "Quern's dependencies live in the virtualenv, so the "
+                        "checks after this one cannot run without it.\n"
+                        "To create it later:\n"
+                        f"  python3 -m venv {project_root / '.venv'}\n"
+                        f"  source {project_root / '.venv'}/bin/activate\n"
+                        '  pip install -e ".[dev]"'
+                    ),
+                ))
+                report.print_summary()
+                _print_unasked()
+                return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(
@@ -2671,17 +2798,7 @@ def run_setup() -> int:
 
     report.print_summary()
 
-    if _UNASKED:
-        # Named, not counted. "3 questions were skipped" tells the reader they
-        # missed something without telling them what, which is the same dead
-        # end as saying nothing.
-        print("  Setup had no terminal, so these were declined without asking:")
-        for question in _UNASKED:
-            print(f"    • {question}")
-        print()
-        for line in run_it_yourself(["quern", "setup"]):
-            print(f"  {line}")
-        print()
+    _print_unasked()
 
     return 1 if report.has_errors else 0
 
