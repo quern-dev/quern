@@ -25,6 +25,7 @@ up can be counted separately from what a person noticed.
 | F6 backend selection latched at startup | [#179](https://github.com/quern-dev/quern/issues/179) |
 | F7 Xcode 27 moved SimulatorKit | fixed, [#176](https://github.com/quern-dev/quern/pull/176) |
 | F8 Android `clear_text` deletes one character | [#177](https://github.com/quern-dev/quern/issues/177) |
+| F9 `scroll_to_element` intermittently misses a distant row | [#84](https://github.com/quern-dev/quern/issues/84), pre-existing |
 
 ---
 
@@ -482,3 +483,41 @@ has the identical construction.
 
 Worth remembering when reading a closed issue as coverage: #98 is closed and
 accurate, and the same bug was live on another backend the whole time.
+
+---
+
+## F9 — `scroll_to_element` intermittently fails to reach a distant row
+
+**Status:** reproduction of pre-existing
+[#84](https://github.com/quern-dev/quern/issues/84), not a new finding.
+Commented there rather than filed again.
+
+Turned up on 0.18.2 as an intermittent failure of
+`test_scroll_to_element_brings_an_offscreen_row_into_view[ios]`: `row_60` is
+present, the sweep runs for minutes, and the call reports it absent.
+
+```
+attempt 1: passed,  91.4s
+attempt 2: failed, 183.2s
+```
+
+What this run adds to the issue, which measured `tap_element(...,
+scroll_to_find=True)` at `max_swipes=10`:
+
+* It reproduces through `POST /api/v1/device/ui/scroll-to-element`, the
+  dedicated endpoint — so both callers of `_ios_scroll_to_element` are
+  affected, and a fix wants checking against both.
+* `max_swipes=25` fails too. A 2.5x budget ruling nothing out is evidence
+  against a ceiling being the cause, and fits the momentum and
+  visibility-re-confirm hypotheses already in the issue.
+* Android passes consistently, so the two backends can be traced against each
+  other without building anything.
+
+**Left failing deliberately.** The suite's rule is that a known bug reports as a
+failure; `xfail` or a retry would make this quieter and less true, and a
+three-minute wait to be told a visible element is absent is exactly the
+user-facing behaviour worth keeping visible.
+
+This is also the first finding the suite produced by *re-running* rather than
+by being written — worth noting for a branch meant to serve as a bug factory,
+since it means periodic full runs are themselves productive.

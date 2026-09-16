@@ -255,6 +255,18 @@ def test_the_last_row_needs_scrolling_to_reach(probe) -> None:
 
 
 def test_scroll_to_element_brings_an_offscreen_row_into_view(probe) -> None:
+    """Known to fail intermittently on iOS — issue #84, not a flaky test.
+
+    Roughly one run in two or three: `row_60` is present, the call sweeps for
+    ~90-180s, and reports it does not exist. Measured here at 91.4s passing and
+    183.2s failing on 0.18.2, with `max_swipes=25` — 2.5x the default budget, so
+    the ceiling is not what is being hit.
+
+    Deliberately not marked `xfail` or retried. A release run should report a
+    known bug as a failure: an agent that waits three minutes to be told a
+    visible element is absent is the user-facing behaviour, and hiding it here
+    would make the suite quieter and less true. Android passes consistently.
+    """
     probe.goto("scroll")
     target_index = 60
     target = probe.contract.row_identifier(target_index)
