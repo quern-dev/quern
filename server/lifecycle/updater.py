@@ -575,15 +575,17 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     # Rebuild MCP server
     from server.__main__ import _ensure_mcp_built
 
+    # `_ensure_mcp_built` no longer raises -- that guard moved into the function,
+    # where it covers all three callers instead of this one (#193). This kept
+    # its own anyway, and deliberately: an exception escaping here aborts an
+    # update part-way, with the source tree already replaced and the rebuild and
+    # restart not yet done, which is the worst state the update can stop in. The
+    # contract says it returns False; this does not depend on the contract.
     try:
         if not _ensure_mcp_built(quiet=False):
             print("Warning: MCP server build failed — MCP tools may be stale")
             failures.append("MCP build")
     except (OSError, subprocess.SubprocessError) as exc:
-        # _ensure_mcp_built shells out to npm twice with timeouts and catches
-        # neither, so a machine without npm -- or a slow install -- raised
-        # straight through this function and crashed `quern update` before it
-        # could report anything, or run setup and restart.
         print(f"Warning: MCP server build failed: {exc}")
         failures.append("MCP build")
 

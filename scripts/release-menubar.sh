@@ -245,6 +245,24 @@ if ! git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   exit 1
 fi
 
+# Run a command under a time limit, without assuming GNU coreutils.
+#
+# `timeout` is not on a stock macOS -- it arrives with Homebrew coreutils, which
+# this script has no business requiring. Absent, the call fails, `|| true`
+# swallows it, and the check below reports "the wrapper did not answer" for a
+# wrapper that answers perfectly well: a release aborted with a misleading
+# reason. Perl ships with macOS and its alarm() is the portable fallback.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  else
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  fi
+}
+
 echo "==> Assembling release tarball: $TARBALL"
 # Source tree at the tag (respects .gitignore/.gitattributes), then drop the
 # signed app in at the top level. Single $PREFIX/ dir so the updater's
@@ -252,6 +270,53 @@ echo "==> Assembling release tarball: $TARBALL"
 mkdir -p "$STAGE" "$(dirname "$TARBALL")"
 git -C "$REPO_ROOT" archive --format=tar "$TAG" | tar -x -C "$STAGE"
 cp -R "$APP" "$STAGE/Quern.app"
+
+# Build the MCP wrapper into the staged tree, so the tarball ships a ready
+# dist/ and a tarball install never needs npm.
+#
+# It used to need it on every start, and that bricked installs. The server
+# calls _ensure_mcp_built, which shells out to npm -- and the menubar app
+# launches the server from a GUI context, which inherits launchd's minimal PATH
+# rather than a shell's. A node installed by fnm or nvm is unreachable from
+# there, and unreachable in a way no static PATH list can fix: fnm's directory
+# is named for the pid of the shell that asked for it. So `quern start` worked
+# from a terminal and the menubar app could not start the server at all. See
+# #193.
+#
+# Built from the staged tag source rather than the working tree, so dist/
+# matches the src/ being shipped. The output is version-independent -- the MCP
+# server reads its version from package.json at runtime -- so this does not
+# care that it runs after the version bump.
+echo "==> Building MCP wrapper into the tarball"
+( cd "$STAGE/mcp" && npm ci --no-audit --no-fund && npm run build )
+
+# Prune to runtime dependencies, do not delete them.
+#
+# `dist/index.js` is tsc output with `module: NodeNext` and no bundler, so it
+# bare-imports `@modelcontextprotocol/sdk` and `zod` -- both real runtime
+# `dependencies`. Shipping dist/ without them produces a wrapper that dies with
+# ERR_MODULE_NOT_FOUND on its first request, and does so *silently*: the server
+# starts, `_ensure_mcp_built` reports "up to date" because dist/ is current, and
+# every MCP tool is dead with nothing to look at. That is strictly worse than
+# the crash this whole change exists to remove -- a loud failure traded for a
+# quiet one. devDependencies (typescript, @types/node) are genuinely build-only
+# and do go.
+( cd "$STAGE/mcp" && npm ci --omit=dev --no-audit --no-fund )
+
+# Prove the artifact runs, rather than proving the files exist. `[[ -f ]]`
+# passes on a zero-byte file, and `tsc` has no `noEmitOnError`, so it emits for
+# a tree that fails type-checking. One handshake catches both, and would have
+# caught the missing dependencies above.
+echo "==> Verifying the staged MCP wrapper answers"
+handshake='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-check","version":"1"}}}'
+reply=$(printf '%s\n' "$handshake" | ( cd "$STAGE/mcp" && run_bounded 30 node dist/launcher.cjs 2>&1 ) || true)
+case "$reply" in
+  *'"serverInfo"'*) echo "  MCP wrapper answered initialize" ;;
+  *) echo "error: staged MCP wrapper did not answer initialize:" >&2
+     printf '%s\n' "$reply" | head -5 >&2
+     exit 1 ;;
+esac
+
 tar -czf "$TARBALL" -C "$WORK" "$PREFIX"
 
 echo "==> Uploading asset to release $TAG"
