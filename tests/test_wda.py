@@ -358,12 +358,26 @@ class TestCustomizeWda:
 
 class TestBuildWda:
     async def test_skips_if_already_built(self, tmp_path):
+        """Built means the artifacts are there, not merely that state says so.
+
+        The artifacts have to be created for this to express "already built" --
+        which is #188: without them the state is a claim about a build whose
+        output is gone.
+        """
         state = {
             "cloned": True,
             "build_team_id": "TEAM123",
             "built_at": "2026-01-01T00:00:00+00:00",
         }
-        with patch("server.device.wda.read_wda_state", return_value=state):
+        app = tmp_path / "Runner.app"
+        app.mkdir()
+        xctestrun = tmp_path / "quern-driver.xctestrun"
+        xctestrun.write_text("")
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.WDA_APP", app),
+            patch("server.device.wda.XCTESTRUN", xctestrun),
+        ):
             result = await build_wda("TEAM123")
 
         assert result is False
@@ -1179,10 +1193,16 @@ class TestTheDeploymentTargetIsOverridden:
         repo.mkdir()
         (repo / "WebDriverAgent.xcodeproj").mkdir()
 
-        captured = {}
+        # Every invocation, not the last one. Patching
+        # `server.device.wda.asyncio.create_subprocess_exec` patches the global
+        # module, so anything else reached through it lands here too -- the
+        # toolchain probe that records what the artifact was built with runs
+        # *after* the build and would otherwise overwrite the thing under test
+        # with `xcodebuild -version`.
+        calls: list[tuple] = []
 
         async def fake_exec(*args, **kwargs):
-            captured["args"] = args
+            calls.append(args)
             return _mock_process()
 
         with (
@@ -1194,7 +1214,9 @@ class TestTheDeploymentTargetIsOverridden:
             patch("server.device.wda._post_process_runner_app", AsyncMock()),
         ):
             await build_wda("TEAM123", force=force)
-        return captured["args"]
+        build = [c for c in calls if "build-for-testing" in c]
+        assert build, f"xcodebuild build-for-testing was never invoked: {calls}"
+        return build[0]
 
     @staticmethod
     def _deployment_target(args):

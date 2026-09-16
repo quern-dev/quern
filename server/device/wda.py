@@ -291,6 +291,77 @@ def customize_wda(repo: Path | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _xcode_build_id() -> str | None:
+    """Xcode's build number, e.g. `17A5241e`, or None if it cannot be read.
+
+    The build number rather than the marketing version: betas ship repeatedly
+    as "26.0" with different builds, and a toolchain change is exactly what this
+    is for.
+    """
+    from server.device.tool_probe import probe_stdout
+
+    out = await probe_stdout("xcodebuild", "-version", tool="xcodebuild")
+    if out is None:
+        return None
+    for line in out.splitlines():
+        if line.startswith("Build version "):
+            return line.split("Build version ", 1)[1].strip() or None
+    return None
+
+
+async def _build_is_current(state: dict[str, Any], team_id: str) -> bool:
+    """Whether the existing WDA build can be reused.
+
+    Three questions, and the cache used to ask only the first.
+
+    **Does the signing team match?** The original key, and still necessary.
+
+    **Are the artifacts actually there?** They were never checked, and that is
+    #188: `force` removes the derived data *before* building, while
+    `build_team_id` is written only after a build that succeeded. So a forced
+    rebuild that fails leaves state from the last *good* build with nothing on
+    disk to match it -- and every later run skips the build, then `install_wda`
+    raises "WDA app not found — build first". Building is precisely what the
+    skip refuses to do, so there is no way out without knowing to pass `force`.
+
+    **Was it built with this toolchain?** #189. The cache carried no record of
+    what produced the artifact, so upgrading Xcode -- the event most likely to
+    invalidate it -- was invisible. Xcode 27 is the live example: every machine
+    that had built WDA before the upgrade kept the old artifact, and only found
+    out at the next forced rebuild, which is also the moment the old one is
+    deleted.
+
+    A recorded value that is *absent* is not treated as a mismatch. Existing
+    installs have no `build_xcode`, and rebuilding WDA for everyone on upgrade
+    -- minutes, and a provisioning round trip on a free account -- is a poor
+    trade for detecting a staleness we cannot actually confirm. Absent means no
+    opinion; present-and-different means rebuild. The first build after this
+    ships records the fingerprint, and every change after that is caught.
+    """
+    if state.get("build_team_id") != team_id:
+        return False
+    if not (WDA_APP.exists() and XCTESTRUN.exists()):
+        logger.info("WDA state claims a build for %s, but the artifacts are "
+                    "missing — rebuilding", team_id)
+        return False
+    recorded = state.get("build_deployment_target")
+    if recorded is not None and recorded != WDA_MIN_DEPLOYMENT_TARGET:
+        logger.info("WDA was built against deployment target %s, now %s — "
+                    "rebuilding", recorded, WDA_MIN_DEPLOYMENT_TARGET)
+        return False
+    recorded_xcode = state.get("build_xcode")
+    if recorded_xcode is not None:
+        current = await _xcode_build_id()
+        # A toolchain we cannot read is not a toolchain that differs. The build
+        # below will fail on its own terms if Xcode is genuinely unusable, and
+        # that failure says more than a rebuild triggered by a probe timeout.
+        if current is not None and current != recorded_xcode:
+            logger.info("WDA was built with Xcode %s, now %s — rebuilding",
+                        recorded_xcode, current)
+            return False
+    return True
+
+
 async def build_wda(team_id: str, force: bool = False) -> bool:
     """Build WDA for a given signing team.
 
@@ -302,7 +373,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     Returns True if a fresh build was performed, False if skipped.
     """
     state = read_wda_state()
-    if not force and state.get("build_team_id") == team_id:
+    if not force and await _build_is_current(state, team_id):
         logger.info("WDA already built for team %s", team_id)
         return False
 
@@ -399,6 +470,12 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     state["cloned"] = True
     state["build_team_id"] = team_id
     state["built_at"] = now
+    # What this artifact was built *with*, so the next run can tell whether it
+    # still matches. Written only here, after a build that returned zero.
+    state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    xcode = await _xcode_build_id()
+    if xcode:
+        state["build_xcode"] = xcode
     save_wda_state(state)
 
     return True
