@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 
@@ -472,6 +473,48 @@ async def swipe(request: Request, body: SwipeRequest):
         raise _handle_device_error(e)
 
 
+
+async def _run_until_client_leaves(
+    request: Request, coro, *, what: str, poll_s: float = 2.0,
+):
+    """Run a long device operation, and abandon it if the caller disconnects.
+
+    Uvicorn does not cancel a handler when its client goes away, so a request
+    the caller timed out of at 180s goes on driving the device. Measured on
+    #84: sweeps of 413s and 523s continued against a client that had left,
+    holding a simulator the next test was trying to use and, worse, swiping it
+    while that test ran.
+
+    The coroutine is run as a task and polled against `is_disconnected()`
+    rather than wrapped in a timeout, because there is no single right timeout
+    -- the operation's own deadline belongs to the operation. This only answers
+    the narrower question of whether anyone is still listening.
+
+    Cancellation is cooperative: the task stops at its next await. A device
+    command already in flight completes, which is correct -- half-sending one
+    is worse than finishing it.
+    """
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=poll_s)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                task.cancel()
+                logger.info(
+                    "%s: client disconnected — cancelling rather than "
+                    "continuing to drive the device", what,
+                )
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                raise HTTPException(
+                    status_code=499, detail=f"{what} cancelled: client disconnected",
+                )
+    finally:
+        if not task.done():
+            task.cancel()
+
 @router.post("/ui/scroll-to-element")
 async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """Scroll a scrollable container until the target element is in view.
@@ -481,11 +524,15 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """
     controller = _get_controller(request)
     try:
-        result = await controller.scroll_to_element(
-            label=body.label,
-            identifier=body.identifier,
-            udid=body.udid,
-            max_swipes=body.max_swipes,
+        result = await _run_until_client_leaves(
+            request,
+            controller.scroll_to_element(
+                label=body.label,
+                identifier=body.identifier,
+                udid=body.udid,
+                max_swipes=body.max_swipes,
+            ),
+            what="scroll_to_element",
         )
         if result.get("status") == "not_found":
             raise HTTPException(status_code=404, detail=result)
