@@ -712,8 +712,14 @@ _RUNNER_FAILURE_PATTERNS = [
     ),
     (
         "The maximum number of apps for free development profiles has been reached",
-        "Free Apple developer account limit reached (max 3 app IDs per 7 days). "
-        "Wait for old app IDs to expire, or use a paid developer account.",
+        "Free Apple developer account limit reached: a free profile may sign at "
+        "most 3 apps installed on one device at a time. Delete a free-signed "
+        "app from the device, or use a paid developer account.\n"
+        "Note that Xcode counts *offloaded* apps toward the three, including "
+        "Apple's own, so the device can look emptier than it is — check "
+        "Settings > General > iPhone Storage for offloaded apps.\n"
+        "This is not the separate 10-App-IDs-per-7-days registration limit; "
+        "waiting does not clear this one.",
     ),
     (
         "Device is not available",

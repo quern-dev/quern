@@ -215,7 +215,15 @@ class TestABuildFailureSaysWhatWentWrong:
         (
             "error: The maximum number of apps for free development profiles "
             "has been reached.",
-            "Free Apple developer account limit reached",
+            "at most 3 apps installed on one device at a time",
+        ),
+        (
+            "error: The maximum number of apps for free development profiles "
+            "has been reached.",
+            # The remedy has to be the one that works. Waiting clears the
+            # 10-App-IDs-per-7-days registration limit, which is a different
+            # error; this one is cleared by deleting an app from the device.
+            "Delete a free-signed app from the device",
         ),
         (
             "error: No signing certificate \"iOS Development\" found",
