@@ -292,6 +292,16 @@ class DeviceControllerUI:
     # and leaves the remaining swipes back to back.
     _BLIND_PROGRESS_CHECKS = 1
 
+    #: Wall-clock ceiling for one scroll sweep, whatever the swipe budget says.
+    #:
+    #: A swipe count is not a time bound: the same 75 steps cost 25s or 500s
+    #: depending on what a tree read costs on the day, and #84 produced sweeps
+    #: of 413s and 523s against a caller that had given up at 180s. Past a
+    #: couple of minutes the answer is worthless anyway -- the screen it
+    #: describes has moved on -- so spending longer only occupies a device
+    #: someone else is waiting for.
+    _SCROLL_DEADLINE_S = 120.0
+
     async def _ios_scroll_to_element(
         self,
         resolved: str,
@@ -299,6 +309,7 @@ class DeviceControllerUI:
         identifier: str | None,
         max_swipes: int,
         target_known_absent: bool = False,
+        deadline_s: float | None = None,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -470,7 +481,17 @@ class DeviceControllerUI:
             f"swipe y {y_far:.0f}->{y_near:.0f}"
         )
 
+        deadline = sweep_started + (
+            self._SCROLL_DEADLINE_S if deadline_s is None else deadline_s
+        )
+
         for _step in range(max_swipes * 3):
+            if time.perf_counter() >= deadline:
+                _give_up(
+                    f"deadline of {deadline - sweep_started:.0f}s reached "
+                    f"after {blind_steps} swipe(s)"
+                )
+                return None
             if el is not None and el.frame is not None:
                 # Located but off-screen: swipe straight toward it. Direction
                 # mirrors _visible's two out-of-view cases.
