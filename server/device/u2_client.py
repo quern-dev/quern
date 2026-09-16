@@ -8,6 +8,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
 from server.config import CONFIG_DIR
 from server.models import DeviceError
@@ -212,6 +213,32 @@ def _patch_ime_setup(device, apk_path: Path) -> None:
     device._setup_ime = _quern_setup_ime
     logger.debug("Patched _setup_ime to use Quern Driver APK")
 
+
+def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
+    """The focused field's text and hint, or ``(None, None)`` if unreadable.
+
+    Read from the hierarchy dump rather than the jsonrpc node info, because only
+    the dump publishes `hint`; the info dict carries `text` alone, which is why
+    an empty field and a filled one look identical through it.
+
+    ``None`` is deliberately distinct from an empty string. "Could not look" is
+    not "was empty", and the caller skips its check rather than reporting a
+    clear as failed on the strength of a lookup that never ran. Measured at
+    ~86ms on a Pixel_7 emulator, against a clear that already costs a tap and a
+    broadcast.
+    """
+    try:
+        root = ET.fromstring(device.dump_hierarchy())
+    except Exception:
+        logger.debug("clear_text: could not read the hierarchy", exc_info=True)
+        return (None, None)
+
+    for node in root.iter("node"):
+        # A window and a view can both report focus; the editable one is the
+        # field that was just cleared.
+        if node.get("focused") == "true" and "EditText" in node.get("class", ""):
+            return (node.get("text", ""), node.get("hint", ""))
+    return (None, None)
 
 class U2Backend:
     """Manages Android UI automation via uiautomator2.
@@ -545,34 +572,67 @@ class U2Backend:
         y: float,
         element_type: str | None = None,
     ) -> None:
-        """Clear text in a field by selecting all and deleting."""
+        """Empty the text field at (x, y), and confirm that it emptied.
+
+        Clears through uiautomator2's IME broadcast rather than by synthesising
+        keystrokes. The previous implementation opened a u2 connection, used it
+        only for the focusing tap, and then shelled out to::
+
+            input keyevent KEYCODE_MOVE_HOME
+            input keyevent --longpress KEYCODE_SHIFT_LEFT KEYCODE_MOVE_END
+            input keyevent KEYCODE_DEL
+
+        `input keyevent` given several keycodes sends them *in sequence, not as
+        a chord*, so Shift was never held and nothing was ever selected: the
+        caret went to the start, then to the end, and the single `KEYCODE_DEL`
+        backspaced one character. Measured on a Pixel 3 XL -- 36 characters in,
+        35 characters out, `{"status": "ok"}` (#177).
+
+        `clear_text()` broadcasts `ADB_KEYBOARD_CLEAR_TEXT` to the AdbKeyboard
+        IME, which is the same path `type_text` already relies on, so it clears
+        in one operation with nothing to hold across calls.
+
+        The read-back is the other half, and the more important one. #98 fixed
+        this same defect on the iOS web path and hardened it with verification;
+        the native path was left with no check at all, which is why this went
+        unnoticed. Clearing is *setup* -- it runs before the interesting part of
+        a test -- so a silent partial clear surfaces later as a mismatched
+        string in an unrelated assertion.
+        """
 
         def _do():
             device = self._connect(udid)
-            # Tap the field to focus it
-            device.click(int(x), int(y))
-            # Select all via Ctrl+A keycode combo, then delete
-            # On Android: use keyevent sequence
-            import subprocess
-            adb_serial = udid
-            # Long press to trigger selection mode, then select all
-            subprocess.run(
-                ["adb", "-s", adb_serial, "shell", "input", "keyevent",
-                 "KEYCODE_MOVE_HOME"],
-                capture_output=True, timeout=5,
-            )
-            subprocess.run(
-                ["adb", "-s", adb_serial, "shell", "input", "keyevent",
-                 "--longpress", "KEYCODE_SHIFT_LEFT", "KEYCODE_MOVE_END"],
-                capture_output=True, timeout=5,
-            )
-            subprocess.run(
-                ["adb", "-s", adb_serial, "shell", "input", "keyevent",
-                 "KEYCODE_DEL"],
-                capture_output=True, timeout=5,
-            )
+            device.click(int(x), int(y))  # focus the field the caller named
+
+            device.clear_text()
+
+            # An empty EditText reports its *hint* in `text`, so a cleared field
+            # does not read empty -- `field_default` reads 'default'. The hint
+            # is published as its own attribute in the hierarchy dump, though it
+            # is absent from the cheaper jsonrpc node info, which is what made
+            # this look undecidable at first. Measured on a Pixel_7 emulator:
+            #
+            #     empty      text='email'             hint='email'   equal
+            #     populated  text='email@example.com' hint='email'   not equal
+            #
+            # So `text == hint` is an exact emptiness test rather than a
+            # heuristic, and it separates all three shapes this has to tell
+            # apart: leftover content from #177's one-character delete, a clear
+            # that removed nothing at all, and a hint that happens to be a
+            # substring of what was typed -- 'email' out of 'email@example.com',
+            # which an earlier version of this check reported as a failure on a
+            # field it had emptied correctly.
+            text, hint = _focused_text_and_hint(device)
+            if text is not None and text != hint:
+                raise DeviceError(
+                    f"clear_text left {len(text)} character(s) in the field: "
+                    f"{text[:40]!r}",
+                    tool="u2",
+                )
 
         try:
             await asyncio.to_thread(_do)
+        except DeviceError:
+            raise
         except Exception as e:
             raise DeviceError(f"Clear text failed: {e}", tool="u2") from e

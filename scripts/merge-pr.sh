@@ -73,5 +73,46 @@ if [ -z "$HEAD_SHA" ]; then
   fi
   HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
 fi
+# The other half of the gate. The review check answers "has a human or a bot
+# read this"; it says nothing about whether the code runs, and for a long time
+# nothing here did -- `main` has no branch protection, so GitHub does not
+# require checks either. #191 and #194 were both merged with a red test matrix
+# and nobody noticed for a day.
+#
+# Checked against $HEAD_SHA rather than the live head, for the same reason the
+# merge is pinned to it: a push landing in between would otherwise move the
+# thing being judged.
+#
+# "Not failed" is not "passed", and that distinction is the whole point. When
+# one matrix leg fails the rest are *cancelled*, so a single red job leaves
+# three with no verdict at all -- which reads as fine in any summary that only
+# looks for the word "failure". Only an explicit success counts. So does the
+# empty case: no checks reported is not a pass, it is a question nobody asked.
+if [ -n "$FORCE" ]; then
+  echo "Skipping the CI gate deliberately (--force)."
+else
+  CHECKS=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+    --jq '.check_runs[] | "\(.conclusion // "pending")\t\(.name)"' 2>/dev/null) || {
+      echo "Not merging #$PR: could not read CI status for $HEAD_SHA."; exit 1; }
+
+  if [ -z "$CHECKS" ]; then
+    echo "Not merging #$PR: no CI results for $HEAD_SHA."
+    echo "  Nothing has reported on this commit, which is not the same as passing."
+    exit 1
+  fi
+
+  BAD=$(printf '%s\n' "$CHECKS" | grep -vE '^(success|skipped|neutral)\t' || true)
+  if [ -n "$BAD" ]; then
+    echo
+    echo "Not merging #$PR: CI has not passed on $HEAD_SHA."
+    printf '%s\n' "$BAD" | sed 's/^/  /'
+    echo
+    echo "  A cancelled or pending job has no verdict; only a success counts."
+    echo "  Re-run the failures, or pass --force to merge anyway."
+    exit 1
+  fi
+  echo "  CI green on $HEAD_SHA ($(printf '%s\n' "$CHECKS" | wc -l | tr -d ' ') checks)."
+fi
+
 gh pr merge "$PR" --repo "$REPO" --merge --delete-branch \
   --match-head-commit "$HEAD_SHA"

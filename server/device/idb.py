@@ -10,7 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from server.config import CONFIG_DIR
+from server.config import CONFIG_DIR, quern_cmd
 from server.device import probing
 from server.device.tool_probe import probe_command
 from server.models import DeviceError
@@ -44,7 +44,7 @@ class IdbBackend:
         if path is None:
             raise DeviceError(
                 "idb not found. Install with: pip install fb-idb "
-                "(also requires: ./quern setup to install idb_companion)",
+                f"(also requires: {quern_cmd()} setup to install idb_companion)",
                 tool="idb",
             )
         self._binary = path

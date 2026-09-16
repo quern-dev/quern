@@ -16,8 +16,30 @@ root="$(cd -P "$(dirname "$src")" && pwd)"
 
 # Prefer the project venv: it carries the editable install, so `-m server`
 # resolves from any cwd. Without one -- before setup has run -- fall back to
-# python3, which still works from the clone and is where setup is run from.
+# python3 and put the project on PYTHONPATH, because `-m` otherwise searches the
+# *caller's* cwd and finds nothing.
+#
+# That fallback used to assume setup is run from inside the project. It is not:
+# the install script leaves quern in ~/.local/share/quern and the terminal
+# wherever it was, so the first command a tarball user runs is by absolute path
+# -- which is exactly what quern's own messages now tell them to type. Without
+# this the reply is `No module named server`, prefixed with whichever python3
+# was first on PATH, pointing the reader at their interpreter.
+#
+# `-P` as well, and it is load-bearing rather than belt-and-braces: `-m` puts
+# the caller's cwd at sys.path[0], *ahead* of PYTHONPATH. Quern's users are by
+# design standing in their own app repositories, and `server/` is an ordinary
+# name for a directory in one -- so without this, their package shadows ours and
+# the reply is `No module named server.__main__`. `-P` drops cwd from the path
+# while leaving the process there, so relative arguments like a project
+# directory to build still resolve against it. That is why this is not
+# `cd "$root"`.
+#
+# A `:` in the install path would still defeat PYTHONPATH, which is
+# colon-separated. Unfixable here and vanishingly rare; the venv branch above,
+# which is the state after setup, does not care.
 python="$root/.venv/bin/python"
-[ -x "$python" ] || python="python3"
-
-exec "$python" -m server "$@"
+if [ -x "$python" ]; then
+    exec "$python" -m server "$@"
+fi
+exec env PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m server "$@"

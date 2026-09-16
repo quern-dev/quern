@@ -254,12 +254,12 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 **Key insight**: Crashes leave traces in multiple places. Cross-referencing sources is where you find root causes.
 
-**Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `./quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
+**Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
 
 **Crash hooks**: Use `--on-crash '<command>'` to run a shell command whenever a crash is detected. The full `CrashReport` JSON is piped to the command's stdin. The hook runs in the background with a 60-second timeout and never blocks the server. Example:
 
 ```bash
-./quern start --on-crash 'cat > /tmp/last_crash.json'
+quern start --on-crash 'cat > /tmp/last_crash.json'
 ```
 
 ---
@@ -490,10 +490,21 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 ## Troubleshooting
 
 **Tools missing or misbehaving?** `quern doctor` reports device-tool availability and venv sync, plus the version, provenance and upgrade command for the tools quern tracks as install sites (`pymobiledevice3`, `idb`, `mitmproxy`, `adb`, `libimobiledevice`, `node`). `simctl` and `devicectl` ship inside Xcode and are reported as available or not, without version detail
-(adb, simctl, idb, devicectl, pymobiledevice3) as read-only diagnostics, and
-`GET /tools` returns the same data over HTTP. Both are deliberately kept off the
-`/health` path so the liveness probe stays sub-millisecond — do not expect
-`/health` to tell you whether a tool is installed.
+(adb, simctl, idb, devicectl, pymobiledevice3), and `GET /tools` returns the
+same data over HTTP. Both are deliberately kept off the `/health` path so the
+liveness probe stays sub-millisecond — do not expect `/health` to tell you
+whether a tool is installed.
+
+`/tools` is read-only about your machine, but it is not inert about the server:
+it re-checks which backend serves simulator UI automation and adopts the answer.
+That is the point — it means an Xcode upgrade under a running server is noticed
+the next time anyone asks, rather than leaving every tap routed to a backend
+that stopped working. Each probe is bounded, so a wedged tool no longer holds up
+the response.
+
+A tool reported as unavailable may be installed but not answering; the two are
+not yet distinguishable in this response. If one is unexpectedly missing, check
+`~/.quern/server.log` for a probe timeout before assuming it is uninstalled.
 
 **"No element found matching label"** — The element may not exist, the label may be wrong, or multiple elements match. Use `get_screen_summary` to see what's actually on screen, then refine your query with the exact label and an element_type.
 

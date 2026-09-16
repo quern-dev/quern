@@ -30,6 +30,27 @@ That's it. The installer clones Quern to `~/.local/share/quern`, then runs `quer
 
 Setup prompts before installing anything — it won't surprise you with Homebrew packages you didn't agree to. If a tool is already installed, it skips it.
 
+### Where you run it from
+
+Two moments, two spellings, and it is worth knowing which you are in.
+
+**During the first setup** there is nothing on your PATH yet, so you run it by
+path — `./quern setup` if you are standing in the directory. Quern installs to
+`~/.local/share/quern`, which is probably not where your terminal is, so if you
+are elsewhere give the full path: `~/.local/share/quern/quern setup`.
+
+**Afterwards, just type `quern`.** Setup puts it on your PATH, so it works from
+any directory and you never need to know where Quern lives. The rest of these
+guides are written that way.
+
+If the very next command reports `command not found: quern`, the shell is
+caching where commands live and has not noticed a new one. Run `rehash` (zsh)
+or open a new terminal.
+
+Quern's own messages follow the same rule — when something goes wrong it names
+the command the way *you* can type it, so if it prints a full path, that is
+because the short name would not have worked from where you are.
+
 When everything's ready, you'll see a summary like this:
 
 ```
@@ -69,6 +90,10 @@ cd quern
 ./quern setup
 ./quern mcp-install
 ```
+
+`./quern` because you are in the clone. After setup `quern` also works from
+anywhere — though in a clone, prefer `./quern`: with more than one checkout the
+bare name resolves to whichever one setup last pointed it at.
 
 </details>
 
@@ -113,7 +138,9 @@ If you installed manually, run `quern mcp-install` to register.
 
 ### Other MCP Clients
 
-Point your client at: `node ~/.local/share/quern/mcp/dist/index.js`
+Point your client at: `node ~/.local/share/quern/mcp/dist/launcher.cjs`
+
+Use `launcher.cjs` rather than `index.js`. It checks the Node version first and tells you which binary it is running under if that version is too old — worth having, because MCP clients do not always pick the node you expect.
 
 The MCP wrapper auto-discovers the running server via `~/.quern/state.json` — no URL or API key configuration needed.
 
