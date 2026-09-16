@@ -8,6 +8,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
 from server.config import CONFIG_DIR
 from server.models import DeviceError
@@ -213,19 +214,31 @@ def _patch_ime_setup(device, apk_path: Path) -> None:
     logger.debug("Patched _setup_ime to use Quern Driver APK")
 
 
-def _focused_text(device) -> str:
-    """Text of the focused node, or "" when there is nothing to read.
+def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
+    """The focused field's text and hint, or ``(None, None)`` if unreadable.
 
-    "Could not look" is not "was empty", but for this caller the distinction
-    collapses safely: with no reading, the verification below simply does not
-    fire. Raising here instead would report a clear as failed on the strength
-    of a lookup that never ran.
+    Read from the hierarchy dump rather than the jsonrpc node info, because only
+    the dump publishes `hint`; the info dict carries `text` alone, which is why
+    an empty field and a filled one look identical through it.
+
+    ``None`` is deliberately distinct from an empty string. "Could not look" is
+    not "was empty", and the caller skips its check rather than reporting a
+    clear as failed on the strength of a lookup that never ran. Measured at
+    ~86ms on a Pixel_7 emulator, against a clear that already costs a tap and a
+    broadcast.
     """
     try:
-        return device(focused=True).info.get("text") or ""
+        root = ET.fromstring(device.dump_hierarchy())
     except Exception:
-        logger.debug("clear_text: could not read the focused field", exc_info=True)
-        return ""
+        logger.debug("clear_text: could not read the hierarchy", exc_info=True)
+        return (None, None)
+
+    for node in root.iter("node"):
+        # A window and a view can both report focus; the editable one is the
+        # field that was just cleared.
+        if node.get("focused") == "true" and "EditText" in node.get("class", ""):
+            return (node.get("text", ""), node.get("hint", ""))
+    return (None, None)
 
 class U2Backend:
     """Manages Android UI automation via uiautomator2.
@@ -591,39 +604,31 @@ class U2Backend:
             device = self._connect(udid)
             device.click(int(x), int(y))  # focus the field the caller named
 
-            # `focused=True` throughout: the tap above decided which field this
-            # is, and re-deriving it from coordinates could read a different one.
-            before = _focused_text(device)
             device.clear_text()
-            after = _focused_text(device)
 
-            # An empty EditText reports its *hint* in `text` -- Android exposes
-            # no separate hint attribute and uiautomator surfaces none, so a
-            # cleared field cannot be told from one containing the hint by
-            # reading alone. Measured: an empty `field_default` reads 'default'.
-            # Asserting "after must be empty" therefore fails on every hinted
-            # field on the platform.
+            # An empty EditText reports its *hint* in `text`, so a cleared field
+            # does not read empty -- `field_default` reads 'default'. The hint
+            # is published as its own attribute in the hierarchy dump, though it
+            # is absent from the cheaper jsonrpc node info, which is what made
+            # this look undecidable at first. Measured on a Pixel_7 emulator:
             #
-            # Nor is "what remains is a fragment of what was there" enough. A
-            # hint is routinely a fragment of its own field's contents: clearing
-            # 'email@example.com' out of a field hinted 'email' leaves 'email',
-            # which is a substring of the original. Measured -- that check
-            # returned 500 on a field it had emptied correctly.
+            #     empty      text='email'             hint='email'   equal
+            #     populated  text='email@example.com' hint='email'   not equal
             #
-            # What separates the two is that a *correct* clear is idempotent and
-            # an incremental one is not. #177's bug removed one character per
-            # call, so clearing again shrinks the field again; a hint does not
-            # move. Only the ambiguous case pays for the extra round trip.
-            if after and after != before and after in before:
-                device.clear_text()
-                settled = _focused_text(device)
-                if settled != after:
-                    raise DeviceError(
-                        f"clear_text is removing text incrementally, not "
-                        f"clearing: {len(before)} character(s) -> {len(after)} "
-                        f"-> {len(settled)}",
-                        tool="u2",
-                    )
+            # So `text == hint` is an exact emptiness test rather than a
+            # heuristic, and it separates all three shapes this has to tell
+            # apart: leftover content from #177's one-character delete, a clear
+            # that removed nothing at all, and a hint that happens to be a
+            # substring of what was typed -- 'email' out of 'email@example.com',
+            # which an earlier version of this check reported as a failure on a
+            # field it had emptied correctly.
+            text, hint = _focused_text_and_hint(device)
+            if text is not None and text != hint:
+                raise DeviceError(
+                    f"clear_text left {len(text)} character(s) in the field: "
+                    f"{text[:40]!r}",
+                    tool="u2",
+                )
 
         try:
             await asyncio.to_thread(_do)

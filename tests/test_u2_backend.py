@@ -538,28 +538,28 @@ class TestSelectAllAndDelete:
         backend._connect = MagicMock(return_value=device)  # type: ignore[method-assign]
         return backend
 
-    def _device(self, texts=None):
-        """A device whose focused field reports `texts` in sequence.
+    #: One focused EditText, as uiautomator dumps it. `hint` is the attribute
+    #: that makes emptiness decidable: an empty field reports its hint in
+    #: `text`, so text == hint means empty and nothing else does.
+    DUMP = (
+        '<?xml version="1.0" encoding="UTF-8"?><hierarchy>'
+        '<node class="android.widget.FrameLayout" focused="true" text="" hint=""/>'
+        '<node class="android.widget.EditText" focused="true"'
+        ' text="{text}" hint="{hint}"/>'
+        "</hierarchy>"
+    )
 
-        Two reads happen per clear -- before and after -- so a test supplies
-        both and the verification sees a real transition rather than a constant.
-        """
+    def _device(self, text="", hint="", dump=None):
         device = MagicMock()
-        focused = MagicMock()
-        focused.info = {"text": ""}
-        seq = list(texts or ["", ""])
-
-        def _info():
-            return {"text": seq.pop(0) if seq else ""}
-
-        type(focused).info = property(lambda _self: _info())
-        device.return_value = focused
+        device.dump_hierarchy.return_value = (
+            dump if dump is not None else self.DUMP.format(text=text, hint=hint)
+        )
         return device
 
     @pytest.mark.asyncio
     async def test_clears_through_the_ime_not_keystrokes(self):
         """One atomic clear, and no shelling out to `adb shell input`."""
-        device = self._device()
+        device = self._device(text="hint", hint="hint")
         backend = self._backend_with_device(device)
 
         with patch("subprocess.run") as run:
@@ -574,7 +574,7 @@ class TestSelectAllAndDelete:
     @pytest.mark.asyncio
     async def test_focuses_the_field_before_clearing(self):
         """The tap decides *which* field is cleared; order is load bearing."""
-        device = self._device()
+        device = self._device(text="hint", hint="hint")
         backend = self._backend_with_device(device)
         calls = []
         device.click.side_effect = lambda *a, **k: calls.append("click")
@@ -593,16 +593,30 @@ class TestSelectAllAndDelete:
         next `type_text` appends to the leftovers, and the failure surfaces
         somewhere else entirely as a mismatched string.
         """
-        # Three reads: before, after, and the settle check that follows an
-        # ambiguous result. The field keeps shrinking, which a hint never does.
-        device = self._device(["to-be-cleared", "to-be-cleare", "to-be-clear"])
+        device = self._device(text="to-be-cleare", hint="default")
         backend = self._backend_with_device(device)
 
         with pytest.raises(DeviceError) as excinfo:
             await backend.select_all_and_delete("serial", 10.0, 20.0)
 
-        assert "incrementally" in str(excinfo.value)
-        assert "13 character(s) -> 12 -> 11" in str(excinfo.value)
+        assert "12 character(s)" in str(excinfo.value)
+        assert "to-be-cleare" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_a_clear_that_removes_nothing_is_rejected(self):
+        """The no-op case, which a before/after comparison cannot see.
+
+        Both reviewers of #199 flagged it: if the clear removes nothing, before
+        and after are identical and any diff-based check reads that as "no
+        leftovers". Comparing against the hint decides it outright — a
+        populated field does not equal its hint.
+        """
+        device = self._device(text="email@example.com", hint="email")
+        backend = self._backend_with_device(device)
+
+        with pytest.raises(DeviceError) as excinfo:
+            await backend.select_all_and_delete("serial", 10.0, 20.0)
+        assert "17 character(s)" in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_a_hint_that_is_a_substring_of_the_content_is_not_a_failure(self):
@@ -616,7 +630,7 @@ class TestSelectAllAndDelete:
         A hint does not move when cleared again, which is what separates it from
         a clear that is removing one character at a time.
         """
-        device = self._device(["email@example.com", "email", "email"])
+        device = self._device(text="email", hint="email")
         backend = self._backend_with_device(device)
 
         await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
@@ -631,7 +645,7 @@ class TestSelectAllAndDelete:
         which the first version of this fix did, in live testing, on a field it
         had cleared correctly.
         """
-        device = self._device(["ABCDEFGHIJKLMNOP", "default"])  # not a substring
+        device = self._device(text="default", hint="default")
         backend = self._backend_with_device(device)
 
         await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
@@ -639,7 +653,7 @@ class TestSelectAllAndDelete:
     @pytest.mark.asyncio
     async def test_clearing_an_already_empty_field_is_not_a_failure(self):
         """Both reads return the hint, unchanged. Clearing twice is legitimate."""
-        device = self._device(["default", "default"])
+        device = self._device(text="default", hint="default")
         backend = self._backend_with_device(device)
 
         await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
@@ -653,11 +667,7 @@ class TestSelectAllAndDelete:
         matcher draws for web URLs.
         """
         device = MagicMock()
-        focused = MagicMock()
-        type(focused).info = property(
-            lambda _self: (_ for _ in ()).throw(RuntimeError("no focused node"))
-        )
-        device.return_value = focused
+        device.dump_hierarchy.side_effect = RuntimeError("no hierarchy")
         backend = self._backend_with_device(device)
 
         await backend.select_all_and_delete("serial", 10.0, 20.0)  # must not raise
