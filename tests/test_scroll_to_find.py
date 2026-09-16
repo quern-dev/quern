@@ -35,13 +35,28 @@ def controller(monkeypatch):
     class Harness(DeviceControllerUI):
         def __init__(self):
             self.swipes = 0
+            self.settles: list[int] = []
             self.offset = 0.0
             self.scrolls = False        # does the screen move when swiped?
             self.only_upward = False    # already at the bottom: only a reverse
                                         # swipe reveals anything
 
+        def __post_init__(self):  # pragma: no cover - not a dataclass
+            pass
+
         async def _get_screen_dimensions(self, _udid):
             return {"width": 393, "height": 852}
+
+        async def resolve_udid(self, udid=None):
+            return udid or "SIM"
+
+        async def wait_for_settle(self, udid=None, timeout=10.0):
+            """Stubbed: the real one screenshots, which this harness has no
+            device for. Recorded rather than ignored so a test can assert the
+            sweep settles *before* it looks -- reading the tree mid-fling is
+            what lost an already-located row in #84."""
+            self.settles.append(self.swipes)
+            return {"settled": True, "elapsed_ms": 0.0, "reason": None}
 
         async def get_ui_elements(self, *_a, **_k):
             return _screen(self.offset), "SIM"
@@ -137,4 +152,51 @@ async def test_a_list_at_the_bottom_is_not_mistaken_for_a_static_screen(controll
     assert found is None
     assert controller.swipes > 3, (
         f"gave up after {controller.swipes} swipes; the reverse direction still moved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_settles_before_it_looks(controller):
+    """Every swipe is followed by a settle, before the tree is read.
+
+    This is the #84 fix. The search fetch used to read mid-fling: it caught the
+    target in flight, the fling carried it out of view, and the confirm then
+    correctly rejected a sighting that had been real when it was taken. The
+    sweep treated that as never having seen the row and swept onward.
+
+    Asserting the *count* rather than merely "settle was called" is what makes
+    this a guard: a single settle somewhere in the loop would satisfy the
+    weaker check while every other step still read mid-flight.
+    """
+    controller.scrolls = True
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=3,
+    )
+
+    assert controller.swipes > 0, "the sweep never swiped; nothing to settle after"
+    assert len(controller.settles) == controller.swipes, (
+        f"{controller.swipes} swipe(s) but {len(controller.settles)} settle(s) — "
+        "some step read the tree while the list was still moving"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_gives_up_when_its_deadline_passes(controller):
+    """A swipe budget is not a time bound.
+
+    The same 75 steps cost 25s or 500s depending on what a tree read costs that
+    day; #84 produced sweeps of 413s and 523s against a caller that had given
+    up at 180s. With a deadline already in the past, the sweep must return
+    without swiping at all rather than spending its budget first.
+    """
+    controller.scrolls = True
+    result = await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=25,
+        deadline_s=-1.0,
+    )
+
+    assert result is None
+    assert controller.swipes == 0, (
+        f"the deadline had already passed but the sweep still made "
+        f"{controller.swipes} swipe(s)"
     )
