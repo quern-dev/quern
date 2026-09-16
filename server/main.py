@@ -780,7 +780,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
     from server.__main__ import _ensure_mcp_built, _ensure_python_deps
     _ensure_python_deps(quiet=True)
 
-    # Always rebuild MCP server to ensure dist/ is current
+    # Rebuild the MCP server only when dist/ is actually stale. A release
+    # tarball ships it built, and reaching for npm to confirm that is what made
+    # a GUI-launched start fail on a machine with an fnm node (#193).
     if not _ensure_mcp_built(quiet=True):
         print("Warning: MCP server build failed — MCP tools may be stale")
 

@@ -271,11 +271,33 @@ cp -R "$APP" "$STAGE/Quern.app"
 # care that it runs after the version bump.
 echo "==> Building MCP wrapper into the tarball"
 ( cd "$STAGE/mcp" && npm ci --no-audit --no-fund && npm run build )
-for f in dist/index.js dist/launcher.cjs; do
-  [[ -f "$STAGE/mcp/$f" ]] || { echo "error: MCP build produced no $f" >&2; exit 1; }
-done
-# node_modules is a build input, not a shipped artifact, and it is enormous.
-rm -rf "$STAGE/mcp/node_modules"
+
+# Prune to runtime dependencies, do not delete them.
+#
+# `dist/index.js` is tsc output with `module: NodeNext` and no bundler, so it
+# bare-imports `@modelcontextprotocol/sdk` and `zod` -- both real runtime
+# `dependencies`. Shipping dist/ without them produces a wrapper that dies with
+# ERR_MODULE_NOT_FOUND on its first request, and does so *silently*: the server
+# starts, `_ensure_mcp_built` reports "up to date" because dist/ is current, and
+# every MCP tool is dead with nothing to look at. That is strictly worse than
+# the crash this whole change exists to remove -- a loud failure traded for a
+# quiet one. devDependencies (typescript, @types/node) are genuinely build-only
+# and do go.
+( cd "$STAGE/mcp" && npm ci --omit=dev --no-audit --no-fund )
+
+# Prove the artifact runs, rather than proving the files exist. `[[ -f ]]`
+# passes on a zero-byte file, and `tsc` has no `noEmitOnError`, so it emits for
+# a tree that fails type-checking. One handshake catches both, and would have
+# caught the missing dependencies above.
+echo "==> Verifying the staged MCP wrapper answers"
+handshake='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-check","version":"1"}}}'
+reply=$(printf '%s\n' "$handshake" | ( cd "$STAGE/mcp" && timeout 30 node dist/launcher.cjs 2>&1 ) || true)
+case "$reply" in
+  *'"serverInfo"'*) echo "  MCP wrapper answered initialize" ;;
+  *) echo "error: staged MCP wrapper did not answer initialize:" >&2
+     printf '%s\n' "$reply" | head -5 >&2
+     exit 1 ;;
+esac
 
 tar -czf "$TARBALL" -C "$WORK" "$PREFIX"
 

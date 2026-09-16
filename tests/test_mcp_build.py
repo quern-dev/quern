@@ -141,6 +141,46 @@ class TestCurrentMeansEveryArtifactAndEveryInput:
         )
 
 
+class TestTheFreshnessComparisonIsNotAccidentallyRight:
+    """Three mutations to the comparison itself survived the whole suite."""
+
+    def test_the_oldest_output_decides_not_the_newest(self, project):
+        """`min` over the outputs, not `max`. With `max`, a launcher rebuilt
+        long after a stale index.js reads as current, and the stale one ships."""
+        import os
+
+        dist = _ship_dist(project)
+        src = project / "mcp" / "src" / "index.ts"
+        stamp = src.stat().st_mtime
+        # index.js older than src; launcher much newer. `max` would pass this.
+        os.utime(dist / "index.js", (stamp - 100, stamp - 100))
+        os.utime(dist / "launcher.cjs", (stamp + 1000, stamp + 1000))
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0)
+            entry._ensure_mcp_built(quiet=True)
+        assert run.call_count > 0, (
+            "freshness was judged from the newest artifact, so a stale "
+            "index.js beside a fresh launcher reads as current"
+        )
+
+    def test_a_directory_mtime_does_not_force_a_rebuild(self, project):
+        """`rglob` yields directories too. Without the is_file() filter a
+        directory's mtime — which changes whenever anything inside it is
+        touched — would count as a build input and rebuild forever."""
+        _ship_dist(project)
+        subdir = project / "mcp" / "src" / "tools"
+        subdir.mkdir()
+        (subdir / "a.ts").write_text("// x\n")
+        import os
+        old = (project / "mcp" / "dist" / "index.js").stat().st_mtime - 500
+        os.utime(subdir / "a.ts", (old, old))
+        os.utime(subdir, (old, old))
+
+        with patch("subprocess.run", side_effect=AssertionError("npm was invoked")):
+            assert entry._ensure_mcp_built(quiet=True) is True
+
+
 class TestAMissingNpmIsReportedNotRaised:
     """Every caller already treats a failed build as survivable. That intent
     only worked for the failures the function anticipated."""
@@ -168,11 +208,33 @@ class TestAMissingNpmIsReportedNotRaised:
             f"the advice does not mention the actual cause: {out!r}"
         )
 
-    def test_a_build_that_runs_and_fails_still_returns_false(self, project):
-        """The case that always worked, which must keep working."""
-        with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 1)
+    @pytest.mark.parametrize("stage", ["install", "build"])
+    def test_a_failing_npm_command_returns_false(self, project, stage):
+        """Both npm calls, and the second was unreachable in the first attempt.
+
+        Without a `node_modules`, `needs_install` is True and the *install* call
+        short-circuits, so a test that only asserted the return value never
+        exercised `npm run build` at all -- deleting either `return False` left
+        the whole suite green. The install stamp is what makes the build branch
+        reachable.
+        """
+        if stage == "build":
+            nm = project / "mcp" / "node_modules"
+            nm.mkdir(parents=True)
+            (nm / ".install-stamp").touch()
+
+        seen = []
+
+        def fake_run(cmd, **_kw):
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1)
+
+        with patch("subprocess.run", side_effect=fake_run):
             assert entry._ensure_mcp_built(quiet=True) is False
+
+        reached = seen[-1][:2]
+        expected = ["npm", "install"] if stage == "install" else ["npm", "run"]
+        assert reached == expected, f"expected to fail at {expected}, failed at {reached}"
 
 
 class TestClientsAreRegisteredOnTheVersionGate:
@@ -197,6 +259,7 @@ class TestClientsAreRegisteredOnTheVersionGate:
     @pytest.mark.parametrize("client,config", [
         ("claude-code", ".claude.json"),
         ("cursor", ".cursor/mcp.json"),
+        ("claude-desktop", "Library/Application Support/Claude/claude_desktop_config.json"),
     ])
     def test_the_registered_entry_point_is_the_launcher(
         self, tmp_path, monkeypatch, client, config,
@@ -256,3 +319,49 @@ class TestSetupUsesTheSameDecision:
             run.return_value = subprocess.CompletedProcess([], 0)
             _build_mcp(project)
         assert run.call_count > 0, "setup reported a dist/ with no launcher as current"
+
+
+class TestEveryRegistrationShapePointsAtTheLauncher:
+    """Three writers, five targets. Two were covered; re-pointing opencode,
+    codex or claude-desktop at `index.js` survived the whole suite.
+
+    The codex one matters most: it registers a bare path and relies on the
+    shebang and exec bit, so it is the shape most sensitive to what the tarball
+    actually preserves.
+    """
+
+    def _prepare(self, tmp_path, monkeypatch):
+        root = tmp_path / "proj"
+        (root / "mcp" / "dist").mkdir(parents=True)
+        (root / "mcp" / "src").mkdir(parents=True)
+        (root / "mcp" / "dist" / "launcher.cjs").write_text("#!/usr/bin/env node\n")
+        monkeypatch.setattr(entry, "_find_project_root", lambda: root)
+        monkeypatch.setattr(entry, "_ensure_mcp_built", lambda **_kw: True)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        return home
+
+    def test_opencode_is_registered_on_the_launcher(self, tmp_path, monkeypatch):
+        import json
+
+        home = self._prepare(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.argv", ["quern", "mcp-install", "opencode"])
+        entry._cmd_mcp_install()
+
+        cfg = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
+        command = cfg["mcp"]["quern"]["command"]
+        assert any(str(c).endswith("launcher.cjs") for c in command), command
+
+    def test_codex_is_registered_on_the_launcher(self, tmp_path, monkeypatch):
+        home = self._prepare(tmp_path, monkeypatch)
+        monkeypatch.setattr("sys.argv", ["quern", "mcp-install", "codex"])
+        entry._cmd_mcp_install()
+
+        text = (home / ".codex" / "config.toml").read_text()
+        assert "launcher.cjs" in text, text
+        assert "dist/index.js" not in text, (
+            "codex runs this path directly via its shebang, so it must be the "
+            "launcher -- the version gate is the only thing standing between a "
+            "wrong node and a raw syntax error"
+        )
