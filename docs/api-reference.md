@@ -110,7 +110,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `tap` | POST | `/api/v1/device/ui/tap` | Tap at coordinates |
 | `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier |
 | `swipe` | POST | `/api/v1/device/ui/swipe` | Swipe gesture |
-| `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it |
+| `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it. Bounded by a wall-clock deadline as well as `max_swipes`. **499** when the caller disconnects — the sweep is abandoned rather than left driving the device |
 | `get_web_content` | POST | `/api/v1/device/ui/web-content` | Read WKWebView content the accessibility tree cannot see (iOS simulator only) |
 | `wait_for_settle` | POST | `/api/v1/device/ui/wait-settled` | Wait until the screen stops changing, by comparing successive screenshots |
 | `type_text` | POST | `/api/v1/device/ui/type` | Type text |
