@@ -1,11 +1,11 @@
-"""./quern setup — interactive environment checker and installer.
+"""quern setup — interactive environment checker and installer.
 
 Validates the Python virtual environment, system dependencies, installs
 missing tools via Homebrew, and optionally configures simulators for proxy use.
 
 Usage:
-    ./quern setup
-    ./quern uninstall
+    quern setup
+    quern uninstall
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from server.config import CONFIG_DIR
+from server.config import CONFIG_DIR, quern_cmd
 from server.device._xcode import xcode_available
 from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself
 
@@ -83,7 +83,7 @@ class SetupReport:
         print("─" * 50)
         if self.has_errors:
             print("  Some required dependencies are missing.")
-            print("  Re-run './quern setup' after resolving them.")
+            print(f"  Re-run '{quern_cmd()} setup' after resolving them.")
         elif self.has_warnings:
             print("  Setup complete with warnings (see above).")
         else:
@@ -532,7 +532,14 @@ WRAPPER_PATH = Path.home() / ".local" / "bin" / "quern"
 
 
 def install_wrapper_script() -> CheckResult:
-    """Install quern wrapper script to ~/.local/bin."""
+    """Install quern wrapper script to ~/.local/bin.
+
+    Clears `quern_cmd`'s cache on the way out. Setup is the one process where
+    the answer changes mid-run: every check before this point is talking to
+    someone with no `quern` on PATH, and every message after it is not. A cached
+    answer from the start of the run would keep telling people to type `./quern`
+    for the rest of a setup that has just made `quern` work.
+    """
     local_bin = WRAPPER_PATH.parent
     wrapper_path = WRAPPER_PATH
 
@@ -568,6 +575,7 @@ exec "{venv_python}" -m server "$@"
     try:
         wrapper_path.write_text(wrapper_content)
         wrapper_path.chmod(0o755)  # Make executable
+        quern_cmd.cache_clear()
 
         # Check if ~/.local/bin is in PATH
         path_env = os.environ.get("PATH", "")
@@ -1671,7 +1679,7 @@ def check_idb_companion() -> CheckResult:
                 message=f"installed but not running ({quern_companion})",
                 detail=(
                     "The binary is present but exited "
-                    f"{rc} when asked for its version. Re-run './quern setup' "
+                    f"{rc} when asked for its version. Re-run '{quern_cmd()} setup' "
                     "to reinstall it; until then simulator UI automation will "
                     "fall back to whatever else is available."
                 ),
@@ -1688,7 +1696,10 @@ def check_idb_companion() -> CheckResult:
             name="idb_companion",
             status=CheckStatus.OK,
             message=f"installed (system, {system_companion})",
-            detail="Patched build available with improved Group element detection: ./quern setup",
+            detail=(
+                "Patched build available with improved Group element "
+                f"detection: {quern_cmd()} setup"
+            ),
         )
     return CheckResult(
         name="idb_companion",
@@ -1807,7 +1818,7 @@ def check_mitmproxy_cert() -> CheckResult:
         status=CheckStatus.WARNING,
         message="Not generated yet",
         detail="The CA certificate is auto-generated on first proxy start.\n"
-               "Run './quern start -f --no-crash' to generate it,\n"
+               f"Run '{quern_cmd()} start -f --no-crash' to generate it,\n"
                "then Ctrl+C to stop.",
     )
 
@@ -1863,7 +1874,7 @@ def check_tunneld() -> CheckResult:
             name="tunneld",
             status=CheckStatus.WARNING,
             message="Not installed",
-            detail="Install with: ./quern tunneld install\n"
+            detail=f"Install with: {quern_cmd()} tunneld install\n"
                    "Required for physical device screenshots.",
         )
 
@@ -1889,7 +1900,7 @@ def check_tunneld() -> CheckResult:
             name="tunneld",
             status=CheckStatus.WARNING,
             message=f"Plist outdated — {drift}",
-            detail="Reinstall with: ./quern tunneld install",
+            detail=f"Reinstall with: {quern_cmd()} tunneld install",
         )
 
     if running:
@@ -1903,7 +1914,7 @@ def check_tunneld() -> CheckResult:
         name="tunneld",
         status=CheckStatus.WARNING,
         message="Installed but not running",
-        detail="Try: ./quern tunneld restart",
+        detail=f"Try: {quern_cmd()} tunneld restart",
     )
 
 
@@ -2172,7 +2183,7 @@ def run_setup() -> int:
     if brew_result.status == CheckStatus.MISSING:
         report.print_summary()
         print("  Homebrew is required to install system dependencies.")
-        print("  Install it first, then re-run: ./quern setup")
+        print(f"  Install it first, then re-run: {quern_cmd()} setup")
         print()
         return 1
 
@@ -2195,7 +2206,7 @@ def run_setup() -> int:
                 ))
                 report.print_summary()
                 print("  Python 3.12 was installed. Restart your shell, then re-run:")
-                print("    ./quern setup")
+                print(f"    {quern_cmd()} setup")
                 print()
                 return 0
             else:
@@ -2596,14 +2607,17 @@ def run_setup() -> int:
                             name="tunneld",
                             status=CheckStatus.ERROR,
                             message="Installation failed",
-                            detail="Try manually: ./quern tunneld install",
+                            detail=f"Try manually: {quern_cmd()} tunneld install",
                         )
             elif needs_install:
                 tunneld_result = CheckResult(
                     name="tunneld",
                     status=CheckStatus.WARNING,
                     message="Not installed (install pymobiledevice3 first)",
-                    detail="Install with: pipx install pymobiledevice3 && ./quern tunneld install",
+                    detail=(
+                        "Install with: pipx install pymobiledevice3 && "
+                        f"{quern_cmd()} tunneld install"
+                    ),
                 )
         report.add(tunneld_result)
 
@@ -2924,7 +2938,7 @@ def _report_drift(sites: list[dict]) -> list[CheckResult]:
         status=CheckStatus.WARNING,
         message=f"{len(drifted)} change(s) since {recorded.get('recorded_at', 'the last record')}",
         detail="\n".join("  " + d for d in drifted)
-               + "\n  Re-record with: ./quern setup",
+               + f"\n  Re-record with: {quern_cmd()} setup",
     )]
 
 

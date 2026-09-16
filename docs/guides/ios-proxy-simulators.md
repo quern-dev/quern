@@ -29,7 +29,7 @@ The first time local capture is used, macOS will ask you to approve the System E
 
 If local capture isn't working (System Extension issues, corporate MDM blocking it), your agent can fall back to the system proxy. This routes *all* Mac traffic through mitmproxy — including your browser. It works, but it's messier.
 
-**Important:** The system proxy must be turned off when you're done. Your agent handles this, but if the server crashes or you kill it, your Mac's proxy settings may be left configured. Run `./quern stop` to clean up, or check System Settings > Network > your interface > Proxies.
+**Important:** The system proxy must be turned off when you're done. Your agent handles this, but if the server crashes or you kill it, your Mac's proxy settings may be left configured. Run `quern stop` to clean up, or check System Settings > Network > your interface > Proxies.
 
 ## Certificates
 

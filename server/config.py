@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import secrets
+import shutil
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger("quern-debug-server.config")
@@ -329,3 +331,29 @@ def clear_plist_watch_config(bundle_id: str) -> bool:
 
     update_user_config(_clear)
     return True
+
+
+@lru_cache(maxsize=1)
+def quern_cmd() -> str:
+    """How to invoke quern, from where the reader is standing.
+
+    Almost every message that names a command is read in one of two places, and
+    the right spelling differs. After `quern setup` there is a wrapper at
+    `~/.local/bin/quern`, so `./quern doctor` is needlessly awkward -- and for a
+    tarball install it is wrong, because the reader is not necessarily standing
+    in the extracted directory. Before setup, or when it bailed early, there is
+    no wrapper and `quern setup` names a command the reader does not have.
+
+    So the answer is decided when the message is built, not when it is written.
+
+    `which` rather than `WRAPPER_PATH.exists()`: the wrapper can exist while
+    `~/.local/bin` is absent from PATH, and CONTRIBUTING documents that as a
+    live failure -- zsh caches its first resolution, so what `type -a` reports
+    and what actually runs can disagree. What matters is whether typing `quern`
+    works, which is what `which` answers.
+
+    Cached: this is called while building error strings, and the answer cannot
+    change within a process that has already started. `quern_cmd.cache_clear()`
+    after installing the wrapper, which `setup` does.
+    """
+    return "quern" if shutil.which("quern") else "./quern"

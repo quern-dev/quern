@@ -100,7 +100,7 @@ Quern finds `adb` and `emulator` by searching:
 2. `ANDROID_HOME` / `ANDROID_SDK_ROOT` environment variables
 3. Standard locations (`~/Library/Android/sdk/` on macOS, `~/Android/Sdk/` on Linux)
 
-If Android Studio was installed after Quern was started, restart the server: `./quern stop && ./quern start`
+If Android Studio was installed after Quern was started, restart the server: `quern stop && quern start`
 
 ## Tips
 
