@@ -1,11 +1,11 @@
-"""./quern setup — interactive environment checker and installer.
+"""quern setup — interactive environment checker and installer.
 
 Validates the Python virtual environment, system dependencies, installs
 missing tools via Homebrew, and optionally configures simulators for proxy use.
 
 Usage:
-    ./quern setup
-    ./quern uninstall
+    quern setup
+    quern uninstall
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from server.config import CONFIG_DIR
+from server.config import CONFIG_DIR, quern_cmd
 from server.device._xcode import xcode_available
 from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself
 
@@ -83,7 +83,7 @@ class SetupReport:
         print("─" * 50)
         if self.has_errors:
             print("  Some required dependencies are missing.")
-            print("  Re-run './quern setup' after resolving them.")
+            print(f"  Re-run '{quern_cmd()} setup' after resolving them.")
         elif self.has_warnings:
             print("  Setup complete with warnings (see above).")
         else:
@@ -451,73 +451,43 @@ def _add_to_path(shell_rc: Path, directory: Path) -> bool:
 
 
 def _build_mcp(project_root: Path) -> CheckResult:
-    """Build the MCP TypeScript server (npm install + npm run build)."""
-    mcp_dir = project_root / "mcp"
-    src_dir = mcp_dir / "src"
-    dist_file = mcp_dir / "dist" / "index.js"
+    """Build the MCP TypeScript server, reporting it as a setup check.
 
-    if not src_dir.exists():
+    Delegates rather than reimplementing. This was a near-copy of
+    `_ensure_mcp_built` and carried every defect that one had: it ran
+    `npm install` before deciding whether a build was needed, judged freshness
+    from `dist/index.js` alone, and let a missing npm raise. That last one is
+    not theoretical here -- `run_setup` calls this unguarded, and `quern update`
+    calls `run_setup`, so the crash that took down `quern start` (#193) had a
+    second route into the updater.
+
+    Two copies of a decision drift, and the one a reader happens to open wins.
+    """
+    mcp_dir = project_root / "mcp"
+    if not (mcp_dir / "src").exists():
         return CheckResult(
             name="MCP server",
             status=CheckStatus.WARNING,
             message="mcp/src/ not found — skipped",
         )
 
-    node_modules = mcp_dir / "node_modules"
-    stamp = node_modules / ".install-stamp"
-    pkg_json = mcp_dir / "package.json"
-    needs_install = (
-        not node_modules.exists()
-        or not stamp.exists()
-        or (pkg_json.exists() and pkg_json.stat().st_mtime > stamp.stat().st_mtime)
-    )
+    from server.__main__ import _ensure_mcp_built
 
-    if needs_install:
-        print("    Installing MCP server dependencies...")
-        result = subprocess.run(
-            ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir),
-            stdin=subprocess.DEVNULL, timeout=120,
-        )
-        if result.returncode != 0:
-            return CheckResult(
-                name="MCP server",
-                status=CheckStatus.ERROR,
-                message="npm install failed",
-                detail="Try manually: cd mcp && npm install",
-            )
-        stamp.touch()
-
-    needs_build = not dist_file.exists()
-    if not needs_build:
-        dist_mtime = dist_file.stat().st_mtime
-        for src_file in src_dir.rglob("*"):
-            if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
-                needs_build = True
-                break
-
-    if needs_build:
-        print("    Building MCP server...")
-        result = subprocess.run(
-            ["npm", "run", "build"], cwd=str(mcp_dir),
-            stdin=subprocess.DEVNULL, timeout=60,
-        )
-        if result.returncode != 0:
-            return CheckResult(
-                name="MCP server",
-                status=CheckStatus.ERROR,
-                message="npm run build failed",
-                detail="Try manually: cd mcp && npm run build",
-            )
+    if _ensure_mcp_built(quiet=False):
         return CheckResult(
             name="MCP server",
             status=CheckStatus.OK,
-            message="Built successfully",
+            message="Up to date",
         )
-
     return CheckResult(
         name="MCP server",
-        status=CheckStatus.OK,
-        message="Up to date",
+        status=CheckStatus.ERROR,
+        message="build failed",
+        detail=(
+            "Try manually: cd mcp && npm install && npm run build. If npm is "
+            "not found, note that a GUI launch does not see a node installed "
+            "by fnm or nvm — run this from a terminal."
+        ),
     )
 
 
@@ -562,7 +532,12 @@ WRAPPER_PATH = Path.home() / ".local" / "bin" / "quern"
 
 
 def install_wrapper_script() -> CheckResult:
-    """Install quern wrapper script to ~/.local/bin."""
+    """Install quern wrapper script to ~/.local/bin.
+
+    Messages built after this point start saying `quern` rather than a path,
+    because `quern_cmd` resolves per call rather than caching -- setup is
+    precisely the process where the right answer changes partway through.
+    """
     local_bin = WRAPPER_PATH.parent
     wrapper_path = WRAPPER_PATH
 
@@ -703,7 +678,7 @@ def build_preview_app() -> CheckResult:
             # already present. Say what happens next instead.
             _run(["xcode-select", "--install"])
             print("    A macOS installer dialog should have opened.")
-            print("    Re-run `quern setup` once it finishes to build the app.")
+            print(f"    Re-run `{quern_cmd()} setup` once it finishes to build the app.")
         return result
 
     try:
@@ -1067,7 +1042,10 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             where = (
                 f"The app is at {location}."
                 if location
-                else "The app could not be located; re-run `quern setup` to fetch it again."
+                else (
+                    "The app could not be located; re-run "
+                    f"`{quern_cmd()} setup` to fetch it again."
+                )
             )
             return CheckResult(
                 name="Menu-bar app",
@@ -1701,7 +1679,7 @@ def check_idb_companion() -> CheckResult:
                 message=f"installed but not running ({quern_companion})",
                 detail=(
                     "The binary is present but exited "
-                    f"{rc} when asked for its version. Re-run './quern setup' "
+                    f"{rc} when asked for its version. Re-run '{quern_cmd()} setup' "
                     "to reinstall it; until then simulator UI automation will "
                     "fall back to whatever else is available."
                 ),
@@ -1718,7 +1696,10 @@ def check_idb_companion() -> CheckResult:
             name="idb_companion",
             status=CheckStatus.OK,
             message=f"installed (system, {system_companion})",
-            detail="Patched build available with improved Group element detection: ./quern setup",
+            detail=(
+                "Patched build available with improved Group element "
+                f"detection: {quern_cmd()} setup"
+            ),
         )
     return CheckResult(
         name="idb_companion",
@@ -1837,7 +1818,7 @@ def check_mitmproxy_cert() -> CheckResult:
         status=CheckStatus.WARNING,
         message="Not generated yet",
         detail="The CA certificate is auto-generated on first proxy start.\n"
-               "Run './quern start -f --no-crash' to generate it,\n"
+               f"Run '{quern_cmd()} start -f --no-crash' to generate it,\n"
                "then Ctrl+C to stop.",
     )
 
@@ -1893,7 +1874,7 @@ def check_tunneld() -> CheckResult:
             name="tunneld",
             status=CheckStatus.WARNING,
             message="Not installed",
-            detail="Install with: ./quern tunneld install\n"
+            detail=f"Install with: {quern_cmd()} tunneld install\n"
                    "Required for physical device screenshots.",
         )
 
@@ -1919,7 +1900,7 @@ def check_tunneld() -> CheckResult:
             name="tunneld",
             status=CheckStatus.WARNING,
             message=f"Plist outdated — {drift}",
-            detail="Reinstall with: ./quern tunneld install",
+            detail=f"Reinstall with: {quern_cmd()} tunneld install",
         )
 
     if running:
@@ -1933,7 +1914,7 @@ def check_tunneld() -> CheckResult:
         name="tunneld",
         status=CheckStatus.WARNING,
         message="Installed but not running",
-        detail="Try: ./quern tunneld restart",
+        detail=f"Try: {quern_cmd()} tunneld restart",
     )
 
 
@@ -2161,7 +2142,7 @@ def _print_unasked() -> None:
     for question in _UNASKED:
         print(f"    • {question}")
     print()
-    for line in run_it_yourself(["quern", "setup"]):
+    for line in run_it_yourself([quern_cmd(), "setup"]):
         print(f"  {line}")
     print()
 
@@ -2202,7 +2183,7 @@ def run_setup() -> int:
     if brew_result.status == CheckStatus.MISSING:
         report.print_summary()
         print("  Homebrew is required to install system dependencies.")
-        print("  Install it first, then re-run: ./quern setup")
+        print(f"  Install it first, then re-run: {quern_cmd()} setup")
         print()
         return 1
 
@@ -2225,7 +2206,7 @@ def run_setup() -> int:
                 ))
                 report.print_summary()
                 print("  Python 3.12 was installed. Restart your shell, then re-run:")
-                print("    ./quern setup")
+                print(f"    {quern_cmd()} setup")
                 print()
                 return 0
             else:
@@ -2626,14 +2607,17 @@ def run_setup() -> int:
                             name="tunneld",
                             status=CheckStatus.ERROR,
                             message="Installation failed",
-                            detail="Try manually: ./quern tunneld install",
+                            detail=f"Try manually: {quern_cmd()} tunneld install",
                         )
             elif needs_install:
                 tunneld_result = CheckResult(
                     name="tunneld",
                     status=CheckStatus.WARNING,
                     message="Not installed (install pymobiledevice3 first)",
-                    detail="Install with: pipx install pymobiledevice3 && ./quern tunneld install",
+                    detail=(
+                        "Install with: pipx install pymobiledevice3 && "
+                        f"{quern_cmd()} tunneld install"
+                    ),
                 )
         report.add(tunneld_result)
 
@@ -2954,7 +2938,7 @@ def _report_drift(sites: list[dict]) -> list[CheckResult]:
         status=CheckStatus.WARNING,
         message=f"{len(drifted)} change(s) since {recorded.get('recorded_at', 'the last record')}",
         detail="\n".join("  " + d for d in drifted)
-               + "\n  Re-record with: ./quern setup",
+               + f"\n  Re-record with: {quern_cmd()} setup",
     )]
 
 

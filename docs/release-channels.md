@@ -170,9 +170,28 @@ git rev-parse origin/release/stable origin/release/beta origin/main   # expect t
 gh release create vN.M.K --title "vN.M.K — short release headline" --notes-file RELEASE_NOTES.md
 
 # 6. Attach the menu-bar app asset, using the app staged in step 0.
+#    This also builds mcp/dist into the tarball -- see below.
 DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
   scripts/release-menubar.sh --publish vN.M.K
 ```
+
+**The tarball is no longer a pure `git archive`.** `--publish` now runs
+`npm ci && npm run build` inside the staged tree and ships `mcp/dist`, dropping
+`node_modules` again before tarring.
+
+That is deliberate, and it is what makes a tarball install startable. The server
+calls `_ensure_mcp_built` on every start, which shells out to npm -- and the
+menubar app launches the server from a GUI context, which inherits launchd's
+minimal PATH rather than a shell's. A node installed by fnm or nvm is
+unreachable from there, in a way no static PATH list can fix, because fnm's
+directory is named for the pid of the shell that asked for it. Before this, such
+a machine could run `quern start` from a terminal and could not start the server
+from the menu bar at all (#193).
+
+So this step needs node and npm **on the release machine**. It is the one part
+of the cut that can fail after the tag and the Release already exist. That is
+survivable: `gh release upload --clobber` makes `--publish` idempotent, so fix
+the build and re-run the same command. Nothing needs unwinding.
 
 **Step 0, before any of the above.** Build, sign and notarize the app first,
 while nothing has been cut yet:

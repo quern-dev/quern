@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import secrets
+import shlex
+import shutil
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -329,3 +331,49 @@ def clear_plist_watch_config(bundle_id: str) -> bool:
 
     update_user_config(_clear)
     return True
+
+
+def quern_cmd() -> str:
+    """How to invoke quern, spelled for where the reader is actually standing.
+
+    Three answers, because there are three situations and only one of them
+    tolerates a guess.
+
+    * **`quern`** -- there is a wrapper on PATH, so the bare name works from
+      anywhere. This is the normal state after `quern setup`.
+    * **`./quern`** -- no wrapper, but the reader's working directory *is* the
+      project. A developer in a clone before first setup.
+    * **the absolute path** -- no wrapper, and the reader is somewhere else.
+
+    That third case is the one this exists for. An install script drops quern in
+    `~/.local/share/quern` and leaves the terminal wherever it was, so a tarball
+    user told to run `./quern setup` is being pointed at a file that is not in
+    their directory -- and they are the least likely person to work out why. The
+    absolute path is longer and it is correct.
+
+    `shutil.which` rather than `WRAPPER_PATH.exists()`: the wrapper can exist
+    while `~/.local/bin` is off PATH, which CONTRIBUTING documents as a live
+    failure, and what matters is whether typing `quern` works.
+
+    Deliberately not cached. The answer depends on PATH, on whether the wrapper
+    exists, and on the current directory -- and all three move: setup installs
+    the wrapper mid-run, uninstall removes it, and anything may `chdir`. A cache
+    here would need invalidating at each of those, which is three chances to
+    miss one. A PATH scan while building an error string is not worth that.
+    """
+    if shutil.which("quern"):
+        return "quern"
+    # server/config.py -> server/ -> project root. Derived from this file rather
+    # than searched for, so it holds wherever the tree has been moved to.
+    wrapper = Path(__file__).resolve().parent.parent / "quern"
+    if not wrapper.exists():
+        return "quern"  # nothing better to offer; naming a missing file is worse
+    try:
+        if Path.cwd().resolve() == wrapper.parent:
+            return "./quern"
+    except OSError:
+        pass  # cwd can be deleted out from under a process
+    # Quoted, because this is the only branch that can contain a space and it
+    # is the one people are meant to paste. `shlex.quote` is a no-op for
+    # `quern` and `./quern`, so the common answers are unchanged.
+    return shlex.quote(str(wrapper))

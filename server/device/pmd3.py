@@ -7,6 +7,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+from server.config import quern_cmd
 from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
@@ -43,8 +44,8 @@ async def _recover_tunneld_if_wedged() -> bool:
     if not can_recover_unattended():
         logger.warning(
             "tunneld is wedged (pid %s) and recovery needs root — run "
-            "`./quern tunneld restart`, or authorise automatic recovery with "
-            "`./quern tunneld grant-recovery`",
+            f"`{quern_cmd()} tunneld restart`, or authorise automatic recovery with "
+            f"`{quern_cmd()} tunneld grant-recovery`",
             health.pid,
         )
         return False
@@ -89,8 +90,8 @@ def _no_tunnel_hint(tunnel_udid: str | None, tunneld_serving: bool) -> str:
     if not tunneld_serving:
         return (
             " — no tunnel was available because tunneld is not serving, and "
-            "iOS 17+ devices need one. Check `./quern tunneld status`; if it "
-            "reports a live pid, it is wedged: `./quern tunneld restart`."
+            f"iOS 17+ devices need one. Check `{quern_cmd()} tunneld status`; if it "
+            f"reports a live pid, it is wedged: `{quern_cmd()} tunneld restart`."
         )
     return (
         " — tunneld is serving but reported no tunnel for this device, and "
