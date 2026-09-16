@@ -451,7 +451,16 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
                 "Manage Certificates → add an 'Apple Development' certificate."
             )
 
+        # Known signing failures get named before the raw output. A free
+        # account exhausting its app-ID slots, or a profile that expired, is a
+        # thing the reader can act on; twenty lines of xcodebuild is not.
+        diagnosis = _diagnose_signing_output(combined)
         stdout_tail = "\n".join(stdout_text.splitlines()[-20:])
+        if diagnosis:
+            raise RuntimeError(
+                f"xcodebuild failed (rc={proc.returncode}): {diagnosis}\n"
+                f"stdout (last 20 lines): {stdout_tail}"
+            )
         raise RuntimeError(
             f"xcodebuild failed (rc={proc.returncode}):\n"
             f"stderr: {stderr_text}\n"
@@ -713,6 +722,25 @@ _RUNNER_FAILURE_PATTERNS = [
 ]
 
 
+def _diagnose_signing_output(text: str) -> str | None:
+    """Translate known xcodebuild/runner failures into something actionable.
+
+    Shared between the build and the runner log on purpose. The table lived
+    behind the runner-log path alone, so a *build* that failed on the free
+    account's app-ID limit printed twenty raw lines of xcodebuild, while the
+    identical condition at runner start printed an explanation. The build is
+    where a free account hits it first -- signing is what consumes the slot.
+
+    That matters more now that a toolchain change can trigger a rebuild: the
+    rebuild is the right call, and the user is entitled to know why it failed
+    in terms they can act on.
+    """
+    for pattern, diagnosis in _RUNNER_FAILURE_PATTERNS:
+        if pattern in text:
+            return diagnosis
+    return None
+
+
 def _diagnose_runner_failure(log_path: Path) -> str | None:
     """Read the runner log and return a user-friendly diagnosis, or None."""
     if not log_path.exists():
@@ -723,9 +751,9 @@ def _diagnose_runner_failure(log_path: Path) -> str | None:
     except Exception:
         return None
 
-    for pattern, diagnosis in _RUNNER_FAILURE_PATTERNS:
-        if pattern in log_text:
-            return diagnosis
+    diagnosis = _diagnose_signing_output(log_text)
+    if diagnosis:
+        return diagnosis
 
     # If the log is very short and empty-ish, xcodebuild crashed early
     if len(log_text.strip()) < 50:

@@ -200,3 +200,56 @@ class TestTheFingerprintIsRecorded:
         with patch("server.device.tool_probe.probe_stdout",
                    AsyncMock(return_value="Xcode 27.0\n")):
             assert await wda._xcode_build_id() is None
+
+
+class TestABuildFailureSaysWhatWentWrong:
+    """The free-account cases especially, since a rebuild is what consumes a slot.
+
+    The failure table was reachable only from the runner-log path, so a *build*
+    that hit the app-ID limit printed twenty raw lines of xcodebuild while the
+    identical condition at runner start printed an explanation. A change that
+    makes rebuilds more likely has to make their failures legible.
+    """
+
+    @pytest.mark.parametrize("output,expect", [
+        (
+            "error: The maximum number of apps for free development profiles "
+            "has been reached.",
+            "Free Apple developer account limit reached",
+        ),
+        (
+            "error: No signing certificate \"iOS Development\" found",
+            "No signing certificate found",
+        ),
+    ])
+    def test_a_known_signing_failure_is_named(self, output, expect):
+        assert expect in (wda._diagnose_signing_output(output) or "")
+
+    def test_an_unknown_failure_is_not_guessed_at(self):
+        assert wda._diagnose_signing_output("error: something nobody has seen") is None
+
+    async def test_the_build_path_uses_it(self, tmp_path, monkeypatch):
+        """Not just that the table exists -- that the build consults it."""
+        repo = tmp_path / "WebDriverAgent"
+        (repo / "WebDriverAgent.xcodeproj").mkdir(parents=True)
+
+        async def failing(*args, **kwargs):
+            class P:
+                returncode = 65
+
+                async def communicate(self):
+                    return (
+                        b"error: The maximum number of apps for free "
+                        b"development profiles has been reached.",
+                        b"",
+                    )
+            return P()
+
+        monkeypatch.setattr(wda, "WDA_REPO", repo)
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "build")
+        monkeypatch.setattr(wda, "read_wda_state", lambda: {"cloned": True})
+        monkeypatch.setattr(wda, "save_wda_state", lambda st: None)
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", failing)
+
+        with pytest.raises(RuntimeError, match="Free Apple developer account limit"):
+            await wda.build_wda("TEAM123")
