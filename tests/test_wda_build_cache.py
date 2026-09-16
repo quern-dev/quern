@@ -261,3 +261,37 @@ class TestABuildFailureSaysWhatWentWrong:
 
         with pytest.raises(RuntimeError, match="Free Apple developer account limit"):
             await wda.build_wda("TEAM123")
+
+
+class TestTheFreeAccountWarningKeepsTheBudgetsApart:
+    """Two Apple limits, two remedies, and merging them sends people to wait
+    out a week for a condition waiting does not affect."""
+
+    def _warnings(self):
+        import inspect
+        return inspect.getsource(wda.setup_wda)
+
+    def test_it_does_not_call_the_device_limit_an_app_id_limit(self):
+        src = self._warnings()
+        assert "2 of your ~3 App ID slots" not in src, (
+            "the install limit (3 apps on a device) is described as an App ID "
+            "limit (10 registrations per 7 days); they are different budgets "
+            "with different remedies"
+        )
+
+    def test_it_gives_the_remedy_that_clears_the_device_limit(self):
+        src = self._warnings()
+        assert "delete a free-signed app from the device" in src.lower(), (
+            "the 3-app limit is cleared by deleting an app, not by waiting"
+        )
+
+    def test_it_names_the_offloaded_app_trap(self):
+        """Xcode counts offloaded apps toward the three, including Apple's own,
+        which is why this fires on a device that looks nearly empty."""
+        assert "offloaded" in self._warnings().lower()
+
+    def test_it_states_what_wda_itself_costs(self):
+        """A free-account user has three slots and quern takes one of them for
+        as long as they use it. Better said at setup than discovered later."""
+        src = self._warnings()
+        assert "leaving 2 for your own" in src

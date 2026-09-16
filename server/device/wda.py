@@ -1139,11 +1139,21 @@ async def setup_wda(
             "Free Apple developer account detected. Limitations:",
             "- Provisioning profiles expire after 7 days "
             "— re-run setup_wda with force:true weekly.",
-            "- WDA uses 2 of your ~3 App ID slots "
-            "(driver + xctrunner), leaving only ~1 for "
-            "your own app. If you hit 'maximum number of "
-            "apps for free development profiles', wait for "
-            "old IDs to expire or use a paid account ($99/yr).",
+            # Two different Apple limits, previously merged into one sentence
+            # with the remedy for the wrong one. Registering a bundle ID and
+            # installing an app on a device are separate budgets.
+            "- Two budgets, and WDA spends from both. It registers 2 App IDs "
+            "(dev.quern.driver for the test bundle, .xctrunner for the "
+            "runner) against a limit of 10 per rolling 7 days — that one "
+            "clears by waiting.",
+            "- It also installs 1 app on the device (the runner, shown as "
+            "QuernDriver) against a limit of 3 free-signed apps installed at "
+            "once, leaving 2 for your own. That limit does NOT clear by "
+            "waiting: delete a free-signed app from the device, or use a paid "
+            "account ($99/yr). Xcode counts offloaded apps toward the three "
+            "as well, including Apple's own, so check Settings > General > "
+            "iPhone Storage if the device looks emptier than the error "
+            "suggests.",
             "- The device must trust the developer profile: "
             "Settings > General > VPN & Device Management "
             "> tap your profile > Trust.",
