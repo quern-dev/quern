@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **idb could not drive a simulator under Xcode 27.** Xcode 27 moved SimulatorKit, and quern's patched `idb_companion` looked only in the old place, so every tap, swipe and keystroke sent through idb failed with "SimulatorKit is required for HID interactions". idb is the fallback when sim-bridge cannot run, so on Xcode 27 there was no fallback. A rebuilt companion (`idb-companion-v2`) finds SimulatorKit in either location. Setup now records which companion release is installed, reports an older one as outdated, and offers to replace it — including on Macs where sim-bridge is active and idb is otherwise skipped, since an existing install is still the fallback there. The update is downloaded and unpacked aside and swapped in only once complete, so an interrupted one leaves the previous install working, and a swap that fails is rolled back. The rebuilt companion needs macOS 12 or later.
 - **Setup could leave you with no menu-bar app.** Every run of setup quit the running menu-bar app and reopened it, even when there was no new version to install — which is every run on a git install. When the reopen failed (macOS error `-600`, seen during a live update), the app stayed quit. A running app with nothing new to install is now left alone. When setup does replace it, the reopen is retried for that error, and if it still fails, setup says the app was stopped and how to start it.
 
 ### Changed

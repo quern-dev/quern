@@ -7,6 +7,10 @@
 > the fallback path for Intel Macs and pre-Xcode-26 setups; the `quern setup`
 > flow skips the companion install entirely when sim-bridge is supported.
 > See [`sim-bridge-spec.md`](sim-bridge-spec.md) for the current backend.
+>
+> An install left over from an older setup is still the fallback when
+> sim-bridge cannot run, so setup offers to replace an outdated one on every
+> host (see *Releases* below).
 
 ## Overview
 
@@ -15,10 +19,58 @@ Quern ships its own `idb_companion` binary instead of depending on the stale Hom
 - **Group children probe** — discovers hidden elements inside childless Group containers (fixes [facebook/idb#767](https://github.com/facebook/idb/issues/767))
 - **xcode-select fallback** — works without `/var/db/xcode_select_link` symlink
 - **Xcode 26 build fixes** — compiles cleanly with current toolchain
+- **Xcode 27 SimulatorKit location** (v2) — Xcode 27 moved SimulatorKit to `Contents/SharedFrameworks`; v1 looks only in `Developer/Library/PrivateFrameworks`, so every HID command fails under Xcode 27 ([#222](https://github.com/quern-dev/quern/issues/222))
+
+## Releases
+
+Published on [quern-dev/idb](https://github.com/quern-dev/idb/releases), asset `idb-companion-patched-arm64.tar.gz`:
+
+| Release | Branch @ commit | Built with | Notes |
+|---|---|---|---|
+| `idb-companion-v1` | `fix/group-children-fallback` @ `ae03179e` | Xcode 26 | HID fails under Xcode 27 |
+| `idb-companion-v2` | `fix/xcode27-simulatorkit` @ `a9daf33d` | Xcode 27.0 | current |
+
+v2 requires macOS 12 (Xcode 27's minimum deployment target; v1 ran on 11). `idb xctest` is likely still broken under Xcode 27 -- XCTestBootstrap hardcodes `Developer/Library/PrivateFrameworks` for XCTAutomationSupport, which also moved -- but quern does not use it.
+
+An install is replaced by extracting into a staging directory under `~/.quern/bin` and swapping `Frameworks/` and the binary in once the payload is complete, so an update interrupted before the swap leaves the previous install untouched. Each half of the swap rolls back if it fails; only a rollback that itself fails leaves the install incomplete, and because the marker is cleared at the swap, the next setup offers the update again and repairs it. The release marker is cleared only at the swap and rewritten after it. A newer marker than setup's own is left alone rather than offered a downgrade.
+
+`_IDB_COMPANION_RELEASE` in `server/lifecycle/setup.py` names the release setup installs. A successful install writes it to `~/.quern/bin/idb_companion.release`; v1 wrote no marker, so an install without one is read as v1. `check_idb_companion` reports an install older than the current release as a warning, and setup offers to replace it.
+
+## Building a release
+
+On the Xcode the release should support, from a checkout of the fork:
+
+```bash
+brew install xcodegen protobuf swift-protobuf
+./build.sh build idb_companion        # products in build/Build/Products/Release
+```
+
+The build is universal; the published asset is arm64 only, and must keep the layout below. Thinning changes the nested frameworks' contents, so re-sign ad hoc afterwards, nested frameworks first:
+
+```bash
+B=build/Build/Products/Release; S=/tmp/idb-stage
+mkdir -p $S/bin $S/Frameworks/PackageFrameworks
+ditto --arch arm64 $B/idb_companion $S/bin/idb_companion
+for f in CompanionLib FBControlCore FBDeviceControl FBSimulatorControl \
+         IDBCompanionUtilities IDBGRPCSwift XCTestBootstrap; do
+  ditto --arch arm64 $B/$f.framework $S/Frameworks/$f.framework
+done
+for f in $B/PackageFrameworks/*.framework; do
+  ditto --arch arm64 "$f" "$S/Frameworks/PackageFrameworks/$(basename "$f")"
+done
+# re-sign Versions/A/Frameworks/*.framework inside each, then each framework:
+#   codesign -f -s - <framework>
+find $S -name .DS_Store -delete
+(cd $S && COPYFILE_DISABLE=1 tar czf /tmp/idb-companion-patched-arm64.tar.gz ./bin ./Frameworks)
+```
+
+The SPM frameworks under `PackageFrameworks` report "code has no resources but signature indicates they must be present" from `codesign -v --deep`. v1 is the same, and the binaries inside are signed, which is what loading needs.
+
+Before publishing, drive a simulator through the staged bundle (tap, swipe, text, describe-all) with `DYLD_FRAMEWORK_PATH` pointing at its `Frameworks` and `Frameworks/PackageFrameworks`. After publishing, bump `_IDB_COMPANION_RELEASE`.
 
 ## Artifact
 
-- **File**: `idb-companion-arm64.tar.gz` (~17MB)
+- **File**: `idb-companion-patched-arm64.tar.gz` (~17MB)
 - **Architecture**: arm64 (Apple Silicon only for now)
 - **Contents**:
   ```
@@ -36,7 +88,7 @@ Quern ships its own `idb_companion` binary instead of depending on the stale Hom
 
 ## Hosting
 
-Publish the tarball as a GitHub release asset on the Quern repo (or a dedicated `quern-idb` repo). Tag it with the idb commit hash for traceability.
+Published as a GitHub release asset on the `quern-dev/idb` fork, with the source commit named in the release notes. See *Releases* above.
 
 ## Installation (quern setup)
 

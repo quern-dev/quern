@@ -1746,6 +1746,20 @@ def check_idb_companion() -> CheckResult:
                 ),
                 fixable=True,
             )
+        if companion_is_outdated():
+            installed = _installed_companion_release()
+            return CheckResult(
+                name="idb_companion",
+                status=CheckStatus.WARNING,
+                message=f"installed (patched, outdated: {installed})",
+                detail=(
+                    f"{installed} cannot find SimulatorKit under Xcode 27, so "
+                    "every tap, swipe and keystroke it is asked for fails. "
+                    f"Re-run '{quern_cmd()} setup' to update it to "
+                    f"{_IDB_COMPANION_RELEASE}."
+                ),
+                fixable=True,
+            )
         return CheckResult(
             name="idb_companion",
             status=CheckStatus.OK,
@@ -1770,44 +1784,213 @@ def check_idb_companion() -> CheckResult:
     )
 
 
+#: The patched companion release setup installs. v2 finds SimulatorKit where
+#: Xcode 27 moved it (Contents/SharedFrameworks); v1 looks only in the old
+#: place, so every HID command it runs fails under Xcode 27 (#222).
+_IDB_COMPANION_RELEASE = "idb-companion-v2"
 _IDB_COMPANION_URL = (
     "https://github.com/quern-dev/idb/releases/download/"
-    "idb-companion-v1/idb-companion-patched-arm64.tar.gz"
+    f"{_IDB_COMPANION_RELEASE}/idb-companion-patched-arm64.tar.gz"
 )
 
 
+def _companion_release_marker() -> Path:
+    return CONFIG_DIR / "bin" / "idb_companion.release"
+
+
+def _installed_companion_release() -> str:
+    """Which patched release is installed.
+
+    v1 wrote no marker, so an install without one is v1 -- the only release
+    that predates it. An unreadable marker reads the same way: ValueError is
+    caught alongside OSError because a marker that is not UTF-8 raises
+    UnicodeDecodeError, and that crashed setup outright.
+    """
+    try:
+        return _companion_release_marker().read_text().strip() or "idb-companion-v1"
+    except (OSError, ValueError):
+        return "idb-companion-v1"
+
+
+def _release_number(release: str) -> int | None:
+    prefix = "idb-companion-v"
+    tail = release[len(prefix):] if release.startswith(prefix) else ""
+    return int(tail) if tail.isdigit() else None
+
+
+def companion_is_outdated() -> bool:
+    """A patched companion is installed, and it is older than this quern's.
+
+    Older, not merely different: a newer install -- left by a later quern
+    before a rollback -- is not something to offer to downgrade. A marker
+    that names no release number is treated as outdated.
+    """
+    if not (CONFIG_DIR / "bin" / "idb_companion").is_file():
+        return False
+    installed = _release_number(_installed_companion_release())
+    current = _release_number(_IDB_COMPANION_RELEASE)
+    return installed is None or (current is not None and installed < current)
+
+
 def _install_patched_companion() -> bool:
-    """Download and install the patched idb_companion to ~/.quern/bin/."""
+    """Download the patched idb_companion and swap it into ~/.quern/bin/.
+
+    Downloaded and extracted into a staging directory first, and only
+    swapped in once the payload is complete. Extracting straight over the
+    install could stop partway -- a full disk is enough -- and leave a v1
+    binary beside half-replaced frameworks, breaking an install that was
+    working on an older Xcode. Replacing Frameworks/ wholesale also drops
+    files the old release had and the new one does not.
+
+    The release marker is cleared just before the swap, not before the
+    download: a download that fails leaves the install exactly as it was,
+    marker included, rather than making a current install read as outdated.
+    """
+    import shutil
+    import tempfile
     import urllib.request
 
     dest = CONFIG_DIR / "bin"
-    dest.mkdir(parents=True, exist_ok=True)
-    tarball = dest / "idb-companion.tar.gz"
+    marker = _companion_release_marker()
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        # A staging directory only survives a kill -9 mid-install, and it is
+        # ~17MB each time, so old ones are cleared rather than accumulated.
+        for stale in dest.glob(".idb-companion-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        staging = Path(tempfile.mkdtemp(prefix=".idb-companion-", dir=dest))
+    except OSError as exc:
+        print(f"    Could not prepare {dest}: {exc}")
+        return False
 
     try:
+        tarball = staging / "idb-companion.tar.gz"
         print("    Downloading patched idb_companion...")
         urllib.request.urlretrieve(_IDB_COMPANION_URL, tarball)
         print("    Extracting...")
         subprocess.run(
-            ["tar", "xzf", str(tarball), "-C", str(dest)],
+            ["tar", "xzf", str(tarball), "-C", str(staging)],
             check=True, stdin=subprocess.DEVNULL,
         )
-        tarball.unlink(missing_ok=True)
-        # Tarball extracts bin/idb_companion — move it up to dest/
-        nested = dest / "bin" / "idb_companion"
-        companion = dest / "idb_companion"
-        if nested.exists():
-            nested.rename(companion)
-            (dest / "bin").rmdir()
-        if companion.exists():
-            companion.chmod(0o755)
-            _record_install("quern", "idb_companion")
-            return True
-        return False
+        new_binary = staging / "bin" / "idb_companion"
+        new_frameworks = staging / "Frameworks"
+        if not new_binary.is_file() or not new_frameworks.is_dir():
+            print("    The download did not contain idb_companion and its Frameworks")
+            return False
+        new_binary.chmod(0o755)
+
+        # From here the install changes. The marker goes first, so a swap
+        # that fails partway leaves an install that reads as outdated, never
+        # one that reads as current.
+        marker.unlink(missing_ok=True)
+        frameworks = dest / "Frameworks"
+        retired = staging / "Frameworks.old"
+        if frameworks.exists():
+            frameworks.rename(retired)
+        try:
+            new_frameworks.rename(frameworks)
+        except OSError:
+            # Put the old frameworks back. If even that fails there are no
+            # frameworks at all, which the check reports as ERROR rather than
+            # MISSING -- the binary is still there -- and the next setup
+            # offers the update, because the marker was already cleared. A
+            # successful install then restores the whole tree.
+            if retired.exists():
+                retired.rename(frameworks)
+            raise
+        try:
+            new_binary.replace(dest / "idb_companion")
+        except OSError:
+            # The binary is the last thing to move, so a failure here would
+            # otherwise leave the new frameworks beside the old binary.
+            frameworks.rename(new_frameworks)
+            if retired.exists():
+                retired.rename(frameworks)
+            raise
     except Exception as exc:
-        print(f"    Download failed: {exc}")
-        tarball.unlink(missing_ok=True)
+        print(f"    Install failed: {exc}")
         return False
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    try:
+        marker.write_text(_IDB_COMPANION_RELEASE + "\n")
+    except OSError as exc:
+        # The new build is in place; only the record of it is missing, so
+        # this is still a successful install. The next setup will read it as
+        # outdated and offer to install it again, which is harmless.
+        print(f"    Installed {_IDB_COMPANION_RELEASE}, but could not record that: {exc}")
+    _record_install("quern", "idb_companion")
+    return True
+
+
+def _offer_companion_update(*, fallback: bool) -> CheckResult:
+    """Offer to replace an outdated patched companion, and say what resulted.
+
+    Declining reports the check as it stands -- an outdated install is a
+    warning whether or not anyone chose to fix it -- and a failed download
+    says so, rather than the "not required" a sim-bridge machine otherwise
+    shows, which would hide a fallback that cannot work.
+    """
+    what = "idb_companion fallback" if fallback else "idb_companion"
+    if not _prompt_yn(
+        f"    The installed {what} ({_installed_companion_release()}) does not "
+        f"work with Xcode 27. Update it to {_IDB_COMPANION_RELEASE}?"
+    ):
+        return check_idb_companion()
+    if _install_patched_companion():
+        return check_idb_companion()
+    return CheckResult(
+        name="idb_companion",
+        status=CheckStatus.WARNING,
+        message="Update failed; the installed build does not work with Xcode 27",
+        detail=(
+            f"Re-run '{quern_cmd()} setup', or download {_IDB_COMPANION_RELEASE} "
+            "from https://github.com/quern-dev/idb/releases"
+        ),
+    )
+
+
+def _setup_idb_companion(*, sim_bridge: bool) -> CheckResult:
+    """Setup's idb_companion step: check it, offer what applies, report.
+
+    With sim-bridge active the companion is not installed, but an install
+    from an older setup is still the fallback when sim-bridge cannot run --
+    and v1 of it cannot drive a simulator at all under Xcode 27 -- so an
+    outdated one is still offered for update.
+    """
+    if sim_bridge:
+        if companion_is_outdated():
+            return _offer_companion_update(fallback=True)
+        return CheckResult(
+            name="idb_companion",
+            status=CheckStatus.SKIPPED,
+            message="Not required (sim-bridge active)",
+            detail="Xcode 26+ on Apple Silicon: simulator UI runs through "
+                   "sim-bridge. An existing idb install is kept as a fallback.",
+        )
+
+    result = check_idb_companion()
+    if result.status == CheckStatus.MISSING:
+        if _prompt_yn("    idb_companion not found. Download patched build?"):
+            if _install_patched_companion():
+                return check_idb_companion()
+            return CheckResult(
+                name="idb_companion",
+                status=CheckStatus.WARNING,
+                message="Download failed (UI automation unavailable)",
+                detail="Try manually: https://github.com/quern-dev/idb/releases",
+            )
+    elif companion_is_outdated():
+        return _offer_companion_update(fallback=False)
+    elif result.message.startswith("installed (system"):
+        if _prompt_yn(
+            "    Patched idb_companion available "
+            "(fixes Group element detection). Install?"
+        ):
+            if _install_patched_companion():
+                return check_idb_companion()
+    return result
 
 
 def check_vpn() -> CheckResult:
@@ -2464,39 +2647,14 @@ def run_setup() -> int:
                 "    Xcode 26+ on Apple Silicon detected — "
                 "sim-bridge handles simulator UI natively. Skipping idb."
             )
-            report.add(CheckResult(
-                name="idb_companion",
-                status=CheckStatus.SKIPPED,
-                message="Not required (sim-bridge active)",
-                detail="Xcode 26+ on Apple Silicon: simulator UI runs through "
-                       "sim-bridge. Existing idb installs still work as a fallback.",
-            ))
+            report.add(_setup_idb_companion(sim_bridge=True))
             report.add(CheckResult(
                 name="idb (fb-idb)",
                 status=CheckStatus.SKIPPED,
                 message="Not required (sim-bridge active)",
             ))
         else:
-            idb_companion_result = check_idb_companion()
-            if idb_companion_result.status == CheckStatus.MISSING:
-                if _prompt_yn("    idb_companion not found. Download patched build?"):
-                    if _install_patched_companion():
-                        idb_companion_result = check_idb_companion()
-                    else:
-                        idb_companion_result = CheckResult(
-                            name="idb_companion",
-                            status=CheckStatus.WARNING,
-                            message="Download failed (UI automation unavailable)",
-                            detail="Try manually: https://github.com/quern-dev/idb/releases",
-                        )
-            elif idb_companion_result.message.startswith("installed (system"):
-                if _prompt_yn(
-                    "    Patched idb_companion available "
-                    "(fixes Group element detection). Install?"
-                ):
-                    if _install_patched_companion():
-                        idb_companion_result = check_idb_companion()
-            report.add(idb_companion_result)
+            report.add(_setup_idb_companion(sim_bridge=False))
 
             idb_result = check_idb()
             if idb_result.status == CheckStatus.MISSING:
