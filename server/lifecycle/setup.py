@@ -1685,7 +1685,7 @@ def check_node(sites: list | None = None) -> CheckResult:
             fixable=True,
         )
 
-    problems = [site for site in sites if not site.ok]
+    problems = [site for site in sites if site.status not in (node_env.OK, node_env.SKIPPED)]
     if not problems:
         return CheckResult(name="Node.js", status=CheckStatus.OK,
                            message=here.version or "installed")

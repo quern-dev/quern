@@ -604,6 +604,10 @@ class TestCheckNode:
         assert "GUI apps" in result.message
         assert "brew install node" in result.detail
 
+    def test_an_unsupported_shell_alone_is_not_a_warning(self):
+        result = check_node(_sites(login=("skipped", None), script=("skipped", None)))
+        assert result.status == CheckStatus.OK
+
     def test_the_wrapper_still_builds_on_a_warning(self):
         """Node 20 builds `mcp/dist`. Gating the build on OK would leave it
         stale on exactly the machines the warning is about."""

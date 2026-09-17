@@ -135,7 +135,46 @@ class TestEachPlaceIsAskedSeparately:
     def test_a_node_that_will_not_say_its_version_is_not_ok(self):
         broken = "/caller/bin/node"
         world = World(on_path={"/caller/bin": broken}, versions={})
-        assert _by_place(world.probe())["this command"].status == node_env.TOO_OLD
+        here = _by_place(world.probe())["this command"]
+        # Its own status: "too old" would advise upgrading a node that does
+        # not run at all. Found in review.
+        assert here.status == node_env.UNUSABLE
+        fix = node_env.fix_for(here, [here])
+        assert "did not run" in fix and "below" not in fix
+
+
+class TestTheProbesRunTogether:
+    def test_four_slow_places_take_the_time_of_one(self):
+        """Up to 10s each, one after another, was a 40s worst case in front of
+        setup and doctor. Found in review."""
+        import threading
+        import time
+
+        node = "/opt/homebrew/bin/node"
+        world = World(on_path={"/caller/bin": node, "/opt/homebrew/bin": node},
+                      versions={node: "v22.1.0"},
+                      login=_line(node, "v22.1.0"), script=_line(node, "v22.1.0"))
+        inner = world.run
+        active = {"now": 0, "most": 0}
+        lock = threading.Lock()
+
+        def slow(argv, **kw):
+            with lock:
+                active["now"] += 1
+                active["most"] = max(active["most"], active["now"])
+            time.sleep(0.2)
+            with lock:
+                active["now"] -= 1
+            return inner(argv, **kw)
+
+        world.run = slow
+        started = time.monotonic()
+        sites = world.probe()
+        assert [s.place for s in sites] == [
+            "this command", "login shell", "non-interactive shell", "GUI apps",
+        ], "the order is part of the report"
+        assert active["most"] >= 3, f"only {active['most']} ran at once"
+        assert time.monotonic() - started < 0.7
 
 
 class TestShellOutput:
@@ -168,12 +207,21 @@ class TestShellOutput:
         assert _by_place(world.probe())["non-interactive shell"].status == node_env.UNKNOWN
 
     @pytest.mark.parametrize("shell", ["/usr/local/bin/fish", ""])
-    def test_an_unsupported_shell_is_unknown_and_not_run(self, shell):
+    def test_an_unsupported_shell_is_skipped_and_not_run(self, shell):
+        """Skipped, not unknown: it is a fact about the machine, and doctor
+        fails on unknown."""
         world = World()
         sites = _by_place(world.probe(shell=shell))
-        assert sites["login shell"].status == node_env.UNKNOWN
-        assert sites["non-interactive shell"].status == node_env.UNKNOWN
+        assert sites["login shell"].status == node_env.SKIPPED
+        assert sites["non-interactive shell"].status == node_env.SKIPPED
+        assert "unsupported shell" in sites["login shell"].detail
         assert not [argv for argv, _ in world.calls if argv[-1] != "--version"]
+
+    def test_the_shell_places_record_which_shell(self):
+        world = World(login=_line("", ""), script=_line("", ""))
+        sites = _by_place(world.probe(shell="/bin/bash"))
+        assert sites["login shell"].shell == "bash"
+        assert sites["non-interactive shell"].shell == "bash"
 
 
 class TestFixes:
@@ -210,6 +258,28 @@ class TestFixes:
                          f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.0.0")
         script = self._site("non-interactive shell", node_env.MISSING)
         assert ".zshenv" in node_env.fix_for(script, [fnm, script])
+
+    def test_bash_scripts_are_pointed_at_bash_env(self):
+        """zsh's file would be read by nothing. Found in review."""
+        fnm = self._site("login shell", node_env.OK,
+                         f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.0.0")
+        script = node_env.NodeSite("non-interactive shell", "x", node_env.MISSING, shell="bash")
+        fix = node_env.fix_for(script, [fnm, script])
+        assert "BASH_ENV" in fix and ".zshenv" not in fix
+
+    def test_bash_mise_is_activated_for_bash(self):
+        mise = self._site("login shell", node_env.OK,
+                          f"{HOME}/.local/share/mise/shims/node", "v22.0.0")
+        script = node_env.NodeSite("non-interactive shell", "x", node_env.MISSING, shell="bash")
+        assert "mise activate bash --shims" in node_env.fix_for(script, [mise, script])
+
+    @pytest.mark.parametrize("shell, file", [("zsh", "~/.zshrc"), ("bash", "~/.bash_profile")])
+    def test_a_login_shell_missing_an_installed_node_is_told_to_load_it(self, shell, file):
+        nvm = self._site("this command", node_env.OK,
+                         f"{HOME}/.nvm/versions/node/v22.0.0/bin/node", "v22.0.0")
+        login = node_env.NodeSite("login shell", "x", node_env.MISSING, shell=shell)
+        fix = node_env.fix_for(login, [nvm, login])
+        assert file in fix and "nvm" in fix and "No node found" not in fix
 
     def test_unknown_explains_itself(self):
         site = node_env.NodeSite("login shell", "x", node_env.UNKNOWN, detail="it hung")
@@ -289,6 +359,23 @@ class TestDoctor:
         out = capsys.readouterr().out
         assert "✓ this command" in out and "✗ GUI apps" in out
         assert out.count("fix:") == 1
+
+    def test_a_place_that_could_not_be_checked_fails_doctor(self, monkeypatch):
+        """Doctor's exit code says when a check could not be made. Found in
+        review."""
+        from server import main
+
+        monkeypatch.setattr(node_env, "probe", lambda: [node_env.NodeSite(
+            "login shell", "x", node_env.UNKNOWN, detail="the shell did not answer")])
+        assert main._report_node() is False
+
+    def test_an_unsupported_shell_does_not_fail_doctor(self, monkeypatch, capsys):
+        from server import main
+
+        monkeypatch.setattr(node_env, "probe", lambda: [node_env.NodeSite(
+            "login shell", "x", node_env.SKIPPED, detail="unsupported shell fish")])
+        assert main._report_node() is True
+        assert "note: unsupported shell fish" in capsys.readouterr().out
 
     def test_a_probe_that_throws_is_reported_as_unchecked(self, monkeypatch, capsys):
         from server import main

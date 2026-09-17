@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,19 +54,22 @@ _SHELL_PROBE = (
 )
 
 OK = "ok"
-TOO_OLD = "too_old"
+TOO_OLD = "too_old"     # a readable version below the floor
+UNUSABLE = "unusable"   # found, but it did not run or say what it is
 MISSING = "missing"
-UNKNOWN = "unknown"   # could not look -- not the same as "no node"
+UNKNOWN = "unknown"     # the probe failed -- not the same as "no node"
+SKIPPED = "skipped"     # not checkable here (an unsupported shell); not a failure
 
 
 @dataclass(frozen=True)
 class NodeSite:
     place: str        # short name, e.g. "GUI apps"
     used_by: str      # who runs node from here
-    status: str       # OK | TOO_OLD | MISSING | UNKNOWN
+    status: str       # one of the statuses above
     path: str | None = None
     version: str | None = None
-    detail: str = ""  # why UNKNOWN, or anything else worth saying
+    detail: str = ""  # why UNKNOWN or SKIPPED, or anything else worth saying
+    shell: str | None = None  # "zsh" or "bash", for the shell places
 
     @property
     def ok(self) -> bool:
@@ -89,8 +93,10 @@ def _classify(path: str | None, version: str | None) -> str:
     major = major_version(version)
     if major is None:
         # Found but would not report a version: a broken binary is not a
-        # working one, and calling it OK is the false all-clear.
-        return TOO_OLD
+        # working one, and calling it OK is the false all-clear. Nor is it
+        # "too old" -- that advice would be to upgrade something that does not
+        # run at all.
+        return UNUSABLE
     return OK if major >= MIN_NODE_MAJOR else TOO_OLD
 
 
@@ -114,6 +120,14 @@ def _on_path(place: str, used_by: str, path_dirs: list[str], run: Runner,
 
 def _in_shell(place: str, used_by: str, argv: list[str], env: dict[str, str],
               run: Runner) -> NodeSite:
+    shell = Path(argv[0]).name
+    site = _in_shell_unnamed(place, used_by, argv, env, run)
+    return NodeSite(site.place, site.used_by, site.status, site.path, site.version,
+                    site.detail, shell)
+
+
+def _in_shell_unnamed(place: str, used_by: str, argv: list[str], env: dict[str, str],
+                      run: Runner) -> NodeSite:
     try:
         result = run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT,
                      env=env, stdin=subprocess.DEVNULL, start_new_session=True)
@@ -166,34 +180,40 @@ def probe(
     """Where each of the four places finds `node`, and whether it is usable."""
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
-    sites = [_here(run, which, env)]
+    checks: list[Callable[[], NodeSite]] = [lambda: _here(run, which, env)]
 
     shell = user_shell(env)
     if shell is None:
         reason = f"unsupported shell {env.get('SHELL') or '(unset)'}; zsh and bash are checked"
-        sites.append(NodeSite("login shell", "Terminal, and CLI MCP clients", UNKNOWN,
-                              detail=reason))
-        sites.append(NodeSite("non-interactive shell", "agents' tools and scripts",
-                              UNKNOWN, detail=reason))
+        checks.append(lambda: NodeSite("login shell", "Terminal, and CLI MCP clients",
+                                       SKIPPED, detail=reason))
+        checks.append(lambda: NodeSite("non-interactive shell", "agents' tools and scripts",
+                                       SKIPPED, detail=reason))
     else:
         base = {k: env[k] for k in ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR")
                 if k in env}
         base["HOME"] = home
         minimal = {**base, "PATH": os.pathsep.join(GUI_PATH)}
-        sites.append(_in_shell("login shell", "Terminal, and CLI MCP clients",
-                               [shell, "-lic", _SHELL_PROBE], minimal, run))
         # bash reads $BASH_ENV in a non-interactive shell; carry it through,
         # since that is the one file such a shell would consult.
         non_interactive = dict(minimal)
         if Path(shell).name == "bash" and "BASH_ENV" in env:
             non_interactive["BASH_ENV"] = env["BASH_ENV"]
-        sites.append(_in_shell("non-interactive shell", "agents' tools and scripts",
-                               [shell, "-c", _SHELL_PROBE], non_interactive, run))
+        checks.append(lambda: _in_shell("login shell", "Terminal, and CLI MCP clients",
+                                        [shell, "-lic", _SHELL_PROBE], minimal, run))
+        checks.append(lambda: _in_shell("non-interactive shell", "agents' tools and scripts",
+                                        [shell, "-c", _SHELL_PROBE], non_interactive, run))
 
     gui_dirs = [d.format(home=home) for d in MENUBAR_EXTRA_PATH] + list(GUI_PATH)
-    sites.append(_on_path("GUI apps", "the menu-bar app, and MCP clients opened from the Dock",
-                          gui_dirs, run, which))
-    return sites
+    checks.append(lambda: _on_path(
+        "GUI apps", "the menu-bar app, and MCP clients opened from the Dock",
+        gui_dirs, run, which))
+
+    # Concurrently: each can take up to PROBE_TIMEOUT, and one after another
+    # that was a 40s worst case in front of setup and doctor. Threads rather
+    # than asyncio because both callers are synchronous CLI steps.
+    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+        return list(pool.map(lambda check: check(), checks))
 
 
 #: Where each installer puts node, most specific first. Matched against the
@@ -272,19 +292,36 @@ def upgrade_command(manager: str | None, major: int = MIN_NODE_MAJOR) -> str:
 
 
 _NON_INTERACTIVE_FIX = {
-    "fnm": 'Add `eval "$(fnm env)"` to ~/.zshenv, which every zsh reads.',
-    "nvm": "Load nvm from ~/.zshenv rather than ~/.zshrc, which scripts never read.",
-    "mise": ('Add `eval "$(mise activate zsh --shims)"` to ~/.zshenv. Plain '
+    "fnm": 'Add `eval "$(fnm env)"` to {file}.',
+    "nvm": "Load nvm from {file}, not only from your interactive startup file.",
+    "mise": ('Add `eval "$(mise activate {shell} --shims)"` to {file}. Plain '
              "`mise activate` only works in interactive shells."),
-    "asdf": "Put asdf's shims directory on PATH in ~/.zshenv, not only in ~/.zshrc.",
-    "volta": "Put ~/.volta/bin on PATH in ~/.zshenv, not only in ~/.zshrc.",
-    "nodenv": 'Add `eval "$(nodenv init - zsh)"` to ~/.zshenv.',
+    "asdf": "Put asdf's shims directory on PATH in {file}.",
+    "volta": "Put ~/.volta/bin on PATH in {file}.",
+    "nodenv": 'Add `eval "$(nodenv init - {shell})"` to {file}.',
 }
+
+#: What each shell reads, per kind of shell. Non-interactive bash reads only
+#: the file $BASH_ENV names, so the advice has to include creating that.
+_STARTUP = {
+    ("zsh", "non-interactive"): ("~/.zshenv", ""),
+    ("bash", "non-interactive"): (
+        "~/.bashenv",
+        " Non-interactive bash reads only the file named by $BASH_ENV, so also "
+        "add `export BASH_ENV=~/.bashenv` to ~/.bash_profile.",
+    ),
+    ("zsh", "login"): ("~/.zshrc", ""),
+    ("bash", "login"): ("~/.bash_profile", ""),
+}
+
+
+def _startup(shell: str | None, kind: str) -> tuple[str, str]:
+    return _STARTUP[(shell if shell in ("zsh", "bash") else "zsh", kind)]
 
 
 def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
     """One actionable line for a site that is not OK."""
-    if site.status == UNKNOWN:
+    if site.status in (UNKNOWN, SKIPPED):
         return site.detail
     # This node's own installer first: a too-old node is upgraded with the tool
     # that put it there, whatever the other places use.
@@ -293,7 +330,10 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
     upgrade = upgrade_command(manager)
 
     if site.status == TOO_OLD:
-        return f"Node {site.version or '(unreadable)'} is below {MIN_NODE_MAJOR}. Run: {upgrade}"
+        return f"Node {site.version} is below {MIN_NODE_MAJOR}. Run: {upgrade}"
+    if site.status == UNUSABLE:
+        return (f"{site.path} did not run or report its version, so it is "
+                f"probably broken. Reinstall it: {upgrade}")
 
     # MISSING: where the fix goes depends on the place.
     if site.place == "GUI apps":
@@ -303,7 +343,15 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
                 f"not `node@{MIN_NODE_MAJOR}`, which Homebrew does not link onto "
                 "PATH), or point your MCP client's \"command\" at an absolute "
                 f"path to a Node {MIN_NODE_MAJOR}+ binary.")
+    shell = site.shell or "zsh"
     if site.place == "non-interactive shell":
-        return _NON_INTERACTIVE_FIX.get(
-            manager or "", "Put your Node setup in ~/.zshenv, which non-interactive zsh reads.")
+        file, extra = _startup(shell, "non-interactive")
+        template = _NON_INTERACTIVE_FIX.get(
+            manager or "", "Put your Node setup in {file}, which non-interactive {shell} reads.")
+        return template.format(file=file, shell=shell) + extra
+    if site.place == "login shell" and manager:
+        # A node exists elsewhere, so this is about loading it, not installing.
+        file, _ = _startup(shell, "login")
+        return f"Node is installed ({manager}) but your login shell does not load it. " \
+               f"Load it from {file}."
     return f"No node found. Run: {upgrade}"
