@@ -459,8 +459,12 @@ class DeviceControllerUI:
             or a progress percentage, and counting it as movement stopped end
             detection outright and kept the at-rest check from ever seeing two
             reads agree (review of #204: 20 downward swipes at the bottom of a
-            list, 182 reads for one sweep). More than two such changes at once
-            is not a clock ticking, and counts as movement.
+            list, 182 reads for one sweep).
+
+            Judged as a share of the screen, not a count: one clock among
+            twenty rows is a clock, but every row replaced in place is a page
+            turning. An absolute limit of two put five "N min ago" labels
+            ticking together straight back into the old failure mode.
             """
             if any(before[k] != after[k] for k in before.keys() & after.keys()):
                 return True
@@ -476,7 +480,7 @@ class DeviceControllerUI:
                     return True
                 appeared.remove(twin)
                 in_place += 1
-            return bool(appeared) or in_place > 2
+            return bool(appeared) or in_place * 4 >= len(before)
 
         async def _read(probe: bool) -> tuple[UIElement | None, dict]:
             """The whole tree: the target if it is there, and the fingerprint.
@@ -675,7 +679,7 @@ class DeviceControllerUI:
                     # and sweeping on spent the whole budget finding it out.
                     _give_up("the target has no frame, so no swipe can bring it into view")
                     return None
-                if el is not None and el.frame["height"] / 2 > bottom_safe - top_safe:
+                if el is not None and el.frame["height"] / 2 >= bottom_safe - top_safe:
                     # _visible needs the top below the chrome and the centre
                     # above the home indicator, which an element this tall can
                     # never satisfy at once; the sweep swung around it until

@@ -52,6 +52,7 @@ class ListScreen(DeviceControllerUI):
     """
 
     def __init__(self, rows: int = 200, *, offset: float = 0.0, row: float = ROW,
+                 tickers: int = 0,
                  scrolls: bool = True, controlled: bool = True,
                  at_rest: bool = False, bounce: float = 0.0,
                  ids: bool = True, ticking: bool = False, lazy: bool = True,
@@ -64,6 +65,7 @@ class ListScreen(DeviceControllerUI):
         self.loading = False
         self.ids = ids              # False: rows told apart only by label
         self.ticking = ticking      # a clock label that changes every read
+        self.tickers = tickers      # several labels ticking at once
         self.ticks = 0
         self.phantom: set[str] = set()   # seen by a filtered read only
         self.rows = rows
@@ -153,6 +155,14 @@ class ListScreen(DeviceControllerUI):
             els.append(UIElement(
                 type="StaticText", identifier="clock", label=f"0:{self.ticks:02d}",
                 frame={"x": 300, "y": 60, "width": 60, "height": 20},
+            ))
+        for n in range(self.tickers):
+            # "N min ago" on each of several rows: id-less, in place, and new
+            # text on every read.
+            self.ticks += 1
+            els.append(UIElement(
+                type="StaticText", identifier="", label=f"{self.ticks} min ago",
+                frame={"x": 300, "y": 120 + 44 * n, "width": 80, "height": 20},
             ))
         if filtered:
             for ident in sorted(self.phantom):
@@ -841,3 +851,59 @@ async def test_where_swipes_fling_the_end_of_a_long_list_is_reached(fling):
         if await _sweep(screen, f"row_{index}") is None:
             missed.append(index)
     assert not missed, f"at {fling}x, not reached: {missed}"
+
+
+@pytest.mark.asyncio
+async def test_several_labels_ticking_at_once_are_still_not_movement():
+    """V-2 — five "N min ago" labels put an absolute limit of two straight
+    back into the old failure mode: 30 swipes and 182 reads for an absent
+    target. The share of the screen they occupy is what tells them from a
+    page turn."""
+    screen = ListScreen(rows=60, tickers=5)
+    found = await _sweep(screen, "row_missing")
+
+    assert found is None
+    assert screen.swipes() == ["swipe:down"] * 5 + ["swipe:up"] * 5, screen.swipes()
+    for group in screen.after_each_swipe():
+        assert len(group) == 2, f"reads did not agree at once: {group}"
+
+
+@pytest.mark.asyncio
+async def test_a_target_exactly_too_tall_to_fit_ends_the_sweep_at_once():
+    """V-1 — at exactly twice the visible window the top and centre still
+    cannot both be in view, and a strict > let it sweep the whole budget."""
+    exactly = 2 * (SCREEN["height"] - 34 - 50)
+    screen = ListScreen(rows=5, row=float(exactly), lazy=False)
+    found = await _sweep(screen, "row_2")
+
+    assert found is None
+    assert screen.swipes() == [], screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_label_that_changes_and_moves_is_movement():
+    """T4 — an in-place change is only in place if the position is the same.
+
+    Without that, a row whose text changed as the list scrolled would pair
+    with its old self and the scroll would read as static.
+    """
+    def screenful(label, y, others):
+        rows = [UIElement(type="StaticText", identifier="", label=label,
+                          frame={"x": 0, "y": y, "width": 393, "height": ROW})]
+        rows += [UIElement(type="Cell", identifier=f"fixed_{i}", label=f"Fixed {i}",
+                           frame={"x": 0, "y": 100 + 44 * i, "width": 393, "height": ROW})
+                 for i in range(others)]
+        return rows
+
+    screen = ListScreen()
+    # One element changes its text *and* moves; everything else holds still.
+    screen.script = [
+        screenful("Loading", 600, 19),
+        screenful("Loaded", 300, 19), screenful("Loaded", 300, 19),
+        screenful("Loaded", 300, 19), screenful("Loaded", 300, 19),
+    ]
+    await _sweep(screen, "row_missing", max_swipes=2)
+
+    assert len(screen.swipes()) > 2, (
+        f"the screen moved and the sweep called it an end: {screen.swipes()}"
+    )
