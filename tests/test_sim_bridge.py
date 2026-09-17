@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
 from pathlib import Path
@@ -727,3 +728,78 @@ class TestCancellationIsNotSwallowed:
             with pytest.raises(RuntimeError, match="timed out"):
                 await mgr._send_locked({"cmd": "tap"})
         assert mgr._kill_process.await_count == 1
+
+
+class TestProbeFlagIsHonouredOnEveryPath:
+    """`probe=False` must mean no hit-tests, on the retry and on idb too.
+
+    Two paths the review found unguarded. Both take the flag and could drop it
+    without any test noticing, and dropping it silently restores the ~3.5s cost
+    the flag exists to skip.
+    """
+
+    #: A tab bar the static walk reports as childless — what probing targets.
+    TAB_BAR = [{
+        "type": "Group", "AXLabel": "Tab Bar", "children": [],
+        "frame": {"x": 0, "y": 800, "width": 400, "height": 80},
+    }]
+
+    @pytest.mark.asyncio
+    async def test_the_poisoned_tree_retry_keeps_probe_false(self):
+        """M5.
+
+        A poisoned accessibility bridge (#66) is healed by one reset and a
+        recursive retry. The retry must carry the caller's `probe` choice, or a
+        caller that opted out pays for probing anyway — exactly when the bridge
+        is already struggling.
+        """
+        backend = SimBridgeBackend(SimBridgeManager())
+        backend._fetch_nested = AsyncMock(side_effect=lambda *_a, **_k: [dict(self.TAB_BAR[0])])  # type: ignore[method-assign]
+        hits: list = []
+
+        async def _describe_point(*_a, **_k):
+            hits.append(_a)
+            return None
+
+        backend.describe_point = _describe_point  # type: ignore[method-assign]
+
+        poisoned = iter([True, False])
+        with (
+            patch("server.device.sim_bridge.ax_recovery.looks_poisoned",
+                  lambda _flat: next(poisoned, False)),
+            patch("server.device.sim_bridge.ax_recovery.reset_bridge",
+                  AsyncMock(return_value=True)),
+        ):
+            await backend.describe_all("udid", probe=False)
+
+        assert backend._fetch_nested.await_count == 2, "the retry did not run"
+        assert hits == [], (
+            f"probe=False, yet {len(hits)} hit-test(s) ran — the retry after a "
+            "bridge reset dropped the caller's choice"
+        )
+
+    @pytest.mark.asyncio
+    async def test_idb_honours_probe_false(self):
+        """M9.
+
+        idb probes the same way sim-bridge does, and is the backend in use
+        whenever sim-bridge is unavailable. Checking only that it *accepts* the
+        keyword let an implementation that ignored it pass.
+        """
+        from server.device.idb import IdbBackend
+
+        backend = IdbBackend()
+        backend._run = AsyncMock(  # type: ignore[method-assign]
+            return_value=(json.dumps(self.TAB_BAR), ""),
+        )
+        backend.describe_point = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        await backend.describe_all("udid", probe=False)
+        assert backend.describe_point.await_count == 0, (
+            "idb ran hit-tests with probe=False"
+        )
+
+        await backend.describe_all("udid", probe=True)
+        assert backend.describe_point.await_count > 0, (
+            "idb did not probe with probe=True — the control for the check above"
+        )
