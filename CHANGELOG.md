@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-09-17
+
+A hotfix for updating into 0.18.3, which crashed after applying the update. If you are on 0.18.2 or earlier, this is the release to update to.
+
 ### Fixed
 - **Updating to 0.18.3 crashed after the update had been applied.** `quern update` ended with `ImportError: cannot import name 'quern_cmd' from 'server.config'`, and setup and the server restart never ran. The updater replaced the source tree and then carried on in the process that was still running the old code, so modules it had loaded before the swap were the old release's and modules it loaded afterwards were the new one's — and the new setup asked the old configuration module for a function added in 0.18.3. It affected every update to 0.18.3 from an earlier version, git and tarball alike. Everything after the swap now runs in a fresh process that has loaded only the new code. Updaters from 0.18.3 and earlier still work the old way, so this release also reloads what such an updater loaded before the swap, which is what lets them install it. If you hit the error, `quern setup` followed by `quern restart` finishes the update.
+
+### Documentation
+- **Starting WebDriverAgent without reinstalling it.** Two failures both surface as "WDA did not become responsive" and want opposite fixes: a build or signing problem wants a rebuild, while a failing install channel does not — the runner is already installed and healthy, and every retry fails the same way. The iOS WDA guide now tells them apart, and shows how to start the installed runner directly with `pymobiledevice3 developer dvt xcuitest`, with no install step.
 
 ## [0.18.3] - 2026-09-16
 
@@ -516,7 +523,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.18.3...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.18.4...main
+[0.18.4]: https://github.com/quern-dev/quern/releases/tag/v0.18.4
 [0.18.3]: https://github.com/quern-dev/quern/releases/tag/v0.18.3
 [0.18.2]: https://github.com/quern-dev/quern/releases/tag/v0.18.2
 [0.18.1]: https://github.com/quern-dev/quern/releases/tag/v0.18.1
