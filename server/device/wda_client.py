@@ -996,8 +996,9 @@ class WdaBackend:
         """Swipe gesture via WDA.
 
         `hold` is accepted for parity with sim-bridge and ignored. WDA's drag is
-        XCUITest's press-then-drag rather than a flick; its travel has not been
-        measured the way sim-bridge's was.
+        XCUITest's press-then-drag, not a flick: measured on an iPhone 11, a
+        358pt drag moved the list 349pt, and nothing was moving once the call
+        returned, including at the end of a list.
         """
         await self._request("post", udid, "/wda/dragfromtoforduration",
                             use_session=True, timeout=ACTION_TIMEOUT,

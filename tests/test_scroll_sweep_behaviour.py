@@ -16,6 +16,13 @@ History, because each part of the harness exists for a measured failure:
   it was 91pt off. `bounce` models that.
 - idb cannot hold a swipe (`controlled=False`); WDA returns only once the app
   is idle (`at_rest=True`).
+
+The model's physics follow measurement, not the sweep's assumptions: a
+controlled swipe travels 0.9x its drag (625pt for 694pt), an idb swipe flings
+2.6x (1020pt for 389pt), and a bounce decays over several reads, as a real
+snap-back animates for a few tenths of a second. A model that moved exactly by
+the drag let the review of this rebuild show idb passing over 87 of 200 rows
+with every test green.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ SCREEN = {"width": 393, "height": 852}
 ROW = 44.0
 TOP = 100.0          # where row 0 sits at offset 0, just under the nav bar
 DRAG = 0.75          # the sweep's swipe, as a fraction of the screen
+TRAVEL = 0.9         # a controlled swipe's travel, per unit of drag
+FLING = 2.6          # an unheld swipe's travel, per unit of drag
 
 
 class ListScreen(DeviceControllerUI):
@@ -44,7 +53,12 @@ class ListScreen(DeviceControllerUI):
 
     def __init__(self, rows: int = 200, *, offset: float = 0.0, row: float = ROW,
                  scrolls: bool = True, controlled: bool = True,
-                 at_rest: bool = False, bounce: float = 0.0):
+                 at_rest: bool = False, bounce: float = 0.0,
+                 ids: bool = True, ticking: bool = False):
+        self.ids = ids              # False: rows told apart only by label
+        self.ticking = ticking      # a clock label that changes every read
+        self.ticks = 0
+        self.phantom: set[str] = set()   # seen by a filtered read only
         self.rows = rows
         self.row = row
         self.offset = offset
@@ -52,7 +66,7 @@ class ListScreen(DeviceControllerUI):
         self.controlled = controlled
         self.at_rest = at_rest
         self.bounce = bounce
-        self.bouncing = False
+        self.bouncing = 0           # reads left that still show the bounce
         self.probe_only: set[str] = set()
         self.script: list[list[UIElement]] | None = None
         self.events: list[str] = []
@@ -94,8 +108,11 @@ class ListScreen(DeviceControllerUI):
         if self.script is not None and not filtered:
             els = self.script.pop(0) if self.script else []
         else:
-            shift = self.offset + (self.bounce if self.bouncing else 0.0)
-            self.bouncing = False
+            # Decays over three reads: bounce, half, a quarter, then rest.
+            shift = self.offset
+            if self.bouncing:
+                shift += self.bounce / 2 ** (3 - self.bouncing)
+                self.bouncing -= 1
             els = [UIElement(
                 type="NavigationBar", identifier="nav", label="List",
                 frame={"x": 0, "y": 50, "width": SCREEN["width"], "height": 44},
@@ -104,10 +121,23 @@ class ListScreen(DeviceControllerUI):
                 y = TOP + i * self.row - shift
                 if -self.row < y < SCREEN["height"]:
                     els.append(UIElement(
-                        type="Cell", identifier=f"row_{i}", label=f"Row {i}",
+                        type="Cell", identifier=f"row_{i}" if self.ids else "",
+                        label=f"Row {i}",
                         frame={"x": 0, "y": y, "width": SCREEN["width"],
                                "height": self.row},
                     ))
+        if self.ticking:
+            self.ticks += 1
+            els.append(UIElement(
+                type="StaticText", identifier="clock", label=f"0:{self.ticks:02d}",
+                frame={"x": 300, "y": 60, "width": 60, "height": 20},
+            ))
+        if filtered:
+            for ident in sorted(self.phantom):
+                els.append(UIElement(
+                    type="Cell", identifier=ident, label=ident,
+                    frame={"x": 0, "y": 900, "width": 393, "height": ROW},
+                ))
         if probe_containers:
             # Chrome only a probing read can see: a tab-bar item, whose tap
             # point sits below the home-indicator inset.
@@ -135,17 +165,19 @@ class ListScreen(DeviceControllerUI):
             self.holds.append(hold)
             self.drags.append(abs(y1 - y2) / SCREEN["height"])
             if not self.scrolls:
-                self.bouncing = bool(self.bounce)   # a short list still bounces
+                self.bouncing = 3 if self.bounce else 0   # short lists bounce too
                 return
-            wanted = self.offset + (y1 - y2)
+            travel = (TRAVEL if self.controlled else FLING) * (y1 - y2)
+            wanted = self.offset + travel
             landed = min(max(wanted, 0.0), self.max_offset)
-            self.bouncing = bool(self.bounce) and landed != wanted
+            self.bouncing = 3 if self.bounce and landed != wanted else 0
             self.offset = landed
 
         async def no_hit_tests(*_a, **_k):
-            raise AssertionError(
-                "the sweep hit-tested; on WDA each hit-test is a full tree read"
-            )
+            # Recorded, not raised: the check this replaced swallowed its own
+            # exceptions, so raising would pass against it.
+            self.events.append("hit-test")
+            return None
 
         backend.swipe = AsyncMock(side_effect=swipe)
         backend.describe_point = AsyncMock(side_effect=no_hit_tests)
@@ -284,7 +316,7 @@ async def test_a_list_moved_by_whole_rows_is_still_seen_to_move():
     on the same positions. Compared on positions alone, that reads as nothing
     having moved, and the sweep turns back at an end it has not reached.
     """
-    row = SCREEN["height"] * DRAG / 10
+    row = SCREEN["height"] * DRAG * TRAVEL / 10
     screen = ListScreen(rows=100, row=row)
     found = await _sweep(screen, "row_80")
 
@@ -419,8 +451,9 @@ async def test_a_probe_only_target_is_not_hunted_with_plain_reads():
     assert sweep_reads and all(e == "read:probe:full" for e in sweep_reads), (
         f"the sweep dropped to plain reads for a probe-only target: {sweep_reads}"
     )
-    assert len(screen.swipes()) <= 3, (
-        f"{len(screen.swipes())} swipes for a target scrolling cannot move"
+    assert len(screen.swipes()) == 2, (
+        f"{len(screen.swipes())} swipes for a target scrolling cannot move; "
+        "the stall check should end it after two"
     )
 
 
@@ -444,7 +477,8 @@ async def test_the_sweep_never_hit_tests():
     overlay and called a scrollable list static.
     """
     screen = ListScreen(scrolls=False)
-    await _sweep(screen, "row_missing")      # the ListScreen hit-test raises
+    await _sweep(screen, "row_missing")
+    assert "hit-test" not in screen.events
 
 
 # -- time --------------------------------------------------------------------
@@ -525,3 +559,143 @@ def test_the_backends_declare_how_their_swipes_end():
     assert WdaBackend.swipe_returns_at_rest is True
     assert getattr(SimBridgeBackend, "swipe_returns_at_rest", False) is not True
     assert getattr(IdbBackend, "swipe_returns_at_rest", False) is not True
+
+
+# -- from the review of the rebuild ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_where_swipes_fling_no_row_is_passed_over():
+    """M32 — idb flings, so its step must leave room for the fling.
+
+    With the controlled backends' 75% drag, a 2.6x fling passed over 87 of 200
+    rows from the top.
+    """
+    missed = []
+    for index in range(200):
+        screen = ListScreen(controlled=False)
+        if await _sweep(screen, f"row_{index}") is None:
+            missed.append(index)
+    assert not missed, f"{len(missed)} rows passed over: {missed[:10]}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row", [300.0, 400.0, 500.0, 700.0])
+async def test_tall_rows_are_brought_into_view(row):
+    """M33 — a located row is swiped toward by what it needs, not a full step.
+
+    A full step toward a row taller than the window it must land in carried
+    it straight past, back and forth, until the budget ran out.
+    """
+    missed = []
+    for index in range(30):
+        screen = ListScreen(rows=30, row=row)
+        if await _sweep(screen, f"row_{index}", max_swipes=25) is None:
+            missed.append(index)
+    assert not missed, f"rows of {row}pt not brought into view: {missed}"
+
+
+@pytest.mark.asyncio
+async def test_a_label_changing_in_place_does_not_hide_the_bottom():
+    """M34 — a running clock must not read as the list moving.
+
+    Counted as movement it stopped end detection outright: from the bottom, a
+    search for a row above swiped down 20 times first.
+    """
+    screen = ListScreen(ticking=True).at_bottom()
+    found = await _sweep(screen, "row_3")
+
+    assert found is not None
+    swipes = screen.swipes()
+    assert swipes[0] == "swipe:down" and set(swipes[1:]) == {"swipe:up"}, swipes
+
+
+@pytest.mark.asyncio
+async def test_a_label_changing_in_place_does_not_keep_the_reads_going():
+    """M34 — nor stop two reads from agreeing: 182 reads for one sweep."""
+    screen = ListScreen(rows=60, ticking=True)
+    await _sweep(screen, "row_missing")
+
+    assert screen.swipes() == ["swipe:down"] * 5 + ["swipe:up"] * 5, screen.swipes()
+    for group in screen.after_each_swipe():
+        assert len(group) == 2, f"reads did not agree at once: {group}"
+
+
+@pytest.mark.asyncio
+async def test_rows_told_apart_only_by_label_are_seen_to_move():
+    """M30b — the label is part of an element's identity.
+
+    Without ids, rows differ only in label. Dropping it makes every row the
+    same element, and a scroll by whole rows reads as nothing moving.
+    """
+    row = SCREEN["height"] * DRAG * TRAVEL / 10
+    screen = ListScreen(rows=100, row=row, ids=False)
+    found = await screen._ios_scroll_to_element(
+        "SIM", "Row 80", None, max_swipes=10,
+    )
+    assert found is not None, f"gave up after {screen.swipes()}"
+
+
+@pytest.mark.asyncio
+async def test_a_bounce_is_read_through_to_rest():
+    """M16b — a snap-back animates over several reads, not one."""
+    screen = ListScreen(bounce=91.0)
+    found = await _sweep(screen, "row_199")
+
+    assert found is not None
+    assert found.frame["y"] == screen.resting_y(199)
+
+
+@pytest.mark.asyncio
+async def test_a_target_without_a_frame_ends_the_sweep_at_once():
+    """M35 — it matched, but no swipe can bring it into view; sweeping on
+    spent all 30 swipes finding that out."""
+    class Frameless(ListScreen):
+        async def get_ui_elements(self, *a, **k):
+            els, udid = await super().get_ui_elements(*a, **k)
+            els.append(UIElement(type="Cell", identifier="ghost", label="ghost",
+                                 frame=None))
+            return els, udid
+
+    screen = Frameless()
+    found = await _sweep(screen, "ghost")
+
+    assert found is None
+    assert screen.swipes() == [], screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_failure_mid_sweep_still_logs_the_steps_before_it(caplog):
+    """M36 — the trace is most wanted exactly when something broke."""
+    class Breaks(ListScreen):
+        reads = 0
+
+        async def get_ui_elements(self, *a, **k):
+            Breaks.reads += 1
+            if Breaks.reads == 5:
+                raise RuntimeError("sim-bridge exited while running describe")
+            return await super().get_ui_elements(*a, **k)
+
+    screen = Breaks()
+    with (
+        caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        pytest.raises(RuntimeError),
+    ):
+        await _sweep(screen, "row_150")
+
+    traces = [r.message for r in caplog.records if "stopped by RuntimeError" in r.message]
+    assert traces, "the failure logged no trace"
+    assert "swipe 1/" in traces[0], traces[0]
+
+
+@pytest.mark.asyncio
+async def test_a_target_only_the_filtered_lookup_sees_does_not_run_to_the_deadline():
+    """WDA answers a filtered lookup with a predicate query and a full read
+    with /source, and the two can disagree. The target is then treated as
+    probe-only; the sweep must still end at the list's ends."""
+    screen = ListScreen(rows=60, at_rest=True)
+    screen.phantom = {"phantom"}
+    found = await _sweep(screen, "phantom")
+
+    assert found is None
+    assert len(screen.swipes()) <= 10, screen.swipes()

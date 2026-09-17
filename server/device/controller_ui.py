@@ -372,18 +372,28 @@ class DeviceControllerUI:
         # content above.
         #
         # 75% of the screen, which is only safe because the swipe is controlled
-        # (see _swipe): the list moves by the drag and no further, measured at
-        # 625pt for this 694pt drag on a 932pt screen. That is less than the
-        # visible content area, so every row is on screen after some swipe. The
-        # endpoints stay clear of the chrome a drag must not start on -- 0.13 is
-        # below a collapsed navigation bar, 0.88 above a tab bar.
-        y_far = screen_height * 0.88
-        y_near = screen_height * 0.13
+        # (see _swipe): the list moves by about the drag and no further,
+        # measured at 625pt for this 694pt drag on a 932pt screen. That is less
+        # than the visible content area, so every row is on screen after some
+        # swipe. The endpoints stay clear of the chrome a drag must not start
+        # on -- 0.13 is below a collapsed navigation bar, 0.88 above a tab bar.
         backend = self._ui_backend(resolved)
         # idb cannot hold a swipe, so its swipes still fling and a read after
         # one can catch the list in flight. It keeps a settle per step; the
         # controlled backends do not need one.
         controlled = getattr(backend, "swipe_is_controlled", True) is not False
+        if controlled:
+            y_far = screen_height * 0.88
+            y_near = screen_height * 0.13
+        else:
+            # A flung swipe travels well past its drag -- 2.6x measured for an
+            # unheld sim-bridge swipe; idb's own factor is unmeasured and
+            # assumed alike. A 75% drag flung that far passes over nearly half
+            # the rows of a list, so idb drags a quarter of the screen, which
+            # keeps even a 2.6x fling inside the visible area.
+            y_far = screen_height * 0.62
+            y_near = screen_height * 0.37
+        step = y_far - y_near
         # WDA's swipe returns only once the app is idle, so the first read
         # after it is already at rest -- measured at the end of a list, where a
         # bounce would show, with nothing moving after the call returned. That
@@ -414,22 +424,40 @@ class DeviceControllerUI:
             matches = find_element(els, label=label, identifier=identifier)
             return matches[0] if matches else None
 
-        def _fingerprint(els: list[UIElement]) -> tuple:
-            """Where everything on screen is, to tell whether a swipe moved it.
+        def _fingerprint(els: list[UIElement]) -> dict[tuple, list[tuple]]:
+            """Where each element on screen is, keyed by what it is."""
+            where: dict[tuple, list[tuple]] = {}
+            for e in els:
+                if e.frame:
+                    where.setdefault(
+                        (e.type, e.identifier or "", e.label or ""), [],
+                    ).append((round(e.frame["x"]), round(e.frame["y"])))
+            for positions in where.values():
+                positions.sort()
+            return where
 
-            Identity is part of it, not just position: a lazy list scrolled by
-            a whole number of rows puts different rows at the same positions.
-            The cost is that a label changing in place -- a running timer --
-            reads as movement, which spends budget rather than giving a wrong
-            answer, and the deadline bounds that.
+        def _moved(before: dict, after: dict) -> bool:
+            """Did anything that is on screen both times change position?
+
+            Judged on elements present in both reads, by identity. Identity,
+            because a lazy list scrolled by a whole number of rows puts
+            different rows at the same positions. Present in both, because a
+            label that changes in place -- a running timer, a progress
+            percentage -- is a new identity every read; counting that as
+            movement stopped end detection outright and kept the at-rest check
+            from ever seeing two reads agree (review of #204: 20 downward
+            swipes at the bottom of a list, and 182 reads for one sweep).
+
+            A controlled step is shorter than the screen, so some rows are on
+            screen both before and after any real scroll. With nothing in
+            common, the two reads are compared whole.
             """
-            return tuple(
-                (e.type, e.identifier or "", e.label or "",
-                 round(e.frame["x"]), round(e.frame["y"]))
-                for e in els if e.frame
-            )
+            shared = before.keys() & after.keys()
+            if not shared:
+                return before != after
+            return any(before[k] != after[k] for k in shared)
 
-        async def _read(probe: bool) -> tuple[UIElement | None, tuple]:
+        async def _read(probe: bool) -> tuple[UIElement | None, dict]:
             """The whole tree: the target if it is there, and the fingerprint.
 
             Unfiltered, because the fingerprint needs everything. On a simulator
@@ -443,7 +471,7 @@ class DeviceControllerUI:
             matches = find_element(els, label=label, identifier=identifier)
             return (matches[0] if matches else None), _fingerprint(els)
 
-        async def _read_at_rest(probe: bool) -> tuple[UIElement | None, tuple]:
+        async def _read_at_rest(probe: bool) -> tuple[UIElement | None, dict]:
             """Read the screen once it has stopped moving.
 
             A controlled swipe leaves nothing moving -- except at the end of a
@@ -466,7 +494,7 @@ class DeviceControllerUI:
                 return previous
             for _ in range(5):
                 current = await _read(probe)
-                if current[1] == previous[1]:
+                if not _moved(previous[1], current[1]):
                     return current
                 previous = current
             _note("  the screen never came to rest; using the last read")
@@ -565,121 +593,152 @@ class DeviceControllerUI:
             f"swipe y {y_far:.0f}->{y_near:.0f}"
         )
 
-        # tap_element has just run the identical filtered query and found
-        # nothing, so repeating it here spends a lookup re-learning what the
-        # caller already knows. scroll_to_element calls in cold with no prior
-        # read, so it still needs this check.
-        if time.perf_counter() >= deadline:
-            _give_up("deadline reached before the first lookup")
-            return None
-        el = None if target_known_absent else await _fetch(probe=True)
-        if el is not None and _visible(el):
-            return _finish(el)
+        def _toward(y: float) -> tuple[float, float]:
+            """A swipe that brings a located element's top to just below the
+            top chrome, and no further than one step.
 
-        # The baseline the first swipe is compared against, and the read that
-        # tells whether the sweep can skip probing.
-        #
-        # Skipping it is only sound for a target the static tree can see. If
-        # the cold lookup located the target and a plain read cannot, the target
-        # is probe-only (a tab-bar or nav-bar item), and a sweep that stops
-        # probing loses it after the first swipe and hunts for something no
-        # swiping reveals. Measured in review: 30 swipes and 31 reads where main
-        # gave up after 2. So that target keeps probing; it then stays located,
-        # does not move -- chrome does not scroll -- and the stall check ends
-        # the sweep after two swipes, which is the right answer for an element
-        # scrolling cannot bring into view.
-        sweep_probe = False
-        plain, last_fingerprint = await _read(probe=False)
-        if el is not None and plain is None:
-            sweep_probe = True
-            _note("  target is probe-only; the sweep will keep probing")
-        elif plain is not None:
-            el = plain
-            if _visible(el):
-                return _finish(el)
+            A full step toward a located row can carry a tall one straight past
+            the window it has to land in: a row of 400pt or more has a visible
+            window shorter than the step, and the sweep oscillated around it.
+            The ~10% a controlled swipe loses to touch slop is added back.
+            """
+            aim = top_safe + 20
+            distance = min(max(abs(y - aim) / 0.9, 80.0), step)
+            if y >= aim:
+                return y_far, y_far - distance
+            return y_near, y_near + distance
 
-        going_down = True
-        moved_at_all = False
-        last_cy: float | None = None
-        stalls = 0
-
-        while True:
+        async def _sweep() -> UIElement | None:
+            nonlocal swipes
+            # tap_element has just run the identical filtered query and found
+            # nothing, so repeating it here spends a lookup re-learning what
+            # the caller already knows. scroll_to_element calls in cold with no
+            # prior read, so it still needs this check.
             if time.perf_counter() >= deadline:
-                _give_up(
-                    f"deadline of {deadline - sweep_started:.0f}s reached "
-                    f"after {swipes} swipe(s)"
-                )
+                _give_up("deadline reached before the first lookup")
                 return None
-            if swipes >= total_budget:
-                _give_up(f"budget of {total_budget} swipes exhausted")
-                return None
-
-            if el is not None and el.frame is not None:
-                # Located but off-screen: swipe straight toward it. Direction
-                # mirrors _visible's two out-of-view cases.
-                _, cy = get_tap_point(el)
-                going_down = el.frame["y"] >= top_safe
-                # End-of-travel guard: frame stopped moving across swipes.
-                if last_cy is not None and abs(cy - last_cy) < 2:
-                    stalls += 1
-                    if stalls >= 2:
-                        _give_up(f"container won't scroll further (cy={cy:.0f})")
-                        return None
-                else:
-                    stalls = 0
-                last_cy = cy
-                kind = "toward target"
-            else:
-                # Not located: sweep blind. If the target was located and then
-                # lost, `going_down` still says which way it was, and the sweep
-                # carries on that way rather than restarting downward -- the
-                # restart is how a 105s sweep kept swiping away from a row it
-                # had seen above it.
-                last_cy = None
-                stalls = 0
-                if going_down and swipes >= down_budget:
-                    going_down = False
-                    _note("  downward budget spent; sweeping up")
-                kind = "blind"
-
-            y1, y2 = (y_far, y_near) if going_down else (y_near, y_far)
-            swipes += 1
-            _note(
-                f"swipe {swipes}/{total_budget} {kind} "
-                f"({'down' if going_down else 'up'}) {y1:.0f}->{y2:.0f}"
-            )
-            await _swipe(y1, y2)
-
-            el, fingerprint = await _read_at_rest(sweep_probe)
-            moved = fingerprint != last_fingerprint
-            last_fingerprint = fingerprint
-
+            el = None if target_known_absent else await _fetch(probe=True)
             if el is not None and _visible(el):
-                _note("  found, at rest and visible — returning")
                 return _finish(el)
-            if el is not None:
+
+            # The baseline the first swipe is compared against, and the read
+            # that tells whether the sweep can skip probing.
+            #
+            # Skipping it is only sound for a target the static tree can see.
+            # If the cold lookup located the target and a plain read cannot, the
+            # target is probe-only (a tab-bar or nav-bar item), and a sweep that
+            # stops probing loses it after the first swipe and hunts for
+            # something no swiping reveals. Measured in review: 30 swipes and 31
+            # reads where main gave up after 2. So that target keeps probing; it
+            # then stays located, does not move -- chrome does not scroll -- and
+            # the stall check ends the sweep after two swipes, which is the
+            # right answer for an element scrolling cannot bring into view.
+            sweep_probe = False
+            plain, last_fingerprint = await _read(probe=False)
+            if el is not None and plain is None:
+                sweep_probe = True
+                _note("  target is probe-only; the sweep will keep probing")
+            elif plain is not None:
+                el = plain
+                if _visible(el):
+                    return _finish(el)
+
+            going_down = True
+            moved_at_all = False
+            last_cy: float | None = None
+            stalls = 0
+
+            while True:
+                if el is not None and el.frame is None:
+                    # Matched, but with nowhere to be: no swipe changes that,
+                    # and sweeping on spent the whole budget finding it out.
+                    _give_up("the target has no frame, so no swipe can bring it into view")
+                    return None
+                if time.perf_counter() >= deadline:
+                    _give_up(
+                        f"deadline of {deadline - sweep_started:.0f}s reached "
+                        f"after {swipes} swipe(s)"
+                    )
+                    return None
+                if swipes >= total_budget:
+                    _give_up(f"budget of {total_budget} swipes exhausted")
+                    return None
+
+                if el is not None:
+                    # Located but off-screen: swipe toward it, by as much as it
+                    # needs. Direction mirrors _visible's two out-of-view cases.
+                    _, cy = get_tap_point(el)
+                    going_down = el.frame["y"] >= top_safe
+                    # End-of-travel guard: frame stopped moving across swipes.
+                    if last_cy is not None and abs(cy - last_cy) < 2:
+                        stalls += 1
+                        if stalls >= 2:
+                            _give_up(f"container won't scroll further (cy={cy:.0f})")
+                            return None
+                    else:
+                        stalls = 0
+                    last_cy = cy
+                    y1, y2 = _toward(el.frame["y"])
+                    kind = "toward target"
+                else:
+                    # Not located: sweep blind. If the target was located and
+                    # then lost, `going_down` still says which way it was, and
+                    # the sweep carries on that way rather than restarting
+                    # downward -- the restart is how a 105s sweep kept swiping
+                    # away from a row it had seen above it.
+                    last_cy = None
+                    stalls = 0
+                    if going_down and swipes >= down_budget:
+                        going_down = False
+                        _note("  downward budget spent; sweeping up")
+                    y1, y2 = (y_far, y_near) if going_down else (y_near, y_far)
+                    kind = "blind"
+
+                swipes += 1
                 _note(
-                    f"  found but not visible (y={el.frame['y']:.0f} "
-                    f"top_safe={top_safe:.0f})" if el.frame
-                    else "  found but not visible (no frame)"
+                    f"swipe {swipes}/{total_budget} {kind} "
+                    f"({'down' if y1 > y2 else 'up'}) {y1:.0f}->{y2:.0f}"
                 )
-                continue
+                await _swipe(y1, y2)
 
-            if moved:
-                moved_at_all = True
-                _note("  not in tree")
-                continue
+                el, fingerprint = await _read_at_rest(sweep_probe)
+                moved = _moved(last_fingerprint, fingerprint)
+                last_fingerprint = fingerprint
 
-            # A swipe that changed nothing: that end of the list is reached.
-            if going_down:
-                going_down = False
-                _note("  not in tree, and nothing moved: at the bottom; sweeping up")
-                continue
-            _give_up(
-                "reached the top without finding it" if moved_at_all
-                else "screen unchanged after a swipe — nothing scrollable"
-            )
-            return None
+                if el is not None and _visible(el):
+                    _note("  found, at rest and visible — returning")
+                    return _finish(el)
+                if el is not None:
+                    _note(
+                        f"  found but not visible (y={el.frame['y']:.0f} "
+                        f"top_safe={top_safe:.0f})" if el.frame
+                        else "  found, but it has no frame"
+                    )
+                    continue
+
+                if moved:
+                    moved_at_all = True
+                    _note("  not in tree")
+                    continue
+
+                # A swipe that changed nothing: that end of the list is reached.
+                if going_down:
+                    going_down = False
+                    _note("  not in tree, and nothing moved: at the bottom; sweeping up")
+                    continue
+                _give_up(
+                    "reached the top without finding it" if moved_at_all
+                    else "screen unchanged after a swipe — nothing scrollable"
+                )
+                return None
+
+        try:
+            return await _sweep()
+        except BaseException as exc:
+            # A read or a swipe failing mid-sweep, or the caller cancelling,
+            # used to take the trace of every step before it down with it.
+            _give_up(f"stopped by {type(exc).__name__}: {exc!r}")
+            raise
 
     async def _try_fast_path_element_check(
         self,
