@@ -18,6 +18,7 @@ Two halves, tested separately:
 from __future__ import annotations
 
 import importlib
+import os
 import subprocess
 import sys
 import textwrap
@@ -178,10 +179,16 @@ def test_an_old_updater_can_import_this_release(old, tmp_path):
     """The real thing: load an old release's updater, swap in this tree, and
     import what that updater imports next.
 
-    Needs the tags, which a shallow CI checkout does not have; skipped there
-    rather than faked, because the point is the *real* old modules.
+    Needs the tags. CI fetches them (`fetch-depth: 0`); a shallow local
+    checkout skips rather than fakes them, because the point is the *real* old
+    modules.
     """
     if not _tag_exists(old):
+        # CI fetches full history for exactly this test, so a missing tag there
+        # is a broken checkout, not a shallow one. Skipping would pass the
+        # suite without checking the thing #212 needed checked.
+        if os.environ.get("CI"):
+            pytest.fail(f"{old} is missing on CI; the checkout needs fetch-depth: 0")
         pytest.skip(f"{old} is not fetched in this checkout")
 
     tree = tmp_path / "quern"
