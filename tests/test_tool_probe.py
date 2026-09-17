@@ -365,6 +365,9 @@ class TestTheCompanionCheckAsksTheBinary:
         companion.parent.mkdir(parents=True)
         companion.write_text("#!/bin/sh\nexit 0\n")
         companion.chmod(0o755)
+        (tmp_path / "bin" / "idb_companion.release").write_text(
+            s._IDB_COMPANION_RELEASE + "\n"
+        )
         monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
 
         assert s.check_idb_companion().status is s.CheckStatus.OK
@@ -559,3 +562,138 @@ class TestMeasuringIsNotSelecting:
             tools = await ctrl.check_tools(adopt=True)
         assert probe.await_count == 1, "/tools served a stale answer"
         assert tools["simctl"] is False
+
+
+class TestAnOutdatedCompanionIsReplaced:
+    """#222: v1 cannot find SimulatorKit under Xcode 27, so every HID command
+    it runs fails. An install that works but is not the current release must
+    say so, and setup must offer to replace it -- including on a sim-bridge
+    machine, where idb is skipped but an old install is still the fallback.
+    """
+
+    def _install(self, tmp_path, monkeypatch, release=None):
+        from server.lifecycle import setup as s
+
+        companion = tmp_path / "bin" / "idb_companion"
+        companion.parent.mkdir(parents=True, exist_ok=True)
+        companion.write_text("#!/bin/sh\nexit 0\n")
+        companion.chmod(0o755)
+        if release is not None:
+            (tmp_path / "bin" / "idb_companion.release").write_text(release + "\n")
+        monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
+        return s
+
+    def test_an_install_without_a_marker_is_v1_and_outdated(self, tmp_path, monkeypatch):
+        s = self._install(tmp_path, monkeypatch)
+
+        result = s.check_idb_companion()
+
+        assert s.companion_is_outdated()
+        assert result.status is s.CheckStatus.WARNING
+        assert "idb-companion-v1" in result.message
+        assert "Xcode 27" in result.detail
+        assert result.fixable
+
+    def test_the_current_release_is_not_outdated(self, tmp_path, monkeypatch):
+        s = self._install(tmp_path, monkeypatch, release=None)
+        (tmp_path / "bin" / "idb_companion.release").write_text(s._IDB_COMPANION_RELEASE)
+
+        assert not s.companion_is_outdated()
+        assert s.check_idb_companion().status is s.CheckStatus.OK
+
+    def test_no_install_is_not_outdated(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as s
+
+        monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
+        assert not s.companion_is_outdated()
+
+    def test_the_download_url_names_the_current_release(self):
+        from server.lifecycle import setup as s
+
+        assert s._IDB_COMPANION_RELEASE != "idb-companion-v1"
+        assert f"/{s._IDB_COMPANION_RELEASE}/" in s._IDB_COMPANION_URL
+
+    def _fake_download(self, s, monkeypatch, tmp_path, *, ok: bool):
+        import urllib.request
+
+        def retrieve(url, dest):
+            if not ok:
+                raise OSError("network down")
+            import tarfile
+            payload = tmp_path / "payload"
+            (payload / "bin").mkdir(parents=True, exist_ok=True)
+            (payload / "bin" / "idb_companion").write_text("#!/bin/sh\nexit 0\n")
+            with tarfile.open(dest, "w:gz") as tar:
+                tar.add(payload / "bin", arcname="bin")
+
+        monkeypatch.setattr(urllib.request, "urlretrieve", retrieve)
+        monkeypatch.setattr(s, "_record_install", lambda *a, **k: None)
+
+    def test_a_successful_install_records_the_release(self, tmp_path, monkeypatch):
+        s = self._install(tmp_path, monkeypatch)
+        (tmp_path / "bin" / "idb_companion").unlink()
+        self._fake_download(s, monkeypatch, tmp_path, ok=True)
+
+        assert s._install_patched_companion()
+        assert s._installed_companion_release() == s._IDB_COMPANION_RELEASE
+        assert not s.companion_is_outdated()
+
+    def test_a_failed_install_does_not_leave_a_current_marker(self, tmp_path, monkeypatch):
+        """A marker must not claim v2 over a binary that is still v1."""
+        s = self._install(tmp_path, monkeypatch, release="idb-companion-v2")
+        self._fake_download(s, monkeypatch, tmp_path, ok=False)
+
+        assert not s._install_patched_companion()
+        assert not (tmp_path / "bin" / "idb_companion.release").exists()
+        assert s.companion_is_outdated()
+
+    def test_accepting_the_update_installs_and_rechecks(self, tmp_path, monkeypatch):
+        s = self._install(tmp_path, monkeypatch)
+        monkeypatch.setattr(s, "_prompt_yn", lambda *a, **k: True)
+
+        def install():
+            (tmp_path / "bin" / "idb_companion.release").write_text(s._IDB_COMPANION_RELEASE)
+            return True
+
+        monkeypatch.setattr(s, "_install_patched_companion", install)
+
+        result = s._offer_companion_update(fallback=True)
+        assert result.status is s.CheckStatus.OK
+
+    def test_declining_reports_the_install_as_outdated(self, tmp_path, monkeypatch):
+        s = self._install(tmp_path, monkeypatch)
+        monkeypatch.setattr(s, "_prompt_yn", lambda *a, **k: False)
+        monkeypatch.setattr(
+            s, "_install_patched_companion",
+            lambda: pytest.fail("installed after the update was declined"),
+        )
+
+        result = s._offer_companion_update(fallback=True)
+        assert result.status is s.CheckStatus.WARNING
+        assert "outdated" in result.message
+
+    def test_a_failed_update_is_reported_not_hidden(self, tmp_path, monkeypatch):
+        """On a sim-bridge machine the row otherwise reads "not required"."""
+        s = self._install(tmp_path, monkeypatch)
+        monkeypatch.setattr(s, "_prompt_yn", lambda *a, **k: True)
+        monkeypatch.setattr(s, "_install_patched_companion", lambda: False)
+
+        result = s._offer_companion_update(fallback=True)
+        assert result.status is s.CheckStatus.WARNING
+        assert "Update failed" in result.message
+
+
+class TestSetupOffersTheUpdateOnEitherPath:
+    """Both branches of run_setup's simulator block route an outdated install
+    to the update offer. Asserted on the source, because driving run_setup to
+    that block needs most of the machine stubbed."""
+
+    def test_both_branches_call_the_update_offer(self):
+        import inspect
+
+        from server.lifecycle import setup as s
+
+        source = inspect.getsource(s.run_setup)
+        assert source.count("companion_is_outdated()") == 2
+        assert "_offer_companion_update(fallback=True)" in source
+        assert "_offer_companion_update(fallback=False)" in source

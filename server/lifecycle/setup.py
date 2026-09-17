@@ -1746,6 +1746,20 @@ def check_idb_companion() -> CheckResult:
                 ),
                 fixable=True,
             )
+        installed = _installed_companion_release()
+        if installed != _IDB_COMPANION_RELEASE:
+            return CheckResult(
+                name="idb_companion",
+                status=CheckStatus.WARNING,
+                message=f"installed (patched, outdated: {installed})",
+                detail=(
+                    f"{installed} cannot find SimulatorKit under Xcode 27, so "
+                    "every tap, swipe and keystroke it is asked for fails. "
+                    f"Re-run '{quern_cmd()} setup' to update it to "
+                    f"{_IDB_COMPANION_RELEASE}."
+                ),
+                fixable=True,
+            )
         return CheckResult(
             name="idb_companion",
             status=CheckStatus.OK,
@@ -1770,10 +1784,38 @@ def check_idb_companion() -> CheckResult:
     )
 
 
+#: The patched companion release setup installs. v2 finds SimulatorKit where
+#: Xcode 27 moved it (Contents/SharedFrameworks); v1 looks only in the old
+#: place, so every HID command it runs fails under Xcode 27 (#222).
+_IDB_COMPANION_RELEASE = "idb-companion-v2"
 _IDB_COMPANION_URL = (
     "https://github.com/quern-dev/idb/releases/download/"
-    "idb-companion-v1/idb-companion-patched-arm64.tar.gz"
+    f"{_IDB_COMPANION_RELEASE}/idb-companion-patched-arm64.tar.gz"
 )
+
+
+def _companion_release_marker() -> Path:
+    return CONFIG_DIR / "bin" / "idb_companion.release"
+
+
+def _installed_companion_release() -> str:
+    """Which patched release is installed.
+
+    v1 wrote no marker, so an install without one is v1 -- the only release
+    that predates it.
+    """
+    try:
+        return _companion_release_marker().read_text().strip() or "idb-companion-v1"
+    except OSError:
+        return "idb-companion-v1"
+
+
+def companion_is_outdated() -> bool:
+    """A patched companion is installed, and it is not the current release."""
+    return (
+        (CONFIG_DIR / "bin" / "idb_companion").is_file()
+        and _installed_companion_release() != _IDB_COMPANION_RELEASE
+    )
 
 
 def _install_patched_companion() -> bool:
@@ -1783,6 +1825,11 @@ def _install_patched_companion() -> bool:
     dest = CONFIG_DIR / "bin"
     dest.mkdir(parents=True, exist_ok=True)
     tarball = dest / "idb-companion.tar.gz"
+    marker = _companion_release_marker()
+    # Cleared before anything is replaced, and written only once the new
+    # binary is in place: a failed update must not leave the old binary
+    # recorded as the new release.
+    marker.unlink(missing_ok=True)
 
     try:
         print("    Downloading patched idb_companion...")
@@ -1801,6 +1848,7 @@ def _install_patched_companion() -> bool:
             (dest / "bin").rmdir()
         if companion.exists():
             companion.chmod(0o755)
+            marker.write_text(_IDB_COMPANION_RELEASE + "\n")
             _record_install("quern", "idb_companion")
             return True
         return False
@@ -1808,6 +1856,33 @@ def _install_patched_companion() -> bool:
         print(f"    Download failed: {exc}")
         tarball.unlink(missing_ok=True)
         return False
+
+
+def _offer_companion_update(*, fallback: bool) -> CheckResult:
+    """Offer to replace an outdated patched companion, and say what resulted.
+
+    Declining reports the check as it stands -- an outdated install is a
+    warning whether or not anyone chose to fix it -- and a failed download
+    says so, rather than the "not required" a sim-bridge machine otherwise
+    shows, which would hide a fallback that cannot work.
+    """
+    what = "idb_companion fallback" if fallback else "idb_companion"
+    if not _prompt_yn(
+        f"    The installed {what} ({_installed_companion_release()}) does not "
+        f"work with Xcode 27. Update it to {_IDB_COMPANION_RELEASE}?"
+    ):
+        return check_idb_companion()
+    if _install_patched_companion():
+        return check_idb_companion()
+    return CheckResult(
+        name="idb_companion",
+        status=CheckStatus.WARNING,
+        message="Update failed; the installed build does not work with Xcode 27",
+        detail=(
+            f"Re-run '{quern_cmd()} setup', or download {_IDB_COMPANION_RELEASE} "
+            "from https://github.com/quern-dev/idb/releases"
+        ),
+    )
 
 
 def check_vpn() -> CheckResult:
@@ -2464,13 +2539,19 @@ def run_setup() -> int:
                 "    Xcode 26+ on Apple Silicon detected — "
                 "sim-bridge handles simulator UI natively. Skipping idb."
             )
-            report.add(CheckResult(
+            companion_result = CheckResult(
                 name="idb_companion",
                 status=CheckStatus.SKIPPED,
                 message="Not required (sim-bridge active)",
                 detail="Xcode 26+ on Apple Silicon: simulator UI runs through "
-                       "sim-bridge. Existing idb installs still work as a fallback.",
-            ))
+                       "sim-bridge. An existing idb install is kept as a fallback.",
+            )
+            # Not installed here, but an install from an older setup is still
+            # the fallback when sim-bridge cannot run -- and v1 of it cannot
+            # drive a simulator at all under Xcode 27.
+            if companion_is_outdated():
+                companion_result = _offer_companion_update(fallback=True)
+            report.add(companion_result)
             report.add(CheckResult(
                 name="idb (fb-idb)",
                 status=CheckStatus.SKIPPED,
@@ -2489,6 +2570,8 @@ def run_setup() -> int:
                             message="Download failed (UI automation unavailable)",
                             detail="Try manually: https://github.com/quern-dev/idb/releases",
                         )
+            elif companion_is_outdated():
+                idb_companion_result = _offer_companion_update(fallback=False)
             elif idb_companion_result.message.startswith("installed (system"):
                 if _prompt_yn(
                     "    Patched idb_companion available "
