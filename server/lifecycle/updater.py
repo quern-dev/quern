@@ -886,6 +886,7 @@ def run_update(apply_tools: bool = False) -> int:
         return 1
 
     if _is_git_install(project_root):
+        _warn_if_node_cannot_build()
         rc = _update_via_git(project_root)
     else:
         rc = _update_via_tarball(project_root)
@@ -924,6 +925,25 @@ def _spawn_finish(cmd: list[str], project_root: Path) -> int:
     point at a temporary directory.
     """
     return subprocess.run(cmd, cwd=str(project_root)).returncode  # noqa: S603
+
+
+def _warn_if_node_cannot_build() -> None:
+    """Say up front when a git update will have trouble building the wrapper.
+
+    A warning, not a refusal (#214): the field report's Node 20 built it with
+    only an npm engine warning, and an update that refused over the user's Node
+    arrangement would strand a working install on an old release.
+    """
+    from server.lifecycle import node_env
+
+    site = node_env.here()
+    if site.ok:
+        return
+    from server.config import quern_cmd
+
+    print(f"Warning: {node_env.fix_for(site, [site])}")
+    print(f"  The MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+. Continuing; "
+          f"`{quern_cmd()} doctor` shows every place a node is picked.")
 
 
 def _hand_off(project_root: Path, apply_tools: bool) -> int:

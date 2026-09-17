@@ -564,21 +564,54 @@ class TestCheckMitmdump:
 # ── Node.js check ────────────────────────────────────────────────────────
 
 
+def _sites(**status_by_place):
+    """Four NodeSites, OK unless named: `_sites(gui=("missing", None))`."""
+    from server.lifecycle import node_env
+
+    keys = {"here": "this command", "login": "login shell",
+            "script": "non-interactive shell", "gui": "GUI apps"}
+    out = []
+    for key, place in keys.items():
+        status, version = status_by_place.get(key, (node_env.OK, "v22.1.0"))
+        path = None if status == node_env.MISSING else f"/x/{key}/node"
+        out.append(node_env.NodeSite(place, "someone", status, path, version))
+    return out
+
+
 class TestCheckNode:
-    def test_installed(self):
-        with (
-            _patch_which({"node": "/opt/homebrew/bin/node"}),
-            _patch_run(_mock_run(stdout="v20.10.0")),
-        ):
-            result = check_node()
-            assert result.status == CheckStatus.OK
-            assert "v20" in result.message
+    """#214: the version and the other three places now count, and nothing
+    here can make setup fail for an install that has been working."""
+
+    def test_installed_everywhere(self):
+        result = check_node(_sites())
+        assert result.status == CheckStatus.OK
+        assert "v22" in result.message
 
     def test_not_installed(self):
-        with _patch_which({"node": None}):
-            result = check_node()
-            assert result.status == CheckStatus.MISSING
-            assert result.fixable
+        result = check_node(_sites(here=("missing", None)))
+        assert result.status == CheckStatus.MISSING
+        assert result.fixable
+
+    def test_node_20_is_a_warning_not_a_pass(self):
+        """The old test asserted v20 was OK; the MCP wrapper refuses it."""
+        result = check_node(_sites(here=("too_old", "v20.10.0")))
+        assert result.status == CheckStatus.WARNING
+        assert "22" in result.message
+
+    def test_a_gui_with_no_node_is_named(self):
+        result = check_node(_sites(gui=("missing", None)))
+        assert result.status == CheckStatus.WARNING
+        assert "GUI apps" in result.message
+        assert "brew install node" in result.detail
+
+    def test_the_wrapper_still_builds_on_a_warning(self):
+        """Node 20 builds `mcp/dist`. Gating the build on OK would leave it
+        stale on exactly the machines the warning is about."""
+        from server.lifecycle.setup import _node_can_build
+
+        assert _node_can_build(check_node(_sites(here=("too_old", "v20.10.0"))))
+        assert _node_can_build(check_node(_sites(gui=("missing", None))))
+        assert not _node_can_build(check_node(_sites(here=("missing", None))))
 
 
 # ── VPN detection ────────────────────────────────────────────────────────

@@ -361,3 +361,27 @@ def _update_finishes_in_process(monkeypatch):
         )
 
     monkeypatch.setattr(updater, "_rebuild_and_restart", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _node_env_is_not_this_machine(monkeypatch):
+    """`node_env.probe` runs the developer's login and non-interactive shells.
+
+    Harmless, but it makes every setup test a report about whoever runs the
+    suite -- and slower, and different on CI. Tests that exercise the probe
+    itself inject `run` and `which` and call it through `node_env.probe`'s
+    original, kept as `_real_probe`.
+    """
+    from server.lifecycle import node_env
+
+    def all_fine(**_kw):
+        return [
+            node_env.NodeSite(place, "test", node_env.OK, "/test/node", "v22.0.0")
+            for place in ("this command", "login shell", "non-interactive shell", "GUI apps")
+        ]
+
+    monkeypatch.setattr(node_env, "_real_probe", node_env.probe, raising=False)
+    monkeypatch.setattr(node_env, "probe", all_fine)
+    # `here` too: every git-update test reaches it, and the real one runs the
+    # developer's `node --version`.
+    monkeypatch.setattr(node_env, "here", lambda **_kw: all_fine()[0])
