@@ -254,6 +254,21 @@ class TestTheRealRunner:
         assert not marker.exists(), "a grandchild outlived the probe"
         _ = os, signal
 
+    def test_a_daemon_that_outlives_its_shell_is_killed_too(self, tmp_path):
+        """The shape that made `getpgid` fail: the shell exits at once, a
+        background descendant keeps the pipe open, and `communicate` waits."""
+        import subprocess as sp
+        import time
+
+        marker = tmp_path / "daemon-alive"
+        script = (f"sh -c 'while :; do touch {marker}; sleep 0.05; done' & exit 0")
+        with pytest.raises(sp.TimeoutExpired):
+            node_env.run_bounded(["/bin/sh", "-c", script], timeout=0.6)
+        time.sleep(0.3)
+        marker.unlink(missing_ok=True)
+        time.sleep(0.4)
+        assert not marker.exists(), "a daemon outlived the probe"
+
     def test_output_that_is_not_utf8_is_read_rather_than_raising(self):
         result = node_env.run_bounded(
             ["/bin/sh", "-c", "printf 'a\\377b\\n'"], timeout=5)

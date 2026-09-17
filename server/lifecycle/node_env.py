@@ -113,7 +113,12 @@ def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
         out, _err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         with contextlib.suppress(OSError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            # `proc.pid` *is* the group id, because start_new_session made the
+            # child a session leader. Asking `getpgid` for it again fails with
+            # ESRCH once that child has exited -- which is exactly the case
+            # this cleanup is for: the shell exits, a daemon it started holds
+            # stdout open, and `communicate` waits for the pipe.
+            os.killpg(proc.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.SubprocessError, OSError):
             proc.communicate(timeout=5)
         raise
