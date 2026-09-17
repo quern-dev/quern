@@ -451,7 +451,11 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
                 note = _rate_limit_note(lifts)
                 if lifts is not None:
                     _ASK_NOT_BEFORE[number] = _LIFTS_AT[number] = lifts
-                elif number not in _ASK_NOT_BEFORE:
+                else:
+                    # The latest word gives no time, so an earlier stated one
+                    # is no longer an answer and must not be shown as one.
+                    _LIFTS_AT.pop(number, None)
+                if lifts is None and number not in _ASK_NOT_BEFORE:
                     _ASK_NOT_BEFORE[number] = now + _RATE_LIMIT_BACKOFF
             not_before = _ASK_NOT_BEFORE.get(number, 0.0)
             if now < not_before:
@@ -469,6 +473,7 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
                         _ASK_NOT_BEFORE[number] = _LIFTS_AT[number] = lifts
                     else:
                         _ASK_NOT_BEFORE[number] = now + _RATE_LIMIT_BACKOFF
+                        _LIFTS_AT.pop(number, None)
                     note = _rate_limit_note(_LIFTS_AT.get(number))
 
     owner, name = REPO.split("/")

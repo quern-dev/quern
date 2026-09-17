@@ -219,6 +219,29 @@ class TestTheNoteIsTrueWhenRead:
         assert "lifted" in detail, detail
 
 
+class TestAnOldLiftTimeIsNotReused:
+    """Found in review: under `--wait`, a time stated by an earlier limit
+    survived a later one that stated none, and was shown as current."""
+
+    def test_a_later_untimed_limit_clears_it(self, gate, monkeypatch):
+        _install(gate, monkeypatch, Fake(_summary(
+            limited_range=(PREV, HEAD), wait="a while", updated=_soon())))
+        gate._LIFTS_AT[202] = gate.time.time() + 3600
+        gate._ASK_NOT_BEFORE[202] = gate.time.time() + 3600
+
+        _, detail = gate.status(202, ask=True)
+
+        assert "rate limited" in detail and "until" not in detail, detail
+
+    def test_an_untimed_reply_clears_it(self, gate, monkeypatch):
+        _install(gate, monkeypatch, Fake(_summary(), answer="Review rate limited."))
+        gate._LIFTS_AT[202] = gate.time.time() - 60   # stale, and in the past
+
+        _, detail = gate.status(202, ask=True)
+
+        assert "until" not in detail and "lifted" not in detail, detail
+
+
 class TestWaitingDoesNotBecomeACommentStorm:
     def test_repeated_checks_ask_once_while_limited(self, gate, monkeypatch):
         """`--wait` re-runs the check every 30s. Once the answer comes back
