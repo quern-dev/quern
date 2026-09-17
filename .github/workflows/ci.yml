@@ -21,6 +21,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history and tags. `test_an_old_updater_can_import_this_release`
+          # installs this tree over a `git archive` of earlier release tags, and
+          # the default single-commit checkout has none -- so it skipped here,
+          # on the one runner that checks every PR.
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7

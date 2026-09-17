@@ -13,6 +13,13 @@ import os
 import sys
 from pathlib import Path
 
+from server.lifecycle.stale_modules import refresh_if_stale
+
+# An updater from 0.18.3 or older imports this file right after swapping the
+# source tree, into a process still holding the previous release's modules;
+# the functions below then import from them lazily (#212). No-op otherwise.
+refresh_if_stale()
+
 
 def _find_project_root() -> Path | None:
     """Find the project root by looking for pyproject.toml."""
@@ -779,8 +786,11 @@ def main() -> None:
         sys.exit(_cmd_install_precommit_hook())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
-        from server.lifecycle.updater import run_update
-        sys.exit(run_update(apply_tools="--tools" in sys.argv[2:]))
+        from server.lifecycle.updater import FINISH_FLAG, finish_update, run_update
+        apply_tools = "--tools" in sys.argv[2:]
+        if FINISH_FLAG in sys.argv[2:]:
+            sys.exit(finish_update(apply_tools=apply_tools))
+        sys.exit(run_update(apply_tools=apply_tools))
 
     # `help` is what people type. argparse only understands -h/--help, so
     # without this the most obvious command in the tool exits 2 with an
