@@ -19,10 +19,17 @@ status, not this script's, so a still-pending PR reads as success. merge-pr.sh
 calls it directly for exactly this reason.
 
 Note on cadence: reviews are rationed, so a push can sit queued rather than
-being reviewed promptly. The message is "You've used all free OSS reviews for
-now" -- a free open-source allowance that resets on its own schedule, not a
-per-hour count, so exhausting it can cost far longer than an hour. Asking again
-is free and does not consume it; only a review that actually runs does.
+being reviewed promptly. Asking is free and does not consume the allowance;
+only a review that actually runs does. When it is spent, CodeRabbit answers a
+request with "Review rate limited" and writes a "Review limit reached" block
+into its summary comment, naming the unreviewed range and when the next review
+is available. Both are read here: the PR is reported pending *with that reason
+and time*, and is not asked about again until the time has passed. (Earlier the
+wording was "You've used all free OSS reviews for now".)
+
+A rate-limited head can still have every thread resolved -- CodeRabbit closes
+threads whose fixes it can see without running a review -- so "0 unresolved"
+is not evidence the head was reviewed.
 
 Several small pushes to the same branch therefore spend the budget faster than
 one considered push, and leave every intermediate state unreviewed.
@@ -32,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -186,6 +194,99 @@ def open_prs() -> list[int]:
 _ALREADY_REVIEWED = "already reviewed the last commit"
 _FINISHED = "review finished"
 _TRIGGERED = "review triggered"
+# Not a "no answer yet". Treating it as one polled out the whole timeout in
+# silence, twice, on #202 -- each request answered within five seconds.
+_RATE_LIMITED = "review rate limited"
+
+# When a PR may next be asked, per PR. A rate-limited answer comes back at
+# once, and `--wait` re-runs the check every 30s, so without this each pass
+# would post another request until the limit lifted.
+_ASK_NOT_BEFORE: dict[int, float] = {}
+
+# Used when the limit is reported without saying when it lifts.
+_RATE_LIMIT_BACKOFF = 600.0
+
+# When CodeRabbit said the limit lifts, per PR. Kept apart from
+# `_ASK_NOT_BEFORE`, which also holds the backoff above: printing that as
+# "rate limited until 14:22" presents a local retry delay as the reset time,
+# and a reader plans the merge around it.
+_LIFTS_AT: dict[int, float] = {}
+
+_SUMMARY_MARKER = "auto-generated comment: summarize by coderabbit.ai"
+_RATE_LIMIT_START = "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->"
+_RATE_LIMIT_END = "<!-- end of auto-generated comment: rate limited by coderabbit.ai -->"
+_WAIT_FOR = re.compile(r"next included review available in ([^*\n]+)", re.IGNORECASE)
+_UNIT = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+
+
+def _duration(text: str) -> float | None:
+    """Seconds in "1 hour and 5 minutes"; None when nothing parses."""
+    parts = re.findall(r"(\d+)\s*(second|minute|hour|day)s?", text, re.IGNORECASE)
+    if not parts:
+        return None
+    return float(sum(int(n) * _UNIT[unit.lower()] for n, unit in parts))
+
+
+def _summary_verdict(number: int, head: str) -> tuple[str, float | None]:
+    """What CodeRabbit's summary comment already says about `head`.
+
+    Returns ("reviewed", None), ("rate_limited", lifts_at_or_None), or
+    ("unknown", None). Reading it costs no comment, so it is consulted before
+    asking.
+
+    Only one direction of each signal is trusted. `coveredCommitId` equal to
+    the head means that head was reviewed -- it is the one trace a clean review
+    leaves -- but it lags, so a different value proves nothing. A rate-limit
+    block counts only when the range it describes ends at the head; the block
+    can outlive the push it was about.
+    """
+    pages = json.loads(gh("api", "--paginate", "--slurp",
+                          f"repos/{REPO}/issues/{number}/comments"))
+    summary = None
+    for c in [c for page in pages for c in page]:
+        user = c.get("user") or {}
+        if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
+            continue
+        if _SUMMARY_MARKER in c.get("body", ""):
+            summary = c
+            break
+    if summary is None:
+        return "unknown", None
+    body = summary.get("body", "")
+
+    covered = re.search(r"final_review_risk_coverage:(\{[^\n]*?\})\s*-->", body)
+    if covered:
+        try:
+            marker = json.loads(covered.group(1))
+        except json.JSONDecodeError:
+            marker = {}
+        if marker.get("kind") == "reviewed" and marker.get("coveredCommitId") == head:
+            return "reviewed", None
+
+    start, end = body.find(_RATE_LIMIT_START), body.find(_RATE_LIMIT_END)
+    if 0 <= start < end:
+        block = body[start:end]
+        if re.search(rf"between [0-9a-f]{{40}} and {re.escape(head)}\b", block):
+            wait = _WAIT_FOR.search(block)
+            seconds = _duration(wait.group(1)) if wait else None
+            lifts = (ts(summary.get("updated_at")) + seconds
+                     if seconds is not None and summary.get("updated_at") else None)
+            return "rate_limited", lifts
+
+    return "unknown", None
+
+
+def _rate_limit_note(lifts: float | None) -> str:
+    if lifts is None:
+        return "CodeRabbit is rate limited"
+    when = datetime.fromtimestamp(lifts)
+    stamp = when.strftime("%H:%M" if when.date() == datetime.now().date()
+                          else "%b %d %H:%M")
+    if lifts <= time.time():
+        # The limit is over but nothing reviewed the push it held back, so the
+        # page still shows it. `--ask` requests the review.
+        return f"its review was rate limited; the limit lifted at {stamp}"
+    return f"CodeRabbit is rate limited until {stamp}"
 
 
 def _ask_for_review(number: int) -> str:
@@ -234,27 +335,30 @@ def _reply_after(number: int, since: str) -> str:
 _MAX_ASKS = 2
 
 
-def _reviewed_by_asking(number: int, timeout: float = 600.0) -> bool:
+def _reviewed_by_asking(number: int, timeout: float = 600.0) -> str:
     """Ask whether the head commit is reviewed, and wait if a review starts.
 
-    Returns True once CodeRabbit reports the current head as reviewed.
+    Returns "reviewed", "rate_limited", or "timeout".
     """
     since = _ask_for_review(number)
     asks = 1
     deadline = time.monotonic() + timeout
+    print(f"  asked CodeRabbit about #{number}; waiting for its reply…", flush=True)
 
     while time.monotonic() < deadline:
         time.sleep(20)
         reply = _reply_after(number, since)
         if _ALREADY_REVIEWED in reply or _FINISHED in reply:
-            return True
+            return "reviewed"
+        if _RATE_LIMITED in reply:
+            return "rate_limited"
         if _TRIGGERED in reply and asks < _MAX_ASKS:
             # A review is running. It leaves a review object only if it finds
             # something, so the way to learn it finished is to ask again — once.
             time.sleep(60)
             since = _ask_for_review(number)
             asks += 1
-    return False
+    return "timeout"
 
 
 def status(number: int, ask: bool = False) -> tuple[str, str]:
@@ -330,8 +434,47 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
     #
     # CodeRabbit will simply say, though, if asked. Its reply to a review
     # request is the authoritative signal, so ask instead of guessing.
-    if reviewed < pushed and ask:
-        reviewed = pushed if _reviewed_by_asking(number) else reviewed
+    #
+    # Before asking, read what the summary comment already says: asking posts a
+    # comment, and a rate-limited PR would only be told what the page shows.
+    #
+    # A limit that has lifted does not review the queued push by itself, so the
+    # stated time only postpones the question; it does not replace it.
+    note = ""
+    if reviewed < pushed:
+        verdict, lifts = _summary_verdict(number, head)
+        if verdict == "reviewed":
+            reviewed = pushed
+        else:
+            now = time.time()
+            if verdict == "rate_limited":
+                note = _rate_limit_note(lifts)
+                if lifts is not None:
+                    _ASK_NOT_BEFORE[number] = _LIFTS_AT[number] = lifts
+                else:
+                    # The latest word gives no time, so an earlier stated one
+                    # is no longer an answer and must not be shown as one.
+                    _LIFTS_AT.pop(number, None)
+                if lifts is None and number not in _ASK_NOT_BEFORE:
+                    _ASK_NOT_BEFORE[number] = now + _RATE_LIMIT_BACKOFF
+            not_before = _ASK_NOT_BEFORE.get(number, 0.0)
+            if now < not_before:
+                note = _rate_limit_note(_LIFTS_AT.get(number))
+            elif ask:
+                note = ""
+                outcome = _reviewed_by_asking(number)
+                if outcome == "reviewed":
+                    reviewed = pushed
+                elif outcome == "rate_limited":
+                    # The reply does not say when; the summary usually does,
+                    # and the same event refreshes it.
+                    _, lifts = _summary_verdict(number, head)
+                    if lifts and lifts > now:
+                        _ASK_NOT_BEFORE[number] = _LIFTS_AT[number] = lifts
+                    else:
+                        _ASK_NOT_BEFORE[number] = now + _RATE_LIMIT_BACKOFF
+                        _LIFTS_AT.pop(number, None)
+                    note = _rate_limit_note(_LIFTS_AT.get(number))
 
     owner, name = REPO.split("/")
     query = (
@@ -345,7 +488,8 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
 
     title = pr.get("title", "")[:44]
     if reviewed < pushed:
-        return "pending", f"#{number} {title} — pushed since the last review"
+        why = f"; {note}" if note else ""
+        return "pending", f"#{number} {title} — pushed since the last review{why}"
     if unresolved:
         return "findings", f"#{number} {title} — {unresolved} unresolved"
     return "ok", f"#{number} {title} — reviewed, clean"
