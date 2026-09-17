@@ -102,6 +102,32 @@ class TestTheUpdateHandsOff:
         out = capsys.readouterr().out
         assert "setup" in out and "restart" in out, out
 
+    def test_what_was_printed_is_out_before_the_child_writes(self, swapped, monkeypatch):
+        """Found live: through a pipe, the parent's "Updated successfully" came
+        out after the child's entire setup summary."""
+        events = []
+
+        class Recording:
+            def __init__(self, name):
+                self.name = name
+
+            def write(self, text):
+                events.append((self.name, "write"))
+                return len(text)
+
+            def flush(self):
+                events.append((self.name, "flush"))
+
+        monkeypatch.setattr(sys, "stdout", Recording("stdout"))
+        monkeypatch.setattr(sys, "stderr", Recording("stderr"))
+        monkeypatch.setattr(updater, "_spawn_finish",
+                            lambda cmd, root: events.append(("child", "run")) or 0)
+        updater.run_update()
+
+        child = events.index(("child", "run"))
+        for stream in ("stdout", "stderr"):
+            assert (stream, "flush") in events[:child], f"{stream} not flushed first: {events}"
+
     def test_nothing_to_do_does_not_hand_off(self, swapped, monkeypatch):
         monkeypatch.setattr(updater, "_update_via_git", lambda _r: 2)
         monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)

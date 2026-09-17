@@ -947,6 +947,12 @@ def _hand_off(project_root: Path, apply_tools: bool) -> int:
     if apply_tools:
         cmd.append("--tools")
 
+    # The child writes straight to the same descriptors while anything printed
+    # here may still be buffered -- block-buffered, when the menu bar reads the
+    # output through a pipe -- which put "Updated successfully" after the
+    # child's whole setup summary.
+    sys.stdout.flush()
+    sys.stderr.flush()
     try:
         rc = _spawn_finish(cmd, project_root)
     except (OSError, subprocess.SubprocessError) as exc:
