@@ -569,7 +569,8 @@ def _sites(**status_by_place):
     from server.lifecycle import node_env
 
     keys = {"here": "this command", "login": "login shell",
-            "script": "non-interactive shell", "gui": "GUI apps"}
+            "script": "non-interactive shell", "gui": "GUI apps",
+            "app": "the Quern app"}
     out = []
     for key, place in keys.items():
         status, version = status_by_place.get(key, (node_env.OK, "v22.1.0"))
@@ -602,6 +603,14 @@ class TestCheckNode:
         result = check_node(_sites(gui=("missing", None)))
         assert result.status == CheckStatus.WARNING
         assert "GUI apps" in result.message
+        assert "absolute path" in result.detail
+
+    def test_the_quern_apps_own_row_is_named_separately(self):
+        """Two PATHs, two rows: a Homebrew node is invisible to a Dock-launched
+        client and visible to the app."""
+        result = check_node(_sites(app=("missing", None)))
+        assert result.status == CheckStatus.WARNING
+        assert "the Quern app" in result.message
         assert "brew install node" in result.detail
 
     def test_an_unsupported_shell_alone_is_not_a_warning(self):

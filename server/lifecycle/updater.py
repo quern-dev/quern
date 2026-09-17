@@ -936,7 +936,11 @@ def _warn_if_node_cannot_build() -> None:
     """
     from server.lifecycle import node_env
 
-    site = node_env.here()
+    try:
+        site = node_env.here()
+    except Exception as exc:  # noqa: BLE001 -- a warning must not stop an update
+        print(f"Warning: could not check which node this command would use: {exc}")
+        return
     if site.ok:
         return
     from server.config import quern_cmd

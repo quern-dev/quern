@@ -76,22 +76,47 @@ class TestVersions:
     def test_the_floor_matches_the_wrapper(self):
         """Three copies of one number; the launcher's is the one that bites."""
         launcher = (ROOT / "mcp" / "src" / "launcher.cjs").read_text()
-        assert f"REQUIRED_MAJOR = {node_env.MIN_NODE_MAJOR};" in launcher
+        # Tolerant of spacing: this is JS source, and reformatting it should
+        # not fail a check about the *number*.
+        assert re.search(rf"REQUIRED_MAJOR\s*=\s*{node_env.MIN_NODE_MAJOR}\b", launcher)
         engines = json.loads((ROOT / "mcp" / "package.json").read_text())["engines"]["node"]
         assert re.fullmatch(rf">=\s*{node_env.MIN_NODE_MAJOR}", engines), engines
 
 
 class TestEachPlaceIsAskedSeparately:
-    def test_all_four_are_reported(self):
-        node = "/opt/homebrew/bin/node"
-        world = World(on_path={"/caller/bin": node, "/opt/homebrew/bin": node},
+    def test_every_place_is_reported(self):
+        node = "/usr/bin/node"
+        world = World(on_path={"/caller/bin": node, "/usr/bin": node},
                       versions={node: "v22.1.0"},
                       login=_line(node, "v22.1.0"), script=_line(node, "v22.1.0"))
         sites = world.probe()
         assert [s.place for s in sites] == [
-            "this command", "login shell", "non-interactive shell", "GUI apps",
+            "this command", "login shell", "non-interactive shell",
+            "GUI apps", "the Quern app",
         ]
         assert all(s.ok for s in sites)
+
+    def test_a_homebrew_node_is_invisible_to_dock_apps_but_not_to_the_quern_app(self):
+        """These were one row, and the merged row was flattering: a Homebrew
+        node made "GUI apps" green while a Dock-launched MCP client still could
+        not see it, and the advice then "fixed" a row that was never broken."""
+        brew = "/opt/homebrew/bin/node"
+        world = World(on_path={"/opt/homebrew/bin": brew}, versions={brew: "v22.1.0"})
+        sites = _by_place(world.probe())
+        assert sites["GUI apps"].status == node_env.MISSING
+        assert sites["the Quern app"].ok
+        fix = node_env.fix_for(sites["GUI apps"], world.probe())
+        assert "brew install node" not in fix, "advice that would change nothing here"
+        assert "absolute path" in fix
+
+    def test_the_quern_app_sees_its_own_extra_directories(self):
+        """`~/.local/bin` is templated with the home directory; nothing
+        asserted the expansion, so it could break silently."""
+        local = f"{HOME}/.local/bin/node"
+        world = World(on_path={f"{HOME}/.local/bin": local}, versions={local: "v22.1.0"})
+        sites = _by_place(world.probe())
+        assert sites["the Quern app"].ok and sites["the Quern app"].path == local
+        assert sites["GUI apps"].status == node_env.MISSING
 
     def test_gui_apps_do_not_see_the_callers_path(self):
         """The field shape: fine in the terminal, nothing for a GUI client."""
@@ -101,11 +126,11 @@ class TestEachPlaceIsAskedSeparately:
         gui = _by_place(world.probe())["GUI apps"]
         assert gui.status == node_env.MISSING
 
-    def test_gui_apps_see_what_the_menu_bar_adds(self):
-        brew = "/opt/homebrew/bin/node"
-        world = World(on_path={"/opt/homebrew/bin": brew}, versions={brew: "v23.0.0"})
+    def test_a_node_in_launchds_own_path_is_seen_by_dock_apps(self):
+        system = "/usr/local/bin/node"
+        world = World(on_path={"/usr/bin": system}, versions={system: "v23.0.0"})
         gui = _by_place(world.probe())["GUI apps"]
-        assert gui.ok and gui.path == brew
+        assert gui.ok and gui.path == system
 
     def test_the_shells_start_clean(self):
         """A shell given the caller's PATH would report the caller's node,
@@ -121,6 +146,31 @@ class TestEachPlaceIsAskedSeparately:
             assert kw["env"]["HOME"] == HOME
             assert kw["stdin"] is subprocess.DEVNULL
             assert kw["timeout"] == node_env.PROBE_TIMEOUT
+
+    def test_zdotdir_and_the_locale_travel_with_the_shell(self):
+        """Without ZDOTDIR a user whose config lives in ~/.config/zsh gets a
+        shell that reads nothing, is reported as having no node, and is told to
+        edit a file their shell never opens."""
+        world = World(login=_line("", ""), script=_line("", ""))
+        world.probe(ZDOTDIR=f"{HOME}/.config/zsh", LANG="en_GB.UTF-8")
+        for _argv, kw in [c for c in world.calls if c[0][-1] != "--version"]:
+            assert kw["env"]["ZDOTDIR"] == f"{HOME}/.config/zsh"
+            assert kw["env"]["LANG"] == "en_GB.UTF-8"
+
+    def test_the_version_call_is_bounded_and_cannot_be_asked_a_question(self):
+        node = "/caller/bin/node"
+        world = World(on_path={"/caller/bin": node}, versions={node: "v22.1.0"})
+        world.probe()
+        version_calls = [kw for argv, kw in world.calls if argv[-1] == "--version"]
+        assert version_calls, "no version was read"
+        for kw in version_calls:
+            assert kw["stdin"] is subprocess.DEVNULL
+            assert kw["timeout"] == node_env.PROBE_TIMEOUT
+
+    def test_the_timeout_is_long_enough_to_be_a_timeout(self):
+        """Asserting `timeout == PROBE_TIMEOUT` passes for 0.001 too, which
+        would make every probe on a slow machine read as "could not ask"."""
+        assert 5 <= node_env.PROBE_TIMEOUT <= 30
 
     def test_bash_keeps_the_one_file_a_script_reads(self):
         world = World(login=_line("", ""), script=_line("", ""))
@@ -173,10 +223,42 @@ class TestTheProbesRunTogether:
         started = time.monotonic()
         sites = world.probe()
         assert [s.place for s in sites] == [
-            "this command", "login shell", "non-interactive shell", "GUI apps",
+            "this command", "login shell", "non-interactive shell",
+            "GUI apps", "the Quern app",
         ], "the order is part of the report"
         assert active["most"] >= 3, f"only {active['most']} ran at once"
-        assert time.monotonic() - started < 0.7
+        # Generous: sequential would be ~1.2s for the shells alone. A tight
+        # bound here is a CI flake, not a stronger assertion.
+        assert time.monotonic() - started < 1.0
+
+
+class TestTheRealRunner:
+    """`run_bounded` is the default; the fakes above never exercise it."""
+
+    def test_a_timeout_takes_the_whole_process_group_with_it(self, tmp_path):
+        """subprocess's own timeout kills the direct child only, and real
+        startup files spawn daemons (gitstatusd, atuin, direnv)."""
+        import os
+        import signal
+        import subprocess as sp
+        import time
+
+        marker = tmp_path / "grandchild-alive"
+        script = (f"sh -c 'while :; do touch {marker}; sleep 0.05; done' & "
+                  "sleep 30")
+        with pytest.raises(sp.TimeoutExpired):
+            node_env.run_bounded(["/bin/sh", "-c", script], timeout=0.6)
+        time.sleep(0.4)
+        marker.unlink(missing_ok=True)
+        time.sleep(0.4)
+        assert not marker.exists(), "a grandchild outlived the probe"
+        _ = os, signal
+
+    def test_output_that_is_not_utf8_is_read_rather_than_raising(self):
+        result = node_env.run_bounded(
+            ["/bin/sh", "-c", "printf 'a\\377b\\n'"], timeout=5)
+        assert result.returncode == 0
+        assert "a" in result.stdout and "b" in result.stdout
 
 
 class TestShellOutput:
@@ -190,6 +272,34 @@ class TestShellOutput:
     def test_no_node_in_a_shell_is_missing(self):
         world = World(login=_line("", ""), script=_line("", ""))
         assert _by_place(world.probe())["non-interactive shell"].status == node_env.MISSING
+
+    def test_a_startup_line_without_a_newline_cannot_swallow_the_answer(self):
+        """p10k's instant prompt, `echo -n`, a spinner: the marker was appended
+        to their line and a working Node 22 read as "could not ask".
+
+        A real /bin/sh, because the fix is in the probe script rather than in
+        the parser -- faking the output here would be testing the fake.
+        """
+        site = node_env._in_shell(
+            "login shell", "x",
+            ["/bin/sh", "-c", "printf 'instant prompt'; " + node_env._SHELL_PROBE],
+            {"PATH": "/usr/bin:/bin", "HOME": HOME}, node_env.run_bounded,
+        )
+        assert site.status != node_env.UNKNOWN, site.detail
+    def test_a_shell_that_writes_undecodable_bytes_does_not_raise(self):
+        """`text=True` decodes strictly, so one stray byte raised
+        UnicodeDecodeError out of probe, through check_node, out of run_setup
+        -- which `quern update` calls after the pull."""
+        def boom(argv, **kw):
+            if argv[-1] == "--version":
+                return _done("v22.1.0")
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        world = World(login=_line("", ""), script=_line("", ""))
+        world.run = boom
+        sites = _by_place(world.probe())
+        assert sites["login shell"].status == node_env.UNKNOWN
+        assert "could not start the shell" in sites["login shell"].detail
 
     def test_a_shell_that_never_answered_is_unknown_not_missing(self):
         """Reporting "no node" would send someone to install one."""
@@ -240,14 +350,21 @@ class TestFixes:
         site = self._site("GUI apps", node_env.TOO_OLD, "/opt/homebrew/bin/node", "v18.0.0")
         assert "brew upgrade node" in node_env.fix_for(site, [site])
 
-    def test_gui_advice_does_not_suggest_a_keg_only_formula(self):
-        """`brew install node@22` is not linked onto PATH, so a GUI app
-        still would not find it."""
-        site = self._site("GUI apps", node_env.MISSING)
+    def test_the_quern_app_advice_does_not_suggest_a_keg_only_formula(self):
+        """`brew install node@22` is not linked onto PATH, so even the app's
+        own extra directories would not find it."""
+        site = self._site("the Quern app", node_env.MISSING)
         fix = node_env.fix_for(site, [site])
         assert "`brew install node`" in fix
         assert "brew install node@" not in fix
-        assert "absolute path" in fix
+
+    def test_dock_advice_names_only_fixes_that_work_there(self):
+        """launchd's PATH has no Homebrew in it, so `brew install node`
+        changes nothing for a Dock-launched client."""
+        site = self._site("GUI apps", node_env.MISSING)
+        fix = node_env.fix_for(site, [site])
+        assert "absolute path" in fix and "launchctl config user path" in fix
+        assert "brew install" not in fix
 
     def test_with_no_manager_recognised_the_default_is_linked_node(self):
         site = self._site("this command", node_env.MISSING)
@@ -388,6 +505,41 @@ class TestDoctor:
         monkeypatch.setattr(node_env, "probe", boom)
         assert main._report_node() is False
         assert "could not be checked" in capsys.readouterr().out
+
+
+class TestNothingHereStopsAnUpdate:
+    """`check_node` runs inside `run_setup`, which `quern update` calls after
+    the pull. A raise there leaves the install pulled but not rebuilt."""
+
+    def test_a_probe_that_raises_becomes_a_warning(self, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        def boom(**_kw):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        monkeypatch.setattr(node_env, "probe", boom)
+        result = setup_mod.check_node()
+        assert result.status == setup_mod.CheckStatus.WARNING
+        assert "could not be checked" in result.message
+
+    def test_the_update_warning_survives_a_raising_probe(self, monkeypatch, tmp_path, capsys):
+        from server.lifecycle import updater
+
+        monkeypatch.setattr(updater, "RESULT_FILE", tmp_path / "r.json")
+        monkeypatch.setattr(updater, "_find_project_root", lambda: tmp_path)
+        monkeypatch.setattr(updater, "_is_git_install", lambda _r: True)
+        pulled = []
+        monkeypatch.setattr(updater, "_update_via_git", lambda _r: pulled.append(1) or 2)
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
+        monkeypatch.setattr(updater, "_refresh_update_check", lambda: None)
+
+        def boom(**_kw):
+            raise RuntimeError("the shell exploded")
+
+        monkeypatch.setattr(node_env, "here", boom)
+        assert updater.run_update() == 0
+        assert pulled, "the update was stopped by a node check"
+        assert "could not check" in capsys.readouterr().out
 
 
 class TestUpdateWarnsAndContinues:

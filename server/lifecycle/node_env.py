@@ -10,8 +10,12 @@ routinely disagree:
   one. Reads `.zprofile` and `.zshrc`.
 - **a non-interactive shell**: agents' tools, scripts, anything a program
   spawns. zsh reads only `.zshenv`; bash reads only `$BASH_ENV`.
-- **GUI apps**: the menu-bar app, and MCP clients launched from the Dock.
-  launchd's PATH, and no shell startup files at all.
+- **GUI apps**: MCP clients launched from the Dock or at login. launchd's PATH
+  and no shell startup files at all -- and launchd's PATH does not include
+  Homebrew, so `brew install node` does not put a node here.
+- **the Quern app**: the same, plus the few directories it adds for itself
+  (`QuernCLI.searchPath`), which is why it can find a Homebrew node when a
+  Dock-launched client cannot.
 
 fnm and nvm usually live in `.zshrc`, so a machine can be fine in a terminal and
 have no `node` for a GUI client -- measured on the maintainer's machine, where
@@ -23,9 +27,11 @@ developer's real shells would be both slow and a report about the developer.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
+import signal
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -47,10 +53,14 @@ PROBE_TIMEOUT = 10.0
 # Printed by the shell probe after anything its startup files print, so their
 # output cannot be mistaken for the answer.
 _MARKER = "__QUERN_NODE__"
+# The leading newline matters: a startup file whose last write has no newline
+# (a p10k instant prompt, `echo -n`, a spinner) would otherwise have the marker
+# appended to its line, and a perfectly good Node 22 was then reported as
+# "could not ask".
 _SHELL_PROBE = (
     f'p=$(command -v node 2>/dev/null); '
     f'if [ -n "$p" ]; then v=$("$p" --version 2>/dev/null); fi; '
-    f'printf "%s\\t%s\\t%s\\n" "{_MARKER}" "$p" "$v"'
+    f'printf "\\n%s\\t%s\\t%s\\n" "{_MARKER}" "$p" "$v"'
 )
 
 OK = "ok"
@@ -79,6 +89,37 @@ class NodeSite:
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
+def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
+                timeout: float = PROBE_TIMEOUT, **_kw) -> subprocess.CompletedProcess:
+    """The default runner: bounded, lenient about bytes, and tidy on timeout.
+
+    `errors="replace"` because a startup file that writes one non-UTF-8 byte
+    would otherwise raise `UnicodeDecodeError` -- a `ValueError`, which the
+    handlers below do not catch -- out of a probe, through `check_node`, and
+    out of `run_setup`. An update calls that *after* pulling, so a machine
+    whose node is fine ends up pulled but not rebuilt, with a traceback. A
+    p10k instant prompt is enough to produce the byte.
+
+    The shell gets its own process group, and on timeout the group is killed:
+    `subprocess`'s own timeout kills the direct child only, and real startup
+    files spawn daemons (gitstatusd, atuin, direnv) that would be left behind.
+    """
+    proc = subprocess.Popen(  # noqa: S603
+        argv, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, errors="replace", start_new_session=True,
+    )
+    try:
+        out, _err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(subprocess.SubprocessError, OSError):
+            proc.communicate(timeout=5)
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, "")
+
+
 def major_version(version: str | None) -> int | None:
     """22 from "v22.22.2"; None when there is nothing to parse."""
     if not version:
@@ -104,7 +145,9 @@ def _version_of(path: str, run: Runner) -> str | None:
     try:
         result = run([path, "--version"], capture_output=True, text=True,
                      timeout=PROBE_TIMEOUT, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError covers UnicodeDecodeError from a node shim that writes
+        # something undecodable; a broken shim is not a reason to raise.
         return None
     if result.returncode != 0:
         return None
@@ -134,7 +177,7 @@ def _in_shell_unnamed(place: str, used_by: str, argv: list[str], env: dict[str, 
     except subprocess.TimeoutExpired:
         return NodeSite(place, used_by, UNKNOWN,
                         detail=f"the shell did not answer within {PROBE_TIMEOUT:.0f}s")
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return NodeSite(place, used_by, UNKNOWN, detail=f"could not start the shell: {exc}")
 
     for line in reversed(result.stdout.splitlines()):
@@ -151,7 +194,7 @@ def _in_shell_unnamed(place: str, used_by: str, argv: list[str], env: dict[str, 
 
 def here(
     *,
-    run: Runner = subprocess.run,
+    run: Runner = run_bounded,
     which: Callable[..., str | None] = shutil.which,
     env: dict[str, str] | None = None,
 ) -> NodeSite:
@@ -172,7 +215,7 @@ def user_shell(env: dict[str, str]) -> str | None:
 
 def probe(
     *,
-    run: Runner = subprocess.run,
+    run: Runner = run_bounded,
     which: Callable[..., str | None] = shutil.which,
     env: dict[str, str] | None = None,
     home: str | None = None,
@@ -190,7 +233,12 @@ def probe(
         checks.append(lambda: NodeSite("non-interactive shell", "agents' tools and scripts",
                                        SKIPPED, detail=reason))
     else:
-        base = {k: env[k] for k in ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR")
+        # ZDOTDIR decides which files zsh reads at all: without it a user who
+        # keeps their config in ~/.config/zsh gets a shell that reads nothing,
+        # is reported as having no node, and is then told to edit a file their
+        # shell never opens. LANG/LC_* change what startup files print.
+        base = {k: env[k] for k in ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR",
+                                    "ZDOTDIR", "LANG", "LC_ALL", "LC_CTYPE")
                 if k in env}
         base["HOME"] = home
         minimal = {**base, "PATH": os.pathsep.join(GUI_PATH)}
@@ -201,13 +249,22 @@ def probe(
             non_interactive["BASH_ENV"] = env["BASH_ENV"]
         checks.append(lambda: _in_shell("login shell", "Terminal, and CLI MCP clients",
                                         [shell, "-lic", _SHELL_PROBE], minimal, run))
-        checks.append(lambda: _in_shell("non-interactive shell", "agents' tools and scripts",
-                                        [shell, "-c", _SHELL_PROBE], non_interactive, run))
+        checks.append(lambda: _in_shell(
+            "non-interactive shell",
+            "scripts and agents' tools started without your terminal's PATH",
+            [shell, "-c", _SHELL_PROBE], non_interactive, run))
 
-    gui_dirs = [d.format(home=home) for d in MENUBAR_EXTRA_PATH] + list(GUI_PATH)
+    # Two rows, because they are two different PATHs and one of them was
+    # flattering the other: a Homebrew node made "GUI apps" green while a
+    # Dock-launched MCP client still could not see it, and the advice to
+    # `brew install node` then "fixed" a row that was never broken.
     checks.append(lambda: _on_path(
-        "GUI apps", "the menu-bar app, and MCP clients opened from the Dock",
-        gui_dirs, run, which))
+        "GUI apps", "MCP clients opened from the Dock or at login",
+        list(GUI_PATH), run, which))
+    menubar_dirs = [d.format(home=home) for d in MENUBAR_EXTRA_PATH] + list(GUI_PATH)
+    checks.append(lambda: _on_path(
+        "the Quern app", "the menu bar app, which adds a few directories of its own",
+        menubar_dirs, run, which))
 
     # Concurrently: each can take up to PROBE_TIMEOUT, and one after another
     # that was a 40s worst case in front of setup and doctor. Threads rather
@@ -337,12 +394,20 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
 
     # MISSING: where the fix goes depends on the place.
     if site.place == "GUI apps":
-        return ("GUI apps do not read your shell's startup files, so a version "
-                "manager's node is invisible here. Install one where GUI apps look "
-                "(`brew install node`, or the installer from https://nodejs.org; "
-                f"not `node@{MIN_NODE_MAJOR}`, which Homebrew does not link onto "
-                "PATH), or point your MCP client's \"command\" at an absolute "
-                f"path to a Node {MIN_NODE_MAJOR}+ binary.")
+        # Not "brew install node": /opt/homebrew/bin is not on launchd's PATH
+        # either, so that would change nothing here. Only these two do.
+        return (f"Apps launched from the Dock get {':'.join(GUI_PATH)} and no "
+                "shell startup files, so a version manager's node is invisible "
+                "to them. Either set your MCP client's \"command\" to an absolute "
+                f"path to a Node {MIN_NODE_MAJOR}+ binary (the reliable fix), or "
+                "add a directory to every GUI app's PATH with "
+                "`sudo launchctl config user path ...` and log out and in.")
+    if site.place == "the Quern app":
+        return ("The Quern app looks in ~/.local/bin, /opt/homebrew/bin and "
+                "/usr/local/bin as well as launchd's PATH. Install a node into "
+                "one of those (`brew install node`, or the installer from "
+                f"https://nodejs.org; not `node@{MIN_NODE_MAJOR}`, which Homebrew "
+                "does not link onto PATH).")
     shell = site.shell or "zsh"
     if site.place == "non-interactive shell":
         file, extra = _startup(shell, "non-interactive")

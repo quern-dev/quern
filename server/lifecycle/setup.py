@@ -1675,7 +1675,18 @@ def check_node(sites: list | None = None) -> CheckResult:
     from server.lifecycle import node_env
 
     if sites is None:
-        sites = node_env.probe()
+        try:
+            sites = node_env.probe()
+        except Exception as exc:  # noqa: BLE001
+            # Never fatal. This runs inside `quern update`, *after* the pull:
+            # a probe that raised there left the install pulled but not
+            # rebuilt, with a traceback, on a machine whose node was fine.
+            return CheckResult(
+                name="Node.js", status=CheckStatus.WARNING,
+                message="could not be checked",
+                detail=f"{exc}\nThe MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+; "
+                       f"{quern_cmd()} doctor shows each place a node is picked.",
+            )
     here = sites[0]
     if here.status == node_env.MISSING:
         return CheckResult(
