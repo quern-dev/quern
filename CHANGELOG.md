@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Setup could leave you with no menu-bar app.** Every run of setup quit the running menu-bar app and reopened it, even when there was no new version to install — which is every run on a git install. When the reopen failed (macOS error `-600`, seen during a live update), the app stayed quit. A running app with nothing new to install is now left alone. When setup does replace it, the reopen is retried for that error, and if it still fails, setup says the app was stopped and how to start it.
 
+### Added
+- **`quern menubar status`, `quern menubar open` and `quern menubar install`.** A git install never got a new menu-bar app from `quern update`, and the only way to install one was a script inside the clone that nothing mentioned. Once the app was quit, getting it back meant knowing where its bundle lives. `install` fetches the signed app matching your Quern, verifies it the way setup does, replaces the old one and starts it; it leaves an app of the current version alone unless you pass `--force`, so a build of your own survives. `open` starts the app and leaves a running one alone. `status` shows the installed version and whether it's running. `quern doctor` now reports the app too, and `quern doctor --fix` installs it when it's missing or older. On a git install, setup warns when the app is older than Quern.
+- **The menu-bar app shows its own version.** The only version it showed was the server's, under **Server** in Settings, so an app several releases behind looked current. The menu now shows **Menu bar vX.Y.Z** above Settings, and Settings has its own **Menu-bar app** section.
+
 ## [0.18.4] - 2026-09-17
 
 A hotfix for updating into 0.18.3, which crashed after applying the update. If you are on 0.18.2 or earlier, this is the release to update to.

@@ -23,23 +23,34 @@ A clone does not get the app, and this is deliberate: `quern setup` skips it
 on the assumption that anyone working from source would rather control their
 own build than have one installed over it.
 
-That left no instructions at all, which is worse. There are now:
+To install the signed app from the release your clone is based on:
 
 ```sh
-scripts/install-menubar-app.sh            # the signed app from the matching release
-scripts/install-menubar-app.sh --build    # build from macos/QuernMenuBar instead
+quern menubar install
 ```
 
-Both install to `~/Applications/Quern.app` and quit a running copy first, then
+`quern update` doesn't replace the app on a clone either, so run the same
+command after updating when `quern menubar status` (or `quern doctor`, or
+`quern setup`) says the app is older than Quern. It leaves an app of the
+current version alone, so it won't overwrite your own build of the same
+version; add `--force` to reinstall anyway.
+
+If you're working on the app itself, build it from your checkout instead:
+
+```sh
+scripts/install-menubar-app.sh --build
+```
+
+Both install to `~/Applications/Quern.app`, quit a running copy first, then
 launch it. The app starts the server itself, so that one command is the whole
 setup — from there you can drive Quern from the menu bar and leave the CLI
 alone.
 
-One prerequisite, and the script checks it for you: `quern setup` must have run
+One prerequisite, which both check for you: `quern setup` must have run
 at least once, because that is what writes `~/.local/bin/quern`. The app drives
 the daemon through that wrapper. A GUI app does not inherit your shell's PATH,
 so a `quern` that works in your terminal is not enough — it looks for that
-exact file. If it is missing the script says so and tells you what to run.
+exact file. If it is missing, they say so and tell you what to run.
 
 Take the default unless you are working on the app itself. A local build is
 unsigned, so its code-signing identity changes every time you rebuild, macOS
@@ -55,11 +66,16 @@ It is installed to `~/Applications/Quern.app`, so Spotlight and Launchpad both
 find it. If you quit it and want it back:
 
 ```sh
-open ~/Applications/Quern.app
+quern menubar open
 ```
 
-`quern setup` also starts it, and will quit a running copy first so an update
-actually takes effect.
+`quern menubar status` shows which version is installed and whether it's
+running. The menu shows the app's own version above **Settings…**, and Settings
+shows it in its own **Menu-bar app** section. The **Version** under **Server** is
+the server's, which can differ on a git install.
+
+`quern setup` starts the app if it isn't running. It only quits and restarts a
+running copy when it's installing a new version.
 
 ## What the menu shows
 
