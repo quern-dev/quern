@@ -54,7 +54,14 @@ class ListScreen(DeviceControllerUI):
     def __init__(self, rows: int = 200, *, offset: float = 0.0, row: float = ROW,
                  scrolls: bool = True, controlled: bool = True,
                  at_rest: bool = False, bounce: float = 0.0,
-                 ids: bool = True, ticking: bool = False):
+                 ids: bool = True, ticking: bool = False, lazy: bool = True,
+                 pager_items: int = 0, loads_more: int = 0,
+                 fling: float = FLING):
+        self.fling = fling
+        self.lazy = lazy            # False: a laid-out scroller, all rows in the tree
+        self.pager_items = pager_items  # >0: each swipe snaps one page; id-less items
+        self.loads_more = loads_more    # rows appended per swipe at the bottom
+        self.loading = False
         self.ids = ids              # False: rows told apart only by label
         self.ticking = ticking      # a clock label that changes every read
         self.ticks = 0
@@ -119,13 +126,28 @@ class ListScreen(DeviceControllerUI):
             )]
             for i in range(self.rows):
                 y = TOP + i * self.row - shift
-                if -self.row < y < SCREEN["height"]:
+                if self.pager_items:
+                    on_screen = abs(y - TOP) < self.row / 2   # only the current page
+                else:
+                    on_screen = -self.row < y < SCREEN["height"]
+                if not self.lazy or on_screen:
                     els.append(UIElement(
                         type="Cell", identifier=f"row_{i}" if self.ids else "",
                         label=f"Row {i}",
                         frame={"x": 0, "y": y, "width": SCREEN["width"],
                                "height": self.row},
                     ))
+                    for j in range(self.pager_items):
+                        els.append(UIElement(
+                            type="StaticText", identifier="", label=f"Page {i} item {j}",
+                            frame={"x": 20, "y": y + 100 + 60 * j,
+                                   "width": 200, "height": 44},
+                        ))
+            if self.loading:
+                els.append(UIElement(
+                    type="ActivityIndicator", identifier="spinner", label="Loading",
+                    frame={"x": 180, "y": 780, "width": 30, "height": 30},
+                ))
         if self.ticking:
             self.ticks += 1
             els.append(UIElement(
@@ -167,7 +189,16 @@ class ListScreen(DeviceControllerUI):
             if not self.scrolls:
                 self.bouncing = 3 if self.bounce else 0   # short lists bounce too
                 return
-            travel = (TRAVEL if self.controlled else FLING) * (y1 - y2)
+            travel = (TRAVEL if self.controlled else self.fling) * (y1 - y2)
+            if self.pager_items:
+                travel = self.row if travel > 0 else -self.row   # snaps a page
+            if travel > 0 and self.offset >= self.max_offset and self.loads_more:
+                # Infinite scroll: a drag at the bottom fetches more rows,
+                # which arrive below the fold; only a spinner shows.
+                self.rows += self.loads_more
+                self.loading = True
+                return
+            self.loading = False
             wanted = self.offset + travel
             landed = min(max(wanted, 0.0), self.max_offset)
             self.bouncing = 3 if self.bounce and landed != wanted else 0
@@ -699,3 +730,114 @@ async def test_a_target_only_the_filtered_lookup_sees_does_not_run_to_the_deadli
 
     assert found is None
     assert len(screen.swipes()) <= 10, screen.swipes()
+
+
+# -- from the re-review ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page", [3, 8])
+async def test_a_pager_that_replaces_every_item_is_seen_to_move(page):
+    """M38 — only the chrome survives a page turn, and it never moves.
+
+    Judged only on what both reads share, a page turn looked like nothing
+    moving, and the sweep turned back after one swipe (re-review, N-1). The
+    items have no ids and sit at the same positions on every page, so their
+    changes look like labels changing in place -- but four at once is not a
+    clock.
+    """
+    screen = ListScreen(rows=10, row=SCREEN["height"], pager_items=4, ids=False)
+    found = await screen._ios_scroll_to_element(
+        "SIM", f"Page {page} item 1", None, max_swipes=10,
+    )
+    assert found is not None, f"gave up after {screen.swipes()}"
+    assert screen.swipes() == ["swipe:down"] * page
+
+
+@pytest.mark.asyncio
+async def test_a_list_that_loads_more_at_the_bottom_is_swept_on():
+    """M39 — something appearing is movement even when nothing left."""
+    screen = ListScreen(rows=40, loads_more=40).at_bottom()
+    found = await _sweep(screen, "row_60")
+    assert found is not None, f"gave up after {screen.swipes()}"
+
+
+@pytest.mark.asyncio
+async def test_a_located_target_above_lands_just_below_the_chrome():
+    """M40 — the correction toward a located target is sized, not stepped.
+
+    One swipe, dragged by the distance plus the ~10% a controlled swipe
+    loses, puts the target's top 20pt below the top inset.
+    """
+    screen = ListScreen(lazy=False)
+    screen.offset = TOP + 20 * ROW + 300        # row_20 at y=-300
+    found = await _sweep(screen, "row_20")
+
+    assert found is not None
+    assert len(screen.swipes()) == 1, screen.swipes()
+    assert screen.drags[0] * SCREEN["height"] == pytest.approx(370 / TRAVEL)
+    assert found.frame["y"] == pytest.approx(70.0)
+
+
+@pytest.mark.asyncio
+async def test_a_small_correction_still_drags_enough_to_register():
+    """M41 — a drag below touch slop does not scroll; 80pt is the floor."""
+    screen = ListScreen(lazy=False)
+    screen.offset = TOP + 20 * ROW - 40         # row_20 at y=40, under the bar
+    found = await _sweep(screen, "row_20")
+
+    assert found is not None
+    assert screen.drags[0] * SCREEN["height"] == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_a_far_located_target_is_approached_a_step_at_a_time():
+    """M42 — the correction is capped at one step, which is what keeps a
+    located row from being passed over."""
+    screen = ListScreen(lazy=False)
+    found = await _sweep(screen, "row_150")
+
+    assert found is not None
+    assert len(screen.drags) > 3
+    assert all(d == pytest.approx(DRAG) for d in screen.drags[:-1]), screen.drags
+
+
+@pytest.mark.asyncio
+async def test_a_target_too_tall_to_fit_ends_the_sweep_at_once():
+    """M43 — its top and centre can never both be in view, and the sweep
+    swung around it for the whole budget (re-review, N-4)."""
+    screen = ListScreen(rows=5, row=2000.0, lazy=False)
+    found = await _sweep(screen, "row_2")
+
+    assert found is None
+    assert screen.swipes() == [], screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_frameless_duplicate_does_not_hide_a_visible_target():
+    """M44 — the match with a frame is the one to act on (re-review, N-5)."""
+    class Duplicated(ListScreen):
+        async def get_ui_elements(self, *a, **k):
+            els, udid = await super().get_ui_elements(*a, **k)
+            ghost = UIElement(type="Cell", identifier="row_3", label="Row 3", frame=None)
+            return [ghost, *els], udid
+
+    screen = Duplicated()
+    found = await _sweep(screen, "row_3")
+
+    assert found is not None and found.frame is not None
+    assert screen.swipes() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fling", [1.2, 3.0])
+async def test_where_swipes_fling_the_end_of_a_long_list_is_reached(fling):
+    """M45 — idb's fling is unmeasured, so its step and budget must cover a
+    range of it. At 1.2x the quarter-screen step covers so little that an
+    unscaled budget left 66 of 200 rows out of reach (re-review, N-2)."""
+    missed = []
+    for index in (120, 160, 199):
+        screen = ListScreen(controlled=False, fling=fling)
+        if await _sweep(screen, f"row_{index}") is None:
+            missed.append(index)
+    assert not missed, f"at {fling}x, not reached: {missed}"

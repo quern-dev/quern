@@ -387,13 +387,17 @@ class DeviceControllerUI:
             y_near = screen_height * 0.13
         else:
             # A flung swipe travels well past its drag -- 2.6x measured for an
-            # unheld sim-bridge swipe; idb's own factor is unmeasured and
-            # assumed alike. A 75% drag flung that far passes over nearly half
-            # the rows of a list, so idb drags a quarter of the screen, which
-            # keeps even a 2.6x fling inside the visible area.
+            # unheld sim-bridge swipe. idb's own factor is unmeasured: its HID
+            # path does not work under Xcode 27, where this was written. A 75%
+            # drag flung 2.6x passes over nearly half the rows of a list, so
+            # idb drags a quarter of the screen, which keeps a fling of up to
+            # ~3x inside the visible area. If idb flings less than that, the
+            # step covers less ground, and its budget is tripled below so the
+            # sweep still reaches the end of a long list.
             y_far = screen_height * 0.62
             y_near = screen_height * 0.37
         step = y_far - y_near
+        budget_scale = 1 if controlled else 3
         # WDA's swipe returns only once the app is idle, so the first read
         # after it is already at rest -- measured at the end of a list, where a
         # bounce would show, with nothing moving after the call returned. That
@@ -421,8 +425,12 @@ class DeviceControllerUI:
                 filter_label=label, filter_identifier=identifier,
                 probe_containers=probe,
             )
-            matches = find_element(els, label=label, identifier=identifier)
-            return matches[0] if matches else None
+            return _pick(find_element(els, label=label, identifier=identifier))
+
+        def _pick(matches: list[UIElement]) -> UIElement | None:
+            # A frame-less duplicate listed first used to hide a visible
+            # target entirely: the sweep saw "no frame" and gave up.
+            return next((m for m in matches if m.frame), matches[0] if matches else None)
 
         def _fingerprint(els: list[UIElement]) -> dict[tuple, list[tuple]]:
             """Where each element on screen is, keyed by what it is."""
@@ -437,25 +445,38 @@ class DeviceControllerUI:
             return where
 
         def _moved(before: dict, after: dict) -> bool:
-            """Did anything that is on screen both times change position?
+            """Did the content move between two reads?
 
-            Judged on elements present in both reads, by identity. Identity,
-            because a lazy list scrolled by a whole number of rows puts
-            different rows at the same positions. Present in both, because a
-            label that changes in place -- a running timer, a progress
-            percentage -- is a new identity every read; counting that as
-            movement stopped end detection outright and kept the at-rest check
-            from ever seeing two reads agree (review of #204: 20 downward
-            swipes at the bottom of a list, and 182 reads for one sweep).
+            Yes if anything present in both changed position. Identity is
+            (type, id, label), because a lazy list scrolled by a whole number
+            of rows puts different rows at the same positions.
 
-            A controlled step is shorter than the screen, so some rows are on
-            screen both before and after any real scroll. With nothing in
-            common, the two reads are compared whole.
+            Also yes if content appeared or disappeared -- a pager or a
+            page-snapping scroll view replaces everything but the chrome, and
+            the chrome never moves -- *unless* the only change is a label
+            changing in place: the same kind of element, with the same id, at
+            the same position, saying something new. That is a running timer
+            or a progress percentage, and counting it as movement stopped end
+            detection outright and kept the at-rest check from ever seeing two
+            reads agree (review of #204: 20 downward swipes at the bottom of a
+            list, 182 reads for one sweep). More than two such changes at once
+            is not a clock ticking, and counts as movement.
             """
-            shared = before.keys() & after.keys()
-            if not shared:
-                return before != after
-            return any(before[k] != after[k] for k in shared)
+            if any(before[k] != after[k] for k in before.keys() & after.keys()):
+                return True
+            appeared = [k for k in after if k not in before]
+            in_place = 0
+            for gone in (k for k in before if k not in after):
+                twin = next(
+                    (k for k in appeared
+                     if k[:2] == gone[:2] and after[k] == before[gone]),
+                    None,
+                )
+                if twin is None:
+                    return True
+                appeared.remove(twin)
+                in_place += 1
+            return bool(appeared) or in_place > 2
 
         async def _read(probe: bool) -> tuple[UIElement | None, dict]:
             """The whole tree: the target if it is there, and the fingerprint.
@@ -469,7 +490,7 @@ class DeviceControllerUI:
                 resolved, use_cache=False, probe_containers=probe,
             )
             matches = find_element(els, label=label, identifier=identifier)
-            return (matches[0] if matches else None), _fingerprint(els)
+            return _pick(matches), _fingerprint(els)
 
         async def _read_at_rest(probe: bool) -> tuple[UIElement | None, dict]:
             """Read the screen once it has stopped moving.
@@ -526,8 +547,8 @@ class DeviceControllerUI:
         sweep_trace: list[str] = []
         sweep_started = time.perf_counter()
         swipes = 0
-        down_budget = max_swipes * 2
-        total_budget = max_swipes * 3
+        down_budget = max_swipes * 2 * budget_scale
+        total_budget = max_swipes * 3 * budget_scale
         # Set before the cold lookup, not at the loop, so that lookup falls
         # inside the budget: it is cheap on a simulator and is not on a physical
         # device, where a single /source read has been measured at 10.7s.
@@ -653,6 +674,16 @@ class DeviceControllerUI:
                     # Matched, but with nowhere to be: no swipe changes that,
                     # and sweeping on spent the whole budget finding it out.
                     _give_up("the target has no frame, so no swipe can bring it into view")
+                    return None
+                if el is not None and el.frame["height"] / 2 > bottom_safe - top_safe:
+                    # _visible needs the top below the chrome and the centre
+                    # above the home indicator, which an element this tall can
+                    # never satisfy at once; the sweep swung around it until
+                    # the budget ran out.
+                    _give_up(
+                        f"the target is {el.frame['height']:.0f}pt tall, too tall "
+                        "to be brought fully into view"
+                    )
                     return None
                 if time.perf_counter() >= deadline:
                     _give_up(
