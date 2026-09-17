@@ -221,6 +221,98 @@ class TestInstall:
         assert "stopped" in out and "menubar open" in out
 
 
+class TestAFailedSwapKeepsAWorkingApp:
+    """An agent review reproduced this: `rmtree(ignore_errors=True)` can leave
+    part of a bundle behind, the rename then fails with ENOTEMPTY, and the app
+    the user was running has already been gutted."""
+
+    def test_the_old_app_survives_a_failed_rename(self, monkeypatch, tmp_path, capsys):
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", running=True, quern="0.18.5")
+        real_replace = menubar.os.replace
+        calls = {"n": 0}
+
+        def replace(src, dst):
+            # Only the staging move fails, which is the real shape: ENOTEMPTY
+            # because a remnant of the old bundle is still there. Putting the
+            # old one back targets a name nothing holds.
+            calls["n"] += 1
+            if str(src).endswith("Quern.app.incoming"):
+                raise OSError(66, "Directory not empty")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(menubar.os, "replace", replace)
+        assert menubar.cmd_install() == 1
+        assert m.version() == "0.18.3", "the working app was destroyed"
+        assert "Could not install" in capsys.readouterr().out
+
+    def test_a_half_installed_app_is_not_called_installed(self, monkeypatch, tmp_path):
+        """The wreckage satisfied is_dir(), so a retry said "already installed"
+        and exited 0, and doctor --fix passed it by."""
+        m = Machine(monkeypatch, tmp_path, quern="0.18.5")
+        (m.app / "Contents").mkdir(parents=True)          # no Info.plist
+        s = menubar.state()
+        assert s.installed and s.version is None and s.damaged
+        assert "damaged" in "\n".join(menubar.describe(s))
+
+        assert menubar.cmd_install() == 0
+        assert m.downloads, "a damaged app was not replaced"
+        assert m.version() == "0.18.5"
+
+    def test_an_unreadable_version_is_not_treated_as_current(self):
+        """`_older` bailing to False on an unparseable version is right; the
+        branch was never exercised, because `behind` short-circuits on None."""
+        assert menubar._older("1.0 (build 3)", "0.18.5") is False
+        assert menubar._older("0.18.4", "0.18.5") is True
+
+    def test_the_download_lands_beside_the_destination(self, monkeypatch, tmp_path):
+        """`dir=apps` is why the install is a rename. Moving it to $TMPDIR
+        makes every install fail with EXDEV on a machine whose install and
+        temp directory are on different volumes -- which is this project's own
+        machine, and the reason the docstring says so."""
+        m = Machine(monkeypatch, tmp_path, quern="0.18.5")
+        seen = {}
+        real = menubar.tempfile.TemporaryDirectory
+
+        def recording(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(menubar.tempfile, "TemporaryDirectory", recording)
+        menubar.cmd_install()
+        assert seen.get("dir") == m.apps
+
+    def test_a_running_app_is_quit_before_it_is_replaced(self, monkeypatch, tmp_path):
+        """`open` activates a running instance rather than starting the new
+        binary, so without the quit the old build keeps running."""
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", running=True, quern="0.18.5")
+        quits = []
+        monkeypatch.setattr(setup_mod, "_quit_menubar_app",
+                            lambda: quits.append(True) or setattr(m, "running", False))
+        assert menubar.cmd_install() == 0
+        assert quits, "the running app was replaced underneath itself"
+
+    def test_a_stale_incoming_bundle_is_cleared_first(self, monkeypatch, tmp_path):
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5")
+        stale = m.apps / "Quern.app.incoming"
+        _make_app(stale, "0.0.1")
+        assert menubar.cmd_install() == 0
+        assert not stale.exists(), "a stale staging bundle was left behind"
+        assert m.version() == "0.18.5"
+
+    def test_a_truncated_download_is_reported_not_raised(self, monkeypatch, tmp_path, capsys):
+        """HTTPException is not an OSError, so it escaped the handler."""
+        import http.client
+
+        def truncated(url, version, work):
+            raise http.client.IncompleteRead(b"half")
+
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", running=True,
+                    download=truncated)
+        assert menubar.cmd_install() == 1
+        assert m.version() == "0.18.3"
+        assert "Could not install" in capsys.readouterr().out
+
+
 class TestCommandLine:
     @pytest.mark.parametrize("argv, force, called", [
         ([], False, "status"), (["status"], False, "status"), (["open"], False, "open"),
@@ -267,6 +359,16 @@ class TestDoctorAndSetup:
         assert main._report_menubar() is True
         out = capsys.readouterr().out
         assert "Quern app:" in out and "v0.18.3" in out
+
+    def test_doctor_fix_reports_a_failed_install(self, monkeypatch, tmp_path):
+        """It printed "failed verification" and exited 0."""
+        from server import main
+
+        def untrusted(url, version, work):
+            raise setup_mod._UntrustedBundle("not ours")
+
+        Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5", download=untrusted)
+        assert main._report_menubar(fix=True) is False
 
     def test_doctor_fix_installs_an_older_app(self, monkeypatch, tmp_path):
         from server import main

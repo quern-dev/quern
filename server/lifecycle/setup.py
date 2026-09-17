@@ -926,6 +926,7 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     if app.exists() or menubar_app_path().exists():
         return None
 
+    import http.client
     import json as _json
     import tempfile
     import urllib.request
@@ -996,9 +997,12 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
                 "      Do not install it by hand; report it instead."
             ),
         )
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
-        # Never fatal. A missing menu-bar app is a missing convenience, and
+    except (OSError, RuntimeError, ValueError, http.client.HTTPException,
+            subprocess.SubprocessError) as e:
+        # Never fatal. A missing Quern app is a missing convenience, and
         # failing setup over it would be worse than the gap it fills.
+        # HTTPException is not an OSError, so a truncated response used to come
+        # out of here as a traceback despite that intent.
         return CheckResult(
             name=name,
             status=CheckStatus.WARNING,

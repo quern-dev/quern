@@ -12,6 +12,7 @@ nothing saying so -- the menu showed no version of its own to notice by.
 
 from __future__ import annotations
 
+import http.client
 import os
 import platform
 import plistlib
@@ -37,6 +38,16 @@ class AppState:
         """Installed, with a version older than quern's own."""
         return (self.installed and self.version is not None
                 and _older(self.version, self.quern_version))
+
+    @property
+    def damaged(self) -> bool:
+        """A bundle is there but does not say what it is.
+
+        A half-replaced app looks exactly like this, and it used to read as
+        "already installed" -- so a retry after a failed swap reported success
+        over the wreckage, and `doctor --fix` passed it by.
+        """
+        return self.installed and self.version is None
 
 
 def _older(a: str, b: str) -> bool:
@@ -75,6 +86,10 @@ def describe(s: AppState) -> list[str]:
     if not s.installed:
         return [f"not installed (expected at {s.path})",
                 f"install it with: {setup.quern_cmd()} menubar install"]
+    if s.damaged:
+        return [f"at {s.path}, but it does not report a version — it may be "
+                "damaged or half-installed",
+                f"reinstall it with: {setup.quern_cmd()} menubar install --force"]
     lines = [f"v{s.version or '?'} at {s.path} — {'running' if s.running else 'not running'}"]
     if s.behind:
         lines.append(f"older than quern (v{s.quern_version}); "
@@ -128,7 +143,7 @@ def cmd_install(force: bool = False) -> int:
         print("The Quern app is macOS only.")
         return 1
     s = state()
-    if s.installed and not force and not s.behind:
+    if s.installed and not force and not s.behind and not s.damaged:
         print(f"Already installed: v{s.version or '?'} (quern is v{s.quern_version}). "
               "Use --force to reinstall.")
         return cmd_open() if not s.running else 0
@@ -155,14 +170,35 @@ def cmd_install(force: bool = False) -> int:
             staging = s.path.with_name("Quern.app.incoming")
             shutil.rmtree(staging, ignore_errors=True)
             os.replace(fresh, staging)
-            shutil.rmtree(s.path, ignore_errors=True)
-            os.replace(staging, s.path)
+            # The old bundle is moved aside, not deleted: `rmtree(...,
+            # ignore_errors=True)` can leave part of it behind -- an
+            # undeletable child is enough -- and the rename that followed then
+            # failed with ENOTEMPTY, having already gutted the app the user was
+            # running. Measured. A rename cannot half-succeed, so the worst
+            # case now is the old app back where it was.
+            replaced = s.path.with_name("Quern.app.replaced")
+            shutil.rmtree(replaced, ignore_errors=True)
+            if s.installed:
+                os.replace(s.path, replaced)
+            try:
+                os.replace(staging, s.path)
+            except OSError:
+                if replaced.exists():
+                    os.replace(replaced, s.path)
+                raise
+            shutil.rmtree(replaced, ignore_errors=True)
     except setup._UntrustedBundle as e:
         print(f"The downloaded app failed verification and was not installed: {e}")
         print("This is not a network problem. Don't install it by hand; please report it.")
         return 1
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
-        print(f"Could not install the menu-bar app: {e}")
+    except (OSError, RuntimeError, ValueError, http.client.HTTPException,
+            subprocess.SubprocessError) as e:
+        # HTTPException is not an OSError: a truncated response mid-download
+        # came out as a traceback rather than as this message.
+        print(f"Could not install the Quern app: {e}")
+        if s.installed and not s.path.is_dir():
+            # Only reachable if the restore above also failed.
+            print(f"The app that was there is at {s.path.with_name('Quern.app.replaced')}")
         print(f"Manual download: https://github.com/quern-dev/quern/releases/tag/v{version}")
         return 1
 

@@ -1313,9 +1313,12 @@ def _report_menubar(fix: bool = False) -> bool:
         return False
     for line in menubar.describe(state):
         print(f"  {line}")
-    if fix and (not state.installed or state.behind):
-        print("  --fix: installing the current menu-bar app")
-        menubar.cmd_install()
+    if fix and (not state.installed or state.behind or state.damaged):
+        print("  --fix: installing the current Quern app")
+        # The result reaches the exit code: `doctor --fix` printing "failed
+        # verification" and exiting 0 is the shape this whole file argues
+        # against.
+        return menubar.cmd_install() == 0
     return True
 
 
