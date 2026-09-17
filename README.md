@@ -415,6 +415,11 @@ quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
 quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without prompting
 quern install-precommit-hook # Install the pre-commit checklist hook
+quern menubar [status]       # The menu-bar app's version, and whether it is running
+quern menubar open           # Start the menu-bar app (a running one is left alone)
+quern menubar install [--force]
+                             # Install the signed app matching this quern and start it;
+                             #   how a git install gets a newer app
 quern enable-local-capture [--skip-cert-check] [process ...]
                              # Enable transparent simulator traffic capture. Refuses
                              #   when a booted simulator does not trust the capture

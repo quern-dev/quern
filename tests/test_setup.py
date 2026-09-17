@@ -1556,17 +1556,56 @@ class TestFetchMenubarApp:
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")  # must not raise
 
-    def test_the_download_is_bounded(self, tmp_path, monkeypatch):
-        """urlretrieve takes no timeout and defaults to none, so a stalled
-        transfer held setup open with no deadline."""
-        import inspect
+    @staticmethod
+    def _endless(monkeypatch, setup_mod, chunk=b"x" * 1024, clock_step=0.0):
+        """A server that never stops sending, and a clock `clock_step` apart
+        per read. Returns the kwargs urlopen was called with."""
+        seen = {}
+        now = {"t": 0.0}
 
+        class Resp:
+            def read(self, _n):
+                now["t"] += clock_step
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def urlopen(url, **kw):
+            seen.update(kw)
+            return Resp()
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        monkeypatch.setattr(setup_mod.time, "monotonic", lambda: now["t"])
+        return seen
+
+    def test_a_stalled_download_has_a_socket_timeout(self, tmp_path, monkeypatch):
+        """urlretrieve takes no timeout and defaults to none, so a stalled
+        transfer held setup open with no deadline. Run, not read: this used to
+        grep the source of a function the download has since moved out of."""
         from server.lifecycle import setup as setup_mod
 
-        src = inspect.getsource(setup_mod.fetch_menubar_app)
-        assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
-        assert "timeout=" in src, "the transfer has no socket timeout"
-        assert "deadline" in src, "the transfer has no whole-operation deadline"
+        seen = self._endless(monkeypatch, setup_mod, clock_step=10.0)
+        with pytest.raises(RuntimeError):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+        assert seen.get("timeout"), "the transfer has no socket timeout"
+
+    def test_a_download_that_never_ends_hits_the_deadline(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        self._endless(monkeypatch, setup_mod, clock_step=10.0)
+        with pytest.raises(RuntimeError, match="180s"):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+
+    def test_a_download_that_never_ends_hits_the_size_cap(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        self._endless(monkeypatch, setup_mod, chunk=b"x" * (8 * 1024 * 1024))
+        with pytest.raises(RuntimeError, match="MB"):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
 
     def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
         """Signature, team and Gatekeeper are all satisfied by any genuine

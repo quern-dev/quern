@@ -1284,11 +1284,39 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
 
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
+    menubar_complete = _report_menubar(fix)
     services_complete = _report_service_health(fix)
 
     if fix:
         sys.exit(1 if repaired is False else 0)
-    sys.exit(0 if tools is not None and services_complete else 1)
+    sys.exit(0 if tools is not None and services_complete and menubar_complete else 1)
+
+
+def _report_menubar(fix: bool = False) -> bool:
+    """The menu-bar app's own version, next to quern's (#201).
+
+    With `--fix`, a missing or older app is installed -- the step a git install
+    never gets from `quern update` (#200). Returns whether the check ran.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return True
+    from server.lifecycle import menubar
+
+    print()
+    print("Menu-bar app:")
+    try:
+        state = menubar.state()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False
+    for line in menubar.describe(state):
+        print(f"  {line}")
+    if fix and (not state.installed or state.behind):
+        print("  --fix: installing the current menu-bar app")
+        menubar.cmd_install()
+    return True
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
@@ -1650,6 +1678,7 @@ def cli() -> None:
             "                                Show or set automatic capture-certificate install\n"
             "  set-update-check [on|off]     Show or set the automatic update check\n"
             "  install-precommit-hook        Install the pre-commit checklist hook\n"
+            "  menubar [status|open|install] Show, start, or install the menu-bar app\n"
             "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

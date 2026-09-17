@@ -219,6 +219,12 @@ final class SettingsModel: ObservableObject {
     /// rule it enforces is that nothing but a live reading may appear in the
     /// version row: update-info.json answers a different question at a
     /// different time, and showing it under "Server" was believed.
+    /// The app's own version, in its own box so it cannot be read as the
+    /// server's -- which is what the Server box's Version row was taken for.
+    static func appRows(version: String?) -> [(String, String)] {
+        [("Version", version ?? "unknown")]
+    }
+
     func serverRows(now: Date) -> [(String, String)] {
         let s = snapshot.server
         return [
@@ -388,6 +394,10 @@ struct SettingsView: View {
 
             GroupBox("Server") {
                 grid("Server", model.serverRows(now: Date()))
+            }
+
+            GroupBox("Menu-bar app") {
+                grid("Menu-bar app", SettingsModel.appRows(version: AppVersion.current))
             }
 
             GroupBox("Proxy") {

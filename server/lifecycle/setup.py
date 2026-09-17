@@ -814,6 +814,88 @@ def _verify_menubar_app(app: Path, expected_version: str) -> None:
         )
 
 
+def download_release_app(url: str, version: str, work: Path) -> Path:
+    """Download the release asset at `url` into `work` and return its verified
+    Quern.app. Raises `_UntrustedBundle` if it does not verify, and RuntimeError
+    or OSError for anything else.
+
+    `work` should be on the same filesystem as wherever the app ends up. On
+    this project's own machines the install and $TMPDIR sit on different
+    volumes, and a move between them is copytree + rmtree: a failure mid-copy
+    leaves a partial Quern.app, and what gets verified is not byte-for-byte
+    what gets installed. Staying on one filesystem makes the final step a
+    rename.
+    """
+    import urllib.request
+
+    asset_name = f"quern-{version}.tar.gz"
+    tarball = work / asset_name
+    # urlretrieve takes no timeout and defaults to none, so a stalled
+    # transfer hangs setup with no deadline at all. Stream it instead,
+    # with a socket timeout and a whole-operation deadline -- a partial
+    # download that never finishes is the failure mode here, not a slow
+    # one.
+    deadline = time.monotonic() + 180
+    # A size cap as well as a clock. The deadline bounds how long a
+    # hostile or broken server can stream, not how much it can write:
+    # at line rate, 180s is tens of gigabytes into the install volume.
+    # The real asset is single-digit megabytes.
+    max_bytes = 200 * 1024 * 1024
+    written = 0
+    with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
+        with open(tarball, "wb") as out:
+            while True:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        "download exceeded 180s; giving up rather than "
+                        "holding setup open"
+                    )
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise RuntimeError(
+                        f"download exceeded {max_bytes // (1024 * 1024)}MB; "
+                        "refusing to keep writing"
+                    )
+                out.write(chunk)
+
+    # macOS tar, not Python's tarfile. The archive carries AppleDouble
+    # metadata (`._Contents` and friends); macOS tar applies those as
+    # extended attributes and removes them, while tarfile extracts them
+    # as literal files *inside* the bundle. That breaks the code
+    # signature seal -- CodeResources sealed a directory that did not
+    # contain them -- and Gatekeeper then rejects the app with "a
+    # sealed resource is missing or invalid". Measured: 21 entries
+    # extracted where a correct bundle has 10.
+    #
+    # Only the app is extracted. The source tree beside it is already
+    # installed, and unpacking it over a running install is not this
+    # step's job.
+    member = f"quern-{version}/Quern.app"
+    proc = subprocess.run(  # noqa: S603
+        ["/usr/bin/tar", "-xzf", str(tarball), "-C", str(work), member],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"could not extract {member}: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    extracted = work / member
+    if not extracted.is_dir():
+        raise RuntimeError(f"{asset_name} contains no Quern.app")
+
+    # Verify before installing. This is an executable fetched over the
+    # network and then launched, so "the release asset said so" is not
+    # sufficient provenance: a replaced asset would otherwise be
+    # installed and run. Checked against the identity that signs
+    # releases, not merely "validly signed by someone".
+    _verify_menubar_app(extracted, version)
+
+    return extracted
+
+
 def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     """Fetch the menu-bar app when a release install is missing it.
 
@@ -889,77 +971,10 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             )
 
         print(f"    Menu-bar app missing — fetching it from the v{version} release...")
-        # Beside the destination, not in $TMPDIR. On this project's own
-        # machines project_root and $TMPDIR sit on different volumes, and
-        # shutil.move then falls back to copytree + rmtree: a failure mid-copy
-        # leaves a partial Quern.app that later runs treat as installed, and
-        # what gets verified is not byte-for-byte what gets installed. Staying
-        # on one filesystem makes the final step a rename.
+        # Beside the destination, so the final step is a rename -- see
+        # download_release_app.
         with tempfile.TemporaryDirectory(dir=project_root) as tmp:
-            tarball = Path(tmp) / asset_name
-            # urlretrieve takes no timeout and defaults to none, so a stalled
-            # transfer hangs setup with no deadline at all. Stream it instead,
-            # with a socket timeout and a whole-operation deadline -- a partial
-            # download that never finishes is the failure mode here, not a slow
-            # one.
-            deadline = time.monotonic() + 180
-            # A size cap as well as a clock. The deadline bounds how long a
-            # hostile or broken server can stream, not how much it can write:
-            # at line rate, 180s is tens of gigabytes into the install volume.
-            # The real asset is single-digit megabytes.
-            max_bytes = 200 * 1024 * 1024
-            written = 0
-            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
-                with open(tarball, "wb") as out:
-                    while True:
-                        if time.monotonic() > deadline:
-                            raise RuntimeError(
-                                "download exceeded 180s; giving up rather than "
-                                "holding setup open"
-                            )
-                        chunk = resp.read(64 * 1024)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > max_bytes:
-                            raise RuntimeError(
-                                f"download exceeded {max_bytes // (1024 * 1024)}MB; "
-                                "refusing to keep writing"
-                            )
-                        out.write(chunk)
-
-            # macOS tar, not Python's tarfile. The archive carries AppleDouble
-            # metadata (`._Contents` and friends); macOS tar applies those as
-            # extended attributes and removes them, while tarfile extracts them
-            # as literal files *inside* the bundle. That breaks the code
-            # signature seal -- CodeResources sealed a directory that did not
-            # contain them -- and Gatekeeper then rejects the app with "a
-            # sealed resource is missing or invalid". Measured: 21 entries
-            # extracted where a correct bundle has 10.
-            #
-            # Only the app is extracted. The source tree beside it is already
-            # installed, and unpacking it over a running install is not this
-            # step's job.
-            member = f"quern-{version}/Quern.app"
-            proc = subprocess.run(  # noqa: S603
-                ["/usr/bin/tar", "-xzf", str(tarball), "-C", tmp, member],
-                capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"could not extract {member}: {proc.stderr.strip() or proc.stdout.strip()}"
-                )
-            extracted = Path(tmp) / member
-            if not extracted.is_dir():
-                raise RuntimeError(f"{asset_name} contains no Quern.app")
-
-            # Verify before installing. This is an executable fetched over the
-            # network and then launched, so "the release asset said so" is not
-            # sufficient provenance: a replaced asset would otherwise be
-            # installed and run. Checked against the identity that signs
-            # releases, not merely "validly signed by someone".
-            _verify_menubar_app(extracted, version)
-
+            extracted = download_release_app(url, version, Path(tmp))
             # os.replace, so the destination either has the whole verified
             # bundle or nothing at all. A half-written Quern.app would be
             # launched by the next step and would make every future setup
@@ -1678,6 +1693,28 @@ def check_node() -> CheckResult:
         status=CheckStatus.MISSING,
         message="Not installed (needed for MCP server)",
         fixable=True,
+    )
+
+
+def check_menubar_current(project_root: Path) -> CheckResult | None:
+    """Say when a git install's menu-bar app is older than quern (#200).
+
+    A release install gets the matching app with every update; a git install
+    never does, and nothing said so. A warning with the command, not an
+    install: a developer may be running their own build on purpose.
+    """
+    if platform.system() != "Darwin" or not (project_root / ".git").exists():
+        return None
+    from server.lifecycle import menubar
+
+    state = menubar.state()
+    if not state.behind:
+        return None
+    return CheckResult(
+        name="Menu-bar app version",
+        status=CheckStatus.WARNING,
+        message=f"v{state.version} is older than quern v{state.quern_version}",
+        detail=f"A git install's updates don't include the app. Run: {quern_cmd()} menubar install",
     )
 
 
@@ -2812,6 +2849,9 @@ def run_setup() -> int:
         menubar_result = launch_menubar_app(project_root)
         if menubar_result is not None:
             report.add(menubar_result)
+        stale = check_menubar_current(project_root)
+        if stale is not None:
+            report.add(stale)
 
     # ── Claude Code skills ──
 
