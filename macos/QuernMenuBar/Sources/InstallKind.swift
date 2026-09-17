@@ -84,6 +84,12 @@ enum TerminalUpdate {
     /// The wrapper's absolute path, quoted: Terminal's shell probably has
     /// `quern` on PATH, but "probably" is the thing this whole feature exists
     /// to stop relying on.
+    ///
+    /// It ends by becoming the user's own login shell. Terminal's default
+    /// profile closes a window whose shell exits cleanly, so a successful
+    /// update vanished before anyone could read it. Handing the window to a
+    /// shell keeps the output on screen and leaves somewhere to run
+    /// `quern doctor` from; a "press Return" pause would only do the first.
     static func script(quern: String) -> String {
         """
         #!/bin/sh
@@ -95,10 +101,12 @@ enum TerminalUpdate {
         status=$?
         echo
         if [ "$status" -eq 0 ]; then
-          echo "Done. You can close this window."
+          echo "Done."
         else
           echo "quern update exited $status. The output above says why."
         fi
+        echo "This window is now an ordinary shell; close it when you're finished."
+        exec "${SHELL:-/bin/zsh}" -l
 
         """
     }

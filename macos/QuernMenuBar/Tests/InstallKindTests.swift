@@ -78,6 +78,16 @@ enum InstallKindTests {
                            "quoted path runs update: \(script)")
         }
 
+        Harness.test("the window stays open once the update is done") {
+            // Terminal closes a window whose shell exits cleanly, which hid a
+            // successful update's output. The script's last act hands the
+            // window to a shell instead of exiting.
+            let lines = TerminalUpdate.script(quern: "/q").split(separator: "\n")
+            Harness.expect(lines.last.map(String.init), "exec \"${SHELL:-/bin/zsh}\" -l",
+                           "last command")
+            Harness.expect(!lines.contains { $0.hasPrefix("exit") }, "no exit before the shell")
+        }
+
         Harness.test("Settings names the install") {
             let model = SettingsModel()
             model.readInstall = { .git(URL(fileURLWithPath: "/Users/u/Dev/quern", isDirectory: true)) }
