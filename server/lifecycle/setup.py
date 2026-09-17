@@ -1854,6 +1854,10 @@ def _install_patched_companion() -> bool:
     marker = _companion_release_marker()
     try:
         dest.mkdir(parents=True, exist_ok=True)
+        # A staging directory only survives a kill -9 mid-install, and it is
+        # ~17MB each time, so old ones are cleared rather than accumulated.
+        for stale in dest.glob(".idb-companion-*"):
+            shutil.rmtree(stale, ignore_errors=True)
         staging = Path(tempfile.mkdtemp(prefix=".idb-companion-", dir=dest))
     except OSError as exc:
         print(f"    Could not prepare {dest}: {exc}")
@@ -1886,10 +1890,23 @@ def _install_patched_companion() -> bool:
         try:
             new_frameworks.rename(frameworks)
         except OSError:
+            # Put the old frameworks back. If even that fails there are no
+            # frameworks at all, which the check reports as ERROR rather than
+            # MISSING -- the binary is still there -- and the next setup
+            # offers the update, because the marker was already cleared. A
+            # successful install then restores the whole tree.
             if retired.exists():
                 retired.rename(frameworks)
             raise
-        new_binary.replace(dest / "idb_companion")
+        try:
+            new_binary.replace(dest / "idb_companion")
+        except OSError:
+            # The binary is the last thing to move, so a failure here would
+            # otherwise leave the new frameworks beside the old binary.
+            frameworks.rename(new_frameworks)
+            if retired.exists():
+                retired.rename(frameworks)
+            raise
     except Exception as exc:
         print(f"    Install failed: {exc}")
         return False

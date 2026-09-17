@@ -718,6 +718,37 @@ class TestAnOutdatedCompanionIsReplaced:
         assert (tmp_path / "bin" / "Frameworks" / "Old.framework").exists()
         assert s._installed_companion_release() == "idb-companion-v2"
 
+    def test_a_failed_binary_swap_restores_the_old_install(self, tmp_path, monkeypatch):
+        """The binary moves last, so a failure there would otherwise leave the
+        new frameworks beside the old binary."""
+        s = self._install(tmp_path, monkeypatch)
+        self._fake_download(monkeypatch, tmp_path)
+        real_replace = type(tmp_path).replace
+
+        def replace(self, target):
+            if self.name == "idb_companion":
+                raise OSError("permission denied")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(type(tmp_path), "replace", replace)
+
+        assert not s._install_patched_companion()
+        assert "v2" not in (tmp_path / "bin" / "idb_companion").read_text()
+        assert (tmp_path / "bin" / "Frameworks" / "Old.framework").exists(), (
+            "the new frameworks were left beside the old binary"
+        )
+        assert s.companion_is_outdated()
+
+    def test_a_stale_staging_directory_is_cleared(self, tmp_path, monkeypatch):
+        """Only a kill -9 leaves one, and each is ~17MB."""
+        s = self._install(tmp_path, monkeypatch)
+        stale = tmp_path / "bin" / ".idb-companion-leftover"
+        (stale / "bin").mkdir(parents=True)
+        self._fake_download(monkeypatch, tmp_path)
+
+        assert s._install_patched_companion()
+        assert not stale.exists()
+
     def test_a_failed_swap_restores_the_old_frameworks(self, tmp_path, monkeypatch):
         s = self._install(tmp_path, monkeypatch)
         self._fake_download(monkeypatch, tmp_path)
@@ -757,11 +788,12 @@ class TestSetupsCompanionStep:
     simulator paths. Driven for real: a check of the source text let a result
     computed and then thrown away pass."""
 
-    def _stub(self, monkeypatch, *, outdated, answer, installs=True):
+    def _stub(self, monkeypatch, *, outdated, answer, installs=True, status=None,
+              message="installed (patched, x)"):
         from server.lifecycle import setup as s
 
         calls = {"prompted": 0, "installed": 0}
-        state = {"outdated": outdated}
+        state = {"outdated": outdated, "status": status, "message": message}
 
         def prompt(*a, **k):
             calls["prompted"] += 1
@@ -771,9 +803,13 @@ class TestSetupsCompanionStep:
             calls["installed"] += 1
             if installs:
                 state["outdated"] = False
+                state["status"] = None
             return installs
 
         def check():
+            if state["status"] is not None:
+                return s.CheckResult(name="idb_companion", status=state["status"],
+                                     message=state["message"])
             if state["outdated"]:
                 return s.CheckResult(name="idb_companion", status=s.CheckStatus.WARNING,
                                      message="installed (patched, outdated: idb-companion-v1)")
@@ -832,3 +868,98 @@ class TestSetupsCompanionStep:
         source = inspect.getsource(s.run_setup)
         assert "report.add(_setup_idb_companion(sim_bridge=True))" in source
         assert "report.add(_setup_idb_companion(sim_bridge=False))" in source
+
+    def test_a_missing_companion_is_offered_and_installed(self, monkeypatch):
+        """The main path on a fresh machine, and the one `_setup_idb_companion`
+        inherited unpinned: `if result.status == MISSING` could be removed
+        entirely and every test still passed."""
+        s, calls = self._stub(
+            monkeypatch, outdated=False, answer=True,
+            status=None, message="",
+        )
+        from server.lifecycle import setup as real
+        state = {"missing": True}
+
+        def check():
+            if state["missing"]:
+                return real.CheckResult(name="idb_companion",
+                                        status=real.CheckStatus.MISSING,
+                                        message="Not installed (needed for UI automation)")
+            return real.CheckResult(name="idb_companion", status=real.CheckStatus.OK,
+                                    message="installed (patched, x)")
+
+        def install():
+            calls["installed"] += 1
+            state["missing"] = False
+            return True
+
+        monkeypatch.setattr(s, "check_idb_companion", check)
+        monkeypatch.setattr(s, "_install_patched_companion", install)
+
+        result = s._setup_idb_companion(sim_bridge=False)
+
+        assert calls["installed"] == 1
+        assert result.status is s.CheckStatus.OK
+
+    def test_a_missing_companion_that_cannot_be_downloaded_is_reported(self, monkeypatch):
+        s, _ = self._stub(monkeypatch, outdated=False, answer=True, installs=False,
+                          status=None)
+        monkeypatch.setattr(
+            s, "check_idb_companion",
+            lambda: s.CheckResult(name="idb_companion", status=s.CheckStatus.MISSING,
+                                  message="Not installed (needed for UI automation)"),
+        )
+
+        result = s._setup_idb_companion(sim_bridge=False)
+
+        assert result.status is s.CheckStatus.WARNING
+        assert "Download failed" in result.message
+
+    def test_a_system_companion_is_offered_the_patched_build(self, monkeypatch):
+        """The other inherited path: a Homebrew companion is offered ours."""
+        s, calls = self._stub(
+            monkeypatch, outdated=False, answer=True,
+            status=None, message="installed (system, /opt/homebrew/bin/idb_companion)",
+        )
+        from server.lifecycle import setup as real
+        state = {"system": True}
+
+        def check():
+            if state["system"]:
+                return real.CheckResult(
+                    name="idb_companion", status=real.CheckStatus.OK,
+                    message="installed (system, /opt/homebrew/bin/idb_companion)",
+                )
+            return real.CheckResult(name="idb_companion", status=real.CheckStatus.OK,
+                                    message="installed (patched, x)")
+
+        def install():
+            calls["installed"] += 1
+            state["system"] = False
+            return True
+
+        monkeypatch.setattr(s, "check_idb_companion", check)
+        monkeypatch.setattr(s, "_install_patched_companion", install)
+
+        result = s._setup_idb_companion(sim_bridge=False)
+
+        assert calls["installed"] == 1
+        assert "patched" in result.message
+
+    def test_a_declined_patched_build_leaves_the_system_one(self, monkeypatch):
+        s, calls = self._stub(
+            monkeypatch, outdated=False, answer=False,
+            status=None, message="installed (system, /opt/homebrew/bin/idb_companion)",
+        )
+        monkeypatch.setattr(
+            s, "check_idb_companion",
+            lambda: s.CheckResult(
+                name="idb_companion", status=s.CheckStatus.OK,
+                message="installed (system, /opt/homebrew/bin/idb_companion)",
+            ),
+        )
+
+        result = s._setup_idb_companion(sim_bridge=False)
+
+        assert calls["installed"] == 0
+        assert "system" in result.message
