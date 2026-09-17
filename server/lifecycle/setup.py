@@ -814,6 +814,14 @@ def _verify_menubar_app(app: Path, expected_version: str) -> None:
         )
 
 
+#: A size cap as well as a clock. The deadline bounds how long a hostile or
+#: broken server can stream, not how much it can write: at line rate, 180s is
+#: tens of gigabytes into the install volume. The real asset is single-digit
+#: megabytes. A module constant so a test can shrink it rather than writing
+#: 200MB to prove the cap exists.
+MAX_ASSET_BYTES = 200 * 1024 * 1024
+
+
 def download_release_app(url: str, version: str, work: Path) -> Path:
     """Download the release asset at `url` into `work` and return its verified
     Quern.app. Raises `_UntrustedBundle` if it does not verify, and RuntimeError
@@ -836,11 +844,7 @@ def download_release_app(url: str, version: str, work: Path) -> Path:
     # download that never finishes is the failure mode here, not a slow
     # one.
     deadline = time.monotonic() + 180
-    # A size cap as well as a clock. The deadline bounds how long a
-    # hostile or broken server can stream, not how much it can write:
-    # at line rate, 180s is tens of gigabytes into the install volume.
-    # The real asset is single-digit megabytes.
-    max_bytes = 200 * 1024 * 1024
+    max_bytes = MAX_ASSET_BYTES
     written = 0
     with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
         with open(tarball, "wb") as out:

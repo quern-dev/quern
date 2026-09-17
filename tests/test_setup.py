@@ -1647,11 +1647,15 @@ class TestFetchMenubarApp:
             setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
 
     def test_a_download_that_never_ends_hits_the_size_cap(self, tmp_path, monkeypatch):
+        """With the real 200MB cap this wrote 200MB to disk to prove it."""
         from server.lifecycle import setup as setup_mod
 
-        self._endless(monkeypatch, setup_mod, chunk=b"x" * (8 * 1024 * 1024))
+        monkeypatch.setattr(setup_mod, "MAX_ASSET_BYTES", 256 * 1024)
+        self._endless(monkeypatch, setup_mod, chunk=b"x" * (64 * 1024))
         with pytest.raises(RuntimeError, match="MB"):
             setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+        written = sum(f.stat().st_size for f in tmp_path.iterdir() if f.is_file())
+        assert written < 2 * 1024 * 1024, f"wrote {written} bytes"
 
     def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
         """Signature, team and Gatekeeper are all satisfied by any genuine

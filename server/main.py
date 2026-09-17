@@ -1289,7 +1289,9 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     services_complete = _report_service_health(fix)
 
     if fix:
-        sys.exit(1 if repaired is False else 0)
+        # The menu-bar repair counts too: printing "failed verification" and
+        # exiting 0 is the shape this file argues against everywhere else.
+        sys.exit(0 if repaired is not False and menubar_complete else 1)
     sys.exit(0 if tools is not None and services_complete and node_complete
              and menubar_complete else 1)
 
@@ -1315,7 +1317,7 @@ def _report_menubar(fix: bool = False) -> bool:
         return False
     for line in menubar.describe(state):
         print(f"  {line}")
-    if fix and (not state.installed or state.behind or state.damaged):
+    if fix and state.needs_install:
         print("  --fix: installing the current Quern app")
         # The result reaches the exit code: `doctor --fix` printing "failed
         # verification" and exiting 0 is the shape this whole file argues

@@ -9,6 +9,7 @@ from __future__ import annotations
 import plistlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -258,6 +259,22 @@ class TestAFailedSwapKeepsAWorkingApp:
         assert m.downloads, "a damaged app was not replaced"
         assert m.version() == "0.18.5"
 
+    def test_a_version_nothing_can_parse_is_repaired_without_force(self, monkeypatch, tmp_path):
+        """`"1.0 (build 3)"` is present and unparseable: not missing, not
+        behind, so the ordinary install path skipped it and only `--force`
+        could repair it -- which nobody knows to reach for."""
+        m = Machine(monkeypatch, tmp_path, installed="1.0 (build 3)", quern="0.18.5")
+        assert menubar.state().needs_install
+        assert menubar.cmd_install() == 0
+        assert m.downloads and m.version() == "0.18.5"
+
+    def test_a_newer_app_is_still_left_alone(self, monkeypatch, tmp_path):
+        """A dev build ahead of the release must survive the same predicate."""
+        m = Machine(monkeypatch, tmp_path, installed="0.19.0", running=True, quern="0.18.5")
+        assert not menubar.state().needs_install
+        assert menubar.cmd_install() == 0
+        assert m.downloads == [] and m.version() == "0.19.0"
+
     def test_an_unreadable_version_is_not_treated_as_current(self):
         """`_older` bailing to False on an unparseable version is right; the
         branch was never exercised, because `behind` short-circuits on None."""
@@ -369,6 +386,24 @@ class TestDoctorAndSetup:
 
         Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5", download=untrusted)
         assert main._report_menubar(fix=True) is False
+
+    def test_a_failed_repair_reaches_doctors_exit_code(self, monkeypatch, tmp_path):
+        """`--fix` looked only at the Python-dependency repair, so a failed
+        app install exited 0 anyway."""
+        from server import main
+
+        def untrusted(url, version, work):
+            raise setup_mod._UntrustedBundle("not ours")
+
+        Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5", download=untrusted)
+        monkeypatch.setattr(main, "_fetch_device_tools", lambda: ({"simctl": True}, ""))
+        monkeypatch.setattr(main, "_report_python_deps", lambda _fix: True)
+        monkeypatch.setattr(main, "_report_external_tools", lambda _fix: None)
+        monkeypatch.setattr(main, "_report_node", lambda: True)
+        monkeypatch.setattr(main, "_report_service_health", lambda _fix=False: True)
+        with pytest.raises(SystemExit) as exit_:
+            main._cmd_doctor(SimpleNamespace(fix=True))
+        assert exit_.value.code == 1
 
     def test_doctor_fix_installs_an_older_app(self, monkeypatch, tmp_path):
         from server import main

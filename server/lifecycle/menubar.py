@@ -40,6 +40,18 @@ class AppState:
                 and _older(self.version, self.quern_version))
 
     @property
+    def needs_install(self) -> bool:
+        """Whether an install would repair something.
+
+        Missing, behind, or present with a version nothing can parse. That last
+        case is not just a missing Info.plist: `"1.0 (build 3)"` parses as
+        nothing, is not "behind", and was therefore skipped by the ordinary
+        install path -- recoverable only with `--force`, which nobody knows to
+        reach for. A *newer* version is left alone, so a dev build survives.
+        """
+        return not self.installed or self.damaged or self.behind
+
+    @property
     def damaged(self) -> bool:
         """A bundle is there but does not say what it is.
 
@@ -47,7 +59,19 @@ class AppState:
         "already installed" -- so a retry after a failed swap reported success
         over the wreckage, and `doctor --fix` passed it by.
         """
-        return self.installed and self.version is None
+        return self.installed and _major_minor(self.version) is None
+
+
+def _major_minor(version: str | None) -> tuple | None:
+    """The parsed version, or None if it does not parse at all."""
+    from packaging.version import InvalidVersion, Version
+
+    if not version:
+        return None
+    try:
+        return (Version(version),)
+    except InvalidVersion:
+        return None
 
 
 def _older(a: str, b: str) -> bool:
@@ -143,7 +167,7 @@ def cmd_install(force: bool = False) -> int:
         print("The Quern app is macOS only.")
         return 1
     s = state()
-    if s.installed and not force and not s.behind and not s.damaged:
+    if not force and not s.needs_install:
         print(f"Already installed: v{s.version or '?'} (quern is v{s.quern_version}). "
               "Use --force to reinstall.")
         return cmd_open() if not s.running else 0
