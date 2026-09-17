@@ -129,6 +129,16 @@ For each item, ask "did this release change what this file asserts?" — not
       for a reason. A `git add -A` swept one into #152, where CodeRabbit
       reviewed it as documentation and reported its command count as wrong. The
       published notes live on the Release, not in the repo.
+- [ ] **Update into this release from the previous one, for real.** Put a
+      git install on the last release's tag, advance `release/beta` to the
+      candidate, switch that install to beta and run `quern update` from
+      another directory. Resolving the channel and inspecting the tarball do
+      not exercise this: the *previous* release's updater imports the *new*
+      release's files, and 0.18.3 crashed every update into it that way
+      (#212) while both of those checks passed. Look for a clean exit, setup
+      having run, the server restarted on the new version, and
+      `~/.quern/last-update.json` reading `updated`. Switch back to stable
+      afterwards.
 - [ ] **Pick the version deliberately.** New commands, new config fields, or a
       call that now refuses where it used to succeed are a minor bump, not a
       patch — regardless of how the work was framed while doing it.
