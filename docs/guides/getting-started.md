@@ -142,6 +142,8 @@ Point your client at: `node ~/.local/share/quern/mcp/dist/launcher.cjs`
 
 Use `launcher.cjs` rather than `index.js`. It checks the Node version first and tells you which binary it is running under if that version is too old — worth having, because MCP clients do not always pick the node you expect.
 
+Which `node` a client gets depends on how the client was started. A client opened from the Dock doesn't read your shell's startup files, so a Node installed with fnm or nvm is invisible to it even when every terminal finds it. `quern doctor` shows the `node` found in each place: this terminal, a login shell, a non-interactive shell, and GUI apps. For any place where it's missing or older than 22, it gives the fix. If a GUI client can't find Node, either install a Node that Homebrew links (`brew install node`), or set the client's `command` to an absolute path to a Node 22+ binary.
+
 The MCP wrapper auto-discovers the running server via `~/.quern/state.json` — no URL or API key configuration needed.
 
 ## Server Lifecycle

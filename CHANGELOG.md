@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Setup accepted any Node version, and only checked one place.** The MCP wrapper needs Node 22 or later, and setup reported Node 20 with a green tick. It also only looked at the `node` on its own PATH, while four different places choose one: the command you ran, a login shell, a non-interactive shell (what agents and scripts get), and GUI apps (the menu-bar app, and MCP clients opened from the Dock), which read none of your shell's startup files. A machine could be fine in every terminal and have no Node at all for a GUI client. Setup now checks all four and warns about any that is missing or too old, with a fix for each, and `quern doctor` lists them. None of this blocks setup or an update: an install that has been working keeps working, and the MCP wrapper is still built on an older Node, which builds it fine.
 - **Setup could leave you with no menu-bar app.** Every run of setup quit the running menu-bar app and reopened it, even when there was no new version to install — which is every run on a git install. When the reopen failed (macOS error `-600`, seen during a live update), the app stayed quit. A running app with nothing new to install is now left alone. When setup does replace it, the reopen is retried for that error, and if it still fails, setup says the app was stopped and how to start it.
 
 ## [0.18.4] - 2026-09-17
