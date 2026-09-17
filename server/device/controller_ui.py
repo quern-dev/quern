@@ -437,12 +437,38 @@ class DeviceControllerUI:
         # screen-dimension reads fall inside the budget too. Those are cheap on
         # a simulator and are not cheap on a physical device, where a single
         # /source read has been measured at 10.7s.
-        deadline = sweep_started + (
+        deadline_budget = (
             self._SCROLL_DEADLINE_S if deadline_s is None else deadline_s
         )
+        deadline = sweep_started + deadline_budget
 
         def _note(event: str) -> None:
             sweep_trace.append(f"{time.perf_counter() - sweep_started:7.2f}s {event}")
+
+        def _finish(element: UIElement) -> UIElement:
+            """Return a found element, and say how it was found if it was slow.
+
+            The trace used to be emitted only on the way out of a failure, which
+            left the worst diagnosable case silent: a sweep that succeeds and
+            takes five times as long as usual logs nothing at all, so the reason
+            has to be reconstructed from scattered [PERF] lines afterwards.
+            Measured on iOS 18.6 -- the same test passed in 24s, 24s and 113s,
+            and only the settle timeouts in between explained the third.
+
+            Threshold is a quarter of the deadline rather than a constant, so it
+            scales if the budget is ever retuned instead of becoming a number
+            nobody revisits.
+            """
+            elapsed = time.perf_counter() - sweep_started
+            if elapsed >= deadline_budget / 4:
+                _note(f"FOUND, but slowly: {elapsed:.1f}s")
+                logger.info(
+                    "ios scroll-to-element: found %s after %d swipe(s) in %.1fs "
+                    "— slower than expected\n  %s",
+                    identifier or label, blind_steps, elapsed,
+                    "\n  ".join(sweep_trace),
+                )
+            return element
 
         def _give_up(reason: str) -> None:
             """Log the whole sweep at the point it fails, and say why.
@@ -477,7 +503,7 @@ class DeviceControllerUI:
             return None
         el = None if target_known_absent else await _fetch(probe=True)
         if el is not None and _visible(el):
-            return el
+            return _finish(el)
 
         last_cy: float | None = None
         stalls = 0
@@ -582,7 +608,7 @@ class DeviceControllerUI:
                             blind_signature = reverse  # it moves; carry on
                             el = await _fetch()
                             if el is not None and _visible(el):
-                                return el
+                                return _finish(el)
                             continue
                         signature = blind_signature  # neither direction moved
                     if signature == blind_signature:
@@ -636,7 +662,7 @@ class DeviceControllerUI:
                 el = await _fetch()
                 if el is not None and _visible(el):
                     _note("  confirmed after settle — returning")
-                    return el
+                    return _finish(el)
 
                 # Found, then gone. The old code treated this as never having
                 # seen the target and swept onward -- away from a row it had
@@ -659,7 +685,7 @@ class DeviceControllerUI:
                 el = await _fetch()
                 if el is not None and _visible(el):
                     _note("  recovered after nudging back — returning")
-                    return el
+                    return _finish(el)
                 _note("  nudge did not recover it; resuming the sweep")
 
         _give_up("budget exhausted")

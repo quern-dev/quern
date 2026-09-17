@@ -12,7 +12,7 @@ reset the guard on every iteration and spent the whole budget.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -263,4 +263,62 @@ async def test_the_first_lookup_probes_even_though_the_sweep_does_not(controller
     assert all(p is False for p in seen[1:]), (
         f"a sweep lookup probed: {seen} — that is the 3.5s-per-swipe cost this "
         "fix exists to remove"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_slow_success_is_traced_not_just_a_failure(controller, caplog):
+    """A sweep that works but takes far too long must still say why.
+
+    The trace was originally emitted only by the give-up path, which left the
+    most diagnosable case silent. Measured on iOS 18.6: the same scroll passed
+    in 24s, 24s and 113s, and nothing in the log distinguished them — the cause
+    had to be reconstructed from scattered [PERF] lines and a count of settle
+    timeouts.
+
+    `item_1` is on screen at rest, so this returns on the pre-loop lookup and
+    the only variable under test is the timing.
+
+    The clock is driven rather than raced. A tiny real `deadline_s` trips the
+    pre-lookup deadline guard before anything can be slow, and a large one needs
+    a genuinely slow sweep to cross the threshold; neither tests what this is
+    for. Stepping `perf_counter` 20s per call puts the elapsed time well past a
+    quarter of a 100s budget while staying inside the budget itself.
+    """
+    import itertools
+    import logging
+
+    ticks = itertools.count(0.0, 20.0)
+
+    with (
+        caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        patch("server.device.controller_ui.time.perf_counter", lambda: next(ticks)),
+    ):
+        found = await controller._ios_scroll_to_element(
+            "SIM", label=None, identifier="item_1", max_swipes=5,
+            deadline_s=100.0,
+        )
+
+    assert found is not None, "the target was on screen and should have been returned"
+    assert any("slower than expected" in r.message for r in caplog.records), (
+        "a slow success logged nothing; the trace still only fires on failure"
+    )
+    assert any("FOUND, but slowly" in r.message for r in caplog.records), (
+        "the trace was logged without the line saying why it was emitted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fast_success_stays_quiet(controller, caplog):
+    """Silence on the common path is the point; a line per scroll is noise."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="quern-debug-server.device"):
+        found = await controller._ios_scroll_to_element(
+            "SIM", label=None, identifier="item_1", max_swipes=5,
+        )
+
+    assert found is not None
+    assert not any("slower than expected" in r.message for r in caplog.records), (
+        "a fast sweep logged its trace; only slow ones should"
     )
