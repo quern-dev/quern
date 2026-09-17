@@ -37,11 +37,25 @@ This matters more than you'd think.
 
 ### Free Account (Apple ID, no enrollment fee)
 
-- Profiles expire after **7 days**
-- No wildcard App IDs — each bundle identifier uses a slot
-- **~3 active App ID slots** per 7-day window
-- Quern Driver uses **2 slots** (`dev.quern.driver` + `dev.quern.driver.xctrunner`), leaving ~1 for your actual app
-- Must re-setup WDA every 7 days
+- Profiles expire after **7 days**, so WDA must be re-set-up weekly
+- No wildcard App IDs — each bundle identifier registers its own
+
+There are **two separate budgets**, and they are often confused because Xcode's
+error message mentions only one of them:
+
+| budget | limit | what Quern Driver uses | cleared by |
+|---|---|---|---|
+| App IDs registered | 10 per rolling 7 days | 2 — `dev.quern.driver` and `dev.quern.driver.xctrunner` | waiting out the 7 days |
+| free-signed apps installed on a device | 3 at once | **1** — the runner, shown as `QuernDriver` | deleting a free-signed app from the device |
+
+Only one app is installed: the `.xctest` bundle ships *inside* the runner rather
+than beside it. So Quern Driver costs you one of three device slots, leaving two
+for your own app.
+
+The error *"The maximum number of apps for free development profiles has been
+reached"* is the **device** limit. Waiting does not clear it. Note also that
+Xcode counts *offloaded* apps toward the three, so a device can look emptier
+than the error suggests — check Settings > General > iPhone Storage.
 
 **If you're on a free account**, tell your agent. It will warn you about slot limits and profile expiry. When Quern Driver stops working after 7 days, tell your agent to rebuild it:
 
@@ -57,7 +71,7 @@ You need to do this on the device itself — it's a one-time step per developer 
 
 ### How Your Agent Detects This
 
-When WDA setup discovers your account type, it includes warnings in the response. Your agent should surface these to you — things like "this is a free account, profiles expire in 7 days" and "Quern Driver is using 2 of your ~3 App ID slots."
+When WDA setup discovers your account type, it includes warnings in the response. Your agent should surface these to you — things like "this is a free account, profiles expire in 7 days" and "Quern Driver occupies 1 of your 3 device slots, leaving 2 for your own app."
 
 ## How the Driver Works
 
@@ -148,7 +162,7 @@ When WDA fails to start, Quern parses the runner log and tells your agent what w
 | "App not trusted" | Developer profile not trusted (free accounts) | Settings > VPN & Device Management > Trust |
 | "Entitlement mismatch" | WDA was reinstalled with different signing | Tell your agent to force-rebuild WDA |
 | "No signing certificate" | Xcode doesn't have a valid cert | Xcode > Settings > Accounts > Manage Certificates |
-| "Maximum number of apps" | Free account slot limit | Wait 7 days for slots to free up, or use a paid account |
+| "Maximum number of apps" | 3 free-signed apps already installed on the device | Delete a free-signed app from the device (check Settings > General > iPhone Storage for offloaded ones too). **Waiting does not clear this** — that is the separate 10-App-IDs-per-7-days limit |
 | "Device is not available" | Device disconnected | Reconnect USB cable |
 
 Runner logs are at `~/.quern/wda/runner-<udid-prefix>.log` if you need to dig deeper.

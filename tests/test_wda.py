@@ -356,19 +356,49 @@ class TestCustomizeWda:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def produced(tmp_path, monkeypatch):
+    """What a real successful build leaves behind.
+
+    Outside `WDA_DERIVED`, which a forced rebuild deletes before building --
+    the fake xcodebuild here does not recreate anything.
+    """
+    out = tmp_path / "artifacts"
+    app = out / "WebDriverAgentRunner-Runner.app"
+    app.mkdir(parents=True)
+    xctestrun = out / "quern-driver.xctestrun"
+    xctestrun.write_text("")
+    monkeypatch.setattr("server.device.wda.WDA_APP", app)
+    monkeypatch.setattr("server.device.wda.XCTESTRUN", xctestrun)
+
+
 class TestBuildWda:
     async def test_skips_if_already_built(self, tmp_path):
+        """Built means the artifacts are there, not merely that state says so.
+
+        The artifacts have to be created for this to express "already built" --
+        which is #188: without them the state is a claim about a build whose
+        output is gone.
+        """
         state = {
             "cloned": True,
             "build_team_id": "TEAM123",
             "built_at": "2026-01-01T00:00:00+00:00",
         }
-        with patch("server.device.wda.read_wda_state", return_value=state):
+        app = tmp_path / "Runner.app"
+        app.mkdir()
+        xctestrun = tmp_path / "quern-driver.xctestrun"
+        xctestrun.write_text("")
+        with (
+            patch("server.device.wda.read_wda_state", return_value=state),
+            patch("server.device.wda.WDA_APP", app),
+            patch("server.device.wda.XCTESTRUN", xctestrun),
+        ):
             result = await build_wda("TEAM123")
 
         assert result is False
 
-    async def test_builds_fresh(self, tmp_path):
+    async def test_builds_fresh(self, tmp_path, produced):
         repo = tmp_path / "WebDriverAgent"
         repo.mkdir()
         (repo / "WebDriverAgent.xcodeproj").mkdir()
@@ -387,7 +417,7 @@ class TestBuildWda:
         assert result is True
         mock_save.assert_called_once()
 
-    async def test_rebuilds_if_different_team(self, tmp_path):
+    async def test_rebuilds_if_different_team(self, tmp_path, produced):
         state = {
             "cloned": True,
             "build_team_id": "OLD_TEAM",
@@ -409,7 +439,7 @@ class TestBuildWda:
 
         assert result is True
 
-    async def test_force_rebuilds_even_if_same_team(self, tmp_path):
+    async def test_force_rebuilds_even_if_same_team(self, tmp_path, produced):
         state = {
             "cloned": True,
             "build_team_id": "TEAM123",
@@ -1154,6 +1184,7 @@ class TestWdaStartStopApi:
         assert resp.status_code == 400
 
 
+@pytest.mark.usefixtures("produced")
 class TestTheDeploymentTargetIsOverridden:
     """Xcode 27 refuses to build upstream WebDriverAgent.
 
@@ -1179,10 +1210,16 @@ class TestTheDeploymentTargetIsOverridden:
         repo.mkdir()
         (repo / "WebDriverAgent.xcodeproj").mkdir()
 
-        captured = {}
+        # Every invocation, not the last one. Patching
+        # `server.device.wda.asyncio.create_subprocess_exec` patches the global
+        # module, so anything else reached through it lands here too -- the
+        # toolchain probe that records what the artifact was built with runs
+        # *after* the build and would otherwise overwrite the thing under test
+        # with `xcodebuild -version`.
+        calls: list[tuple] = []
 
         async def fake_exec(*args, **kwargs):
-            captured["args"] = args
+            calls.append(args)
             return _mock_process()
 
         with (
@@ -1194,7 +1231,9 @@ class TestTheDeploymentTargetIsOverridden:
             patch("server.device.wda._post_process_runner_app", AsyncMock()),
         ):
             await build_wda("TEAM123", force=force)
-        return captured["args"]
+        build = [c for c in calls if "build-for-testing" in c]
+        assert build, f"xcodebuild build-for-testing was never invoked: {calls}"
+        return build[0]
 
     @staticmethod
     def _deployment_target(args):

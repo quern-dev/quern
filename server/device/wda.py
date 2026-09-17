@@ -291,6 +291,77 @@ def customize_wda(repo: Path | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _xcode_build_id() -> str | None:
+    """Xcode's build number, e.g. `17A5241e`, or None if it cannot be read.
+
+    The build number rather than the marketing version: betas ship repeatedly
+    as "26.0" with different builds, and a toolchain change is exactly what this
+    is for.
+    """
+    from server.device.tool_probe import probe_stdout
+
+    out = await probe_stdout("xcodebuild", "-version", tool="xcodebuild")
+    if out is None:
+        return None
+    for line in out.splitlines():
+        if line.startswith("Build version "):
+            return line.split("Build version ", 1)[1].strip() or None
+    return None
+
+
+async def _build_is_current(state: dict[str, Any], team_id: str) -> bool:
+    """Whether the existing WDA build can be reused.
+
+    Three questions, and the cache used to ask only the first.
+
+    **Does the signing team match?** The original key, and still necessary.
+
+    **Are the artifacts actually there?** They were never checked, and that is
+    #188: `force` removes the derived data *before* building, while
+    `build_team_id` is written only after a build that succeeded. So a forced
+    rebuild that fails leaves state from the last *good* build with nothing on
+    disk to match it -- and every later run skips the build, then `install_wda`
+    raises "WDA app not found — build first". Building is precisely what the
+    skip refuses to do, so there is no way out without knowing to pass `force`.
+
+    **Was it built with this toolchain?** #189. The cache carried no record of
+    what produced the artifact, so upgrading Xcode -- the event most likely to
+    invalidate it -- was invisible. Xcode 27 is the live example: every machine
+    that had built WDA before the upgrade kept the old artifact, and only found
+    out at the next forced rebuild, which is also the moment the old one is
+    deleted.
+
+    A recorded value that is *absent* is not treated as a mismatch. Existing
+    installs have no `build_xcode`, and rebuilding WDA for everyone on upgrade
+    -- minutes, and a provisioning round trip on a free account -- is a poor
+    trade for detecting a staleness we cannot actually confirm. Absent means no
+    opinion; present-and-different means rebuild. The first build after this
+    ships records the fingerprint, and every change after that is caught.
+    """
+    if state.get("build_team_id") != team_id:
+        return False
+    if not (WDA_APP.exists() and XCTESTRUN.exists()):
+        logger.info("WDA state claims a build for %s, but the artifacts are "
+                    "missing — rebuilding", team_id)
+        return False
+    recorded = state.get("build_deployment_target")
+    if recorded is not None and recorded != WDA_MIN_DEPLOYMENT_TARGET:
+        logger.info("WDA was built against deployment target %s, now %s — "
+                    "rebuilding", recorded, WDA_MIN_DEPLOYMENT_TARGET)
+        return False
+    recorded_xcode = state.get("build_xcode")
+    if recorded_xcode is not None:
+        current = await _xcode_build_id()
+        # A toolchain we cannot read is not a toolchain that differs. The build
+        # below will fail on its own terms if Xcode is genuinely unusable, and
+        # that failure says more than a rebuild triggered by a probe timeout.
+        if current is not None and current != recorded_xcode:
+            logger.info("WDA was built with Xcode %s, now %s — rebuilding",
+                        recorded_xcode, current)
+            return False
+    return True
+
+
 async def build_wda(team_id: str, force: bool = False) -> bool:
     """Build WDA for a given signing team.
 
@@ -302,7 +373,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     Returns True if a fresh build was performed, False if skipped.
     """
     state = read_wda_state()
-    if not force and state.get("build_team_id") == team_id:
+    if not force and await _build_is_current(state, team_id):
         logger.info("WDA already built for team %s", team_id)
         return False
 
@@ -380,7 +451,16 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
                 "Manage Certificates → add an 'Apple Development' certificate."
             )
 
+        # Known signing failures get named before the raw output. A free
+        # account exhausting its app-ID slots, or a profile that expired, is a
+        # thing the reader can act on; twenty lines of xcodebuild is not.
+        diagnosis = _diagnose_signing_output(combined)
         stdout_tail = "\n".join(stdout_text.splitlines()[-20:])
+        if diagnosis:
+            raise RuntimeError(
+                f"xcodebuild failed (rc={proc.returncode}): {diagnosis}\n"
+                f"stdout (last 20 lines): {stdout_tail}"
+            )
         raise RuntimeError(
             f"xcodebuild failed (rc={proc.returncode}):\n"
             f"stderr: {stderr_text}\n"
@@ -393,12 +473,37 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     # Rename the xctestrun file to a stable name
     _rename_xctestrun()
 
+    # A zero exit is not proof of a usable build. Recording one without its
+    # artifacts would claim a success nothing can install; `_build_is_current`
+    # would catch it next run, but this run would fail later and less legibly.
+    missing = [p.name for p in (WDA_APP, XCTESTRUN) if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "xcodebuild reported success but did not produce "
+            f"{', '.join(missing)} under {WDA_DERIVED}"
+        )
+
     # Update state
     now = datetime.now(UTC).isoformat()
     state = read_wda_state()
     state["cloned"] = True
     state["build_team_id"] = team_id
     state["built_at"] = now
+    # What this artifact was built *with*, so the next run can tell whether it
+    # still matches. Written only here, after a build that returned zero.
+    state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    # Cleared, not merely skipped, when the probe fails. Leaving the previous
+    # value would describe *this* artifact with the fingerprint of the one
+    # before it -- and the window in which the probe fails is xcodebuild hanging
+    # during Xcode's first-launch tasks (#180), which is exactly when the
+    # toolchain has just changed. CONTRIBUTING: a success marker must not
+    # survive a failure, and not writing it is insufficient when it may already
+    # be current from an earlier success.
+    xcode = await _xcode_build_id()
+    if xcode:
+        state["build_xcode"] = xcode
+    else:
+        state.pop("build_xcode", None)
     save_wda_state(state)
 
     return True
@@ -625,15 +730,65 @@ _RUNNER_FAILURE_PATTERNS = [
         "a valid Apple Development certificate exists for this team.",
     ),
     (
+        # Found by running the real command: with -allowProvisioningUpdates,
+        # which is what build_wda passes, a team Xcode has never seen produces
+        # this rather than "No Account for Team".
+        "No Accounts: Add a new account in Accounts settings",
+        "Xcode has no Apple ID signed in. Open Xcode > Settings > Accounts and "
+        "add the Apple ID for this team, then retry.",
+    ),
+    (
         "The maximum number of apps for free development profiles has been reached",
-        "Free Apple developer account limit reached (max 3 app IDs per 7 days). "
-        "Wait for old app IDs to expire, or use a paid developer account.",
+        "Free Apple developer account limit reached: a free profile may sign at "
+        "most 3 apps installed on one device at a time. Delete a free-signed "
+        "app from the device, or use a paid developer account.\n"
+        "Note that Xcode counts *offloaded* apps toward the three, so the "
+        "device can look emptier than it is — check Settings > General > "
+        "iPhone Storage for offloaded apps.\n"
+        "This is not the separate 10-App-IDs-per-7-days registration limit; "
+        "waiting does not clear this one.",
+    ),
+    (
+        # Deliberately *after* the max-apps entry. Xcode reports the
+        # device-install limit as the reason automatic provisioning failed,
+        # and the signing step then emits this generic line as well -- so
+        # first-match-wins would answer the specific condition with the
+        # generic remedy, which is a rebuild that cannot clear it. Specific
+        # before generic, and the ordering is covered by a test.
+        #
+        # On a free account with slots to spare, this is what an expired
+        # 7-day profile looks like.
+        "were found: Xcode couldn't find any",
+        "No provisioning profile matches this build. On a free account that "
+        "usually means the 7-day profile expired — re-run setup_wda with "
+        "force:true. Otherwise check that the signing team is still present in "
+        "Xcode > Settings > Accounts, and that its certificate has not been "
+        "revoked.",
     ),
     (
         "Device is not available",
         "The device disconnected or is not available. Reconnect the USB cable and try again.",
     ),
 ]
+
+
+def _diagnose_signing_output(text: str) -> str | None:
+    """Translate known xcodebuild/runner failures into something actionable.
+
+    Shared between the build and the runner log on purpose. The table lived
+    behind the runner-log path alone, so a *build* that failed on the free
+    account's app-ID limit printed twenty raw lines of xcodebuild, while the
+    identical condition at runner start printed an explanation. The build is
+    where a free account hits it first -- signing is what consumes the slot.
+
+    That matters more now that a toolchain change can trigger a rebuild: the
+    rebuild is the right call, and the user is entitled to know why it failed
+    in terms they can act on.
+    """
+    for pattern, diagnosis in _RUNNER_FAILURE_PATTERNS:
+        if pattern in text:
+            return diagnosis
+    return None
 
 
 def _diagnose_runner_failure(log_path: Path) -> str | None:
@@ -646,9 +801,9 @@ def _diagnose_runner_failure(log_path: Path) -> str | None:
     except Exception:
         return None
 
-    for pattern, diagnosis in _RUNNER_FAILURE_PATTERNS:
-        if pattern in log_text:
-            return diagnosis
+    diagnosis = _diagnose_signing_output(log_text)
+    if diagnosis:
+        return diagnosis
 
     # If the log is very short and empty-ish, xcodebuild crashed early
     if len(log_text.strip()) < 50:
@@ -1028,11 +1183,20 @@ async def setup_wda(
             "Free Apple developer account detected. Limitations:",
             "- Provisioning profiles expire after 7 days "
             "— re-run setup_wda with force:true weekly.",
-            "- WDA uses 2 of your ~3 App ID slots "
-            "(driver + xctrunner), leaving only ~1 for "
-            "your own app. If you hit 'maximum number of "
-            "apps for free development profiles', wait for "
-            "old IDs to expire or use a paid account ($99/yr).",
+            # Two different Apple limits, previously merged into one sentence
+            # with the remedy for the wrong one. Registering a bundle ID and
+            # installing an app on a device are separate budgets.
+            "- Two budgets, and WDA spends from both. It registers 2 App IDs "
+            "(dev.quern.driver for the test bundle, .xctrunner for the "
+            "runner) against a limit of 10 per rolling 7 days — that one "
+            "clears by waiting.",
+            "- It also installs 1 app on the device (the runner, shown as "
+            "QuernDriver) against a limit of 3 free-signed apps installed at "
+            "once, leaving 2 for your own. That limit does NOT clear by "
+            "waiting: delete a free-signed app from the device, or use a paid "
+            "account ($99/yr). Xcode counts offloaded apps toward the three "
+            "as well, so check Settings > General > iPhone Storage if the "
+            "device looks emptier than the error suggests.",
             "- The device must trust the developer profile: "
             "Settings > General > VPN & Device Management "
             "> tap your profile > Trust.",
