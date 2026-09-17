@@ -216,6 +216,66 @@ class TestFixes:
         assert node_env.fix_for(site, [site]) == "it hung"
 
 
+class TestInstallers:
+    """#219's matrix, as far as recognising and advising goes."""
+
+    @pytest.mark.parametrize("path, real, n_dir, manager", [
+        (f"{HOME}/.local/state/fnm_multishells/1_2/bin/node",
+         f"{HOME}/.local/share/fnm/node-versions/v22.1.0/installation/bin/node", False, "fnm"),
+        (f"{HOME}/.nvm/versions/node/v22.1.0/bin/node", None, False, "nvm"),
+        (f"{HOME}/.volta/bin/node", None, False, "volta"),
+        (f"{HOME}/.asdf/shims/node", None, False, "asdf"),
+        (f"{HOME}/.local/share/mise/shims/node", None, False, "mise"),
+        (f"{HOME}/.local/share/mise/installs/node/22.1.0/bin/node", None, False, "mise"),
+        (f"{HOME}/.nodenv/shims/node", None, False, "nodenv"),
+        (f"{HOME}/Library/pnpm/node", None, False, "pnpm"),
+        (f"{HOME}/.nix-profile/bin/node", "/nix/store/abc-nodejs-22/bin/node", False, "nix"),
+        ("/run/current-system/sw/bin/node", None, False, "nix"),
+        ("/opt/local/bin/node", None, False, "macports"),
+        ("/opt/homebrew/bin/node", "/opt/homebrew/Cellar/node/23.0.0/bin/node", False, "brew"),
+        # Intel Homebrew: only the resolved path says so.
+        ("/usr/local/bin/node", "/usr/local/Cellar/node/23.0.0/bin/node", False, "brew"),
+        ("/opt/homebrew/opt/node@18/bin/node", None, False, "brew-keg"),
+        # The same path, from two other installers.
+        ("/usr/local/bin/node", None, True, "n"),
+        ("/usr/local/bin/node", None, False, "installer"),
+        ("/some/where/else/node", None, False, None),
+    ])
+    def test_who_installed_it(self, path, real, n_dir, manager):
+        got = node_env.manager_of(
+            path, resolve=lambda p: real or p,
+            is_dir=lambda d: n_dir and d == node_env.N_PREFIX,
+        )
+        assert got == manager
+
+    @pytest.mark.parametrize("manager, fragment", [
+        ("fnm", "fnm install 22"), ("nvm", "nvm install 22"), ("volta", "volta install node@22"),
+        ("mise", "mise use -g node@22"), ("asdf", "asdf install nodejs latest:22"),
+        ("nodenv", "nodenv install"), ("n", "n 22"), ("installer", "nodejs.org"),
+        ("pnpm", "pnpm env use --global 22"), ("macports", "port install nodejs22"),
+        ("nix", "nodejs_22"), ("brew", "brew upgrade node"), ("brew-keg", "brew install node"),
+        (None, "brew install node"),
+    ])
+    def test_each_gets_its_own_upgrade(self, manager, fragment):
+        assert fragment in node_env.upgrade_command(manager)
+
+    def test_a_too_old_node_is_upgraded_with_its_own_installer(self, monkeypatch):
+        """Not whichever place happens to be listed first."""
+        monkeypatch.setattr(node_env, "manager_of", lambda p, **_k: {
+            "/fnm/node": "fnm", "/usr/local/bin/node": "installer"}.get(p))
+        fnm = node_env.NodeSite("this command", "x", node_env.OK, "/fnm/node", "v22.0.0")
+        old = node_env.NodeSite("GUI apps", "x", node_env.TOO_OLD,
+                                "/usr/local/bin/node", "v18.0.0")
+        fix = node_env.fix_for(old, [fnm, old])
+        assert "nodejs.org" in fix and "fnm" not in fix
+
+    def test_mise_scripts_are_told_about_shims(self):
+        mise = node_env.NodeSite("login shell", "x", node_env.OK,
+                                 f"{HOME}/.local/share/mise/shims/node", "v22.0.0")
+        script = node_env.NodeSite("non-interactive shell", "x", node_env.MISSING)
+        assert "--shims" in node_env.fix_for(script, [mise, script])
+
+
 class TestDoctor:
     def test_every_place_is_listed_with_its_fix(self, monkeypatch, capsys):
         from server import main

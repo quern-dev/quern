@@ -196,29 +196,101 @@ def probe(
     return sites
 
 
-def manager_of(path: str | None) -> str | None:
+#: Where each installer puts node, most specific first. Matched against the
+#: path as found *and* with symlinks resolved: Intel Homebrew's
+#: `/usr/local/bin/node` is only recognisable from where it points.
+_MANAGER_PATHS = (
+    ("/.local/share/mise/", "mise"),
+    ("/.asdf/", "asdf"),
+    ("/.nodenv/", "nodenv"),
+    ("/.volta/", "volta"),
+    ("/.nvm/", "nvm"),
+    ("/fnm", "fnm"),                       # fnm_multishells and share/fnm
+    ("/library/pnpm/", "pnpm"),
+    ("/.local/share/pnpm/", "pnpm"),
+    ("/nix/store/", "nix"),
+    ("/.nix-profile/", "nix"),
+    ("/run/current-system/", "nix"),
+    ("/opt/local/", "macports"),
+    ("/opt/homebrew/", "brew"),
+    ("/usr/local/cellar/", "brew"),
+    ("/usr/local/opt/", "brew"),
+)
+
+#: n installs node into /usr/local/bin and keeps its versions here.
+N_PREFIX = "/usr/local/n"
+
+
+def manager_of(
+    path: str | None,
+    *,
+    resolve: Callable[[str], str] = os.path.realpath,
+    is_dir: Callable[[str], bool] = os.path.isdir,
+) -> str | None:
     """Which tool installed this node, judged from where it lives."""
     if not path:
         return None
-    p = path.lower()
-    for needle, name in (("/fnm", "fnm"), ("/.nvm/", "nvm"), ("/.volta/", "volta"),
-                         ("/homebrew/", "brew"), ("/usr/local/cellar/", "brew")):
-        if needle in p:
-            return name
+    try:
+        real = resolve(path)
+    except OSError:
+        real = path
+    for candidate in (path.lower(), real.lower()):
+        # A versioned Homebrew formula is keg-only: upgrading `node` leaves it
+        # where it is, so it gets its own advice.
+        if "/opt/node@" in candidate or "/cellar/node@" in candidate:
+            return "brew-keg"
+        for needle, name in _MANAGER_PATHS:
+            if needle in candidate:
+                return name
+    # A real file in /usr/local/bin is n's or the official installer's; they
+    # put it in the same place, and only n keeps a versions directory.
+    if real.startswith("/usr/local/bin/"):
+        return "n" if is_dir(N_PREFIX) else "installer"
     return None
+
+
+def upgrade_command(manager: str | None, major: int = MIN_NODE_MAJOR) -> str:
+    """How to get Node `major` with the tool that installed the current one."""
+    return {
+        "fnm": f"fnm install {major} && fnm default {major}",
+        "nvm": f"nvm install {major} && nvm alias default {major}",
+        "volta": f"volta install node@{major}",
+        "mise": f"mise use -g node@{major}",
+        "asdf": (f"asdf install nodejs latest:{major}, then make it the default with "
+                 f"`asdf set --home nodejs <version>` (`asdf global` before asdf 0.16)"),
+        "nodenv": (f"nodenv install <{major}.x.y> && nodenv global <{major}.x.y> "
+                   f"(`nodenv install -l | grep '^ *{major}'` lists them)"),
+        "n": f"n {major} (with sudo if /usr/local is not writable)",
+        "installer": f"install Node {major} from https://nodejs.org",
+        "pnpm": f"pnpm env use --global {major}",
+        "macports": f"sudo port install nodejs{major}",
+        "nix": f"add nodejs_{major} to your Nix configuration",
+        "brew": "brew upgrade node",
+        "brew-keg": ("brew install node (a versioned node@ formula is not linked, "
+                     "and upgrading `node` does not touch it)"),
+    }.get(manager or "", "brew install node")
+
+
+_NON_INTERACTIVE_FIX = {
+    "fnm": 'Add `eval "$(fnm env)"` to ~/.zshenv, which every zsh reads.',
+    "nvm": "Load nvm from ~/.zshenv rather than ~/.zshrc, which scripts never read.",
+    "mise": ('Add `eval "$(mise activate zsh --shims)"` to ~/.zshenv. Plain '
+             "`mise activate` only works in interactive shells."),
+    "asdf": "Put asdf's shims directory on PATH in ~/.zshenv, not only in ~/.zshrc.",
+    "volta": "Put ~/.volta/bin on PATH in ~/.zshenv, not only in ~/.zshrc.",
+    "nodenv": 'Add `eval "$(nodenv init - zsh)"` to ~/.zshenv.',
+}
 
 
 def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
     """One actionable line for a site that is not OK."""
     if site.status == UNKNOWN:
         return site.detail
-    manager = next((m for m in (manager_of(s.path) for s in sites) if m), None)
-    upgrade = {
-        "fnm": f"fnm install {MIN_NODE_MAJOR} && fnm default {MIN_NODE_MAJOR}",
-        "nvm": f"nvm install {MIN_NODE_MAJOR} && nvm alias default {MIN_NODE_MAJOR}",
-        "volta": f"volta install node@{MIN_NODE_MAJOR}",
-        "brew": "brew upgrade node",
-    }.get(manager or "", "brew install node")
+    # This node's own installer first: a too-old node is upgraded with the tool
+    # that put it there, whatever the other places use.
+    manager = manager_of(site.path) or next(
+        (m for m in (manager_of(s.path) for s in sites) if m), None)
+    upgrade = upgrade_command(manager)
 
     if site.status == TOO_OLD:
         return f"Node {site.version or '(unreadable)'} is below {MIN_NODE_MAJOR}. Run: {upgrade}"
@@ -227,14 +299,11 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
     if site.place == "GUI apps":
         return ("GUI apps do not read your shell's startup files, so a version "
                 "manager's node is invisible here. Install one where GUI apps look "
-                "(`brew install node`; not `node@22`, which Homebrew does not link "
-                "onto PATH), or point your MCP client's "
-                "\"command\" at an absolute path to a Node "
-                f"{MIN_NODE_MAJOR}+ binary.")
+                "(`brew install node`, or the installer from https://nodejs.org; "
+                f"not `node@{MIN_NODE_MAJOR}`, which Homebrew does not link onto "
+                "PATH), or point your MCP client's \"command\" at an absolute "
+                f"path to a Node {MIN_NODE_MAJOR}+ binary.")
     if site.place == "non-interactive shell":
-        if manager == "fnm":
-            return 'Add `eval "$(fnm env)"` to ~/.zshenv, which every zsh reads.'
-        if manager == "nvm":
-            return "Load nvm from ~/.zshenv rather than ~/.zshrc, which scripts never read."
-        return "Put your Node setup in ~/.zshenv, which non-interactive zsh reads."
+        return _NON_INTERACTIVE_FIX.get(
+            manager or "", "Put your Node setup in ~/.zshenv, which non-interactive zsh reads.")
     return f"No node found. Run: {upgrade}"
