@@ -171,9 +171,24 @@ class TimelineMiddleware:
         body_bytes = await request.body()
         action = format_action(request.url.path, body_bytes)
 
-        # Make body re-readable for the endpoint
+        # Make body re-readable for the endpoint, then get out of the way.
+        #
+        # Returning the buffered body forever swallowed everything that came
+        # after it -- including `http.disconnect`, which is what tells a
+        # handler its caller has gone. That put the endpoints this middleware
+        # wraps back in the state #208 fixed for everything else, and
+        # `tap_element` is one of them: the endpoint whose unbounded sweep
+        # motivated the guard in the first place.
+        body_delivered = False
+
         async def cached_receive():  # noqa: ANN202
-            return {"type": "http.request", "body": body_bytes}
+            nonlocal body_delivered
+            if body_delivered:
+                return await receive()
+            body_delivered = True
+            return {
+                "type": "http.request", "body": body_bytes, "more_body": False,
+            }
 
         # Capture response status code
         status_code = 200

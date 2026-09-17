@@ -188,6 +188,81 @@ async def test_a_repeated_header_is_read_the_way_starlette_reads_it(
     assert status == [expected]
 
 
+async def _status(scope, api_key=KEY):
+    """Drive the middleware directly, for requests a test client cannot send."""
+    codes = []
+
+    async def app(_scope, _receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            codes.append(message["status"])
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    await APIKeyMiddleware(app, api_key=api_key)(scope, receive, send)
+    return codes[0]
+
+
+def _get(path="/api/v1/device/list", headers=(), method="GET"):
+    return {"type": "http", "method": method, "path": path, "headers": list(headers)}
+
+
+@pytest.mark.asyncio
+async def test_a_key_with_characters_outside_latin_1_is_compared_whole():
+    """The bypass a review of #208 found in the first version of this.
+
+    It encoded the configured key as latin-1 with errors="ignore", so every
+    character that would not fit was *dropped* before the comparison: a key of
+    `abc<emoji>def` was satisfied by `abcdef`, and a key made only of emoji
+    encoded to nothing, which an empty bearer token matched. ~/.quern/api-key
+    is a file a user can edit, so a pasted smart quote is enough to reach it.
+    """
+    key = "abc\U0001F511def"
+
+    assert await _status(_get(headers=[(b"x-api-key", b"abcdef")]), key) == 401
+    assert await _status(_get(headers=[(b"x-api-key", key.encode())]), key) == 200
+    assert await _status(
+        _get(headers=[(b"authorization", b"Bearer " + key.encode())]), key,
+    ) == 200
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_encodes_to_nothing_authorises_nobody():
+    key = "\U0001F511\U0001F511"
+
+    assert await _status(_get(headers=[(b"authorization", b"Bearer ")]), key) == 401
+    assert await _status(_get(headers=[(b"x-api-key", b"")]), key) == 401
+    assert await _status(_get(headers=[(b"x-api-key", key.encode())]), key) == 200
+
+
+@pytest.mark.asyncio
+async def test_the_bearer_scheme_needs_its_space():
+    """`Bearer` without the separator is not the scheme: matching on it would
+    read the key from one byte into the value."""
+    assert await _status(
+        _get(headers=[(b"authorization", b"BearerX" + KEY.encode())]),
+    ) == 401
+
+
+@pytest.mark.asyncio
+async def test_a_scope_without_headers_is_refused_not_crashed():
+    """Not every scope carries a header list -- a malformed or synthetic one
+    may omit it, and an unauthenticated crash is still a failure."""
+    assert await _status({"type": "http", "method": "GET", "path": "/api/v1/x"}) == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["OPTIONS", "HEAD", "DELETE", "POST"])
+async def test_no_method_is_exempt(method):
+    """CORS answers preflights above auth in production, so an OPTIONS
+    exemption here would be invisible rather than harmless."""
+    assert await _status(_get(method=method)) == 401
+
+
 # -- scopes and disconnects --------------------------------------------------
 
 

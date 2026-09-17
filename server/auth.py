@@ -68,7 +68,14 @@ class APIKeyMiddleware:
         `ServerConfig` always generates one, so this guards a state that should
         not arise -- which is what the previous version assumed too.
         """
-        if not self.api_key:
+        # UTF-8, and never a lossy encode. `latin-1` with errors="ignore" was
+        # worse than wrong: it compared against the key with every
+        # unencodable character *dropped*, so a configured key of `abc<emoji>def`
+        # was satisfied by `abcdef`, and a key of only emoji by an empty
+        # token -- a bypass anyone could send. ~/.quern/api-key is a file a
+        # user can edit, and one pasted smart quote is enough to reach it.
+        expected = self.api_key.encode("utf-8")
+        if not expected:
             return False
 
         # ASGI headers are a list of (lowercase name, value) byte pairs, not a
@@ -84,7 +91,9 @@ class APIKeyMiddleware:
                 if api_key_header is None:
                     api_key_header = raw_value
 
-        expected = self.api_key.encode("latin-1", errors="ignore")
+        # Constant-time, so a wrong key cannot be narrowed a byte at a time by
+        # timing the refusals. No test can tell this from `==`; it is here on
+        # purpose and should stay.
         if authorization is not None and authorization.startswith(b"Bearer "):
             if hmac.compare_digest(authorization[7:], expected):
                 return True
