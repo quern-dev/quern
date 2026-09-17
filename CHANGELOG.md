@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Setup could leave you with no menu-bar app.** Every run of setup quit the running menu-bar app and reopened it, even when there was no new version to install — which is every run on a git install. When the reopen failed (macOS error `-600`, seen during a live update), the app stayed quit. A running app with nothing new to install is now left alone. When setup does replace it, the reopen is retried for that error, and if it still fails, setup says the app was stopped and how to start it.
 
+### Changed
+- **On a git install, the menu bar updates in Terminal.** A git update rebuilds the MCP wrapper with npm, and an app launched from the Dock or at login can't see a Node installed with fnm, nvm, Volta, asdf or mise, because those are set up in your shell's startup files. It also has nowhere to show a git credential prompt. So on a git install the menu offers **Update in Terminal…**, which opens a Terminal window running `quern update`. Release installs keep **Restart to Update**, which needs nothing from your shell. Settings now shows which install you have, and the menu-bar guide explains how to switch a git install to a release install. The menu's **Documentation** item and the Settings button also opened a page that doesn't exist; both now open the installation guide.
+
 ## [0.18.4] - 2026-09-17
 
 A hotfix for updating into 0.18.3, which crashed after applying the update. If you are on 0.18.2 or earlier, this is the release to update to.
