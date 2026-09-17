@@ -1494,6 +1494,7 @@ class TestFetchMenubarApp:
         assert "network is down" in (result.detail or "")
         assert "releases/tag" in (result.detail or ""), "no manual route offered"
 
+    @pytest.mark.release_download
     def test_extraction_goes_through_macos_tar(self, tmp_path, monkeypatch):
         """Python's tarfile cannot extract this bundle correctly.
 
@@ -1609,9 +1610,18 @@ class TestFetchMenubarApp:
         seen = {}
         now = {"t": 0.0}
 
+        sent = {"chunks": 0}
+
         class Resp:
             def read(self, _n):
                 now["t"] += clock_step
+                sent["chunks"] += 1
+                if sent["chunks"] > 4096:
+                    # The fake has to end. With the clock frozen for the
+                    # size-cap test, removing the cap left the loop with no
+                    # exit at all: the mutant filled the disk until CI killed
+                    # the job, which is not a readable failure.
+                    raise AssertionError("the download was never bounded")
                 return chunk
 
             def __enter__(self):
@@ -1628,6 +1638,7 @@ class TestFetchMenubarApp:
         monkeypatch.setattr(setup_mod.time, "monotonic", lambda: now["t"])
         return seen
 
+    @pytest.mark.release_download
     def test_a_stalled_download_has_a_socket_timeout(self, tmp_path, monkeypatch):
         """urlretrieve takes no timeout and defaults to none, so a stalled
         transfer held setup open with no deadline. Run, not read: this used to
@@ -1639,6 +1650,7 @@ class TestFetchMenubarApp:
             setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
         assert seen.get("timeout"), "the transfer has no socket timeout"
 
+    @pytest.mark.release_download
     def test_a_download_that_never_ends_hits_the_deadline(self, tmp_path, monkeypatch):
         from server.lifecycle import setup as setup_mod
 
@@ -1646,6 +1658,7 @@ class TestFetchMenubarApp:
         with pytest.raises(RuntimeError, match="180s"):
             setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
 
+    @pytest.mark.release_download
     def test_a_download_that_never_ends_hits_the_size_cap(self, tmp_path, monkeypatch):
         """With the real 200MB cap this wrote 200MB to disk to prove it."""
         from server.lifecycle import setup as setup_mod
@@ -1693,6 +1706,7 @@ class TestFetchMenubarApp:
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise
 
 
+    @pytest.mark.release_download
     def test_verification_runs_before_the_app_is_installed(self, tmp_path, monkeypatch):
         """Every other test calls _verify_menubar_app directly. Deleting its
         call site left the whole suite green while setup would download,

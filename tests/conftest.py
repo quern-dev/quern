@@ -385,3 +385,48 @@ def _node_env_is_not_this_machine(monkeypatch):
     # `here` too: every git-update test reaches it, and the real one runs the
     # developer's `node --version`.
     monkeypatch.setattr(node_env, "here", lambda **_kw: all_fine()[0])
+
+
+@pytest.fixture(autouse=True)
+def _no_real_release_downloads(monkeypatch, request):
+    """Fail any test that tries to fetch a release asset.
+
+    `quern doctor --fix` installs a missing or stale Quern app, so a test that
+    runs it on a machine without one goes to the network and downloads an app.
+    CI found that the hard way: the doctor exit-contract tests do not stub the
+    section, and every runner is a machine without one.
+
+    Both hops: the release lookup and the asset download. The first version
+    guarded only the second, while promising both.
+
+    Tests that exercise the download itself mark themselves
+    `@pytest.mark.release_download` and inject their own transport; tests that
+    exercise a *caller* replace this with a fake (see
+    `tests/test_menubar_cli.py`).
+    """
+    if request.node.get_closest_marker("release_download"):
+        return
+    import urllib.request
+
+    from server.lifecycle import setup as setup_mod
+
+    real_urlopen = urllib.request.urlopen
+
+    def guarded_urlopen(url, *a, **kw):
+        target = getattr(url, "full_url", url)
+        if isinstance(target, str) and "/releases" in target:
+            raise AssertionError(
+                f"a test tried to fetch {target}. Patch urlopen, or stub the "
+                "section that calls it."
+            )
+        return real_urlopen(url, *a, **kw)
+
+    monkeypatch.setattr(urllib.request, "urlopen", guarded_urlopen)
+
+    def refuse(url, version, work):
+        raise AssertionError(
+            f"a test tried to download {url}. Patch download_release_app, or "
+            "stub the section that calls it."
+        )
+
+    monkeypatch.setattr(setup_mod, "download_release_app", refuse)

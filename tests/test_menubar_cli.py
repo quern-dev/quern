@@ -368,12 +368,18 @@ class TestCommandLine:
         assert seen == [(["install"], True)]
 
 
+def main_report(monkeypatch, *, fix=False):
+    from server import main
+
+    return main._report_menubar(fix=fix)
+
+
 class TestDoctorAndSetup:
     def test_doctor_reports_the_app(self, monkeypatch, tmp_path, capsys):
         from server import main
 
         Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5", running=True)
-        assert main._report_menubar() is True
+        assert main._report_menubar() == (True, None)
         out = capsys.readouterr().out
         assert "Quern app:" in out and "v0.18.3" in out
 
@@ -385,7 +391,7 @@ class TestDoctorAndSetup:
             raise setup_mod._UntrustedBundle("not ours")
 
         Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5", download=untrusted)
-        assert main._report_menubar(fix=True) is False
+        assert main._report_menubar(fix=True) == (True, False), "a failed repair"
 
     def test_a_failed_repair_reaches_doctors_exit_code(self, monkeypatch, tmp_path):
         """`--fix` looked only at the Python-dependency repair, so a failed
@@ -422,6 +428,17 @@ class TestDoctorAndSetup:
         assert m.downloads == []
         assert "installing" not in capsys.readouterr().out
 
+    def test_doctor_fix_does_not_install_an_app_that_was_never_there(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """A first install writes a GUI app into ~/Applications and launches
+        it. `doctor` runs unattended; `describe()` prints the command instead."""
+        m = Machine(monkeypatch, tmp_path, quern="0.18.5")
+        checked, repaired = main_report(monkeypatch, fix=True)
+        assert (checked, repaired) == (True, None)
+        assert m.downloads == []
+        assert "menubar install" in capsys.readouterr().out
+
     def test_doctor_without_fix_changes_nothing(self, monkeypatch, tmp_path):
         from server import main
 
@@ -434,8 +451,8 @@ class TestDoctorAndSetup:
 
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr("platform.system", lambda: "Linux")
-        assert main._report_menubar() is True
-        assert "Menu-bar" not in capsys.readouterr().out
+        assert main._report_menubar() == (True, None)
+        assert "Quern app" not in capsys.readouterr().out
 
     def test_setup_warns_a_git_install_with_an_older_app(self, monkeypatch, tmp_path):
         Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5")

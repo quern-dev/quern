@@ -15,6 +15,25 @@ import pytest
 from server.main import _cmd_doctor
 
 
+def _no_slow_sections(monkeypatch):
+    """The sections that shell out or reach the network, stubbed for every test
+    in this file.
+
+    Autouse, because the exit-contract tests do not take `stub_sections` and
+    CI caught the consequence: on a runner with no app and no wrapper,
+    `_report_menubar(fix=True)` ran the real repair, which failed, and flipped
+    doctor's exit code. A unit test must not do real machine work, and
+    `doctor` gains sections over time.
+    """
+    monkeypatch.setattr("server.main._report_node", lambda: True)
+    monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
+
+
+@pytest.fixture(autouse=True)
+def _autouse_no_slow_sections(monkeypatch):
+    _no_slow_sections(monkeypatch)
+
+
 @pytest.fixture
 def stub_sections(monkeypatch):
     """Stand in for the three server-independent sections, which shell out."""
@@ -152,6 +171,43 @@ class TestDoctorExitContract:
         monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
         monkeypatch.setattr("server.main.read_state", lambda: None)
         assert _run(args_fix=True) == 0
+
+    def test_a_section_that_could_not_look_reaches_the_plain_exit_code(
+        self, monkeypatch, capsys,
+    ):
+        """Both new sections feed it, and neither term was covered: deleting
+        either from the exit expression passed the whole suite."""
+        self._server(monkeypatch, {"adb": True})
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+
+        monkeypatch.setattr("server.main._report_node", lambda: False)
+        assert _run() != 0, "a node probe that could not look must not read as clean"
+
+        monkeypatch.setattr("server.main._report_node", lambda: True)
+        monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (False, None))
+        assert _run() != 0, "an app that could not be checked must not read as clean"
+
+    def test_a_diagnostic_that_could_not_look_does_not_veto_a_repair(
+        self, monkeypatch, capsys,
+    ):
+        """`quern doctor --fix && quern start` is the sequence this exists for.
+        Folding "could not check the app" into the --fix exit broke it."""
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+        monkeypatch.setattr("server.main.read_state", lambda: None)
+        monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (False, None))
+        assert _run(args_fix=True) == 0
+
+    def test_a_failed_repair_does_fail_fix(self, monkeypatch, capsys):
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+        monkeypatch.setattr("server.main.read_state", lambda: None)
+        monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, False))
+        assert _run(args_fix=True) != 0
 
     def test_fix_fails_when_the_repair_fails(self, monkeypatch, capsys):
         monkeypatch.setattr("server.main._report_python_deps", lambda fix: False)

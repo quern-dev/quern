@@ -829,6 +829,11 @@ def test_fix_is_silent_when_every_tool_is_current(monkeypatch, capsys):
 
 
 def test_doctor_passes_the_fix_flag_through(monkeypatch):
+    # The menu-bar section too: it does real machine work under --fix, and a
+    # test that runs `doctor --fix` without stubbing it exercised that for
+    # real. CI found this shape in test_doctor.py; this file had it too.
+    monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
+    monkeypatch.setattr("server.main._report_node", lambda: True)
     """Pin the wiring: the flag reached `_report_python_deps` and not this
     section, which is how the inconsistency arose in the first place.
 
