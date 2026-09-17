@@ -113,7 +113,9 @@ class TestEachPlaceIsAskedSeparately:
         world = World(login=_line("", ""), script=_line("", ""))
         world.probe(path="/caller/bin:/secret/bin")
         shells = [(argv, kw) for argv, kw in world.calls if argv[-1] != "--version"]
-        assert [argv[1] for argv, _ in shells] == ["-lic", "-c"]
+        # Order-free: the places are probed concurrently, and CI caught the
+        # first version of this assertion depending on which thread won.
+        assert sorted(argv[1] for argv, _ in shells) == ["-c", "-lic"]
         for _argv, kw in shells:
             assert kw["env"]["PATH"] == ":".join(node_env.GUI_PATH)
             assert kw["env"]["HOME"] == HOME
