@@ -127,7 +127,7 @@ class TestTheFingerprintIsRecorded:
     suite, which is exactly the shape a review caught in #194.
     """
 
-    async def test_a_successful_build_records_what_produced_it(self, tmp_path, monkeypatch):
+    async def test_a_successful_build_records_what_produced_it(self, tmp_path, monkeypatch, built):
         repo = tmp_path / "WebDriverAgent"
         (repo / "WebDriverAgent.xcodeproj").mkdir(parents=True)
         saved: dict = {}
@@ -159,7 +159,7 @@ class TestTheFingerprintIsRecorded:
         )
 
     async def test_an_unreadable_toolchain_is_left_unrecorded_not_guessed(
-        self, tmp_path, monkeypatch,
+        self, tmp_path, monkeypatch, built,
     ):
         """Better an absent key -- which means "no opinion" -- than a wrong one
         that would trigger a rebuild on every run afterwards."""
@@ -186,6 +186,38 @@ class TestTheFingerprintIsRecorded:
         await wda.build_wda("TEAM123")
 
         assert "build_xcode" not in saved
+
+    async def test_a_zero_exit_without_artifacts_is_not_recorded(
+        self, tmp_path, monkeypatch,
+    ):
+        """The state is a claim that something installable exists. xcodebuild
+        returning zero is evidence of that, not proof -- and recording it here
+        would defer the failure to install, where it no longer names the build."""
+        repo = tmp_path / "WebDriverAgent"
+        (repo / "WebDriverAgent.xcodeproj").mkdir(parents=True)
+        saved: dict = {}
+
+        async def fake_exec(*args, **kwargs):
+            class P:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"", b""
+            return P()
+
+        monkeypatch.setattr(wda, "WDA_REPO", repo)
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "derived")
+        monkeypatch.setattr(wda, "WDA_APP", tmp_path / "derived" / "Runner.app")
+        monkeypatch.setattr(wda, "XCTESTRUN", tmp_path / "derived" / "quern-driver.xctestrun")
+        monkeypatch.setattr(wda, "read_wda_state", lambda: {"cloned": True})
+        monkeypatch.setattr(wda, "save_wda_state", lambda st: saved.update(st))
+        monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())
+        monkeypatch.setattr(wda, "_xcode_build_id", AsyncMock(return_value="17A5241e"))
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", fake_exec)
+
+        with pytest.raises(RuntimeError, match="did not produce"):
+            await wda.build_wda("TEAM123")
+        assert saved == {}, f"a build with nothing to install was recorded: {saved}"
 
     async def test_the_build_id_is_parsed_from_xcodebuild(self):
         output = "Xcode 27.0\nBuild version 17A5241e\n"
@@ -278,7 +310,7 @@ class TestTheFreeAccountWarningKeepsTheBudgetsApart:
         monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
         monkeypatch.setattr(wda, "build_wda", AsyncMock(return_value=False))
         monkeypatch.setattr(wda, "install_wda", AsyncMock(return_value=None))
-        monkeypatch.setattr(wda, "customize_wda", AsyncMock(return_value=None))
+        monkeypatch.setattr(wda, "customize_wda", lambda *a, **k: False)
         monkeypatch.setattr(wda, "discover_signing_identities", lambda: [
             {"team_id": "TEAM123", "team_type": team_type, "name": "Test"},
         ])
@@ -464,7 +496,7 @@ class TestAFailedProbeDoesNotLeaveTheOldFingerprint:
     """
 
     async def test_an_unreadable_toolchain_clears_a_previous_value(
-        self, tmp_path, monkeypatch,
+        self, tmp_path, monkeypatch, built,
     ):
         repo = tmp_path / "WebDriverAgent"
         (repo / "WebDriverAgent.xcodeproj").mkdir(parents=True)

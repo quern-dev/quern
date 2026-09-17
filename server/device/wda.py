@@ -473,6 +473,16 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     # Rename the xctestrun file to a stable name
     _rename_xctestrun()
 
+    # A zero exit is not proof of a usable build. Recording one without its
+    # artifacts would claim a success nothing can install; `_build_is_current`
+    # would catch it next run, but this run would fail later and less legibly.
+    missing = [p.name for p in (WDA_APP, XCTESTRUN) if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "xcodebuild reported success but did not produce "
+            f"{', '.join(missing)} under {WDA_DERIVED}"
+        )
+
     # Update state
     now = datetime.now(UTC).isoformat()
     state = read_wda_state()

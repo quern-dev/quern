@@ -356,6 +356,22 @@ class TestCustomizeWda:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def produced(tmp_path, monkeypatch):
+    """What a real successful build leaves behind.
+
+    Outside `WDA_DERIVED`, which a forced rebuild deletes before building --
+    the fake xcodebuild here does not recreate anything.
+    """
+    out = tmp_path / "artifacts"
+    app = out / "WebDriverAgentRunner-Runner.app"
+    app.mkdir(parents=True)
+    xctestrun = out / "quern-driver.xctestrun"
+    xctestrun.write_text("")
+    monkeypatch.setattr("server.device.wda.WDA_APP", app)
+    monkeypatch.setattr("server.device.wda.XCTESTRUN", xctestrun)
+
+
 class TestBuildWda:
     async def test_skips_if_already_built(self, tmp_path):
         """Built means the artifacts are there, not merely that state says so.
@@ -382,7 +398,7 @@ class TestBuildWda:
 
         assert result is False
 
-    async def test_builds_fresh(self, tmp_path):
+    async def test_builds_fresh(self, tmp_path, produced):
         repo = tmp_path / "WebDriverAgent"
         repo.mkdir()
         (repo / "WebDriverAgent.xcodeproj").mkdir()
@@ -401,7 +417,7 @@ class TestBuildWda:
         assert result is True
         mock_save.assert_called_once()
 
-    async def test_rebuilds_if_different_team(self, tmp_path):
+    async def test_rebuilds_if_different_team(self, tmp_path, produced):
         state = {
             "cloned": True,
             "build_team_id": "OLD_TEAM",
@@ -423,7 +439,7 @@ class TestBuildWda:
 
         assert result is True
 
-    async def test_force_rebuilds_even_if_same_team(self, tmp_path):
+    async def test_force_rebuilds_even_if_same_team(self, tmp_path, produced):
         state = {
             "cloned": True,
             "build_team_id": "TEAM123",
@@ -1168,6 +1184,7 @@ class TestWdaStartStopApi:
         assert resp.status_code == 400
 
 
+@pytest.mark.usefixtures("produced")
 class TestTheDeploymentTargetIsOverridden:
     """Xcode 27 refuses to build upstream WebDriverAgent.
 
