@@ -30,7 +30,11 @@ Published on [quern-dev/idb](https://github.com/quern-dev/idb/releases), asset `
 | `idb-companion-v1` | `fix/group-children-fallback` @ `ae03179e` | Xcode 26 | HID fails under Xcode 27 |
 | `idb-companion-v2` | `fix/xcode27-simulatorkit` @ `a9daf33d` | Xcode 27.0 | current |
 
-`_IDB_COMPANION_RELEASE` in `server/lifecycle/setup.py` names the release setup installs. A successful install writes it to `~/.quern/bin/idb_companion.release`; v1 wrote no marker, so an install without one is read as v1. `check_idb_companion` reports an install that is not the current release as a warning, and setup offers to replace it.
+v2 requires macOS 12 (Xcode 27's minimum deployment target; v1 ran on 11). `idb xctest` is likely still broken under Xcode 27 -- XCTestBootstrap hardcodes `Developer/Library/PrivateFrameworks` for XCTAutomationSupport, which also moved -- but quern does not use it.
+
+An install is replaced by extracting into a staging directory under `~/.quern/bin` and swapping `Frameworks/` and the binary in once the payload is complete, so an interrupted update leaves the previous install intact. The release marker is cleared only at the swap and rewritten after it. A newer marker than setup's own is left alone rather than offered a downgrade.
+
+`_IDB_COMPANION_RELEASE` in `server/lifecycle/setup.py` names the release setup installs. A successful install writes it to `~/.quern/bin/idb_companion.release`; v1 wrote no marker, so an install without one is read as v1. `check_idb_companion` reports an install older than the current release as a warning, and setup offers to replace it.
 
 ## Building a release
 
