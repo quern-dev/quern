@@ -1914,6 +1914,22 @@ class TestTheMenubarAppIsNotLeftStopped:
         opens = len([c for c in calls if c[0] == "open"])
         assert opens == setup_mod._OPEN_ATTEMPTS, f"retried {opens} times"
 
+    def test_a_first_install_that_fails_to_launch_does_not_claim_it_stopped_one(
+        self, tmp_path, monkeypatch,
+    ):
+        """Nothing was running, so nothing was stopped. Found in review."""
+        from server.lifecycle import setup as setup_mod
+
+        self._machine(monkeypatch, setup_mod, tmp_path, running=False,
+                      open_results=[(1, "The application cannot be opened.")])
+        (tmp_path / "install" / "Quern.app").mkdir(parents=True)
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.WARNING
+        assert "Stopped" not in result.message, result.message
+        assert result.message == "Could not launch Quern.app"
+
 
 class TestOtherQuernOnPath:
     """A second `quern` on PATH is what makes a stale shell hash possible."""

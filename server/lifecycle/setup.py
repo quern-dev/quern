@@ -1044,6 +1044,9 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             # Quit before replacing: a running app whose bundle is swapped
             # underneath it keeps executing the old image from an inode that
             # no longer has a name, which is a confusing state to debug.
+            # Whether it was running is recorded first: a first install has
+            # nothing to stop, and must not later claim it stopped something.
+            stopped = _menubar_app_running()
             _quit_menubar_app()
             shutil.rmtree(installed, ignore_errors=True)
             os.replace(str(staging), str(installed))
@@ -1073,9 +1076,8 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
                 message=f"Could not install to {MENUBAR_APP_DIR}",
                 detail=f"{e}\n      {where}",
             )
-        replaced = True
     else:
-        replaced = False
+        stopped = False
 
     rc, err = _open_menubar_app(installed)
     if rc == 0:
@@ -1085,7 +1087,7 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             message=f"Running from {installed}",
         )
     start = f"open {shlex.quote(str(installed))}"
-    if replaced:
+    if stopped:
         # We stopped the running app to install this one, so the machine now
         # has no menu bar because of us. Say that, not merely that a launch
         # failed.
