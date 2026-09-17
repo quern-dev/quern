@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1022,6 +1023,17 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
     if not delivered.exists() and not installed.exists():
         return None
 
+    if not delivered.exists() and _menubar_app_running():
+        # Nothing new to run, so nothing to restart. This used to quit and
+        # reopen the app on every setup -- which is every setup on a git
+        # install, where nothing is ever delivered -- and when the reopen
+        # failed it left the machine with no menu bar at all (#215).
+        return CheckResult(
+            name="Menu-bar app",
+            status=CheckStatus.OK,
+            message=f"Running from {installed}",
+        )
+
     # Move the delivered copy into place, replacing any older install.
     if delivered.exists():
         try:
@@ -1032,6 +1044,9 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             # Quit before replacing: a running app whose bundle is swapped
             # underneath it keeps executing the old image from an inode that
             # no longer has a name, which is a confusing state to debug.
+            # Whether it was running is recorded first: a first install has
+            # nothing to stop, and must not later claim it stopped something.
+            stopped = _menubar_app_running()
             _quit_menubar_app()
             shutil.rmtree(installed, ignore_errors=True)
             os.replace(str(staging), str(installed))
@@ -1062,21 +1077,60 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
                 detail=f"{e}\n      {where}",
             )
     else:
-        _quit_menubar_app()
+        stopped = False
 
-    rc, _out, err = _run(["open", str(installed)])
+    rc, err = _open_menubar_app(installed)
     if rc == 0:
         return CheckResult(
             name="Menu-bar app",
             status=CheckStatus.OK,
             message=f"Running from {installed}",
         )
+    start = f"open {shlex.quote(str(installed))}"
+    if stopped:
+        # We stopped the running app to install this one, so the machine now
+        # has no menu bar because of us. Say that, not merely that a launch
+        # failed.
+        return CheckResult(
+            name="Menu-bar app",
+            status=CheckStatus.WARNING,
+            message="Stopped to install the new version, and did not restart",
+            detail=f"{err.strip() or 'open failed'}\n      Start it with: {start}",
+        )
     return CheckResult(
         name="Menu-bar app",
         status=CheckStatus.WARNING,
         message="Could not launch Quern.app",
-        detail=err.strip() or f"Try: open {installed}",
+        detail=f"{err.strip() or 'open failed'}\n      Try: {start}",
     )
+
+
+_MENUBAR_PROCESS = "Quern.app/Contents/MacOS/QuernMenuBar"
+
+#: `open` answering -600 (procNotFound) right after a quit, measured once on
+#: a live update: a manual `open` a minute later worked. The quit wait below
+#: ends when pgrep stops listing the process, which is not necessarily when
+#: LaunchServices has finished with it, so a short retry covers the gap.
+_OPEN_ATTEMPTS = 5
+_OPEN_RETRY_DELAY = 1.0
+_LS_PROC_NOT_FOUND = "-600"
+
+
+def _menubar_app_running() -> bool:
+    rc, out, _err = _run(["pgrep", "-f", _MENUBAR_PROCESS])
+    return rc == 0 and bool(out.strip())
+
+
+def _open_menubar_app(app: Path) -> tuple[int, str]:
+    """`open` the app, retrying only the error a just-quit app produces."""
+    rc, err = 1, ""
+    for attempt in range(_OPEN_ATTEMPTS):
+        rc, _out, err = _run(["open", str(app)])
+        if rc == 0 or _LS_PROC_NOT_FOUND not in err:
+            return rc, err
+        if attempt + 1 < _OPEN_ATTEMPTS:
+            time.sleep(_OPEN_RETRY_DELAY)
+    return rc, err
 
 
 def _quit_menubar_app() -> None:
@@ -1088,8 +1142,7 @@ def _quit_menubar_app() -> None:
     """
     _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
     for _ in range(20):
-        rc, out, _err = _run(["pgrep", "-f", "Quern.app/Contents/MacOS/QuernMenuBar"])
-        if rc != 0 or not out.strip():
+        if not _menubar_app_running():
             return
         time.sleep(0.25)
 
