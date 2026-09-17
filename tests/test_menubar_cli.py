@@ -266,7 +266,7 @@ class TestDoctorAndSetup:
         Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5", running=True)
         assert main._report_menubar() is True
         out = capsys.readouterr().out
-        assert "Menu-bar app:" in out and "v0.18.3" in out
+        assert "Quern app:" in out and "v0.18.3" in out
 
     def test_doctor_fix_installs_an_older_app(self, monkeypatch, tmp_path):
         from server import main

@@ -86,10 +86,10 @@ def describe(s: AppState) -> list[str]:
 
 def cmd_status() -> int:
     if platform.system() != "Darwin":
-        print("The menu-bar app is macOS only.")
+        print("The Quern app is macOS only.")
         return 1
     s = state()
-    print("Menu-bar app:")
+    print("Quern app:")
     for line in describe(s):
         print(f"  {line}")
     return 0
@@ -98,11 +98,11 @@ def cmd_status() -> int:
 def cmd_open() -> int:
     """Start the installed app, leaving a running one alone."""
     if platform.system() != "Darwin":
-        print("The menu-bar app is macOS only.")
+        print("The Quern app is macOS only.")
         return 1
     s = state()
     if not s.installed:
-        print(f"The menu-bar app is not installed. Run: {setup.quern_cmd()} menubar install")
+        print(f"The Quern app is not installed. Run: {setup.quern_cmd()} menubar install")
         return 1
     if s.running:
         print(f"Already running (v{s.version or '?'}).")
@@ -125,7 +125,7 @@ def cmd_install(force: bool = False) -> int:
     is -- is left alone unless `--force` says otherwise.
     """
     if platform.system() != "Darwin":
-        print("The menu-bar app is macOS only.")
+        print("The Quern app is macOS only.")
         return 1
     s = state()
     if s.installed and not force and not s.behind:
@@ -179,8 +179,8 @@ def cmd_install(force: bool = False) -> int:
 USAGE = """\
 usage: quern menubar [status|open|install [--force]]
 
-  status             Show the installed menu-bar app's version and whether it runs
-  open               Start the menu-bar app (leaves a running one alone)
+  status             Show the installed Quern app's version and whether it runs
+  open               Start the Quern app in the menu bar (a running one is left alone)
   install [--force]  Install the signed app matching this quern, then start it.
                      Skips an app that is already current unless --force.
 """

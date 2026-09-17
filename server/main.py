@@ -1305,7 +1305,7 @@ def _report_menubar(fix: bool = False) -> bool:
     from server.lifecycle import menubar
 
     print()
-    print("Menu-bar app:")
+    print("Quern app:")
     try:
         state = menubar.state()
     except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
@@ -1678,7 +1678,7 @@ def cli() -> None:
             "                                Show or set automatic capture-certificate install\n"
             "  set-update-check [on|off]     Show or set the automatic update check\n"
             "  install-precommit-hook        Install the pre-commit checklist hook\n"
-            "  menubar [status|open|install] Show, start, or install the menu-bar app\n"
+            "  menubar [status|open|install] Show, start, or install the Quern app (menu bar)\n"
             "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

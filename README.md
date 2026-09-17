@@ -131,7 +131,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | File | Purpose |
 |------|---------|
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
-| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the menu-bar app reads |
+| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the Quern app reads |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture processes, update channel, and the automatic-update-check and certificate-install settings |
@@ -142,10 +142,10 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
 
-### The menu bar app
+### The Quern app (menu bar)
 
-On macOS, Quern installs a menu-bar app so you can see whether the server is up
-without opening a terminal. It appears automatically after `quern setup`, and
+On macOS, Quern installs an app in your menu bar so you can see whether the
+server is up without opening a terminal. It appears automatically after `quern setup`, and
 `quern update` keeps it current. It lives at `~/Applications/Quern.app` — quit
 it from its own menu, and `open ~/Applications/Quern.app` to bring it back.
 
@@ -196,7 +196,7 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored.
 
-To turn the automatic check off, untick **Check for updates automatically** in the menu-bar app's Settings, or run `quern set-update-check off`. That governs the automatic check alone — `quern check-updates` and the menu bar's **Check for Updates** keep working, so turning it off means "do not call home unprompted" rather than "never check". The underlying setting is `"update_check": false` in `~/.quern/config.json`.
+To turn the automatic check off, untick **Check for updates automatically** in the Quern app's Settings, or run `quern set-update-check off`. That governs the automatic check alone — `quern check-updates` and the menu bar's **Check for Updates** keep working, so turning it off means "do not call home unprompted" rather than "never check". The underlying setting is `"update_check": false` in `~/.quern/config.json`.
 
 ### Update channels
 
@@ -415,8 +415,8 @@ quern regenerate-key         # New API key
 quern mcp-install            # Register MCP server with Claude Code
 quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without prompting
 quern install-precommit-hook # Install the pre-commit checklist hook
-quern menubar [status]       # The menu-bar app's version, and whether it is running
-quern menubar open           # Start the menu-bar app (a running one is left alone)
+quern menubar [status]       # The Quern app's version, and whether it is running
+quern menubar open           # Start the Quern app in the menu bar (a running one is left alone)
 quern menubar install [--force]
                              # Install the signed app matching this quern and start it;
                              #   how a git install gets a newer app

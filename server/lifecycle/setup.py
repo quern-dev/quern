@@ -932,7 +932,7 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
 
     from server import get_version
 
-    name = "Menu-bar app"
+    name = "Quern app"
     version = get_version()
     asset_name = f"quern-{version}.tar.gz"
     manual = (
@@ -967,10 +967,10 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
                 name=name,
                 status=CheckStatus.SKIPPED,
                 message=f"Not published with v{version}",
-                detail="This release has no menu-bar app asset.",
+                detail="This release has no Quern app asset.",
             )
 
-        print(f"    Menu-bar app missing — fetching it from the v{version} release...")
+        print(f"    Quern app missing — fetching it from the v{version} release...")
         # Beside the destination, so the final step is a rename -- see
         # download_release_app.
         with tempfile.TemporaryDirectory(dir=project_root) as tmp:
@@ -988,7 +988,7 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
         return CheckResult(
             name=name,
             status=CheckStatus.ERROR,
-            message="The downloaded menu-bar app failed verification",
+            message="The downloaded Quern app failed verification",
             detail=(
                 f"{e}\n"
                 "      Not installed. This is not a network problem -- the "
@@ -1002,7 +1002,7 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
         return CheckResult(
             name=name,
             status=CheckStatus.WARNING,
-            message="Could not fetch the menu-bar app",
+            message="Could not fetch the Quern app",
             detail=f"{e}\n      {manual}",
         )
 
@@ -1044,7 +1044,7 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
         # install, where nothing is ever delivered -- and when the reopen
         # failed it left the machine with no menu bar at all (#215).
         return CheckResult(
-            name="Menu-bar app",
+            name="Quern app",
             status=CheckStatus.OK,
             message=f"Running from {installed}",
         )
@@ -1086,7 +1086,7 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
                 )
             )
             return CheckResult(
-                name="Menu-bar app",
+                name="Quern app",
                 status=CheckStatus.WARNING,
                 message=f"Could not install to {MENUBAR_APP_DIR}",
                 detail=f"{e}\n      {where}",
@@ -1097,7 +1097,7 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
     rc, err = _open_menubar_app(installed)
     if rc == 0:
         return CheckResult(
-            name="Menu-bar app",
+            name="Quern app",
             status=CheckStatus.OK,
             message=f"Running from {installed}",
         )
@@ -1107,13 +1107,13 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
         # has no menu bar because of us. Say that, not merely that a launch
         # failed.
         return CheckResult(
-            name="Menu-bar app",
+            name="Quern app",
             status=CheckStatus.WARNING,
             message="Stopped to install the new version, and did not restart",
             detail=f"{err.strip() or 'open failed'}\n      Start it with: {start}",
         )
     return CheckResult(
-        name="Menu-bar app",
+        name="Quern app",
         status=CheckStatus.WARNING,
         message="Could not launch Quern.app",
         detail=f"{err.strip() or 'open failed'}\n      Try: {start}",
@@ -1723,7 +1723,7 @@ def check_menubar_current(project_root: Path) -> CheckResult | None:
     if not state.behind:
         return None
     return CheckResult(
-        name="Menu-bar app version",
+        name="Quern app version",
         status=CheckStatus.WARNING,
         message=f"v{state.version} is older than quern v{state.quern_version}",
         detail=f"A git install's updates don't include the app. Run: {quern_cmd()} menubar install",

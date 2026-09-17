@@ -134,7 +134,7 @@ enum QuernCLI {
             let detail = FileManager.default.fileExists(atPath: wrapper)
                 ? "\(wrapper) exists but is not executable. Fix it with:\n\n"
                     + "    chmod +x \(wrapper)"
-                : "The menu bar app looks for \(wrapper), which `quern setup` "
+                : "The Quern app looks for \(wrapper), which `quern setup` "
                     + "writes. Run setup once from your install, then try again."
             DispatchQueue.main.async {
                 completion?(notFoundStatus, "Could not find the quern command.\n\n" + detail)
