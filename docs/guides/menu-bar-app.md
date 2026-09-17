@@ -104,7 +104,8 @@ not own the daemon, it asks.
 
 **Restart to update.** Appears only once an update has been staged, and
 restarts into the new version. This is the Ollama pattern — no separate
-updater, no second update path.
+updater, no second update path. On a git install the item is **Update in
+Terminal…** instead — see [Updating](#updating).
 
 **Check for Updates.** Shown instead, when nothing is staged. The hint the
 item above depends on comes from a cache the server refreshes at most once a
@@ -156,6 +157,54 @@ their own prompts.
 
 Quitting the menu bar app does not stop the server. Hold ⌥ over Quit when you
 want both.
+
+## Updating
+
+How the app updates Quern depends on how Quern was installed. Settings shows
+which you have, on the **Install** row.
+
+**Release install** (the `curl … | bash` installer, in `~/.local/share/quern`):
+**Restart to Update** does everything from the menu. The release ships its MCP
+wrapper already built, so updating needs nothing from your shell.
+
+**Git install** (a clone you ran `./quern setup` in): the item is **Update in
+Terminal…**, which opens a Terminal window running `quern update`. A git
+update rebuilds the MCP wrapper with npm, and the menu-bar app can't do that
+reliably:
+
+- Apps started from the Dock or at login don't read your shell's startup files,
+  so a Node installed with fnm, nvm, Volta, asdf or mise isn't there for them.
+  `quern doctor` shows which `node` each place finds.
+- `git pull` may need to ask for credentials, and a menu-bar app has nowhere to
+  show that prompt.
+
+Terminal has your environment, so the update runs there.
+
+A git install also doesn't receive new versions of the menu-bar app from
+`quern update`. To install the current one, run `quern menubar install`. Setup
+and `quern doctor` say when the app is behind.
+
+### Switching from a git install to a release install
+
+If you don't work on Quern itself, a release install is simpler: updates run
+from the menu, and the menu-bar app is updated along with everything else.
+
+```bash
+quern stop
+curl -fsSL https://quern.dev/install.sh | bash
+```
+
+The installer puts Quern in `~/.local/share/quern` and runs setup from there.
+Setup re-points the `quern` command at the new install, re-registers your MCP
+clients, and installs the matching menu-bar app. Open a new terminal (or run
+`rehash`) so your shell picks up the change, then check that Settings now says
+**Release**.
+
+Your settings, API key and device state live in `~/.quern` and are kept. The
+clone is left where it was. Delete it if you don't need it.
+
+To go back to the clone, run `./quern setup` inside it. That points `quern` and
+your MCP clients at the clone again.
 
 ## Quitting
 
