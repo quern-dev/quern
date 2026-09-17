@@ -65,7 +65,7 @@ def state() -> AppState:
         path=app,
         installed=installed,
         version=app_version(app) if installed else None,
-        running=setup._menubar_app_running(),
+        running=installed and setup._menubar_app_running(app),
         quern_version=get_version(),
     )
 
@@ -150,7 +150,7 @@ def cmd_install(force: bool = False) -> int:
         # In ~/Applications, so the install is a rename (see download_release_app).
         with tempfile.TemporaryDirectory(dir=apps, prefix=".quern-app-") as tmp:
             fresh = setup.download_release_app(url, version, Path(tmp))
-            stopped = setup._menubar_app_running()
+            stopped = s.installed and setup._menubar_app_running(s.path)
             setup._quit_menubar_app()
             staging = s.path.with_name("Quern.app.incoming")
             shutil.rmtree(staging, ignore_errors=True)

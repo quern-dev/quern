@@ -37,6 +37,7 @@ class Machine:
             _make_app(self.app, installed)
         self.running = running
         self.opens: list[str] = []
+        self.asked: list = []
         self.downloads: list[str] = []
         self.open_result = (0, "")
         wrapper_path = tmp_path / "bin" / "quern"
@@ -49,11 +50,15 @@ class Machine:
         monkeypatch.setattr(menubar.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(setup_mod.platform, "system", lambda: "Darwin")
         monkeypatch.setattr("server.get_version", lambda: quern)
-        monkeypatch.setattr(setup_mod, "_menubar_app_running", lambda: self.running)
+        monkeypatch.setattr(setup_mod, "_menubar_app_running", self._running)
         monkeypatch.setattr(setup_mod, "_quit_menubar_app", self._quit)
         monkeypatch.setattr(setup_mod, "_open_menubar_app", self._open)
         monkeypatch.setattr(setup_mod, "download_release_app",
                             download or self._download_ok)
+
+    def _running(self, app=None):
+        self.asked.append(app)
+        return self.running
 
     def _quit(self):
         self.running = False
@@ -98,6 +103,39 @@ class TestState:
         text = "\n".join(menubar.describe(menubar.state()))
         assert "v0.18.3" in text and "v0.18.5" in text and "menubar install" in text
         assert "menubar open" not in text
+
+
+class TestTheRightAppIsAskedAbout:
+    def test_status_asks_about_its_own_bundle(self, monkeypatch, tmp_path):
+        """With any other Quern.app running, a general match called a
+        never-launched install "running". Found live."""
+        m = Machine(monkeypatch, tmp_path, installed="0.18.5")
+        menubar.state()
+        assert m.asked == [m.app]
+
+    def test_nothing_installed_is_never_running(self, monkeypatch, tmp_path):
+        m = Machine(monkeypatch, tmp_path, running=True)   # another copy runs
+        assert menubar.state().running is False
+        assert m.asked == []
+
+    def test_a_first_install_does_not_claim_it_stopped_one(self, monkeypatch, tmp_path, capsys):
+        m = Machine(monkeypatch, tmp_path, running=True)   # another copy runs
+        m.open_result = (1, "error -600")
+        menubar.cmd_install()
+        assert "stopped" not in capsys.readouterr().out
+
+    def test_the_pattern_names_the_bundle(self, monkeypatch):
+        seen = []
+        def run(cmd, timeout=30):
+            seen.append(cmd)
+            return (1, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        setup_mod._menubar_app_running(Path("/Users/u/Applications/Quern.app"))
+        setup_mod._menubar_app_running()
+        assert seen[0] == ["pgrep", "-f",
+                           r"/Users/u/Applications/Quern\.app/Contents/MacOS/QuernMenuBar"]
+        assert seen[1] == ["pgrep", "-f", "Quern.app/Contents/MacOS/QuernMenuBar"]
 
 
 class TestOpen:

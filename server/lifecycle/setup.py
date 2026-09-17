@@ -1131,8 +1131,20 @@ _OPEN_RETRY_DELAY = 1.0
 _LS_PROC_NOT_FOUND = "-600"
 
 
-def _menubar_app_running() -> bool:
-    rc, out, _err = _run(["pgrep", "-f", _MENUBAR_PROCESS])
+def _menubar_app_running(app: Path | None = None) -> bool:
+    """Whether a menu-bar app is running -- any copy, or the one at `app`.
+
+    Any copy by default, which is the cautious answer for setup: opening a
+    second app beside one already running is worse than leaving it. `quern
+    menubar` names its bundle, because "running" there is a claim about that
+    app, and with a second copy anywhere on disk the general match reported a
+    freshly installed, never-launched app as running.
+    """
+    import re
+
+    pattern = (f"{re.escape(str(app))}/Contents/MacOS/QuernMenuBar"
+               if app is not None else _MENUBAR_PROCESS)
+    rc, out, _err = _run(["pgrep", "-f", pattern])
     return rc == 0 and bool(out.strip())
 
 
