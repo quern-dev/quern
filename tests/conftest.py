@@ -333,9 +333,31 @@ def _update_finishes_in_process(monkeypatch):
     written before the hand-off assumed. The hand-off's own tests replace
     `_spawn_finish` with a recording fake.
     """
+    import functools
+
     from server.lifecycle import updater
 
     def in_process(cmd, _project_root):
         return updater.finish_update(apply_tools="--tools" in cmd)
 
     monkeypatch.setattr(updater, "_spawn_finish", in_process)
+
+    # And behind it, the steps themselves. They install packages, build the MCP
+    # wrapper, run setup against the real HOME and restart the server. The
+    # conftest path guard reports a write to ~/.claude/settings.json only
+    # *after* it has happened, and it happened twice while this was written:
+    # once from the tests above before the hand-off had a seam, once from a
+    # mutation that removed the hand-off. A test reaching them unpatched is now
+    # an immediate failure rather than a change to the developer's machine.
+    real = updater._rebuild_and_restart
+
+    @functools.wraps(real)
+    def refuse(project_root):
+        raise AssertionError(
+            "a test reached the real _rebuild_and_restart, which runs setup "
+            "and restarts the server on this machine. Patch it, or drive the "
+            "real one under its own fakes via inspect.unwrap -- see the "
+            "`rebuild` fixture in tests/test_tool_updates.py."
+        )
+
+    monkeypatch.setattr(updater, "_rebuild_and_restart", refuse)

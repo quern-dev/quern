@@ -20,6 +20,7 @@ same way `probe_container` takes `describe_point`.
 
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -1071,7 +1072,10 @@ def rebuild(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=state["restart"])
 
     monkeypatch.setattr(updater.subprocess, "run", fake_run)
-    state["_run"] = lambda: updater._rebuild_and_restart(tmp_path)
+    # The real one, deliberately: conftest refuses it by default, and every
+    # step it takes is faked above.
+    real = inspect.unwrap(updater._rebuild_and_restart)
+    state["_run"] = lambda: real(tmp_path)
     return state
 
 
