@@ -199,6 +199,12 @@ class TestFixes:
         assert "brew install node@" not in fix
         assert "absolute path" in fix
 
+    def test_with_no_manager_recognised_the_default_is_linked_node(self):
+        site = self._site("this command", node_env.MISSING)
+        fix = node_env.fix_for(site, [site])
+        assert "brew install node" in fix
+        assert "brew install node@" not in fix
+
     def test_scripts_are_pointed_at_zshenv_for_fnm(self):
         fnm = self._site("login shell", node_env.OK,
                          f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.0.0")
