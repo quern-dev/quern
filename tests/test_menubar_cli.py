@@ -237,6 +237,16 @@ class TestDoctorAndSetup:
         main._report_menubar(fix=True)
         assert m.version() == "0.18.5"
 
+    def test_doctor_fix_leaves_a_current_app_alone_and_says_nothing(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        from server import main
+
+        m = Machine(monkeypatch, tmp_path, installed="0.18.5", quern="0.18.5", running=True)
+        main._report_menubar(fix=True)
+        assert m.downloads == []
+        assert "installing" not in capsys.readouterr().out
+
     def test_doctor_without_fix_changes_nothing(self, monkeypatch, tmp_path):
         from server import main
 
