@@ -132,6 +132,62 @@ def test_an_empty_configured_key_authorises_nobody():
         ).status_code == 401
 
 
+@pytest.mark.parametrize("sent", ["prefix", "suffix"])
+def test_a_key_that_merely_starts_or_extends_the_real_one_is_refused(client, sent):
+    """A truncated key must not authenticate: comparing with `startswith`
+    rather than an equality would accept every prefix of the real key, and
+    `Bearer q` would be enough."""
+    token = KEY[:-1] if sent == "prefix" else KEY + "x"
+
+    assert client.get(
+        "/api/v1/device/list", headers={"Authorization": f"Bearer {token}"},
+    ).status_code == 401
+    assert client.get(
+        "/api/v1/device/list", headers={"X-API-Key": token},
+    ).status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [b"authorization", b"x-api-key"])
+@pytest.mark.parametrize("order,expected", [
+    (("good", "bad"), 200),
+    (("bad", "good"), 401),
+])
+async def test_a_repeated_header_is_read_the_way_starlette_reads_it(
+    name, order, expected,
+):
+    """First occurrence wins, as `Headers.get` does. Taking the last instead
+    would let a second header override the first, which is the shape of a
+    request-smuggling trick."""
+    values = {
+        b"authorization": {"good": f"Bearer {KEY}".encode(), "bad": b"Bearer wrong"},
+        b"x-api-key": {"good": KEY.encode(), "bad": b"wrong"},
+    }[name]
+
+    status = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status.append(message["status"])
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/device/list",
+        "headers": [(name, values[which]) for which in order],
+    }
+    await APIKeyMiddleware(app, api_key=KEY)(scope, receive, send)
+
+    assert status == [expected]
+
+
 # -- scopes and disconnects --------------------------------------------------
 
 
