@@ -36,21 +36,54 @@ def is_overridden(env: dict[str, str] | None = None) -> bool:
     return api_base(env) != DEFAULT_API
 
 
-def asset_url_is_trusted(url: str, env: dict[str, str] | None = None) -> bool:
-    """Whether an asset URL from a release response may be followed.
+def allowed_prefixes(env: dict[str, str] | None = None) -> tuple[str, ...]:
+    """Every URL prefix a release response may point us at.
 
-    Release assets are served from github.com; anything else means the response
-    is not what we think it is, and following it would fetch code from
-    somewhere nobody chose. The exception is an explicitly overridden base: the
-    operator pointed us at that server on purpose, and its assets live there.
-    Even then the download is verified before it is installed -- the signature
-    check is what makes the app safe to run, not the hostname.
+    Pinned to *this* repository, not merely to github.com: a host check alone
+    accepts `https://github.com/someone-else/evil/releases/download/...`, and a
+    free account is enough to host a payload on a genuinely trusted host. What
+    is downloaded is extracted over the install, so the repository is the part
+    that matters.
+
+    Both shapes are here because a release can legitimately be either:
+    `releases/download/` is an uploaded asset, and `.../tarball/` is GitHub's
+    generated source tarball, which is what a release with no asset resolves to
+    -- v0.14.1 and every release cut before the asset existed. Refusing that
+    form would have refused their updates outright, with no fallback.
     """
+    base = api_base(env)
     if is_overridden(env):
-        base = urlparse(api_base(env))
-        here = urlparse(url)
-        return (here.scheme, here.netloc) == (base.scheme, base.netloc)
-    return url.startswith("https://github.com/")
+        # One server the operator named. Everything it serves is under its own
+        # base; a response from it naming somewhere else is still wrong.
+        return (base + "/",)
+    return (
+        f"https://github.com/{GITHUB_REPO}/releases/download/",
+        f"https://github.com/{GITHUB_REPO}/archive/",
+        f"{DEFAULT_API}/tarball/",
+    )
+
+
+def asset_url_is_trusted(url: str, env: dict[str, str] | None = None) -> bool:
+    """Whether a URL from a release response may be followed.
+
+    The scheme and host are compared case-insensitively, since they are
+    case-insensitive in fact; the path is not.
+
+    This is a first-hop check. GitHub's asset URLs redirect to a storage host,
+    and urllib follows that redirect, so it establishes *which release* we
+    asked for rather than which bytes come back -- see #227 for signing them.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("https", "http"):
+        return False
+    normalised = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"
+    for prefix in allowed_prefixes(env):
+        head = urlparse(prefix)
+        if normalised.startswith(
+            f"{head.scheme.lower()}://{head.netloc.lower()}{head.path}"
+        ):
+            return True
+    return False
 
 
 def download_url(version: str, env: dict[str, str] | None = None) -> str:

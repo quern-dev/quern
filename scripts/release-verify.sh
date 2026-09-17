@@ -10,8 +10,10 @@
 # that crashed for everyone (#212). These are the checks that would have caught
 # them, run after step 6 of docs/release-channels.md.
 #
-# Read-only: it fetches, unpacks into a temporary directory, and asserts. It
-# installs nothing and changes no branch. Exits nonzero on the first failure,
+# Read-only where it counts: it fetches, unpacks into a temporary directory,
+# and asserts. It installs nothing, changes no branch and writes nothing to
+# ~/.quern; it does `git fetch` the tag and main into the local object store,
+# which is what lets it tell whether main contains the release. Exits nonzero on the first failure,
 # naming what it expected.
 #
 # The rehearsal (quern#219) sets QUERN_RELEASES_URL to point the same checks at
@@ -40,7 +42,12 @@ trap 'rm -rf "$WORK"' EXIT
 # --------------------------------------------------------------------------
 step "What the release API says"
 # --------------------------------------------------------------------------
-latest_tag="$(curl -fsSL "$API/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+# `|| true`, because `set -e` would otherwise end the run at the first failed
+# request -- and unauthenticated api.github.com is 60 requests an hour. A
+# verification that stops without saying so is the hazard this script exists to
+# remove.
+latest_json="$(curl -fsSL "$API/releases/latest" 2>/dev/null || true)"
+latest_tag="$(printf '%s' "$latest_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
 if [[ "$latest_tag" == "$TAG" ]]; then
   ok "latest release is $TAG"
 else
@@ -51,24 +58,17 @@ fi
 # --------------------------------------------------------------------------
 step "What quern's own updater would offer"
 # --------------------------------------------------------------------------
-# The updater, not a re-implementation of it: 0.18.1's downgrade bug was in the
-# resolving, and a check that resolved separately would have agreed with itself.
+# The *released* updater, not this checkout's: 0.18.1's downgrade bug lived in
+# the resolver users were running, and a check that ran the fixed local copy
+# would have passed while every install was still wrong. The tarball is
+# unpacked first, below, and this runs out of that tree.
+#
+# The interpreter is this checkout's venv, for its dependencies (`packaging`);
+# the *code* comes from the release.
 PYTHON="$ROOT/.venv/bin/python"
-[[ -x "$PYTHON" ]] || PYTHON="python3"
-for channel in stable beta; do
-  offered="$("$PYTHON" -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-from server.lifecycle.updater import _fetch_latest_release
-got = _fetch_latest_release(sys.argv[2])
-print(got[0] if got else "")
-' "$ROOT" "$channel" 2>/dev/null || true)"
-  if [[ "$offered" == "$VERSION" ]]; then
-    ok "channel $channel offers $VERSION"
-  else
-    bad "channel $channel offers ${offered:-nothing}, expected $VERSION"
-  fi
-done
+if [[ ! -x "$PYTHON" ]]; then
+  bad "no venv interpreter at $PYTHON — the resolver checks need one; run setup"
+fi
 
 # --------------------------------------------------------------------------
 step "Where the refs point"
@@ -91,7 +91,10 @@ else
   # check that demanded equality would fail for every release ten minutes after
   # it was cut. What matters is that the release is an ancestor of main rather
   # than something cut from a branch that never landed.
-  git -C "$ROOT" fetch -q origin "$TAG" 2>/dev/null || true
+  # Both refs fetched first: against a stale checkout this reported that main
+  # did not contain a tag it has had for hours. This is the one thing here that
+  # writes anything, and it writes only to the local object store.
+  git -C "$ROOT" fetch -q origin "$TAG" main 2>/dev/null || true
   if git -C "$ROOT" merge-base --is-ancestor "$tag_sha" "origin/main" 2>/dev/null; then
     ok "main contains $TAG"
   else
@@ -113,6 +116,40 @@ if curl -fsSL --max-time 300 -o "$WORK/$asset" "$asset_url"; then
   /usr/bin/tar -xzf "$WORK/$asset" -C "$WORK"
   tree="$WORK/quern-$VERSION"
 
+  if [[ -x "$PYTHON" ]]; then
+    for channel in stable beta; do
+      # Both halves: the version *and* the URL. Dropping the URL was how the
+      # first version of this script could not have caught its own branch
+      # refusing GitHub's generated tarball.
+      resolved="$("$PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from server.lifecycle.updater import _fetch_latest_release
+try:
+    # Only releases from 0.18.5 have this; older ones follow any URL.
+    from server.lifecycle.releases import asset_url_is_trusted
+except ImportError:
+    asset_url_is_trusted = lambda _url: True
+got = _fetch_latest_release(sys.argv[2])
+if got:
+    print(got[0], got[1], "trusted" if asset_url_is_trusted(got[1]) else "REFUSED")
+else:
+    print("- - no-answer")
+' "$tree" "$channel" 2>&1 | tail -1)"
+      read -r offered offered_url trusted <<<"$resolved"
+      if [[ "$offered" == "$VERSION" ]]; then
+        ok "channel $channel offers $VERSION"
+      else
+        bad "channel $channel offers ${offered:-nothing}, expected $VERSION"
+      fi
+      if [[ "$trusted" == "trusted" ]]; then
+        ok "channel $channel resolves to a URL the released code will follow"
+      else
+        bad "channel $channel resolved ${offered_url:-nothing} ($trusted) — the released code would refuse it"
+      fi
+    done
+  fi
+
   stamped="$(sed -n 's/^version = "\(.*\)"/\1/p' "$tree/pyproject.toml" | head -1)"
   [[ "$stamped" == "$VERSION" ]] && ok "pyproject says $VERSION" \
     || bad "pyproject says ${stamped:-nothing}, expected $VERSION"
@@ -121,12 +158,13 @@ if curl -fsSL --max-time 300 -o "$WORK/$asset" "$asset_url"; then
   # bar, where a version-managed node is invisible.
   [[ -f "$tree/mcp/dist/launcher.cjs" ]] && ok "mcp/dist is built" \
     || bad "mcp/dist/launcher.cjs is missing — the wrapper would need npm"
-  if [[ -d "$tree/mcp/node_modules" ]]; then
-    ok "mcp/node_modules ships ($(find "$tree/mcp/node_modules" -maxdepth 1 -type d | wc -l | tr -d ' ') entries)"
+  modules="$(find "$tree/mcp/node_modules" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${modules:-0}" -gt 10 ]]; then
+    ok "mcp/node_modules ships ($modules entries)"
   else
     # It loads and then fails on its first request, which reads as quern being
     # broken rather than as a packaging mistake.
-    bad "mcp/node_modules is missing — the wrapper would fail on its first request"
+    bad "mcp/node_modules has ${modules:-0} entries — the wrapper would fail on its first request"
   fi
 
   app="$tree/Quern.app"
@@ -161,7 +199,8 @@ if [[ -z "${QUERN_RELEASES_URL:-}" ]]; then
   else
     bad "quern.dev says no update is available: ${answer:-no answer}"
   fi
-  if printf '%s' "$answer" | grep -q "\"latest_version\": *\"$VERSION\""; then
+  if printf '%s' "$answer" | grep -qF "\"latest_version\":\"$VERSION\"" \
+     || printf '%s' "$answer" | grep -qF "\"latest_version\": \"$VERSION\""; then
     ok "quern.dev names $VERSION"
   else
     bad "quern.dev does not name $VERSION: ${answer:-no answer}"

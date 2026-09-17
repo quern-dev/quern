@@ -19,7 +19,10 @@ import pytest
 from server.lifecycle import releases
 
 LOCAL = "http://127.0.0.1:8899/repos/quern-dev/quern"
-INSTALL_SH = Path("/Volumes/Home/jham/Dev/quern.dev/public/_install.sh")
+#: The site repo, checked out beside this one. Relative, not absolute: an
+#: absolute path made these tests pass on one machine and skip everywhere else,
+#: including CI.
+INSTALL_SH = Path(__file__).resolve().parents[2] / "quern.dev" / "public" / "_install.sh"
 
 
 class TestTheBase:
@@ -45,21 +48,43 @@ class TestWhatMayBeFollowed:
     extracted over the install."""
 
     @pytest.mark.parametrize("url, ok", [
+        # An uploaded asset.
         ("https://github.com/quern-dev/quern/releases/download/v1/quern-1.tar.gz", True),
-        ("https://api.github.com/repos/quern-dev/quern/tarball/v1", False),
+        # GitHub's generated source tarball: what a release with no asset
+        # resolves to. v0.14.1 is exactly this, and refusing it would refuse
+        # those users' updates outright -- a review caught this branch doing
+        # precisely that, with a test asserting it as intended.
+        ("https://api.github.com/repos/quern-dev/quern/tarball/v0.14.1", True),
+        ("https://github.com/quern-dev/quern/archive/refs/tags/v1.tar.gz", True),
+        # Another repository on the same host: a free account is enough to
+        # host a payload there, and the payload is extracted over the install.
+        ("https://github.com/attacker/evil/releases/download/v1/quern-1.tar.gz", False),
+        ("https://github.com/@evil.example/x.tar.gz", False),
         ("https://github.com.evil.example/quern.tar.gz", False),
-        ("http://github.com/quern-dev/quern/x.tar.gz", False),
+        ("https://github.com@evil.example/quern.tar.gz", False),
+        # Case is not significant in a host, and is in a path.
+        ("https://GitHub.COM/quern-dev/quern/releases/download/v1/q.tar.gz", True),
+        ("https://github.com/Quern-Dev/quern/releases/download/v1/q.tar.gz", False),
+        # Plaintext, and other endpoints on the API host.
+        ("http://github.com/quern-dev/quern/releases/download/v1/q.tar.gz", False),
+        ("https://api.github.com/repos/quern-dev/quern/releases/assets/1", False),
         ("https://example.com/quern.tar.gz", False),
+        ("file:///etc/passwd", False),
         ("x.tgz", False),
     ])
-    def test_by_default_only_github(self, url, ok):
+    def test_by_default_only_this_repository(self, url, ok):
         assert releases.asset_url_is_trusted(url, {}) is ok
 
     @pytest.mark.parametrize("url, ok", [
         (LOCAL + "/releases/download/v1/quern-1.tar.gz", True),
-        ("http://127.0.0.1:8899/anything", True),
+        (LOCAL + "/tarball/v1", True),
+        ("http://127.0.0.1:8899/repos/quern-dev/quern/anything", True),
+        ("http://127.0.0.1:8899/elsewhere", False),      # outside the named base
         ("http://127.0.0.1:9999/quern.tar.gz", False),   # another port is another server
-        ("https://github.com/quern-dev/quern/x.tar.gz", False),
+        # A scheme downgrade is a different server too. A review mutation that
+        # compared only the host survived the suite until this case existed.
+        ("https://127.0.0.1:8899/repos/quern-dev/quern/x.tar.gz", False),
+        ("https://github.com/quern-dev/quern/releases/download/v1/q.tar.gz", False),
         ("https://example.com/quern.tar.gz", False),
     ])
     def test_an_override_trusts_only_itself(self, url, ok):
