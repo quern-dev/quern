@@ -185,6 +185,20 @@ DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
   scripts/release-menubar.sh --publish vN.M.K
 ```
 
+```sh
+# 7. Check the published release from the outside.
+scripts/release-verify.sh vN.M.K
+```
+
+That last step is not optional and takes under ten seconds. It asserts what a
+user meets: the API's latest release, what *quern's own updater* offers on both
+channels, that `release/stable` and `release/beta` are at the tag and `main`
+contains it, that the tarball carries the right version with `mcp/dist`, its
+`node_modules` and a signed, notarized app, and that quern.dev offers the
+release to an old install. Every one of those is a failure this project has
+shipped: a channel branch left behind (0.14.0), a downgrade offer (0.18.1), a
+wrapper with no dependencies, and an update that crashed for everyone (#212).
+
 **The tarball is no longer a pure `git archive`.** `--publish` now runs
 `npm ci && npm run build` inside the staged tree and ships `mcp/dist`, dropping
 `node_modules` again before tarring.

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`scripts/release-verify.sh`**, run after publishing: it checks the release the way a user meets it — the API's latest release, what quern's own updater offers on stable and beta, that the channel branches are at the tag and `main` contains it, that the tarball has the right version with the MCP wrapper built, its dependencies, and a signed and notarized app, and that quern.dev offers the release to an old install. Under ten seconds, read-only.
+
 ### Fixed
 - **Setup could leave you with no menu-bar app.** Every run of setup quit the running menu-bar app and reopened it, even when there was no new version to install — which is every run on a git install. When the reopen failed (macOS error `-600`, seen during a live update), the app stayed quit. A running app with nothing new to install is now left alone. When setup does replace it, the reopen is retried for that error, and if it still fails, setup says the app was stopped and how to start it.
 

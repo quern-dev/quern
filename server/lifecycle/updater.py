@@ -26,11 +26,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR
+from server.lifecycle import releases
 from server.lifecycle.invocation import run_it_yourself
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
-GITHUB_REPO = "quern-dev/quern"
+GITHUB_REPO = releases.GITHUB_REPO
 
 
 def _find_project_root() -> Path | None:
@@ -171,10 +172,11 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
     Returns ``(version, tarball_url)`` or None on failure.
     """
     try:
+        base = releases.api_base()
         if channel == "beta":
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+            url = f"{base}/releases"
         else:
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            url = f"{base}/releases/latest"
         req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
@@ -481,6 +483,16 @@ def _update_via_tarball(project_root: Path) -> int:
                 return 1
         except (InvalidVersion, TypeError):
             pass
+
+    if not releases.asset_url_is_trusted(tarball_url):
+        # The URL comes out of the API response, and what is downloaded here is
+        # extracted over the install. Checked at the download rather than at
+        # resolution: this is the step that runs the bytes. setup's app fetch
+        # has had this check; the path that replaces the whole source tree did
+        # not.
+        print(f"Error: the release points at {tarball_url}, which is not on the "
+              "release host; not updating.")
+        return 1
 
     print(f"Updating v{current_version or 'unknown'} → v{latest_version} (channel '{channel}')...")
 

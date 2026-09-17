@@ -1162,7 +1162,13 @@ class TestAnUpdateNeverMovesBackwards:
 
         monkeypatch.setattr(updater, "_read_local_version", lambda root: current)
         monkeypatch.setattr(
-            updater, "_fetch_latest_release", lambda ch: (offered, "x.tgz"),
+            # A release-shaped URL: the download is refused before it is
+            # attempted when the host is not the release host, and a fixture
+            # that looks nothing like a release would be testing that refusal
+            # rather than the version guard this class is about.
+            updater, "_fetch_latest_release",
+            lambda ch: (offered, f"https://github.com/quern-dev/quern/releases/download/"
+                                 f"v{offered}/quern-{offered}.tar.gz"),
         )
         monkeypatch.setattr("server.config.get_update_channel", lambda: channel)
         return updater._update_via_tarball(tmp_path)
