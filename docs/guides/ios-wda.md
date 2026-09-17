@@ -156,7 +156,7 @@ When WDA fails to start, Quern parses the runner log and tells your agent what w
 | "Maximum number of apps" | Free account slot limit | Wait 7 days for slots to free up, or use a paid account |
 | "Device is not available" | Device disconnected | Reconnect USB cable |
 | "Failed to install the app on the device", `IXRemoteErrorDomain`, "Connection interrupted" | The install channel is unhealthy. The runner itself is fine | Start it without reinstalling (below), or replug the device |
-| "WDA did not become responsive" with a healthy runner log | Something local is in the way — often a stale port forward holding the WDA port | Check `lsof -nP -iTCP:18100` before blaming WDA |
+| "WDA did not become responsive" with a healthy runner log | Something local is in the way — often a stale port forward holding the port Quern forwards WDA to (iOS 16 and older; the first device gets 18100) | Check `lsof -nP -iTCP:18100` before blaming WDA |
 
 Runner logs are at `~/.quern/wda/runner-<udid-prefix>.log` if you need to dig deeper.
 
@@ -189,8 +189,9 @@ step. WDA answers `/status` in under ten seconds and Quern picks it up on
 the next command — no restart of the server, no rebuild. Leave the process
 running; it hosts the session.
 
-Note the hardware UDID (the `00008030-...` form from `xcrun devicectl list
-devices`), not Quern's normalised UDID.
+Both commands take the hardware UDID (the `00008030-...` form shown by
+`xcrun devicectl list devices`), not the CoreDevice identifier that Quern's
+`list_devices` reports for the same device.
 
 **Do not try `devicectl device process launch` on the runner.** It reports
 success and nothing happens: an `.xctrunner` app is a stub, and XCTest
