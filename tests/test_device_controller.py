@@ -1391,9 +1391,12 @@ class TestScrollToElement:
         backend = MagicMock()
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
-        # First below the viewport (center 1020), then in view after a swipe
-        # (the third fetch is the settle re-confirm).
+        # Reads, in order: the cold (probing) lookup finds it below the
+        # viewport; a plain read finds it too, so it is an ordinary element
+        # rather than a probe-only one and the sweep may stop probing; after the
+        # swipe it is in view; then the settle re-confirm.
         ctrl.get_ui_elements = AsyncMock(side_effect=[
+            ([self._el(1000)], "AAAA-1111"),
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
@@ -1412,9 +1415,12 @@ class TestScrollToElement:
         backend = MagicMock()
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
-        # First tucked under the top nav bar (top edge 4 < 50 inset), then in
-        # view after scrolling up (the third fetch is the settle re-confirm).
+        # Reads, in order: the cold lookup finds it tucked under the top nav bar
+        # (top edge 4 < 50 inset); a plain read finds it too, so it is not
+        # probe-only; after scrolling up it is in view; then the settle
+        # re-confirm.
         ctrl.get_ui_elements = AsyncMock(side_effect=[
+            ([self._el(4)], "AAAA-1111"),
             ([self._el(4)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),

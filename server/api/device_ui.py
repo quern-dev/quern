@@ -362,17 +362,25 @@ async def tap_element(request: Request, body: TapElementRequest):
             resolved = await controller.resolve_udid(body.udid)
             before = await _capture_action_screenshot(controller, resolved, "tap_before")
 
-        result = await controller.tap_element(
-            label=body.label,
-            label_contains=body.label_contains,
-            label_prefix=body.label_prefix,
-            identifier=body.identifier,
-            element_type=body.element_type,
-            udid=body.udid,
-            skip_stability_check=body.skip_stability_check,
-            source_timeout=body.source_timeout,
-            value=body.value,
-            scroll_to_find=body.scroll_to_find,
+        # Guarded like scroll_to_element, and for the same reason: with
+        # `scroll_to_find` on -- the default -- an off-screen target runs the
+        # same sweep, and this is the path most callers reach it by. Guarding
+        # only the dedicated scroll endpoint left the common one unbounded.
+        result = await _run_until_client_leaves(
+            request,
+            controller.tap_element(
+                label=body.label,
+                label_contains=body.label_contains,
+                label_prefix=body.label_prefix,
+                identifier=body.identifier,
+                element_type=body.element_type,
+                udid=body.udid,
+                skip_stability_check=body.skip_stability_check,
+                source_timeout=body.source_timeout,
+                value=body.value,
+                scroll_to_find=body.scroll_to_find,
+            ),
+            what="tap_element",
         )
 
         end = time.perf_counter()

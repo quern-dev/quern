@@ -433,10 +433,13 @@ class DeviceControllerUI:
         sweep_trace: list[str] = []
         sweep_started = time.perf_counter()
         blind_steps = 0
-        # Set before any work, not at the loop, so the cold lookup and the
-        # screen-dimension reads fall inside the budget too. Those are cheap on
-        # a simulator and are not cheap on a physical device, where a single
-        # /source read has been measured at 10.7s.
+        # Set before the cold lookup, not at the loop, so that lookup falls
+        # inside the budget: it is cheap on a simulator and is not on a physical
+        # device, where a single /source read has been measured at 10.7s.
+        #
+        # The screen-dimension reads above run *before* this and are not
+        # covered. Said plainly because an earlier version of this comment
+        # claimed otherwise.
         deadline_budget = (
             self._SCROLL_DEADLINE_S if deadline_s is None else deadline_s
         )
@@ -504,6 +507,27 @@ class DeviceControllerUI:
         el = None if target_known_absent else await _fetch(probe=True)
         if el is not None and _visible(el):
             return _finish(el)
+
+        # The sweep's lookups skip probing, which is the whole of the cost
+        # saving -- but that is only sound for a target the static tree can see.
+        # If the cold lookup located the target and a plain read cannot, the
+        # target is probe-only (a tab-bar or nav-bar item), and a sweep that
+        # stops probing loses it after the first swipe and falls into a blind
+        # hunt for something no swiping reveals. Measured in review: 30 swipes
+        # and 31 reads where main gave up after 2, leaving the list scrolled
+        # away from where the caller had it.
+        #
+        # So keep probing for that target. It then stays located, its position
+        # does not move -- chrome does not scroll -- and the existing stall
+        # check ends the sweep after two swipes, which is the right answer for
+        # an element scrolling cannot bring into view. One extra plain read,
+        # paid only in this found-but-not-visible case.
+        sweep_probe = False
+        if el is not None:
+            plain = await _fetch(probe=False)
+            if plain is None:
+                sweep_probe = True
+                _note("  target is probe-only; the sweep will keep probing")
 
         last_cy: float | None = None
         stalls = 0
@@ -606,7 +630,7 @@ class DeviceControllerUI:
                         reverse = await _signature()
                         if reverse is not None and reverse != blind_signature:
                             blind_signature = reverse  # it moves; carry on
-                            el = await _fetch()
+                            el = await _fetch(probe=sweep_probe)
                             if el is not None and _visible(el):
                                 return _finish(el)
                             continue
@@ -619,7 +643,7 @@ class DeviceControllerUI:
                         return None
                     blind_signature = signature
 
-            el = await _fetch()
+            el = await _fetch(probe=sweep_probe)
             if el is None:
                 # The case that matters. A recycling list drops off-screen rows
                 # entirely, so "not matched" means either the target is not on
@@ -659,7 +683,7 @@ class DeviceControllerUI:
                         "using coordinates that may still be moving",
                         stability.get("reason"),
                     )
-                el = await _fetch()
+                el = await _fetch(probe=sweep_probe)
                 if el is not None and _visible(el):
                     _note("  confirmed after settle — returning")
                     return _finish(el)
@@ -672,8 +696,14 @@ class DeviceControllerUI:
                 # The target is not gone, it is just past, by less than one
                 # swipe -- one swipe is all that moved since we saw it. So
                 # nudging back is both cheap and well-founded: half a swipe the
-                # other way, then re-check. Bounded to one attempt per sighting
-                # so a genuinely absent element cannot make the sweep oscillate.
+                # other way, then re-check.
+                #
+                # One nudge per sighting, not one per sweep. A target that keeps
+                # being sighted and lost can therefore draw a nudge on every
+                # iteration -- forward, back, forward -- so the sweep can
+                # oscillate. It cannot run away: every iteration still spends
+                # the swipe budget and is checked against the deadline, so the
+                # oscillation is bounded by both.
                 _note("  confirm failed after settle — nudging back toward it")
                 y_back1, y_back2 = (y_near, y_far) if y1 > y2 else (y_far, y_near)
                 midpoint = (y_back1 + y_back2) / 2
@@ -682,7 +712,7 @@ class DeviceControllerUI:
                 )
                 self._invalidate_ui_cache(resolved)
                 await self.wait_for_settle(udid=resolved, timeout=3.0)
-                el = await _fetch()
+                el = await _fetch(probe=sweep_probe)
                 if el is not None and _visible(el):
                     _note("  recovered after nudging back — returning")
                     return _finish(el)

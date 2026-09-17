@@ -408,19 +408,35 @@ class SimBridgeManager:
             await self._kill_process()
             self._cleanup_state()
 
-            # Cancellation gets the same cleanup and a different exit. Converting
-            # it into a RuntimeError swallowed the cancellation: a caller that
-            # cancelled this task -- `_run_until_client_leaves` does, when the
-            # client has disconnected -- saw a RuntimeError escape instead, so
-            # its 499 path was never reached and the error claimed a timeout
-            # that had not happened.
+            # A CancelledError here has two sources, and they need different
+            # exits. The cleanup is identical for both, so it runs first.
             #
-            # Re-raised after the kill, not before: the stale-response hazard
-            # described above is identical whichever way the wait ended, and a
-            # cancellation that skipped the cleanup would leave exactly the
-            # uncorrelated response this guards against.
+            # 1. *This task* was cancelled -- `_run_until_client_leaves` does
+            #    that when a client disconnects. Swallowing it into a
+            #    RuntimeError hid the cancellation from the caller that asked
+            #    for it, and the error claimed a timeout that had not happened.
+            #    Re-raise.
+            #
+            # 2. The *future* was cancelled under us. `_stdout_reader` calls
+            #    `_cleanup_state()` when the subprocess exits, and that cancels
+            #    `_pending_response` -- so a bridge that crashes mid-command
+            #    also arrives here as CancelledError, though nobody cancelled
+            #    anything. Re-raising that turned a crash into a cancellation,
+            #    which skips every `except Exception` fallback above this call.
+            #    That is still a failed command. Report it as one.
+            #
+            # `Task.cancelling()` counts outstanding cancellation requests
+            # against the current task, so it tells the two apart exactly.
+            # Available from 3.11, which is this project's floor.
             if isinstance(exc, asyncio.CancelledError):
-                raise
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                raise RuntimeError(
+                    f"sim-bridge exited while running {cmd.get('cmd')}. The command "
+                    f"may have executed; do not retry a state-changing command "
+                    f"automatically. The subprocess will be restarted on next use."
+                ) from None
 
             raise RuntimeError(
                 f"sim-bridge command timed out: {cmd.get('cmd')}. The command was "

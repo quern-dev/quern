@@ -641,34 +641,52 @@ class TestDescribeAllProbeSkip:
 
 
 class TestCancellationIsNotSwallowed:
-    """A cancelled command must stay cancelled, with the cleanup still done.
+    """A cancelled command stays cancelled; a crashed bridge stays a failure.
 
-    `_send_locked` catches `CancelledError` alongside `TimeoutError` because the
-    remedy is the same: the command was already written, the protocol has no
-    request ids, so a late response would be handed to whoever asks next. The
-    kill is right for both.
+    `_send_locked` sees `CancelledError` from two different sources, and they
+    need different exits:
 
-    Converting cancellation into a `RuntimeError` was not. A caller that
-    cancelled the task — `_run_until_client_leaves` does, when the client has
-    gone — saw that error escape instead, so its 499 never happened and the
-    message claimed a timeout that had not occurred.
+    * **this task was cancelled** — `_run_until_client_leaves` does that when a
+      client disconnects. The cancellation must propagate, or the caller that
+      asked for it never finds out.
+    * **the future was cancelled under us** — `_stdout_reader` calls
+      `_cleanup_state()` when the subprocess exits, which cancels
+      `_pending_response`. Nobody cancelled anything; the bridge crashed. That
+      is a failed command and must be reported as one.
+
+    Both are driven for real here: `_send_locked` awaits a genuine future, and
+    the test either cancels the *task* or cancels the *future*. The first
+    version of these tests patched `asyncio.wait_for` to raise, which looks the
+    same in both cases — so it passed against an implementation that turned
+    every crash into a cancellation.
     """
 
-    @pytest.mark.asyncio
-    async def test_cancellation_propagates_rather_than_becoming_a_runtime_error(self):
+    def _manager(self):
         mgr = SimBridgeManager()
         mgr._process = MagicMock()
         mgr._process.stdin = MagicMock()
         mgr._process.stdin.drain = AsyncMock()
         mgr._ensure_process = AsyncMock()  # type: ignore[method-assign]
         mgr._kill_process = AsyncMock()  # type: ignore[method-assign]
+        return mgr
 
-        async def _never_answers(*_a, **_kw):
-            raise asyncio.CancelledError
+    async def _until_waiting(self, mgr):
+        """Yield until `_send_locked` has created its future and is awaiting it."""
+        for _ in range(100):
+            if mgr._pending_response is not None:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("_send_locked never reached its wait")
 
-        with patch("asyncio.wait_for", _never_answers):
-            with pytest.raises(asyncio.CancelledError):
-                await mgr._send_locked({"cmd": "tap"})
+    @pytest.mark.asyncio
+    async def test_cancelling_the_task_propagates_the_cancellation(self):
+        mgr = self._manager()
+        task = asyncio.ensure_future(mgr._send_locked({"cmd": "tap"}))
+        await self._until_waiting(mgr)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
         assert mgr._kill_process.await_count == 1, (
             "the subprocess was not killed on cancellation; a late response can "
@@ -676,14 +694,31 @@ class TestCancellationIsNotSwallowed:
         )
 
     @pytest.mark.asyncio
+    async def test_a_bridge_crash_is_a_failure_not_a_cancellation(self):
+        """The regression the review caught.
+
+        Cancelling the *future* is what `_cleanup_state()` does when the
+        subprocess dies. The waiting task was not cancelled, so it must not
+        come out looking cancelled — that would skip every `except Exception`
+        fallback between here and the endpoint.
+        """
+        mgr = self._manager()
+        task = asyncio.ensure_future(mgr._send_locked({"cmd": "tap"}))
+        await self._until_waiting(mgr)
+
+        mgr._pending_response.cancel()  # what the reader's cleanup does
+
+        with pytest.raises(RuntimeError, match="exited"):
+            await task
+        assert not task.cancelled(), (
+            "a crashed bridge surfaced as a cancelled task; nothing cancelled it"
+        )
+        assert mgr._kill_process.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_a_timeout_still_becomes_a_runtime_error(self):
-        """The control: only the cancellation path changed."""
-        mgr = SimBridgeManager()
-        mgr._process = MagicMock()
-        mgr._process.stdin = MagicMock()
-        mgr._process.stdin.drain = AsyncMock()
-        mgr._ensure_process = AsyncMock()  # type: ignore[method-assign]
-        mgr._kill_process = AsyncMock()  # type: ignore[method-assign]
+        """The control: the timeout path is unchanged."""
+        mgr = self._manager()
 
         async def _times_out(*_a, **_kw):
             raise TimeoutError
