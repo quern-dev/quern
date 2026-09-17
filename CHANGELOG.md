@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Updating to 0.18.3 crashed after the update had been applied.** `quern update` ended with `ImportError: cannot import name 'quern_cmd' from 'server.config'`, and setup and the server restart never ran. The updater replaced the source tree and then carried on in the process that was still running the old code, so modules it had loaded before the swap were the old release's and modules it loaded afterwards were the new one's — and the new setup asked the old configuration module for a function added in 0.18.3. It affected every update to 0.18.3 from an earlier version, git and tarball alike. Everything after the swap now runs in a fresh process that has loaded only the new code. Updaters from 0.18.3 and earlier still work the old way, so this release also reloads what such an updater loaded before the swap, which is what lets them install it. If you hit the error, `quern setup` followed by `quern restart` finishes the update.
+
 ## [0.18.3] - 2026-09-16
 
 Ten fixes. Most are the same shape as 0.18.2's: something stopped working and went on reporting that it had not.
