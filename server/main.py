@@ -1284,11 +1284,44 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
 
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
+    node_complete = _report_node()
     services_complete = _report_service_health(fix)
 
     if fix:
         sys.exit(1 if repaired is False else 0)
-    sys.exit(0 if tools is not None and services_complete else 1)
+    sys.exit(0 if tools is not None and services_complete and node_complete else 1)
+
+
+def _report_node() -> bool:
+    """Which `node` each place will run, and what to do where it will fail.
+
+    Returns whether the probe completed. One row per place because the fixes
+    differ: fnm in `.zshenv` repairs the non-interactive row and does nothing
+    for GUI apps (#214). Read-only, like the rest of doctor.
+    """
+    from server.lifecycle import node_env
+
+    print()
+    print(f"Node.js (the MCP wrapper needs {node_env.MIN_NODE_MAJOR}+):")
+    try:
+        sites = node_env.probe()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False
+    marks = {node_env.OK: "\u2713", node_env.UNKNOWN: "?", node_env.SKIPPED: "\u2013"}
+    for site in sites:
+        found = f"{site.version or 'no version'}  {site.path}" if site.path else site.status
+        mark = marks.get(site.status, "\u2717")
+        print(f"  {mark} {site.place} — {found}")
+        print(f"      used by: {site.used_by}")
+        if not site.ok:
+            label = "note" if site.status == node_env.SKIPPED else "fix"
+            print(f"      {label}: {node_env.fix_for(site, sites)}")
+    # A place whose probe failed was not checked, and doctor's exit code says
+    # when a check could not be made. An unsupported shell is not that: it is
+    # a permanent fact about the machine, and failing on it would fail every
+    # doctor run there.
+    return not any(site.status == node_env.UNKNOWN for site in sites)
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
