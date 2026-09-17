@@ -14,7 +14,7 @@ You need two things before installing:
 curl -fsSL https://quern.dev/install.sh | bash
 ```
 
-That's it. The installer clones Quern to `~/.local/share/quern`, then runs `quern setup`, which does everything else:
+That's it. The installer downloads the latest release to `~/.local/share/quern`, then runs `quern setup`, which does everything else:
 
 1. **Installs Python** (via Homebrew) if you don't already have Python 3.11+, then creates a virtual environment and installs server dependencies
 2. **Checks for system tools** and offers to install what's missing:

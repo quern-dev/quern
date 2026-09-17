@@ -277,8 +277,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // The Ollama parallel: only appears once an update is staged.
         if u.updateAvailable {
-            let title = u.latestVersion.map { "Restart to Update — v\($0)" } ?? "Restart to Update"
-            menu.addItem(action(title, #selector(restartToUpdate)))
+            // A git install is updated in Terminal: its update needs npm and
+            // a git that may prompt, and a GUI app has neither the user's
+            // Node nor anywhere to show a prompt. See InstallKind.swift.
+            switch UpdateMenuItem.forStaged(latestVersion: u.latestVersion,
+                                            install: InstallKind.current) {
+            case .restartToUpdate(let title):
+                menu.addItem(action(title, #selector(restartToUpdate)))
+            case .updateInTerminal(let title):
+                menu.addItem(action(title, #selector(updateInTerminal)))
+                menu.addItem(action("Why Terminal? (git install)", #selector(openInstallDocs)))
+            }
         } else if !checkingForUpdates {
             // Always offered when there is nothing staged. The item above is
             // driven by a cached answer the server refreshes at most once a
@@ -466,12 +475,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
     }
 
+    @objc private func updateInTerminal() {
+        TerminalUpdate.open { [weak self] error in
+            guard let error else { return }
+            self?.reportFailure("Could not open Terminal to update",
+                                detail: error + "\n\nRun `quern update` in a terminal instead.")
+        }
+    }
+
+    @objc private func openInstallDocs() { NSWorkspace.shared.open(TerminalUpdate.docs) }
+
     @objc private func openServerLog() { NSWorkspace.shared.open(Self.serverLog) }
 
     @objc private func openSettings() { settings.show() }
 
     @objc private func openDocs() {
-        NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
+        // Not /docs, which the site does not have: it answered 404.
+        NSWorkspace.shared.open(URL(string: "https://quern.dev/getting-started/installation-and-setup/")!)
     }
 
     /// The screen-mirror bundle quern installs alongside its other binaries,
