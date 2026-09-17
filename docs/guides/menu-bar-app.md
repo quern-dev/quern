@@ -71,7 +71,7 @@ quern menubar open
 
 `quern menubar status` shows which version is installed and whether it's
 running. The menu shows the app's own version above **Settings…**, and Settings
-shows it in its own **Menu-bar app** section. The **Version** under **Server** is
+shows it in its own **Quern app** section. The **Version** under **Server** is
 the server's, which can differ on a git install.
 
 `quern setup` starts the app if it isn't running. It only quits and restarts a

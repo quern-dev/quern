@@ -402,8 +402,8 @@ struct SettingsView: View {
                 grid("Server", model.serverRows(now: Date()))
             }
 
-            GroupBox("Menu-bar app") {
-                grid("Menu-bar app", SettingsModel.appRows(version: AppVersion.current))
+            GroupBox("Quern app") {
+                grid("Quern app", SettingsModel.appRows(version: AppVersion.current))
             }
 
             GroupBox("Proxy") {

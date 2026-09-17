@@ -17,9 +17,14 @@ enum AppVersion {
 
     static var current: String? { of(Bundle.main.infoDictionary) }
 
-    /// "Menu bar v0.18.4", or a plain label when the bundle has no version --
+    /// "Quern app v0.18.4", or a plain label when the bundle has no version --
     /// which is how an unbundled test binary runs.
+    ///
+    /// "Quern app", not "Menu bar" or "Helper": it distinguishes this from the
+    /// *server*, which is the version the row above it reports, without
+    /// claiming to be a background helper -- on macOS a "Helper" is launched
+    /// by a main app, which here would be the daemon, not this.
     static func menuLine(_ version: String?) -> String {
-        version.map { "Menu bar v\($0)" } ?? "Menu bar (version unknown)"
+        version.map { "Quern app v\($0)" } ?? "Quern app (version unknown)"
     }
 }

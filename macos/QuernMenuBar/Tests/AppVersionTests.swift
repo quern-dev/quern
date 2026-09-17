@@ -10,9 +10,9 @@ enum AppVersionTests {
             Harness.expect(AppVersion.of(nil), nil, "no info")
         }
 
-        Harness.test("the menu line names the menu bar, not the server") {
-            Harness.expect(AppVersion.menuLine("0.18.4"), "Menu bar v0.18.4", "known")
-            Harness.expect(AppVersion.menuLine(nil), "Menu bar (version unknown)", "unknown")
+        Harness.test("the menu line names the app, not the server") {
+            Harness.expect(AppVersion.menuLine("0.18.4"), "Quern app v0.18.4", "known")
+            Harness.expect(AppVersion.menuLine(nil), "Quern app (version unknown)", "unknown")
         }
 
         Harness.test("Settings shows the app version in its own rows") {
