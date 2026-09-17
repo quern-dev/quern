@@ -11,6 +11,7 @@ enum LifecycleControllerTests {
         let clock = TestScheduler()
         var running = false
         var alerts: [(String, String)] = []
+        var recoveries: [Recovery?] = []
         var changes = 0
         var refreshes = 0
         var invoked: [String] = []
@@ -43,7 +44,10 @@ enum LifecycleControllerTests {
 
             controller = LifecycleController(deps)
             controller.onChange = { [unowned self] in self.changes += 1 }
-            controller.onAlert = { [unowned self] in self.alerts.append(($0, $1)) }
+            controller.onAlert = { [unowned self] in
+                self.alerts.append(($0, $1))
+                self.recoveries.append($2)
+            }
         }
     }
 
@@ -170,6 +174,60 @@ enum LifecycleControllerTests {
             Harness.expect(rig.controller.hasFailed, false, "stale failure survived")
             Harness.expect(rig.controller.statusText == nil, "stale status survived")
             Harness.expect(rig.changes >= before + 1, "clearing a stale failure must repaint")
+        }
+
+        Harness.test("a start that never comes up offers the repair recovery") {
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.run(.start, reporting: .alert)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "recovery")
+            Harness.expect(rig.recoveries.count, 1, "one alert")
+            Harness.expect(rig.recoveries.first ?? nil, .repair, "the alert carries it")
+        }
+
+        Harness.test("a login start that fails still offers recovery in the menu") {
+            // Quiet is about the modal, not about leaving the user without a
+            // next step: the menu item is how a login failure is recovered.
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "recovery")
+            Harness.expect(rig.alerts.isEmpty, true, "no modal")
+        }
+
+        Harness.test("a missing CLI offers set-up, not repair") {
+            let rig = Rig(result: (QuernCLI.notFoundStatus, "no wrapper"))
+            rig.controller.run(.start, reporting: .alert)
+            Harness.expect(rig.controller.recovery, .setUp, "recovery")
+            Harness.expect(rig.recoveries.first ?? nil, .setUp, "the alert carries it")
+        }
+
+        Harness.test("a failed stop offers no recovery") {
+            // The server is still up; there is nothing to repair from Terminal.
+            let rig = Rig(result: (1, "permission denied"))
+            rig.running = true
+            rig.controller.run(.stop, reporting: .alert)
+            Harness.expect(rig.controller.recovery == nil, "no recovery")
+            Harness.expect(rig.recoveries.first ?? nil, nil, "the alert offers none")
+        }
+
+        Harness.test("recovery is cleared by a success, or by the server appearing") {
+            let rig = Rig(result: (1, "timed out"))
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            rig.controller.noteServerRunning()
+            Harness.expect(rig.controller.recovery == nil, "cleared when the daemon appears")
+
+            // The same controller failing, then succeeding: a fresh one
+            // starts clean and would pass whether or not success clears it.
+            let same = Rig(result: nil)
+            same.controller.run(.start, reporting: .menuOnly)
+            same.pending.removeFirst()(1, "timed out")
+            same.clock.advance(by: 60)
+            Harness.expect(same.controller.recovery, .repair, "failed first")
+            same.controller.run(.start, reporting: .alert)
+            same.pending.removeFirst()(0, "")
+            Harness.expect(same.controller.recovery == nil, "cleared by the later success")
         }
     }
 }

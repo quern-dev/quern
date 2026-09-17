@@ -73,8 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.refreshStatusButton()
         }
-        controller.onAlert = { [weak self] message, detail in
-            self?.reportFailure(message, detail: detail)
+        controller.onAlert = { [weak self] message, detail, recovery in
+            self?.reportFailure(message, detail: detail, recovery: recovery)
         }
         return controller
     }()
@@ -119,9 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         didAttemptLaunchStart = true
         guard StartOnLaunch.isEnabled, !reader.snapshot.server.running else { return }
 
-        // menuOnly, not an alert: this can fire at login, and a modal taking
-        // focus as you open your laptop is worse than the failure it reports.
-        lifecycle.run(.start, reporting: .menuOnly)
+        // Quiet by default: this can fire at login, and a modal taking focus
+        // as you open your laptop is worse than the failure it reports. Loud
+        // right after an update, when the user just clicked it and is watching
+        // (#225).
+        lifecycle.run(.start, reporting: FailureReporting.forLaunchStart(
+            lastUpdate: UpdateResult.read(), now: Date()))
     }
 
     // MARK: - Status button
@@ -255,6 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if !s.running, let status = lifecycle.statusText {
             menu.addItem(info(status))
+            if let recovery = lifecycle.recovery {
+                menu.addItem(action(recovery.menuTitle, #selector(recoverInTerminal)))
+            }
             if lifecycle.hasFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
             }
@@ -470,7 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.activityText = progress.isWorking ? progress.text : nil
             },
             failure: { [weak self] message, detail in
-                self?.reportFailure(message, detail: detail)
+                self?.reportFailure(message, detail: detail, recovery: .finishUpdate)
             }
         )
     }
@@ -480,6 +486,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let error else { return }
             self?.reportFailure("Could not open Terminal to update",
                                 detail: error + "\n\nRun `quern update` in a terminal instead.")
+        }
+    }
+
+    @objc private func recoverInTerminal() {
+        guard let recovery = lifecycle.recovery else { return }
+        openRecovery(recovery)
+    }
+
+    private func openRecovery(_ recovery: Recovery) {
+        recovery.open { [weak self] error in
+            guard let error else { return }
+            self?.reportFailure("Could not open Terminal", detail: error)
         }
     }
 
@@ -546,8 +564,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// path out of a modal they cannot copy from.
     static var serverLog: URL { StateReader.quernDir.appendingPathComponent("server.log") }
 
-    private func reportFailure(_ message: String, detail: String) {
-        DispatchQueue.main.async {
+    private func reportFailure(_ message: String, detail: String, recovery: Recovery? = nil) {
+        DispatchQueue.main.async { [weak self] in
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = message
@@ -555,29 +573,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.informativeText = trimmed.isEmpty
                 ? "Run `quern status` to see what state it is in."
                 : trimmed
-            alert.addButton(withTitle: "OK")
-            // Copy before Open Log: when the CLI could not do something itself
-            // it prints the command to run instead, and getting that onto the
-            // clipboard is the next step. Copying rather than launching a
-            // terminal is deliberate -- running a `sudo` command on one menu
-            // click is a larger commitment than this app makes anywhere else,
-            // it would pick a terminal on the user's behalf, and driving one
-            // needs an Automation permission prompt. The command is visible
-            // here and gets pasted wherever they actually work.
-            let canCopy = !trimmed.isEmpty
-            if canCopy { alert.addButton(withTitle: "Copy") }
-            let hasLog = FileManager.default.fileExists(atPath: Self.serverLog.path)
-            if hasLog { alert.addButton(withTitle: "Open Log") }
+            let buttons = FailureAlert.buttons(
+                detail: trimmed,
+                hasLog: FileManager.default.fileExists(atPath: Self.serverLog.path),
+                recovery: recovery
+            )
+            for button in buttons { alert.addButton(withTitle: button.title) }
 
-            switch alert.runModal() {
-            case .alertSecondButtonReturn where canCopy:
+            let index = alert.runModal().rawValue
+                - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            guard buttons.indices.contains(index) else { return }
+            switch buttons[index] {
+            case .ok:
+                break
+            case .fixInTerminal(let recovery):
+                self?.openRecovery(recovery)
+            case .copy:
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(trimmed, forType: .string)
-            case .alertSecondButtonReturn where hasLog,
-                 .alertThirdButtonReturn where hasLog:
+            case .openLog:
                 NSWorkspace.shared.open(Self.serverLog)
-            default:
-                break
             }
         }
     }

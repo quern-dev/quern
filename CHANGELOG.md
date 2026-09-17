@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **On a git install, the menu bar updates in Terminal.** A git update rebuilds the MCP wrapper with npm, and an app launched from the Dock or at login can't see a Node installed with fnm, nvm, Volta, asdf or mise, because those are set up in your shell's startup files. It also has nowhere to show a git credential prompt. So on a git install the menu offers **Update in Terminal…**, which opens a Terminal window running `quern update`. Release installs keep **Restart to Update**, which needs nothing from your shell. Settings now shows which install you have, and the menu-bar guide explains how to switch a git install to a release install. The menu's **Documentation** item and the Settings button also opened a page that doesn't exist; both now open the installation guide.
 
+### Added
+- **A way into recovery when the server doesn't come back.** A failed start used to leave a red icon and a link to the server log. Now the menu offers **Troubleshoot in Terminal…**, which opens a Terminal window running `quern doctor --fix` and then `quern start`, and every failure alert has a **Fix in Terminal** button. After an update that stopped partway, the button runs `quern setup` and `quern restart` instead. Terminal never opens without a click. A start that fails within a few minutes of an update now shows an alert rather than only turning the icon red, since you've just clicked Update and are watching; a failed start at login stays quiet.
+
 ## [0.18.4] - 2026-09-17
 
 A hotfix for updating into 0.18.3, which crashed after applying the update. If you are on 0.18.2 or earlier, this is the release to update to.

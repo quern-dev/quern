@@ -72,48 +72,26 @@ enum TerminalUpdate {
     /// Where the guide explains git versus release installs, and how to switch.
     static let docs = URL(string: "https://quern.dev/getting-started/menu-bar-app/#updating")!
 
-    static let terminalApp = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-
-    /// A `.command` file Terminal runs in a new window.
-    ///
-    /// A file rather than AppleScript: scripting Terminal from a
-    /// hardened-runtime app needs the apple-events entitlement, a usage
-    /// string, and a permission prompt the user has to accept, and until they
-    /// do it fails with -1743. Opening a document needs none of that.
-    ///
-    /// The wrapper's absolute path, quoted: Terminal's shell probably has
-    /// `quern` on PATH, but "probably" is the thing this whole feature exists
-    /// to stop relying on.
-    ///
-    /// It ends by becoming the user's own login shell. Terminal's default
-    /// profile closes a window whose shell exits cleanly, so a successful
-    /// update vanished before anyone could read it. Handing the window to a
-    /// shell keeps the output on screen and leaves somewhere to run
-    /// `quern doctor` from; a "press Return" pause would only do the first.
+    /// The update script. The wrapper's absolute path, quoted: Terminal's
+    /// shell probably has `quern` on PATH, but "probably" is the thing this
+    /// whole feature exists to stop relying on. `TerminalScript.wrap` leaves
+    /// the window open afterwards.
     static func script(quern: String) -> String {
-        """
-        #!/bin/sh
-        # Written by the Quern menu-bar app to update a git install. Safe to delete.
-        clear
-        echo "Updating Quern (git install)..."
-        echo
-        \(shellQuote(quern)) update
-        status=$?
-        echo
-        if [ "$status" -eq 0 ]; then
-          echo "Done."
-        else
-          echo "quern update exited $status. The output above says why."
-        fi
-        echo "This window is now an ordinary shell; close it when you're finished."
-        exec "${SHELL:-/bin/zsh}" -l
-
-        """
+        TerminalScript.wrap(title: "update a git install", body: [
+            "echo \"Updating Quern (git install)...\"",
+            "echo",
+            "\(shellQuote(quern)) update",
+            "status=$?",
+            "echo",
+            "if [ \"$status\" -eq 0 ]; then",
+            "  echo \"Done.\"",
+            "else",
+            "  echo \"quern update exited $status. The output above says why.\"",
+            "fi",
+        ])
     }
 
-    static func shellQuote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
+    static func shellQuote(_ s: String) -> String { TerminalScript.shellQuote(s) }
 
     /// Write the script and open it in Terminal. `completion` receives an
     /// error description, or nil once Terminal has it.
@@ -122,22 +100,8 @@ enum TerminalUpdate {
             completion("Could not find the quern command. Run `quern setup` in a terminal.")
             return
         }
-        let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent("quern-update.command")
-        do {
-            try script(quern: quern).write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700],
-                                                  ofItemAtPath: file.path)
-        } catch {
-            completion("Could not write \(file.path): \(error.localizedDescription)")
-            return
-        }
-        NSWorkspace.shared.open([file], withApplicationAt: terminalApp,
-                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
-            DispatchQueue.main.async {
-                completion(error.map { "Terminal did not open: \($0.localizedDescription)" })
-            }
-        }
+        TerminalScript.open(name: "quern-update.command", contents: script(quern: quern),
+                            completion: completion)
     }
 }
 

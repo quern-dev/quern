@@ -71,11 +71,14 @@ final class LifecycleController {
     /// end this file exists to remove.
     private(set) var hasFailed = false
     private(set) var statusText: String?
+    /// What to offer when the last action failed in a way the user can act on
+    /// from Terminal (#225). Cleared with the failure it describes.
+    private(set) var recovery: Recovery?
 
     /// Called whenever any of the three above change, so the icon can repaint.
     var onChange: (() -> Void)?
-    /// Title and detail for a modal.
-    var onAlert: ((String, String) -> Void)?
+    /// Title, detail, and the recovery to offer, for a modal.
+    var onAlert: ((String, String, Recovery?) -> Void)?
 
     init(_ deps: Dependencies = Dependencies()) {
         self.deps = deps
@@ -84,9 +87,10 @@ final class LifecycleController {
     /// The daemon came up by some route other than us -- a terminal, another
     /// app. Whatever we were reporting is no longer true.
     func noteServerRunning() {
-        guard statusText != nil || hasFailed else { return }
+        guard statusText != nil || hasFailed || recovery != nil else { return }
         statusText = nil
         hasFailed = false
+        recovery = nil
         changed()
     }
 
@@ -121,7 +125,7 @@ final class LifecycleController {
             if code == QuernCLI.notFoundStatus {
                 // Not `failed`: nothing ran, so the server log has nothing to
                 // say about it. The status line carries the real answer.
-                self.finish(status: "quern not found — run `quern setup`")
+                self.finish(status: "quern not found — run `quern setup`", recovery: .setUp)
                 self.report(reporting, action: action, detail: output)
                 return
             }
@@ -167,7 +171,7 @@ final class LifecycleController {
             return
         }
         guard attemptsLeft > 0 else {
-            finish(status: "Could not start the server", failed: true)
+            finish(status: "Could not start the server", failed: true, recovery: .repair)
             report(reporting, action: action, detail: detail)
             return
         }
@@ -177,16 +181,17 @@ final class LifecycleController {
         }
     }
 
-    private func finish(status: String?, failed: Bool = false) {
+    private func finish(status: String?, failed: Bool = false, recovery: Recovery? = nil) {
         isBusy = false
         statusText = status
         hasFailed = failed
+        self.recovery = recovery
         changed()
     }
 
     private func report(_ reporting: Report, action: Action, detail: String) {
         guard reporting == .alert else { return }
-        onAlert?("Could not \(action.rawValue) the server", detail)
+        onAlert?("Could not \(action.rawValue) the server", detail, recovery)
     }
 
     private func changed() { onChange?() }
