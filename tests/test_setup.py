@@ -1811,6 +1811,110 @@ class TestMenubarInstallLocation:
         assert setup_mod.launch_menubar_app(tmp_path / "install") is None
 
 
+class TestTheMenubarAppIsNotLeftStopped:
+    """#215: setup quit the running app and reopened it on every run -- every
+    run on a git install, where nothing is ever delivered -- and a failed
+    reopen (`-600`) left the machine with no menu bar at all."""
+
+    @staticmethod
+    def _machine(monkeypatch, setup_mod, tmp_path, *, running, open_results):
+        """`_run` for a machine whose app is (not) running and whose `open`
+        answers from `open_results` in turn. Returns the commands seen."""
+        apps = tmp_path / "Applications"
+        (apps / "Quern.app").mkdir(parents=True)
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod.time, "sleep", lambda _s: None)
+        state = {"running": running}
+        answers = list(open_results)
+        calls: list[list[str]] = []
+
+        def run(cmd, timeout=30):
+            calls.append(cmd)
+            if cmd[0] == "pgrep":
+                return (0, "4242", "") if state["running"] else (1, "", "")
+            if cmd[0] == "osascript":
+                state["running"] = False
+                return (0, "", "")
+            if cmd[0] == "open":
+                rc, err = answers.pop(0) if answers else (0, "")
+                if rc == 0:
+                    state["running"] = True
+                return (rc, "", err)
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        return calls
+
+    def test_a_running_app_with_nothing_new_is_left_alone(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=True, open_results=[])
+        (tmp_path / "install").mkdir()
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.OK
+        assert not [c for c in calls if c[0] in ("osascript", "open")], (
+            f"restarted an app that had nothing new to run: {calls}"
+        )
+
+    def test_a_stopped_app_with_nothing_new_is_started(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=False,
+                              open_results=[(0, "")])
+        (tmp_path / "install").mkdir()
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.OK
+        assert [c[0] for c in calls if c[0] in ("osascript", "open")] == ["open"]
+
+    def test_the_error_a_just_quit_app_gives_is_retried(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        busy = "_LSOpenURLsWithCompletionHandler() failed with error -600."
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=True,
+                              open_results=[(1, busy), (1, busy), (0, "")])
+        (tmp_path / "install" / "Quern.app").mkdir(parents=True)
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.OK, result
+        assert len([c for c in calls if c[0] == "open"]) == 3
+
+    def test_other_failures_are_not_retried(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=False,
+                              open_results=[(1, "The application cannot be opened.")] * 5)
+        (tmp_path / "install").mkdir()
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.WARNING
+        assert len([c for c in calls if c[0] == "open"]) == 1
+
+    def test_stopping_it_and_failing_to_restart_says_so(self, tmp_path, monkeypatch):
+        """The machine has no menu bar because setup stopped it. "Could not
+        launch" hides that; the reader needs to know it was running before."""
+        from server.lifecycle import setup as setup_mod
+
+        busy = "failed with error -600."
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=True,
+                              open_results=[(1, busy)] * 99)
+        (tmp_path / "install" / "Quern.app").mkdir(parents=True)
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.WARNING
+        assert "Stopped" in result.message, result.message
+        installed = tmp_path / "Applications" / "Quern.app"
+        assert f"open {installed}" in result.detail, result.detail
+        opens = len([c for c in calls if c[0] == "open"])
+        assert opens == setup_mod._OPEN_ATTEMPTS, f"retried {opens} times"
+
+
 class TestOtherQuernOnPath:
     """A second `quern` on PATH is what makes a stale shell hash possible."""
 
