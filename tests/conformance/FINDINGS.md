@@ -521,3 +521,48 @@ user-facing behaviour worth keeping visible.
 This is also the first finding the suite produced by *re-running* rather than
 by being written — worth noting for a branch meant to serve as a bug factory,
 since it means periodic full runs are themselves productive.
+
+### F9 — root cause (2026-09-16)
+
+The slow-success trace added in #204 answered this in one run. On iOS 18.6 a
+0.3s sweep swipe **flung** the list: 1020pt of travel for a 389pt drag, more
+than a screen. So from the top, the first swipe left `row_20` under the nav
+bar (y=-43), and the next carried it out of the tree. The sweep had lost the
+direction by then and restarted downward, and it took 32 swipes and 105.8s. It
+was also why every between-swipe settle timed out: the flings outlasted them.
+
+Measured travel for the same drag:
+
+| Swipe | Travel |
+|---|---|
+| 0.3s, no hold | 1020pt |
+| 1.0s | 600pt |
+| 2.0s | 379pt |
+| 0.3s + 0.15s hold (identical points) | 1000pt |
+| 0.3s + 0.15s hold (points alternating by 0.0005) | 350pt, at rest on release |
+
+#204 now holds every sweep swipe, drags 75% of the screen (625pt measured,
+shorter than the visible area), and reads at rest. The scroll test went from
+105s to 19s, and the whole suite from 436s to 300s.
+
+## F10 — the screen-size table is wrong for every model it lists → #210
+
+Found live-testing #204: the sweep logged `screen=440x926` on an iPhone 16 Plus
+simulator whose app frame is 430×932. None of the table's eight entries is
+right. Separately, the visibility check's 34pt bottom inset lets a row under an
+83pt tab bar count as visible.
+
+## F11 — WDA's status probe lets `RemoteProtocolError` escape as a 500 → #211
+
+With the WDA runner down on an iPhone 11, `GET /ui` returned a bare 500. The
+check catches three httpx subclasses, not the base class, so this one escapes,
+and the `usbmux forward` process it started is never terminated.
+
+## F12 — WDA's hit-test resolved every point on iOS 26 Settings to an overlay (fixed in #204)
+
+`find_element_at_point` took the *last* element containing the point. iOS 26
+Settings has full-screen `Other` views after its rows, so every point resolved
+to one of them. Their frames never move, so the sweep's progress check called
+a scrollable list static and gave up after one swipe: 3 of 4 targets returned
+404 on an iPhone 11. It now takes the smallest containing element, and the
+sweep no longer hit-tests at all.
