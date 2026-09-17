@@ -1693,22 +1693,58 @@ def check_mitmdump() -> CheckResult:
     )
 
 
-def check_node() -> CheckResult:
-    """Check for Node.js (needed to run the MCP server)."""
-    node = _which("node")
-    if node:
-        version = _get_version(["node", "--version"])
-        msg = version or "installed"
+def check_node(sites: list | None = None) -> CheckResult:
+    """Check the `node` every part of the system will run, not just ours (#214).
+
+    Four places pick a `node` and they disagree routinely -- see
+    `server.lifecycle.node_env`. Only a *missing* node here is MISSING, since
+    that is the one setup can offer to fix and the one the MCP build needs.
+    Anything else wrong -- too old, or absent where GUI apps look -- is a
+    WARNING, never a failure: an install that has been working must not have
+    setup or an update refuse over the user's Node arrangement.
+    """
+    from server.lifecycle import node_env
+
+    if sites is None:
+        try:
+            sites = node_env.probe()
+        except Exception as exc:  # noqa: BLE001
+            # Never fatal. This runs inside `quern update`, *after* the pull:
+            # a probe that raised there left the install pulled but not
+            # rebuilt, with a traceback, on a machine whose node was fine.
+            return CheckResult(
+                name="Node.js", status=CheckStatus.WARNING,
+                message="could not be checked",
+                detail=f"{exc}\nThe MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+; "
+                       f"{quern_cmd()} doctor shows each place a node is picked.",
+            )
+    here = sites[0]
+    if here.status == node_env.MISSING:
         return CheckResult(
             name="Node.js",
-            status=CheckStatus.OK,
-            message=msg,
+            status=CheckStatus.MISSING,
+            message="Not installed (needed for MCP server)",
+            fixable=True,
         )
+
+    problems = [site for site in sites if site.status not in (node_env.OK, node_env.SKIPPED)]
+    if not problems:
+        return CheckResult(name="Node.js", status=CheckStatus.OK,
+                           message=here.version or "installed")
+
+    lines = []
+    for site in problems:
+        found = f"{site.version or 'no version'} at {site.path}" if site.path else site.status
+        lines.append(f"{site.place} ({site.used_by}): {found}")
+        lines.append(f"  {node_env.fix_for(site, sites)}")
+    lines.append(f"Details: {quern_cmd()} doctor")
+    names = ", ".join(site.place for site in problems)
     return CheckResult(
         name="Node.js",
-        status=CheckStatus.MISSING,
-        message="Not installed (needed for MCP server)",
-        fixable=True,
+        status=CheckStatus.WARNING,
+        message=f"{here.version or 'installed'} here; needs attention for: {names} "
+                f"(the MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+)",
+        detail="\n".join(lines),
     )
 
 
@@ -1732,6 +1768,16 @@ def check_menubar_current(project_root: Path) -> CheckResult | None:
         message=f"v{state.version} is older than quern v{state.quern_version}",
         detail=f"A git install's updates don't include the app. Run: {quern_cmd()} menubar install",
     )
+
+def _node_can_build(node_result: CheckResult) -> bool:
+    """Whether to build the MCP wrapper after the Node check.
+
+    Present is enough: Node 20 builds it fine, and a warning about some *other*
+    place's node -- or about this one being too old to *run* it -- is no reason
+    to leave the wrapper stale. Before #214 this read `status == OK`, which was
+    only equivalent while the check could say nothing but OK or MISSING.
+    """
+    return node_result.status in (CheckStatus.OK, CheckStatus.WARNING)
 
 
 def check_idb() -> CheckResult:
@@ -2883,7 +2929,7 @@ def run_setup() -> int:
     # Build the TypeScript MCP server so it's ready when Claude Code connects.
     # Without this, the MCP shows as broken until the first `quern start`.
 
-    if node_result.status == CheckStatus.OK and project_root:
+    if _node_can_build(node_result) and project_root:
         report.add(_build_mcp(project_root))
 
     # ── Tool inventory ──
