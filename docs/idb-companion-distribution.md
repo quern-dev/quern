@@ -32,7 +32,7 @@ Published on [quern-dev/idb](https://github.com/quern-dev/idb/releases), asset `
 
 v2 requires macOS 12 (Xcode 27's minimum deployment target; v1 ran on 11). `idb xctest` is likely still broken under Xcode 27 -- XCTestBootstrap hardcodes `Developer/Library/PrivateFrameworks` for XCTAutomationSupport, which also moved -- but quern does not use it.
 
-An install is replaced by extracting into a staging directory under `~/.quern/bin` and swapping `Frameworks/` and the binary in once the payload is complete, so an interrupted update leaves the previous install intact. The release marker is cleared only at the swap and rewritten after it. A newer marker than setup's own is left alone rather than offered a downgrade.
+An install is replaced by extracting into a staging directory under `~/.quern/bin` and swapping `Frameworks/` and the binary in once the payload is complete, so an update interrupted before the swap leaves the previous install untouched. Each half of the swap rolls back if it fails; only a rollback that itself fails leaves the install incomplete, and because the marker is cleared at the swap, the next setup offers the update again and repairs it. The release marker is cleared only at the swap and rewritten after it. A newer marker than setup's own is left alone rather than offered a downgrade.
 
 `_IDB_COMPANION_RELEASE` in `server/lifecycle/setup.py` names the release setup installs. A successful install writes it to `~/.quern/bin/idb_companion.release`; v1 wrote no marker, so an install without one is read as v1. `check_idb_companion` reports an install older than the current release as a warning, and setup offers to replace it.
 
