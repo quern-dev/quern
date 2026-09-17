@@ -123,8 +123,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // as you open your laptop is worse than the failure it reports. Loud
         // right after an update, when the user just clicked it and is watching
         // (#225).
-        lifecycle.run(.start, reporting: FailureReporting.forLaunchStart(
-            lastUpdate: UpdateResult.read(), now: Date()))
+        // The one place that knows an update just landed. It chooses how loud
+        // to be *and* which recovery fits: a server that will not start right
+        // after an update is finished with setup + restart, not doctor --fix.
+        let reporting = FailureReporting.forLaunchStart(
+            lastUpdate: UpdateResult.read(), now: Date())
+        lifecycle.run(.start, reporting: reporting,
+                      recoveryOnFailure: reporting == .alert ? .finishUpdate : .repair)
     }
 
     // MARK: - Status button
@@ -259,6 +264,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !s.running, let status = lifecycle.statusText {
             menu.addItem(info(status))
             if let recovery = lifecycle.recovery {
+                // Captured as the menu is built. Reading it again on click
+                // meant the three-second state poll could clear it while the
+                // menu was open, and the click then did nothing at all.
+                offeredRecovery = recovery
                 menu.addItem(action(recovery.menuTitle, #selector(recoverInTerminal)))
             }
             if lifecycle.hasFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
@@ -476,7 +485,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.activityText = progress.isWorking ? progress.text : nil
             },
             failure: { [weak self] message, detail in
-                self?.reportFailure(message, detail: detail, recovery: .finishUpdate)
+                // "Could not start the update" means nothing ran -- the
+                // installed version could not even be read -- so there is no
+                // half-done update to finish.
+                let recovery = Recovery.forUpdateFailure(
+                    started: message != "Could not start the update")
+                // Recorded as well as shown: dismissing the alert must not
+                // take the only route out with it.
+                self?.lifecycle.noteFailure(status: message, recovery: recovery)
+                self?.reportFailure(message, detail: detail, recovery: recovery)
             }
         )
     }
@@ -489,8 +506,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// The recovery the visible menu is offering. See `menuNeedsUpdate`.
+    private var offeredRecovery: Recovery?
+
     @objc private func recoverInTerminal() {
-        guard let recovery = lifecycle.recovery else { return }
+        guard let recovery = offeredRecovery ?? lifecycle.recovery else { return }
         openRecovery(recovery)
     }
 

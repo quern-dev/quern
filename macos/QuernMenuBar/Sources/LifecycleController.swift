@@ -84,6 +84,17 @@ final class LifecycleController {
         self.deps = deps
     }
 
+    /// A failure that did not come from `run` -- an update that stopped partway
+    /// -- so the menu keeps offering its recovery after the alert is gone.
+    ///
+    /// Without this the update dead-end survived the alert: OK left `recovery`
+    /// nil and the menu had nothing, in the case this feature exists for.
+    func noteFailure(status: String, recovery: Recovery) {
+        statusText = status
+        self.recovery = recovery
+        changed()
+    }
+
     /// The daemon came up by some route other than us -- a terminal, another
     /// app. Whatever we were reporting is no longer true.
     func noteServerRunning() {
@@ -94,13 +105,18 @@ final class LifecycleController {
         changed()
     }
 
-    func run(_ action: Action, reporting: Report) {
+    func run(_ action: Action, reporting: Report,
+             recoveryOnFailure: Recovery = .repair) {
         // Belt as well as braces. The menu hides these items while busy, but
         // the automatic start at launch does not go through the menu, so the
         // invariant belongs here rather than in what happens to be drawn.
         guard !isBusy else { return }
         isBusy = true
         hasFailed = false
+        // Cleared with the failure it belonged to: through the retry window
+        // the menu would otherwise offer the *previous* failure's recovery
+        // beside "Starting…", after Open Server Log had already gone.
+        recovery = nil
         statusText = action.present
         changed()
 
@@ -142,7 +158,8 @@ final class LifecycleController {
             }
 
             self.waitForTheServerToAppear(attemptsLeft: self.graceAttempts,
-                                          action: action, reporting: reporting, detail: output)
+                                          action: action, reporting: reporting, detail: output,
+                                          recovery: recoveryOnFailure)
         }
     }
 
@@ -164,20 +181,22 @@ final class LifecycleController {
     /// bounded at fifteen seconds and the delegate owns this for the life of
     /// the process, so nothing leaked; it just was not doing what it said.
     private func waitForTheServerToAppear(
-        attemptsLeft: Int, action: Action, reporting: Report, detail: String
+        attemptsLeft: Int, action: Action, reporting: Report, detail: String,
+        recovery: Recovery = .repair
     ) {
         if deps.serverIsRunning() {
             finish(status: nil)
             return
         }
         guard attemptsLeft > 0 else {
-            finish(status: "Could not start the server", failed: true, recovery: .repair)
+            finish(status: "Could not start the server", failed: true, recovery: recovery)
             report(reporting, action: action, detail: detail)
             return
         }
         deps.scheduler.after(graceInterval) { [weak self] in
             self?.waitForTheServerToAppear(attemptsLeft: attemptsLeft - 1,
-                                           action: action, reporting: reporting, detail: detail)
+                                           action: action, reporting: reporting, detail: detail,
+                                           recovery: recovery)
         }
     }
 

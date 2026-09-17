@@ -56,7 +56,11 @@ enum Recovery: Equatable {
             }
         }
         body.append("echo")
-        body.append("echo \"The server's log is \(log)\"")
+        // Quoted like every other interpolation. This lands inside a
+        // double-quoted word, where " ` $ and \ are all live, and a home
+        // directory can legitimately contain them -- a network home under
+        // /Volumes/..., or an apostrophe in a name.
+        body.append("echo " + TerminalScript.shellQuote("The server's log is \(log)"))
         return TerminalScript.wrap(title: "Quern recovery", body: body)
     }
 
@@ -95,8 +99,12 @@ enum TerminalScript {
     /// exits cleanly, which hid a successful run's output before anyone could
     /// read it; a shell keeps it on screen and leaves somewhere to type next.
     static func wrap(title: String, body: [String]) -> String {
-        (["#!/bin/sh",
-          "# Written by the Quern menu-bar app (\(title)). Safe to delete.",
+        // The title lands in a comment, so anything that could end that line
+        // could add a command. Constants today; cheap to make it not matter.
+        let safe = title.replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        return (["#!/bin/sh",
+          "# Written by the Quern app (\(safe)). Safe to delete.",
           "clear"]
          + body
          + ["echo \"This window is now an ordinary shell; close it when you're finished.\"",
@@ -122,6 +130,19 @@ enum TerminalScript {
                 completion(error.map { "Terminal did not open: \($0.localizedDescription)" })
             }
         }
+    }
+}
+
+extension Recovery {
+    /// Which recovery an update failure deserves.
+    ///
+    /// `Updater` reports two different things through one channel: an update
+    /// that ran and stopped partway, and one that never started because the
+    /// installed version could not be read. Only the first is finished by
+    /// `setup` + `restart`; offering that for the second restarts a server
+    /// that is probably healthy.
+    static func forUpdateFailure(started: Bool) -> Recovery {
+        started ? .finishUpdate : .repair
     }
 }
 

@@ -46,9 +46,51 @@ enum RecoveryTests {
         }
 
         Harness.test("with no install at all, the installer is shown and not run") {
+            // The whole body, not a prefix: `!hasPrefix("curl")` was satisfied
+            // by `sh -c 'curl … | bash'`, ` curl …`, `eval "$(curl …)"` and
+            // `bash <(curl …)` alike -- a review mutation added exactly that
+            // and the suite stayed green. Nothing but `echo` may mention the
+            // installer.
             let l = lines(script(.setUp, quern: nil, releaseWrapperExists: false))
             Harness.expect(l.contains { $0.contains(Recovery.installOneLiner) }, "shown")
-            Harness.expect(!l.contains { $0.hasPrefix("curl") }, "never executed")
+            let executable = l.filter { line in
+                let t = line.trimmingCharacters(in: .whitespaces)
+                return !t.isEmpty && !t.hasPrefix("#") && !t.hasPrefix("echo ") && t != "echo"
+                    && t != "clear" && !t.hasPrefix("exec ")
+            }
+            Harness.expect(executable, [], "nothing is run in this case: \(executable)")
+            Harness.expect(!l.contains { $0.contains("install.sh") && !$0.hasPrefix("echo ") },
+                           "install.sh appears only inside an echo")
+        }
+
+        Harness.test("the log path is quoted, whatever the home directory is") {
+            // Every other interpolation went through shellQuote; this one sat
+            // inside a double-quoted word, where " ` and $ are live.
+            let hostile = "/Volumes/Home/o\"brien; touch /tmp/pwned; #/.quern/server.log"
+            let text = Recovery.repair.script(quern: "/q", releaseRoot: root, log: hostile,
+                                              exists: { _ in false })
+            // Pinned exactly: the whole path must sit inside one quoted word,
+            // so the shell sees it as text rather than as more commands.
+            let logLine = lines(text).first { $0.contains("server.log") } ?? ""
+            Harness.expect(logLine,
+                           "echo " + TerminalScript.shellQuote("The server's log is \(hostile)"),
+                           "quoting")
+            for metachar in ["`id`", "$(id)", "$HOME", "\"", "\\"] {
+                let path = "/h/\(metachar)/server.log"
+                let t = Recovery.repair.script(quern: "/q", releaseRoot: root, log: path,
+                                               exists: { _ in false })
+                let line = lines(t).first { $0.contains("server.log") } ?? ""
+                Harness.expect(line, "echo " + TerminalScript.shellQuote("The server's log is \(path)"),
+                               "\(metachar) quoted")
+            }
+        }
+
+        Harness.test("an update that never started is repaired, not finished") {
+            // "Could not start the update" means the installed version could
+            // not be read: nothing ran, so setup + restart would bounce a
+            // server that is probably healthy.
+            Harness.expect(Recovery.forUpdateFailure(started: false), .repair, "never started")
+            Harness.expect(Recovery.forUpdateFailure(started: true), .finishUpdate, "stopped partway")
         }
 
         Harness.test("a missing wrapper falls back to quern on PATH") {
@@ -77,6 +119,15 @@ enum RecoveryTests {
             Harness.expect(report(record(.updated, secondsAgo: 30)), .alert, "just updated")
             Harness.expect(report(record(.failed, secondsAgo: 30)), .alert, "update just failed")
             Harness.expect(report(record(.updated, secondsAgo: 3600)), .menuOnly, "an old update")
+            // Just past the window: the only "too old" case was an hour, so a
+            // ten-times-wider window passed the suite -- an hour of unwanted
+            // login modals, which is what this function exists to prevent.
+            Harness.expect(report(record(.updated,
+                                         secondsAgo: FailureReporting.afterUpdateWindow + 60)),
+                           .menuOnly, "just past the window")
+            Harness.expect(report(record(.updated,
+                                         secondsAgo: FailureReporting.afterUpdateWindow - 60)),
+                           .alert, "just inside the window")
             Harness.expect(report(record(.noOp, secondsAgo: 30)), .menuOnly, "nothing was updated")
             Harness.expect(report(record(.updated, secondsAgo: nil)), .menuOnly, "no timestamp")
             Harness.expect(report(record(.updated, secondsAgo: -600)), .menuOnly, "a future timestamp")

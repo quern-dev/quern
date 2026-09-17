@@ -195,6 +195,39 @@ enum LifecycleControllerTests {
             Harness.expect(rig.alerts.isEmpty, true, "no modal")
         }
 
+        Harness.test("a recovery from outside survives for the menu") {
+            // The update path: the alert is dismissed and the menu must still
+            // offer the way out. Clicking OK used to take it with it.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            Harness.expect(rig.controller.recovery, .finishUpdate, "recorded")
+            Harness.expect(rig.controller.statusText, "Update failed", "status")
+            Harness.expect(rig.changes >= 1, "the menu must repaint")
+        }
+
+        Harness.test("a caller can say which recovery a failed start deserves") {
+            // A start that fails right after an update is finished with setup
+            // + restart, not doctor --fix.
+            let rig = Rig(result: (1, "timed out"))
+            rig.controller.run(.start, reporting: .alert, recoveryOnFailure: .finishUpdate)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .finishUpdate, "the caller's choice")
+            Harness.expect(rig.recoveries.first ?? nil, .finishUpdate, "and in the alert")
+        }
+
+        Harness.test("a new action clears the last failure's recovery") {
+            // Through the retry window the menu offered the previous failure's
+            // recovery beside "Starting…", after Open Server Log had gone.
+            let rig = Rig(result: nil)
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.pending.removeFirst()(1, "timed out")
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "failed")
+            rig.controller.run(.start, reporting: .menuOnly)
+            Harness.expect(rig.controller.recovery == nil, "cleared while retrying")
+            Harness.expect(rig.controller.statusText, "Starting…", "and it is busy")
+        }
+
         Harness.test("a missing CLI offers set-up, not repair") {
             let rig = Rig(result: (QuernCLI.notFoundStatus, "no wrapper"))
             rig.controller.run(.start, reporting: .alert)
