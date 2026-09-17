@@ -40,6 +40,8 @@ def controller(monkeypatch):
             self.scrolls = False        # does the screen move when swiped?
             self.only_upward = False    # already at the bottom: only a reverse
                                         # swipe reveals anything
+            self.controlled = True      # False models idb, whose swipes fling
+            self.holds: list[float] = []
 
         def __post_init__(self):  # pragma: no cover - not a dataclass
             pass
@@ -66,9 +68,12 @@ def controller(monkeypatch):
 
         def _ui_backend(self, _udid):
             backend = MagicMock()
+            if not self.controlled:
+                backend.swipe_is_controlled = False
 
-            async def swipe(_udid, _x1, y1, _x2, y2, *_a, **_k):
+            async def swipe(_udid, _x1, y1, _x2, y2, *_a, hold=0.0, **_k):
                 self.swipes += 1
+                self.holds.append(hold)
                 reverse = y2 > y1        # near -> far reveals content above
                 if self.only_upward:
                     if reverse:
@@ -129,11 +134,21 @@ async def test_a_target_that_is_present_is_returned_without_swiping(controller):
     assert controller.swipes == 0
 
 
-async def test_progress_checks_are_bounded(controller):
-    """Sampling costs a full tree read (~1.8s on a simulator), so it must not
-    run on every iteration of a long, legitimately scrolling sweep."""
-    from server.device.controller_ui import DeviceControllerUI
-    assert DeviceControllerUI._BLIND_PROGRESS_CHECKS <= 5
+async def test_the_static_check_costs_no_extra_reads(controller):
+    """Whether the list moved comes from the sweep's own reads.
+
+    The check it replaced hit-tested three points before and after the first
+    swipe, and on a physical device each hit-test is a full tree read -- six
+    extra reads, measured at ~25s on an iPhone 11, before the sweep had
+    looked for anything.
+    """
+    controller.scrolls = False
+    backend = controller._ui_backend("SIM")
+    controller._ui_backend = lambda _udid: backend
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=10,
+    )
+    backend.describe_point.assert_not_called()
 
 
 async def test_a_list_at_the_bottom_is_not_mistaken_for_a_static_screen(controller):
@@ -156,19 +171,39 @@ async def test_a_list_at_the_bottom_is_not_mistaken_for_a_static_screen(controll
 
 
 @pytest.mark.asyncio
-async def test_the_sweep_settles_before_it_looks(controller):
-    """Every swipe is followed by a settle, before the tree is read.
+async def test_a_controlled_sweep_holds_every_swipe_and_never_settles(controller):
+    """The sweep's swipes stop dead, so there is nothing to wait for.
 
-    This is the #84 fix. The search fetch used to read mid-fling: it caught the
-    target in flight, the fling carried it out of view, and the confirm then
-    correctly rejected a sighting that had been real when it was taken. The
-    sweep treated that as never having seen the row and swept onward.
-
-    Asserting the *count* rather than merely "settle was called" is what makes
-    this a guard: a single settle somewhere in the loop would satisfy the
-    weaker check while every other step still read mid-flight.
+    A 105s sweep on iOS 18.6 settled after each of its 32 swipes and every
+    settle timed out: the list was still flinging, 1020pt for a 389pt drag.
+    Holding the swipe stops the fling, and the per-step settle that was
+    compensating for it becomes 2.5s of nothing per step.
     """
     controller.scrolls = True
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=3,
+    )
+
+    assert controller.swipes > 0, "the sweep never swiped"
+    assert all(h > 0 for h in controller.holds), (
+        f"a sweep swipe was not held, so the list can fling past rows: {controller.holds}"
+    )
+    assert controller.settles == [], (
+        f"settled {len(controller.settles)} time(s) after swipes that cannot fling"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_whose_swipes_fling_settles_before_it_looks(controller):
+    """idb cannot hold a swipe, so there the #84 fix still applies.
+
+    The search read used to run mid-fling: it caught the target in flight, the
+    fling carried it out of view, and the confirm rejected a sighting that had
+    been real when it was taken. Counted rather than merely called, so one
+    settle somewhere in the loop cannot satisfy it.
+    """
+    controller.scrolls = True
+    controller.controlled = False
     await controller._ios_scroll_to_element(
         "SIM", label=None, identifier="never_exists", max_swipes=3,
     )

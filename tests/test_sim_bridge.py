@@ -803,3 +803,53 @@ class TestProbeFlagIsHonouredOnEveryPath:
         assert backend.describe_point.await_count > 0, (
             "idb did not probe with probe=True — the control for the check above"
         )
+
+
+class TestSwipesCanBeHeld:
+    """The sweep's swipes stop dead only if the hold reaches the bridge."""
+
+    async def test_the_hold_is_sent_to_the_bridge(self):
+        sent: list[dict] = []
+
+        async def send(cmd):
+            sent.append(cmd)
+            return {"ok": True}
+
+        backend, _ = _backend_with_send(send)
+        await backend.swipe("SIM", 100, 700, 100, 100, 0.3, hold=0.15)
+        assert sent[-1]["cmd"] == "swipe"
+        assert sent[-1]["hold"] == 0.15
+
+    async def test_a_plain_swipe_still_flings(self):
+        """The public swipe keeps its behaviour: a caller asking for a swipe
+        may want the momentum."""
+        sent: list[dict] = []
+
+        async def send(cmd):
+            sent.append(cmd)
+            return {"ok": True}
+
+        backend, _ = _backend_with_send(send)
+        await backend.swipe("SIM", 100, 700, 100, 100)
+        assert sent[-1]["hold"] == 0
+
+    def test_only_idb_declares_its_swipes_uncontrolled(self):
+        """The sweep skips its per-step settle unless a backend says it flings.
+
+        idb has no way to hold a swipe, so losing this flag would put the #84
+        failure back on every simulator that falls back to idb.
+        """
+        from server.device.idb import IdbBackend
+        from server.device.wda_client import WdaBackend
+
+        assert IdbBackend.swipe_is_controlled is False
+        assert getattr(SimBridgeBackend, "swipe_is_controlled", True) is not False
+        assert getattr(WdaBackend, "swipe_is_controlled", True) is not False
+
+    def test_the_bridge_source_reads_the_hold(self):
+        """The Python side sending `hold` is only half of it."""
+        source = (
+            Path(__file__).resolve().parent.parent / "tools" / "sim-bridge.swift"
+        ).read_text()
+        assert 'dict["hold"]' in source
+        assert "hold: hold" in source

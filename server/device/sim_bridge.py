@@ -662,12 +662,18 @@ class SimBridgeBackend:
         start_x: float, start_y: float,
         end_x: float, end_y: float,
         duration: float = 0.3,
+        hold: float = 0.0,
     ) -> None:
+        """Swipe, optionally holding at the end so the list does not fling.
+
+        See `doSwipe` in sim-bridge.swift for the measurements behind `hold`.
+        """
         await self._send({
             "cmd": "swipe", "udid": udid,
             "x1": start_x, "y1": start_y,
             "x2": end_x, "y2": end_y,
             "duration": duration,
+            "hold": hold,
         })
 
     async def type_text(self, udid: str, text: str) -> None:

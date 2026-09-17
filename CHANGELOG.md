@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Scrolling to an element on iOS is rebuilt, and is several times faster.** On a simulator every sweep swipe flung the list: 1020pt of travel for a 389pt drag, more than a screen. A row could land under the navigation bar after one swipe and be gone from the tree after the next, and a wait between swipes that existed to let the fling stop timed out on every step. A measured sweep for row 20 took 32 swipes and 105s. Sweep swipes are now held at the end, so the list stops where the finger does; they cover three-quarters of the screen, which is less than the visible area, so no row can be passed over; and every read is taken at rest. The sweep now turns around as soon as a swipe moves nothing, rather than spending its downward budget at the bottom of a list whose target is above. On an iPhone 16 Plus simulator the conformance scroll test went from 105s to 19s. On an iPhone 11, four Settings targets went from 27–94s to 14–24s. The downward share of the budget is now twice `max_swipes`, with three times `max_swipes` in all as before, because a controlled swipe travels less than a flung one did. The public `swipe` endpoint is unchanged and still flings.
+- **The sweep reports itself when it is slow or gives up.** A sweep that fails, or succeeds after more than a quarter of its deadline, logs every step it took, what each read saw, and why it stopped. On iOS it is also bounded by a two-minute deadline, whatever the swipe budget.
+
+### Fixed
+- **On a physical device, scrolling to an element could give up after one swipe on a list that scrolls.** The check for "does anything here move" hit-tested three points. WDA has no hit-test, so each one was emulated by picking the *last* element in the tree containing the point, and on iOS 26 Settings that was always a full-screen overlay whose position never changes. Three of four targets in Settings reported not found on an iPhone 11. The emulated hit-test now picks the smallest element containing the point, and the sweep no longer hit-tests at all: whether the list moved is read from the same tree read that looks for the target, which also saves the six full tree reads (~25s) the check cost on a physical device.
+- **Scrolling to an element on a simulator no longer probes containers on every step.** Container probing, which finds tab-bar items the accessibility tree omits, was 92% of each tree read and ran up to 75 times per sweep. The sweep now probes only on its first lookup, and throughout a sweep whose target only probing can see.
+- **`tap_element` with scroll-to-find is bounded by the same deadline as `scroll_to_element`.**
+- **A crash of the simulator bridge during a command is no longer reported as the request being cancelled.**
+
 ## [0.18.3] - 2026-09-16
 
 Ten fixes. Most are the same shape as 0.18.2's: something stopped working and went on reporting that it had not.
