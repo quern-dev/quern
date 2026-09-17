@@ -143,6 +143,16 @@ class TestARateLimitedReplyIsAnAnswer:
 
         assert state == "pending"
         assert "rate limited" in detail, detail
+        # Nothing here says when it lifts, so no time may be printed: the
+        # retry delay is ours, and reads as CodeRabbit's reset time.
+        assert "until" not in detail, detail
+
+    def test_a_time_is_shown_only_when_one_was_stated(self, gate, monkeypatch):
+        """Repeated checks inside the backoff must not start inventing one."""
+        _install(gate, monkeypatch, Fake(_summary(), answer="Review rate limited."))
+        gate.status(202, ask=True)
+        _, detail = gate.status(202, ask=True)
+        assert "rate limited" in detail and "until" not in detail, detail
 
     def test_a_finished_review_is_still_recognised(self, gate, monkeypatch):
         _install(gate, monkeypatch, Fake(_summary(), answer="Review finished."))

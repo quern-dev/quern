@@ -206,6 +206,12 @@ _ASK_NOT_BEFORE: dict[int, float] = {}
 # Used when the limit is reported without saying when it lifts.
 _RATE_LIMIT_BACKOFF = 600.0
 
+# When CodeRabbit said the limit lifts, per PR. Kept apart from
+# `_ASK_NOT_BEFORE`, which also holds the backoff above: printing that as
+# "rate limited until 14:22" presents a local retry delay as the reset time,
+# and a reader plans the merge around it.
+_LIFTS_AT: dict[int, float] = {}
+
 _SUMMARY_MARKER = "auto-generated comment: summarize by coderabbit.ai"
 _RATE_LIMIT_START = "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->"
 _RATE_LIMIT_END = "<!-- end of auto-generated comment: rate limited by coderabbit.ai -->"
@@ -444,12 +450,12 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
             if verdict == "rate_limited":
                 note = _rate_limit_note(lifts)
                 if lifts is not None:
-                    _ASK_NOT_BEFORE[number] = lifts
+                    _ASK_NOT_BEFORE[number] = _LIFTS_AT[number] = lifts
                 elif number not in _ASK_NOT_BEFORE:
                     _ASK_NOT_BEFORE[number] = now + _RATE_LIMIT_BACKOFF
             not_before = _ASK_NOT_BEFORE.get(number, 0.0)
             if now < not_before:
-                note = _rate_limit_note(not_before)
+                note = _rate_limit_note(_LIFTS_AT.get(number))
             elif ask:
                 note = ""
                 outcome = _reviewed_by_asking(number)
@@ -459,9 +465,11 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
                     # The reply does not say when; the summary usually does,
                     # and the same event refreshes it.
                     _, lifts = _summary_verdict(number, head)
-                    _ASK_NOT_BEFORE[number] = lifts if lifts and lifts > now \
-                        else now + _RATE_LIMIT_BACKOFF
-                    note = _rate_limit_note(_ASK_NOT_BEFORE[number])
+                    if lifts and lifts > now:
+                        _ASK_NOT_BEFORE[number] = _LIFTS_AT[number] = lifts
+                    else:
+                        _ASK_NOT_BEFORE[number] = now + _RATE_LIMIT_BACKOFF
+                    note = _rate_limit_note(_LIFTS_AT.get(number))
 
     owner, name = REPO.split("/")
     query = (
