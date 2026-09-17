@@ -21,9 +21,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from server.config import CONFIG_DIR, quern_cmd
-from server.device._xcode import xcode_available
-from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself
+# Before the server imports below, not after: an updater from 0.18.3 or older
+# imports this file into a process still holding the previous release's
+# `server.config`, and the next line asks it for a name that release lacks
+# (#212). `stale_modules` has no server imports, so it is always current.
+from server.lifecycle.stale_modules import refresh_if_stale
+
+refresh_if_stale()
+
+from server.config import CONFIG_DIR, quern_cmd  # noqa: E402
+from server.device._xcode import xcode_available  # noqa: E402
+from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself  # noqa: E402
 
 # ── Result types ──────────────────────────────────────────────────────────
 

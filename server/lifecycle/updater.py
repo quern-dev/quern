@@ -860,6 +860,11 @@ def _refresh_update_check() -> None:
         )
 
 
+#: Hidden argument to `quern update` naming the second half of an update: the
+#: part that runs the *new* code, in a process that has loaded only new code.
+FINISH_FLAG = "--finish"
+
+
 def run_update(apply_tools: bool = False) -> int:
     """Pull latest changes and rebuild.
 
@@ -903,6 +908,76 @@ def run_update(apply_tools: bool = False) -> int:
         _refresh_update_check()
         _write_result(NO_OP, "already up to date", version=_installed_version())
         return 0
+
+    # The source has moved. Everything from here runs the new release's code,
+    # so it runs in a process that has loaded nothing but new code.
+    return _hand_off(project_root, apply_tools)
+
+
+def _spawn_finish(cmd: list[str], project_root: Path) -> int:
+    """Run the finishing process and return its exit code.
+
+    Its own function so the test suite can replace it in one place. The real
+    one runs setup and restarts the server *on the machine running the suite*,
+    against whatever checkout the suite is in -- which is what the first
+    version of these tests did, rewriting the developer's Claude Code hook to
+    point at a temporary directory.
+    """
+    return subprocess.run(cmd, cwd=str(project_root)).returncode  # noqa: S603
+
+
+def _hand_off(project_root: Path, apply_tools: bool) -> int:
+    """Finish the update in a fresh interpreter, and report how it went.
+
+    Carrying on in this process is what #212 was: modules imported before the
+    swap are the old release's, modules imported after it are the new one's,
+    and the first new module to ask an old one for a name added since crashes
+    the update -- after the pull, before setup and the restart. No amount of
+    care inside the new code fixes that from here, because this process decides
+    what is already loaded.
+
+    The venv's interpreter, because the swap preserves it and the finishing
+    steps install into it. cwd is the project, which `-m` puts first on
+    `sys.path`, so the child imports the tree that was just installed.
+    """
+    python = project_root / ".venv" / "bin" / "python"
+    if not python.exists():
+        python = Path(sys.executable)
+    cmd = [str(python), "-m", "server", "update", FINISH_FLAG]
+    if apply_tools:
+        cmd.append("--tools")
+
+    try:
+        rc = _spawn_finish(cmd, project_root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Error: could not start the updated quern to finish the update: {exc}")
+        rc = 1
+
+    if rc != 0 and not RESULT_FILE.exists():
+        # The child records its own outcome. One that died before it could --
+        # an interpreter that would not start, an import that failed -- leaves
+        # nothing, and the menu bar would read that as "still running".
+        _write_result(FAILED, "the updated version could not finish the update")
+        print("The source was updated, but setup and the restart did not run.")
+        from server.config import quern_cmd
+        for step in ("setup", "restart"):
+            for line in run_it_yourself([quern_cmd(), step]):
+                print(f"  {line}")
+    return 0 if rc == 0 else 1
+
+
+def finish_update(apply_tools: bool = False) -> int:
+    """The part of an update that runs the new release: rebuild, set up,
+    restart, record. Invoked as `quern update --finish` by `_hand_off`.
+
+    Its name is also the marker `stale_modules` looks for: an updater that
+    defines it hands off, one that does not is an older in-process updater.
+    """
+    project_root = _find_project_root()
+    if project_root is None:
+        print("Error: could not find project root")
+        _write_result(FAILED, "could not find project root")
+        return 1
 
     # The pull or swap succeeded, so the installed version has changed and the
     # cached answer is about the old one. Refresh here rather than at the exits

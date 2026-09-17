@@ -316,3 +316,26 @@ def _no_real_subprocess_spawns(monkeypatch):
         "this test spawned a real usbmux forward, which outlives it and squats "
         "port 18100 (issue #160): " + "; ".join(violations)
     )
+
+
+@pytest.fixture(autouse=True)
+def _update_finishes_in_process(monkeypatch):
+    """Keep `quern update` from spawning a real finishing process.
+
+    Since #212 the second half of an update runs as `python -m server update
+    --finish` in the project directory, which is this checkout. Reached from a
+    test, that is a real setup and a real restart on the machine running the
+    suite -- and it happened: the first run of the updated tests rewrote the
+    developer's Claude Code hook to point at a temporary state directory, which
+    the child inherited through QUERN_STATE_DIR.
+
+    So by default the finishing half runs in-process, which is what every test
+    written before the hand-off assumed. The hand-off's own tests replace
+    `_spawn_finish` with a recording fake.
+    """
+    from server.lifecycle import updater
+
+    def in_process(cmd, _project_root):
+        return updater.finish_update(apply_tools="--tools" in cmd)
+
+    monkeypatch.setattr(updater, "_spawn_finish", in_process)

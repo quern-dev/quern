@@ -458,15 +458,32 @@ def test_already_up_to_date_still_checks_tools(monkeypatch):
     assert called == [False], "the up-to-date path skipped the tool check"
 
 
-def test_the_tools_flag_reaches_the_updater(monkeypatch):
+@pytest.mark.parametrize("argv, called, tools", [
+    (["update"], "run_update", False),
+    (["update", "--tools"], "run_update", True),
+    (["update", "--finish"], "finish_update", False),
+    (["update", "--finish", "--tools"], "finish_update", True),
+])
+def test_the_tools_flag_reaches_the_updater(monkeypatch, argv, called, tools):
     """Pin the argv wiring: a correct planner behind a flag nobody parses is
-    the same as no planner."""
-    import inspect
-
+    the same as no planner. Run rather than read: this used to assert on the
+    source text, which any reformatting of the line broke."""
     from server import __main__ as entry
+    from server.lifecycle import updater
 
-    source = inspect.getsource(entry)
-    assert 'run_update(apply_tools="--tools" in sys.argv[2:])' in source
+    seen = []
+    monkeypatch.setattr(updater, "run_update",
+                        lambda apply_tools=False: seen.append(("run_update", apply_tools)) or 0)
+    monkeypatch.setattr(updater, "finish_update",
+                        lambda apply_tools=False: seen.append(("finish_update", apply_tools)) or 0)
+    monkeypatch.setattr(entry, "_maybe_reexec_in_venv", lambda: None)
+    monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+
+    with pytest.raises(SystemExit) as exit_:
+        entry.main()
+
+    assert exit_.value.code == 0
+    assert seen == [(called, tools)]
 
 
 # --------------------------------------------------------------------------
