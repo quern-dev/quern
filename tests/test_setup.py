@@ -1095,6 +1095,80 @@ class TestAssumeYes:
         )
 
 
+class TestTheStandingCertAnswer:
+    """`auto_install_cert` answers the CA question once. Setup's own prompt
+    ignored it, which is the one place CONTRIBUTING says it must not be
+    ignored -- so a user who had turned it on was asked anyway, and one who
+    had turned it off was asked again."""
+
+    def test_on_installs_without_asking(self):
+        from server.lifecycle.setup import _cert_install_decision
+
+        asked = []
+        install, note = _cert_install_decision(True, lambda: asked.append(1) or False)
+        assert install is True
+        assert asked == [], "it asked a question the user had already answered"
+        assert "auto_install_cert is on" in note
+
+    def test_off_skips_without_asking(self):
+        """The half that matters most: re-asking is how a considered no
+        becomes a tired yes."""
+        from server.lifecycle.setup import _cert_install_decision
+
+        asked = []
+        install, note = _cert_install_decision(False, lambda: asked.append(1) or True)
+        assert install is False
+        assert asked == [], "it re-asked a question the user had declined"
+        assert "not installing" in note
+        assert "set-auto-install-cert" in note, "it does not say how to change it"
+
+    def test_unset_asks(self):
+        from server.lifecycle.setup import _cert_install_decision
+
+        assert _cert_install_decision(None, lambda: True) == (True, None)
+        assert _cert_install_decision(None, lambda: False) == (False, None)
+
+    def test_setup_never_writes_the_setting(self):
+        """Saying yes once at a prompt is not choosing a standing policy."""
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        assert "set_auto_install_cert" not in inspect.getsource(setup_mod), (
+            "setup writes auto_install_cert, turning one answer into a policy"
+        )
+
+
+class TestTheCertChoiceIsThreeWay:
+    def test_unset_is_not_a_no(self, monkeypatch):
+        from server import config
+
+        monkeypatch.setattr(config, "read_user_config", lambda: {})
+        assert config.auto_install_cert_choice() is None
+        assert config.get_auto_install_cert() is False, (
+            "the two-way reader must still fold unset into no — silence is "
+            "not permission for the callers that install"
+        )
+
+    def test_a_literal_boolean_is_the_answer(self, monkeypatch):
+        from server import config
+
+        for stored in (True, False):
+            monkeypatch.setattr(config, "read_user_config",
+                                lambda stored=stored: {"auto_install_cert": stored})
+            assert config.auto_install_cert_choice() is stored
+
+    def test_a_typo_reads_as_never_answered(self, monkeypatch):
+        """Same rule as the two-way reader: a typo means "ask me", never
+        consent — and never a silent no either."""
+        from server import config
+
+        for junk in ("yes", "true", 1, None, [], {}):
+            monkeypatch.setattr(config, "read_user_config",
+                                lambda junk=junk: {"auto_install_cert": junk})
+            assert config.auto_install_cert_choice() is None, junk
+
+
 class TestPromptYnMore:
     def test_tty_stdin(self):
         """Normal TTY stdin reads via input()."""

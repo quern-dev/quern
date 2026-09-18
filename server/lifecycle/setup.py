@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -2266,6 +2267,30 @@ def _is_cert_installed(udid: str) -> bool:
         return False
 
 
+def _cert_install_decision(
+    standing: bool | None, ask: Callable[[], bool],
+) -> tuple[bool, str | None]:
+    """Whether to install the CA into booted simulators, and what to say.
+
+    A standing answer is an answer. This decision used to ignore
+    `auto_install_cert` entirely: someone who had turned it on was asked
+    anyway -- the prompt they had paid to be rid of -- and someone who had
+    turned it off was asked again, which is how a considered no becomes a
+    tired yes. CONTRIBUTING says the setting means the same thing everywhere,
+    and this was the place it did not.
+
+    Setup reads the setting and never writes it. Turning it on because
+    somebody said yes once at a prompt would convert a single answer into a
+    standing policy they never chose.
+    """
+    if standing is True:
+        return True, "    auto_install_cert is on — installing without asking."
+    if standing is False:
+        return False, ("    auto_install_cert is off — not installing.\n"
+                       "    Turn it on with `quern set-auto-install-cert on`.")
+    return ask(), None
+
+
 def install_cert_simulator(udid: str, name: str) -> CheckResult:
     """Install mitmproxy CA cert into a booted simulator.
 
@@ -2952,10 +2977,18 @@ def run_setup(assume_yes: bool = False) -> int:
                     print(f"    Found {len(needs_cert)} booted simulator(s) needing CA cert:")
                     for sim in needs_cert:
                         print(f"      • {sim['name']} ({sim['udid'][:8]}…)")
-                    if _prompt_yn(
-                        "    Install mitmproxy CA cert into booted simulators?",
-                        deliberate=True,
-                    ):
+                    from server.config import auto_install_cert_choice
+
+                    install_it, note = _cert_install_decision(
+                        auto_install_cert_choice(),
+                        lambda: _prompt_yn(
+                            "    Install mitmproxy CA cert into booted simulators?",
+                            deliberate=True,
+                        ),
+                    )
+                    if note:
+                        print(note)
+                    if install_it:
                         for sim in needs_cert:
                             result = install_cert_simulator(sim["udid"], sim["name"])
                             report.add(result)
