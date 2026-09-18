@@ -104,6 +104,27 @@ from anywhere as `quern`.
 
 </details>
 
+### Unattended setup
+
+```bash
+quern setup -y
+quern setup --yes          # the same thing, spelled out
+```
+
+`-y` (or `--yes`) answers setup's prompts with their default instead of asking,
+for a provisioning script, a Dockerfile, or anything else with no terminal.
+
+Without it and with no terminal to ask on, setup still completes the install
+itself — the virtualenv, the dependencies, the MCP wrapper and the `quern`
+command — and declines the optional extras it would otherwise have asked about,
+listing them at the end.
+
+One prompt is not covered by `-y`: installing the capture certificate authority
+into booted simulators. A CA outlives the session that wanted it and has to be
+removed deliberately, so it is always asked or declined, never assumed. Set it
+as a standing policy with `quern set-auto-install-cert` if you want it answered
+once.
+
 ### Uninstall
 
 ```bash

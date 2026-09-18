@@ -366,7 +366,14 @@ def _can_prompt() -> bool:
     return True
 
 
-def _prompt_yn(question: str, default: bool = True) -> bool:
+#: Set once by `run_setup`, read by `_prompt_yn`. A parameter would have to be
+#: threaded through some twenty call sites and every function between them,
+#: which is how one gets missed and a single prompt goes on blocking an
+#: unattended run.
+_ASSUME_YES = False
+
+
+def _prompt_yn(question: str, default: bool = True, *, deliberate: bool = False) -> bool:
     """Prompt the user for yes/no confirmation.
 
     When stdin is not a TTY (e.g. ``curl | bash``), reopens /dev/tty so
@@ -379,8 +386,24 @@ def _prompt_yn(question: str, default: bool = True) -> bool:
     terminal one, and said so nowhere. The question is printed and kept, so the
     output shows what was asked and `run_setup` can say how many went
     unanswered.
+
+    `-y` answers with the default instead, the way `apt-get -y` does -- except
+    for a prompt marked `deliberate`, which it must not answer at all. Consent
+    that the user has to be told about afterwards is not consent: installing a
+    MITM certificate authority outlives the session that wanted it, and the
+    user has to know it happened in order to undo it. Those keep declining, and
+    are still recorded as unasked.
     """
     suffix = " [Y/n] " if default else " [y/N] "
+    if _ASSUME_YES and not deliberate:
+        # Printed, not silent: the transcript has to show what was asked and
+        # what was answered on the user's behalf.
+        print(f"{question}{suffix}— {'yes' if default else 'no'} (-y)")
+        return default
+    if _ASSUME_YES and deliberate:
+        _UNASKED.append(question)
+        print(f"{question}{suffix}— not answered by -y; this one is yours to make")
+        return False
     if sys.stdin.isatty():
         try:
             answer = input(question + suffix).strip().lower()
@@ -2365,8 +2388,15 @@ def _print_unasked() -> None:
     print()
 
 
-def run_setup() -> int:
-    """Run the interactive setup. Returns 0 on success, 1 on errors."""
+def run_setup(assume_yes: bool = False) -> int:
+    """Run the interactive setup. Returns 0 on success, 1 on errors.
+
+    `assume_yes` answers every prompt with its default, the way `apt-get -y`
+    does -- except the ones marked `deliberate`, which no flag answers. See
+    `_prompt_yn`.
+    """
+    global _ASSUME_YES
+    _ASSUME_YES = assume_yes
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
     if sys.prefix != sys.base_prefix:
         venv_bin = str(Path(sys.prefix) / "bin")
@@ -2496,49 +2526,33 @@ def run_setup() -> int:
             print(f"    Re-running setup inside {venv_path}...")
             return _reexec_in_venv(venv_path)
         else:
-            # No venv — create it, then re-exec
-            if _prompt_yn("    No virtual environment found. Create one?"):
-                if create_venv(project_root):
-                    return _reexec_in_venv(venv_path)
-                else:
-                    report.add(CheckResult(
-                        name="Virtual env",
-                        status=CheckStatus.ERROR,
-                        message="Failed to create virtual environment",
-                        detail="Try manually:\n"
-                               f"  python3 -m venv {project_root / '.venv'}\n"
-                               f"  source {project_root / '.venv'}/bin/activate\n"
-                               '  pip install -e ".[dev]"',
-                    ))
-                    report.print_summary()
-                    return 1
-            else:
-                # Declining used to fall through to the block below, which is
-                # commented "we're inside the venv" and reports the check OK.
-                # It is not inside a venv, so the next third-party import ended
-                # setup with `ModuleNotFoundError: No module named 'httpx'` --
-                # several hundred lines from the decision that caused it, and
-                # naming a dependency the user never mentioned.
-                #
-                # This branch is also where an *unaskable* prompt lands: with no
-                # terminal, `_prompt_yn` declines rather than hanging, so a GUI
-                # or piped setup arrives here without anyone having said no.
-                report.add(CheckResult(
-                    name="Virtual env",
-                    status=CheckStatus.ERROR,
-                    message="Declined — nothing further can run",
-                    detail=(
-                        "Quern's dependencies live in the virtualenv, so the "
-                        "checks after this one cannot run without it.\n"
-                        "To create it later:\n"
-                        f"  python3 -m venv {project_root / '.venv'}\n"
-                        f"  source {project_root / '.venv'}/bin/activate\n"
-                        '  pip install -e ".[dev]"'
-                    ),
-                ))
-                report.print_summary()
-                _print_unasked()
-                return 1
+            # No venv — create it, then re-exec. Not asked about: a venv inside
+            # the install directory *is* the install, the way node_modules is
+            # `npm install`. Asking made an unattended run decline it and stop
+            # with a tree it could not run, and there was never a second
+            # answer: every check below this point needs it.
+            #
+            # What used to live here was the *declined* branch, which existed
+            # because declining fell through to the block below -- commented
+            # "we're inside the venv" and reporting the check OK -- and setup
+            # then died several hundred lines later on `ModuleNotFoundError:
+            # No module named 'httpx'`, naming a dependency the user never
+            # mentioned. There is nothing left to decline.
+            print("    No virtual environment found. Creating one...")
+            if create_venv(project_root):
+                return _reexec_in_venv(venv_path)
+            report.add(CheckResult(
+                name="Virtual env",
+                status=CheckStatus.ERROR,
+                message="Failed to create virtual environment",
+                detail="Try manually:\n"
+                       f"  python3 -m venv {project_root / '.venv'}\n"
+                       f"  source {project_root / '.venv'}/bin/activate\n"
+                       '  pip install -e ".[dev]"',
+            ))
+            report.print_summary()
+            _print_unasked()
+            return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(
@@ -2938,7 +2952,10 @@ def run_setup() -> int:
                     print(f"    Found {len(needs_cert)} booted simulator(s) needing CA cert:")
                     for sim in needs_cert:
                         print(f"      • {sim['name']} ({sim['udid'][:8]}…)")
-                    if _prompt_yn("    Install mitmproxy CA cert into booted simulators?"):
+                    if _prompt_yn(
+                        "    Install mitmproxy CA cert into booted simulators?",
+                        deliberate=True,
+                    ):
                         for sim in needs_cert:
                             result = install_cert_simulator(sim["udid"], sim["name"])
                             report.add(result)

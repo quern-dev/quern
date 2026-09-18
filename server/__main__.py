@@ -719,6 +719,17 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _setup_usage() -> None:
+    print("Usage: quern setup [-y|--yes]")
+    print()
+    print("Checks the environment and installs what is missing.")
+    print()
+    print("  -y, --yes   Answer prompts with their default, for an unattended")
+    print("              run. Prompts that must be made deliberately -- ")
+    print("              installing a certificate authority -- are still")
+    print("              declined and listed at the end.")
+
+
 def _capture_env_usage() -> None:
     print("Usage: quern capture-env [FILE]")
     print()
@@ -769,8 +780,27 @@ def main() -> None:
 
     # Lightweight commands — handle without heavy imports
     if len(sys.argv) >= 2 and sys.argv[1] == "setup":
+        # Parsed rather than ignored, for the reason `capture-env` above states
+        # about its own arguments: everything after the subcommand used to be
+        # dropped, so `setup --help` ran a full setup instead of printing help,
+        # and a mistyped flag did the same. A flag that is silently ignored is
+        # worse than one that does not exist -- the caller believes they opted
+        # in. This is dispatched before argparse (see the comment at the top of
+        # `main`), so the parsing has to be here.
+        rest = sys.argv[2:]
+        if any(a in ("-h", "--help") for a in rest):
+            _setup_usage()
+            sys.exit(0)
+        assume_yes = False
+        for arg in rest:
+            if arg in ("-y", "--yes"):
+                assume_yes = True
+            else:
+                _setup_usage()
+                print(f"unrecognised option: {arg}", file=sys.stderr)
+                sys.exit(2)
         from server.lifecycle.setup import run_setup
-        sys.exit(run_setup())
+        sys.exit(run_setup(assume_yes=assume_yes))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
         from server.lifecycle.setup import run_uninstall

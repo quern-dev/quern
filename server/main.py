@@ -1786,7 +1786,14 @@ def cli() -> None:
         "check-updates",
         help="Check for a new release now, ignoring the once-a-day rate limit",
     )
-    subparsers.add_parser("setup", help="Check environment and install dependencies")
+    setup_parser = subparsers.add_parser(
+        "setup", help="Check environment and install dependencies")
+    # `server.__main__` dispatches setup before this parser is reached, and
+    # parses the same flag itself. Declared here too so the two entry points
+    # do not disagree about what `quern setup` accepts.
+    setup_parser.add_argument(
+        "-y", "--yes", action="store_true", dest="assume_yes",
+        help="Answer prompts with their default (unattended)")
 
     # uninstall
     subparsers.add_parser("uninstall", help="Remove Quern and its dependencies")
@@ -1867,7 +1874,7 @@ def cli() -> None:
         sys.exit(_cmd_check_updates())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
-        sys.exit(run_setup())
+        sys.exit(run_setup(assume_yes=getattr(args, "assume_yes", False)))
     elif args.command == "uninstall":
         from server.lifecycle.setup import run_uninstall
         sys.exit(run_uninstall())

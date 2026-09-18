@@ -1016,6 +1016,86 @@ class TestPromptYn:
             mock_stdin.isatty.return_value = False
             assert _prompt_yn("Install it?", default=True) is False
 
+class TestAssumeYes:
+    """`-y`, the way `apt-get -y` means it: answer with the default rather
+    than decline. It exists because an unattended install declined the venv
+    and stopped with a tree it could not run."""
+
+    @pytest.fixture(autouse=True)
+    def _restore(self):
+        import server.lifecycle.setup as setup_mod
+        before = setup_mod._ASSUME_YES
+        yield
+        setup_mod._ASSUME_YES = before
+
+    def test_it_takes_the_default_without_a_terminal(self, capsys, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        # No terminal at all: the case -y is for.
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert setup_mod._prompt_yn("Install it?", default=True) is True
+            assert setup_mod._prompt_yn("Wipe it?", default=False) is False
+
+        out = capsys.readouterr().out
+        assert "Install it?" in out and "(-y)" in out, (
+            "an answer given on the user's behalf must still be shown"
+        )
+
+    def test_it_does_not_answer_a_deliberate_prompt(self, capsys, monkeypatch):
+        """Installing a MITM certificate authority outlives the session that
+        wanted it, and the user has to know it happened to undo it. No flag
+        answers that one -- which is also why the flag cannot simply be "yes
+        to anything that does not need sudo": this needs none."""
+        from server.lifecycle import setup as setup_mod
+
+        setup_mod._UNASKED.clear()
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert setup_mod._prompt_yn("Install the CA?", default=True,
+                                        deliberate=True) is False
+
+        assert setup_mod._UNASKED == ["Install the CA?"], (
+            "it must still be reported as unasked, not silently skipped"
+        )
+
+    def test_the_ca_prompt_is_marked_deliberate(self):
+        """The marking is the guard, so a test asserts the marking exists at
+        the call site rather than trusting the flag's own unit test."""
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        src = inspect.getsource(setup_mod)
+        idx = src.index("Install mitmproxy CA cert into booted simulators?")
+        assert "deliberate=True" in src[idx:idx + 200], (
+            "the CA prompt must never be answered by -y"
+        )
+
+    def test_run_setup_sets_and_clears_nothing_behind_it(self, monkeypatch):
+        """The flag is module state, so it must be written by run_setup rather
+        than left from whatever ran last."""
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        monkeypatch.setattr(setup_mod, "_can_prompt", lambda: False)
+        monkeypatch.setattr(setup_mod, "check_homebrew", lambda: CheckResult(
+            name="Homebrew", status=CheckStatus.MISSING, message="not found"))
+        setup_mod.run_setup()
+        assert setup_mod._ASSUME_YES is False, (
+            "a run without -y must not inherit a previous run's yes"
+        )
+
+
+class TestPromptYnMore:
     def test_tty_stdin(self):
         """Normal TTY stdin reads via input()."""
         from server.lifecycle.setup import _prompt_yn
@@ -2163,41 +2243,55 @@ def _stub_the_checks_before_the_venv(monkeypatch):
     )
 
 
-class TestDecliningTheVenvStopsThere:
-    """Answering "no" to the venv prompt used to fall through to the block
-    commented "we're inside the venv", which reports the check OK.
+class TestTheVenvIsNotAQuestion:
+    """A venv inside the install directory *is* the install, the way
+    node_modules is `npm install`, so setup creates one rather than asking.
 
-    It is not inside a venv, so the run continued until the first third-party
-    import and died with `ModuleNotFoundError: No module named 'httpx'` --
-    several hundred lines from the decision that caused it, naming a dependency
-    the user never mentioned. A deliberate "no" is not an error to be reported
-    as a missing module.
+    It used to ask, and with no terminal `_prompt_yn` declines rather than
+    hanging -- so an unattended install (the `curl | bash` one-liner in a
+    provisioning script, or the menu bar's update) stopped with a tree it
+    could not run. There was never a second answer either: every check past
+    this point needs the venv.
 
-    This is also where an *unaskable* prompt lands: with no terminal
-    `_prompt_yn` declines rather than hanging, so a GUI or piped setup arrives
-    here without anyone having said anything.
+    What must survive from the old behaviour is the *stop*. Falling through
+    reaches a block commented "we're inside the venv" that reports the check
+    OK, and the run then died at the first third-party import with
+    `ModuleNotFoundError: No module named 'httpx'` -- several hundred lines
+    from the cause, naming a dependency the user never mentioned.
     """
 
-    def _decline(self, monkeypatch, tmp_path):
+    def _no_venv(self, monkeypatch, tmp_path):
         from server.lifecycle import setup
 
         _stub_the_checks_before_the_venv(monkeypatch)
         (tmp_path / "pyproject.toml").write_text("")
         monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
-        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: False)
         # Not in a venv.
         monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
         monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
         return setup
 
-    def test_it_exits_nonzero_instead_of_continuing(
-        self, monkeypatch, tmp_path, capsys
-    ):
-        setup = self._decline(monkeypatch, tmp_path)
-        created = []
-        monkeypatch.setattr(
-            setup, "create_venv", lambda *a, **k: created.append(True) or True,
+    def test_it_is_created_without_being_asked_about(self, monkeypatch, tmp_path):
+        """The regression guard for the change itself: no prompt, and a venv."""
+        setup = self._no_venv(monkeypatch, tmp_path)
+        asked, created = [], []
+        monkeypatch.setattr(setup, "_prompt_yn",
+                            lambda q, *a, **k: asked.append(q) or False)
+        monkeypatch.setattr(setup, "create_venv",
+                            lambda *a, **k: created.append(True) or True)
+        monkeypatch.setattr(setup, "_reexec_in_venv", lambda *a, **k: 0)
+
+        setup.run_setup()
+
+        assert created == [True], "no venv was created"
+        assert not any("virtual environment" in q.lower() for q in asked), (
+            "setup asked whether to create the venv, which an unattended run "
+            "answers no to, leaving a tree it cannot run"
         )
+
+    def test_a_failure_to_create_one_stops_there(self, monkeypatch, tmp_path, capsys):
+        setup = self._no_venv(monkeypatch, tmp_path)
+        monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
 
         # The load-bearing assertion. `run_setup` returns 1 for plenty of
         # reasons in a sandbox, so an exit code alone does not show it stopped
@@ -2206,54 +2300,48 @@ class TestDecliningTheVenvStopsThere:
         # ends in 1. Pinning the first check past the venv block is what
         # distinguishes "stopped" from "carried on and failed anyway".
         reached = []
-        monkeypatch.setattr(
-            setup, "check_mitmdump", lambda *a, **k: reached.append(True),
-        )
+        monkeypatch.setattr(setup, "check_mitmdump",
+                            lambda *a, **k: reached.append(True))
 
         rc = setup.run_setup()
 
         assert reached == [], (
-            "setup carried on past the venv it was told not to create, which "
-            "is how this surfaced as ModuleNotFoundError several hundred lines "
+            "setup carried on without the venv it failed to create, which is "
+            "how this surfaced as ModuleNotFoundError several hundred lines "
             "later"
         )
-        assert rc == 1, "declining was reported as success"
-        assert created == [], "it created a venv after being told not to"
+        assert rc == 1, "a failed venv was reported as success"
         out = capsys.readouterr().out
-        assert "Declined" in out, "the summary does not say why it stopped"
+        assert "Failed to create virtual environment" in out, (
+            "the summary does not say why it stopped"
+        )
         assert "httpx" not in out, (
             "the failure surfaced as a missing dependency rather than the "
-            "decision that caused it"
+            "step that caused it"
         )
 
-    def test_an_unasked_prompt_still_gets_the_no_terminal_report(
+    def test_a_failure_still_reports_what_was_never_asked(
         self, monkeypatch, tmp_path, capsys
     ):
-        """Without a terminal every prompt declines rather than hanging, so a
-        menu-bar or `curl | bash` setup on a machine with no venv lands on this
-        exit *every time* -- and the early return skipped the block that names
-        what was never asked and says to run setup in a terminal. Being told you
-        "declined" a question nobody put to you is the worse half of that."""
-        from server.lifecycle import setup
+        """The early return skips the block that names unanswered questions and
+        says to run setup in a terminal. Other prompts run before this one, so
+        a machine with no terminal still needs that report."""
+        setup_mod = self._no_venv(monkeypatch, tmp_path)
 
-        setup_mod = self._decline(monkeypatch, tmp_path)
-        monkeypatch.setattr(setup_mod, "create_venv", lambda *a, **k: True)
-
-        # Record the question the way the real no-terminal path does, rather
-        # than pre-seeding the list: `run_setup` clears `_UNASKED` on entry, so
-        # anything seeded beforehand is gone by the time the branch runs.
-        def declines_and_records(question, *a, **k):
-            setup._UNASKED.append(question.strip())
+        # Stands in for an earlier prompt that went unanswered, recorded at the
+        # point the real no-terminal path would have recorded it. It cannot be
+        # pre-seeded -- `run_setup` clears `_UNASKED` on entry -- and it cannot
+        # be the venv question any more, which is the point of this change.
+        def fails_after_something_went_unasked(*a, **k):
+            setup_mod._UNASKED.append("Node.js not found. Install via Homebrew?")
             return False
 
-        monkeypatch.setattr(setup_mod, "_prompt_yn", declines_and_records)
+        monkeypatch.setattr(setup_mod, "create_venv",
+                            fails_after_something_went_unasked)
 
         setup_mod.run_setup()
 
         out = capsys.readouterr().out
-        assert "No virtual environment found. Create one?" in out, (
-            "the block naming what was never asked was skipped by the early exit"
-        )
         assert "declined without asking" in out
         assert "quern setup" in out, "it does not say how to answer the question"
 
