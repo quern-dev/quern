@@ -334,6 +334,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // indented Screen Mirror and Documentation with it. Given the icon
         // cannot be removed, it gets its own section instead of a fight.
         menu.addItem(.separator())
+        // The app's own version, not the server's (#201). A git install's
+        // updates do not replace the app, so this is how drift gets noticed.
+        menu.addItem(info(AppVersion.menuLine(AppVersion.current)))
         menu.addItem(action("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
 

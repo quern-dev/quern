@@ -1,9 +1,13 @@
-# The Menu Bar App
+# The Quern App (Menu Bar)
 
 Quern runs as a background daemon, which means the honest answer to "is it
-running?" usually involves a terminal. The menu-bar app puts that answer in the
-corner of your screen instead, and gives you the handful of controls you would
-otherwise type.
+running?" usually involves a terminal. The Quern app puts that answer in your
+menu bar instead, and gives you the handful of controls you would otherwise
+type.
+
+It calls itself **Quern app** in its own Settings, to tell it apart from the
+**server** it reports on; those two carry separate versions, and on a git
+install they can differ.
 
 It is macOS only. Everything it does, the CLI already did.
 
@@ -23,23 +27,36 @@ A clone does not get the app, and this is deliberate: `quern setup` skips it
 on the assumption that anyone working from source would rather control their
 own build than have one installed over it.
 
-That left no instructions at all, which is worse. There are now:
+To install the signed app from the release your clone is based on:
 
 ```sh
-scripts/install-menubar-app.sh            # the signed app from the matching release
-scripts/install-menubar-app.sh --build    # build from macos/QuernMenuBar instead
+quern menubar install
 ```
 
-Both install to `~/Applications/Quern.app` and quit a running copy first, then
-launch it. The app starts the server itself, so that one command is the whole
+`quern update` doesn't replace the app on a clone either, so run the same
+command after updating when `quern menubar status` (or `quern doctor`, or
+`quern setup`) says the app is older than Quern. It leaves an app of the
+current version alone, so it won't overwrite your own build of the same
+version; add `--force` to reinstall anyway.
+
+If you're working on the app itself, build it from your checkout instead:
+
+```sh
+scripts/install-menubar-app.sh --build
+```
+
+Both install to `~/Applications/Quern.app` and launch the app. A copy running
+from *that* location is quit first so the new build actually starts; a Quern
+running from somewhere else is left alone and reported, since quitting it is
+not this command's business. The app starts the server itself, so that one command is the whole
 setup — from there you can drive Quern from the menu bar and leave the CLI
 alone.
 
-One prerequisite, and the script checks it for you: `quern setup` must have run
+One prerequisite, which both check for you: `quern setup` must have run
 at least once, because that is what writes `~/.local/bin/quern`. The app drives
 the daemon through that wrapper. A GUI app does not inherit your shell's PATH,
 so a `quern` that works in your terminal is not enough — it looks for that
-exact file. If it is missing the script says so and tells you what to run.
+exact file. If it is missing, they say so and tell you what to run.
 
 Take the default unless you are working on the app itself. A local build is
 unsigned, so its code-signing identity changes every time you rebuild, macOS
@@ -55,11 +72,16 @@ It is installed to `~/Applications/Quern.app`, so Spotlight and Launchpad both
 find it. If you quit it and want it back:
 
 ```sh
-open ~/Applications/Quern.app
+quern menubar open
 ```
 
-`quern setup` also starts it, and will quit a running copy first so an update
-actually takes effect.
+`quern menubar status` shows which version is installed and whether it's
+running. The menu shows the app's own version above **Settings…**, and Settings
+shows it in its own **Quern app** section. The **Version** under **Server** is
+the server's, which can differ on a git install.
+
+`quern setup` starts the app if it isn't running. It only quits and restarts a
+running copy when it's installing a new version.
 
 ## What the menu shows
 
@@ -141,7 +163,7 @@ There are also two launch toggles, and a read-only view of the server's
 address, version and uptime, plus the full UDID of the active device — which
 the menu deliberately leaves out to keep itself narrow.
 
-*Launch at login* starts the menu bar app when you log in. *Start the server
+*Launch at login* starts the Quern app when you log in. *Start the server
 when Quern launches* is on by default: opening the Quern app and being told the
 server is stopped, with a button to press, is a step that did not need to
 exist. If the server is already running the app leaves it alone.
@@ -152,7 +174,7 @@ watches for crash reports. It does not begin capturing device or system logs,
 and it does not touch the proxy or install any certificate — those stay behind
 their own prompts.
 
-Quitting the menu bar app does not stop the server. Hold ⌥ over Quit when you
+Quitting the Quern app does not stop the server. Hold ⌥ over Quit when you
 want both.
 
 ## Updating
@@ -166,25 +188,25 @@ wrapper already built, so updating needs nothing from your shell.
 
 **Git install** (a clone you ran `./quern setup` in): the item is **Update in
 Terminal…**, which opens a Terminal window running `quern update`. A git
-update rebuilds the MCP wrapper with npm, and the menu-bar app can't do that
+update rebuilds the MCP wrapper with npm, and the Quern app can't do that
 reliably:
 
 - Apps started from the Dock or at login don't read your shell's startup files,
   so a Node installed with fnm, nvm, Volta, asdf or mise isn't there for them.
   `quern doctor` shows which `node` each place finds.
-- `git pull` may need to ask for credentials, and a menu-bar app has nowhere to
+- `git pull` may need to ask for credentials, and an app in the menu bar has nowhere to
   show that prompt.
 
 Terminal has your environment, so the update runs there.
 
-A git install also doesn't receive new versions of the menu-bar app from
-`quern update`. To install the current one, run
-`scripts/install-menubar-app.sh` in the clone.
+A git install also doesn't receive new versions of the Quern app from
+`quern update`. To install the current one, run `quern menubar install`. Setup
+and `quern doctor` say when the app is behind.
 
 ### Switching from a git install to a release install
 
 If you don't work on Quern itself, a release install is simpler: updates run
-from the menu, and the menu-bar app is updated along with everything else.
+from the menu, and the Quern app is updated along with everything else.
 
 ```bash
 quern stop
@@ -193,7 +215,7 @@ curl -fsSL https://quern.dev/install.sh | bash
 
 The installer puts Quern in `~/.local/share/quern` and runs setup from there.
 Setup re-points the `quern` command at the new install, re-registers your MCP
-clients, and installs the matching menu-bar app. Open a new terminal (or run
+clients, and installs the matching Quern app. Open a new terminal (or run
 `rehash`) so your shell picks up the change, then check that Settings now says
 **Release**.
 
