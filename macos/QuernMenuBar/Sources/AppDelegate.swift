@@ -261,14 +261,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let status = updateStatusText {
             menu.addItem(info(status))
         }
+        // Outside the `!s.running` section on purpose: an update can stop
+        // partway with the server still up, and the way out must not be drawn
+        // only when the daemon happens to be down.
+        if let recovery = lifecycle.updateRecovery {
+            menu.addItem(recoveryItem(recovery))
+        }
         if !s.running, let status = lifecycle.statusText {
             menu.addItem(info(status))
             if let recovery = lifecycle.recovery {
-                // Captured as the menu is built. Reading it again on click
-                // meant the three-second state poll could clear it while the
-                // menu was open, and the click then did nothing at all.
-                offeredRecovery = recovery
-                menu.addItem(action(recovery.menuTitle, #selector(recoverInTerminal)))
+                menu.addItem(recoveryItem(recovery))
             }
             if lifecycle.hasFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
@@ -482,6 +484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func restartToUpdate() {
+        lifecycle.clearUpdateRecovery()
         updater.restartToUpdate(
             status: { [weak self] progress in
                 self?.updateStatusText = progress.text
@@ -502,6 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func updateInTerminal() {
+        lifecycle.clearUpdateRecovery()
         TerminalUpdate.open { [weak self] error in
             guard let error else { return }
             self?.reportFailure("Could not open Terminal to update",
@@ -509,11 +513,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// The recovery the visible menu is offering. See `menuNeedsUpdate`.
-    private var offeredRecovery: Recovery?
+    /// Both failures can be on the menu at once, so the recovery rides on the
+    /// item rather than in one shared property. It is captured as the menu is
+    /// built: reading the controller again on click meant the three-second
+    /// state poll could clear it while the menu was open, and the click then
+    /// did nothing at all.
+    private func recoveryItem(_ recovery: Recovery) -> NSMenuItem {
+        let item = action(recovery.menuTitle, #selector(recoverInTerminal))
+        item.representedObject = recovery
+        return item
+    }
 
-    @objc private func recoverInTerminal() {
-        guard let recovery = offeredRecovery ?? lifecycle.recovery else { return }
+    @objc private func recoverInTerminal(_ sender: NSMenuItem) {
+        guard let recovery = sender.representedObject as? Recovery else { return }
         openRecovery(recovery)
     }
 

@@ -200,9 +200,41 @@ enum LifecycleControllerTests {
             // offer the way out. Clicking OK used to take it with it.
             let rig = Rig(result: (0, ""))
             rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
-            Harness.expect(rig.controller.recovery, .finishUpdate, "recorded")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "recorded")
             Harness.expect(rig.controller.statusText, "Update failed", "status")
             Harness.expect(rig.changes >= 1, "the menu must repaint")
+        }
+
+        Harness.test("a running server does not erase an update's way out") {
+            // An update can stop partway with the server still up, and the
+            // next poll then says "running" -- which cleared the only route
+            // back. The two failures are tracked apart for this.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerRunning()
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
+            Harness.expect(rig.controller.recovery, nil, "and not the start one")
+        }
+
+        Harness.test("a start failure and an update failure do not overwrite each other") {
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "the start's")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "the update's")
+        }
+
+        Harness.test("trying the update again drops the stale way out") {
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.changes = 0
+            rig.controller.clearUpdateRecovery()
+            Harness.expect(rig.controller.updateRecovery, nil, "cleared")
+            Harness.expect(rig.changes >= 1, "the menu must repaint")
+            rig.changes = 0
+            rig.controller.clearUpdateRecovery()
+            Harness.expect(rig.changes, 0, "and clearing nothing repaints nothing")
         }
 
         Harness.test("a caller can say which recovery a failed start deserves") {

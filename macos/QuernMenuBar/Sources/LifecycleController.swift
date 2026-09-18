@@ -71,9 +71,16 @@ final class LifecycleController {
     /// end this file exists to remove.
     private(set) var hasFailed = false
     private(set) var statusText: String?
-    /// What to offer when the last action failed in a way the user can act on
+    /// What to offer when the last *start* failed in a way the user can act on
     /// from Terminal (#225). Cleared with the failure it describes.
     private(set) var recovery: Recovery?
+
+    /// The same, for an update that stopped partway -- kept apart because it
+    /// outlives the condition `recovery` is tied to. An update can fail with
+    /// the server still running happily, and then the menu's start-failure
+    /// section is not drawn at all and `noteServerRunning()` would clear it.
+    /// The way out has to survive both.
+    private(set) var updateRecovery: Recovery?
 
     /// Called whenever any of the three above change, so the icon can repaint.
     var onChange: (() -> Void)?
@@ -91,7 +98,14 @@ final class LifecycleController {
     /// nil and the menu had nothing, in the case this feature exists for.
     func noteFailure(status: String, recovery: Recovery) {
         statusText = status
-        self.recovery = recovery
+        updateRecovery = recovery
+        changed()
+    }
+
+    /// The user is trying again, so the last update's way out is stale.
+    func clearUpdateRecovery() {
+        guard updateRecovery != nil else { return }
+        updateRecovery = nil
         changed()
     }
 
