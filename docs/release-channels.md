@@ -238,6 +238,31 @@ NOTARY_PROFILE="your-notarytool-profile" \
 That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
 `--publish` command to run at step 6.
 
+**Step 0b, also before any of the above.** Rehearse the update:
+
+```sh
+scripts/release-rehearsal.sh            # candidate HEAD, from the published release
+```
+
+Nothing gets tagged unless this passes. `release-verify.sh` checks a release
+after it is published; this checks the thing that actually breaks, which is
+updating *into* it -- and it does so with the **previous release's** updater,
+because that is the code every user runs. #212 could not have been caught any
+other way: 0.18.3 was fine to install and crashed every update into it.
+
+It runs in a sandbox with its own `HOME` and `QUERN_STATE_DIR` and stubs for
+`osascript`, `open`, `sudo`, `launchctl`, `pkill` and `killall`, so it writes
+nothing outside a temporary directory. It takes a couple of minutes, mostly
+building a venv and the MCP wrapper.
+
+It defaults to the newest *published* release rather than the newest tag: a
+release pulled back to a draft leaves its tag behind -- 0.18.3 did -- and no
+user is on it. Pass a second argument to rehearse from somewhere else.
+
+Proof that it works: `scripts/release-rehearsal.sh v0.18.3 v0.18.2` still
+reproduces #212, `ImportError: cannot import name 'quern_cmd'`, and fails four
+checks.
+
 Doing it first is the point of the split. Notarization is the slow step, the
 one that depends on Apple's service being reachable, and the one that would
 otherwise abort a release *after* the tag and Release existed — leaving
