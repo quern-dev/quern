@@ -185,6 +185,29 @@ DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
   scripts/release-menubar.sh --publish vN.M.K
 ```
 
+```sh
+# 7. Check the published release from the outside.
+scripts/release-verify.sh vN.M.K
+```
+
+That last step is not optional and takes under ten seconds. It asserts what a
+user meets: the API's latest release, what *quern's own updater* offers on both
+channels, that `release/stable` and `release/beta` are at the tag and `main`
+contains it, that the tarball carries the right version with `mcp/dist`, its
+`node_modules` and a signed, notarized app, and that quern.dev offers the
+release to an old install. Every one of those is a failure this project has
+shipped: a channel branch left behind (0.14.0), a downgrade offer (0.18.1), a
+wrapper with no dependencies, and an update that crashed for everyone (#212).
+
+It prints `–` for a check it could not make, and counts them in the summary, so
+a run with skips never reads like a clean one. The resolver checks are the ones
+that skip: they run the *released* updater, and a release from before 0.18.5
+has no `QUERN_RELEASES_URL` support and no trust check, so against a candidate
+served locally its resolver asks GitHub instead. That was found by rehearsing
+against 0.18.4, where it reported two passes it had not earned -- the local
+server was never asked -- and it matters because a rehearsal of an
+already-published tag is exactly when the wrong answer matches.
+
 **The tarball is no longer a pure `git archive`.** `--publish` now runs
 `npm ci && npm run build` inside the staged tree and ships `mcp/dist`, dropping
 `node_modules` again before tarring.
@@ -214,6 +237,53 @@ NOTARY_PROFILE="your-notarytool-profile" \
 
 That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
 `--publish` command to run at step 6.
+
+**Step 0b, also before any of the above.** Rehearse the update:
+
+```sh
+scripts/release-rehearsal.sh            # candidate HEAD, from the published release
+```
+
+Nothing gets tagged unless this passes. `release-verify.sh` checks a release
+after it is published; this checks the thing that actually breaks, which is
+updating *into* it -- and it does so with the **previous release's** updater,
+because that is the code every user runs. #212 could not have been caught any
+other way: 0.18.3 was fine to install and crashed every update into it.
+
+It runs in a sandbox with its own `HOME` and `QUERN_STATE_DIR` and stubs for
+`osascript`, `open`, `sudo`, `launchctl`, `pkill` and `killall`, so it writes
+nothing outside a temporary directory. It takes a few minutes, mostly building
+venvs and the MCP wrapper. It does start a server, which takes the first free
+port from 9100 as usual.
+
+The cases, each against the tree the update produced:
+
+- **A git update** from the published release, run by *that* release's updater.
+- **A GUI-style start** (#193), with `env -i` and launchd's four-entry PATH,
+  asserting `/health` answers rather than that a process appeared.
+- **The MCP wrapper**, asked to `initialize` — what every agent client runs.
+- **The Node arrangements** (#214), built to order in throwaway homes: a
+  version manager in `.zshrc` (login shells only), the same in `.zshenv`, a
+  Node three majors too old, no node at all, and a shell quern cannot drive.
+  The doctor rows are the product, so the rows are what is asserted.
+- **A fresh install** through the site repo's `install.sh` against a candidate
+  served locally, then the wrapper run from another directory. Skipped when
+  `quern.dev` is not checked out beside this repo, which is the case in CI.
+- **A tarball update**, declared and skipped until the previous release
+  honours `QUERN_RELEASES_URL`.
+
+Unattended, `install.sh` cannot ask whether to create a venv, so it declines,
+exits non-zero and names the step. The rehearsal asserts that rather than
+treating it as a pass, then finishes the install the way the message says to.
+
+It defaults to the newest *published* release rather than the newest tag: a
+release pulled back to a draft leaves its tag behind -- 0.18.3 did -- and no
+user is on it. Pass a second argument to rehearse from somewhere else.
+
+Proof that it works: `scripts/release-rehearsal.sh v0.18.3 v0.18.2` still
+reproduces #212 — `ImportError: cannot import name 'quern_cmd'` — and exits
+non-zero. Deliberately no count: a number here is a regression detector that
+goes stale the first time a case is added, and then never fires again.
 
 Doing it first is the point of the split. Notarization is the slow step, the
 one that depends on Apple's service being reachable, and the one that would
