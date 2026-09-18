@@ -701,9 +701,13 @@ def build_preview_app() -> CheckResult:
             detail="Install with: xcode-select --install",
             fixable=True,
         )
+        # `-y` must not answer this: it opens a macOS dialog that somebody has
+        # to click, and an unattended run has nobody. Saying yes there leaves
+        # a window open on a machine no one is looking at.
         if _prompt_yn(
             "    Xcode Command Line Tools not found (needed for the screen-mirror "
             "app). Open the installer?",
+            deliberate=True,
         ):
             # `xcode-select --install` hands off to a macOS dialog and returns
             # immediately, so there is nothing to wait on and no exit code
@@ -2186,7 +2190,10 @@ def configure_crash_reporter_dialog() -> CheckResult:
         )
 
     desc = f"Currently: '{current}'" if current else "Currently: default (shows dialog)"
-    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})"):
+    # A persistent, user-wide macOS setting that `quern uninstall` does not
+    # revert, so it outlives quern itself. Same test as the CA.
+    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})",
+                  deliberate=True):
         rc, _, stderr = _run([
             "defaults", "write", "com.apple.CrashReporter", "DialogType", "none",
         ])
@@ -2360,7 +2367,13 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
 # ── Main setup flow ──────────────────────────────────────────────────────
 
 def _reexec_in_venv(venv_path: Path) -> int:
-    """Re-execute setup inside the venv so all checks run in the right environment."""
+    """Re-execute setup inside the venv so all checks run in the right environment.
+
+    `-y` has to be carried across. Almost every prompt lives *after* this
+    point, so a child started without it answers nothing on the run that most
+    needs it: a fresh install has no venv, which is exactly when the re-exec
+    happens, and `-y` reached one prompt out of a dozen.
+    """
     venv_python = venv_path / "bin" / "python"
     if not venv_python.exists():
         return -1
@@ -2379,8 +2392,11 @@ def _reexec_in_venv(venv_path: Path) -> int:
             stdin_arg = os.open("/dev/tty", os.O_RDONLY)
         except OSError:
             pass
+    argv = [str(venv_python), "-m", "server.main", "setup"]
+    if _ASSUME_YES:
+        argv.append("--yes")
     result = subprocess.run(
-        [str(venv_python), "-m", "server.main", "setup"],
+        argv,
         cwd=str(venv_path.parent),
         stdin=stdin_arg,
         env=env,
@@ -2404,7 +2420,17 @@ def _print_unasked() -> None:
     # Named, not counted. "3 questions were skipped" tells the reader they
     # missed something without telling them what, which is the same dead
     # end as saying nothing.
-    print("  Setup had no terminal, so these were declined without asking:")
+    #
+    # And named for the right reason. Under `-y` these are not questions
+    # nobody could ask -- there may well be a terminal -- they are the ones
+    # the flag deliberately does not answer. Saying "no terminal" there is the
+    # same defect this function exists to fix, reintroduced by a new route,
+    # and the remedy differs too: rerunning `quern setup -y` prints this
+    # again forever, because `-y` is what declined them.
+    if _ASSUME_YES:
+        print("  These need a decision of their own, so -y left them alone:")
+    else:
+        print("  Setup had no terminal, so these were declined without asking:")
     for question in _UNASKED:
         print(f"    • {question}")
     print()
@@ -2435,7 +2461,12 @@ def run_setup(assume_yes: bool = False) -> int:
     print()
 
     _UNASKED.clear()
-    if not _can_prompt():
+    if _ASSUME_YES:
+        print("  Running with -y, so each question is answered with its default.")
+        print("  A few need a decision of their own; those are left alone and")
+        print("  listed at the end.")
+        print()
+    elif not _can_prompt():
         print("  No terminal attached, so nothing can be asked. Setup will do")
         print("  what it can and decline the rest rather than answer for you.")
         if invoked_by() == MENUBAR:
@@ -2773,7 +2804,11 @@ def run_setup(assume_yes: bool = False) -> int:
                     )
                 else:
                     prompt = "    pymobiledevice3 not found. Install via pipx?"
-                if _prompt_yn(prompt):
+                # Only the system-wide install is out of reach of `-y`: it
+                # writes outside $HOME under sudo, and the password prompt is
+                # not something a flag can answer. The plain pipx install is
+                # ordinary setup work.
+                if _prompt_yn(prompt, deliberate=wants_global or misplaced):
                     if wants_global:
                         # Inherit stdin so sudo can prompt for the password.
                         cmd = ["sudo", pipx_bin, "install", "--global",
@@ -2842,7 +2877,12 @@ def run_setup(assume_yes: bool = False) -> int:
                         "    tunneld not installed. Install LaunchDaemon "
                         "now (requires sudo)?"
                     )
-                if _prompt_yn(prompt):
+                # Both branches install a LaunchDaemon that runs as root at
+                # boot and survives reboots, via sudo. Larger than the CA
+                # prompt on CONTRIBUTING's own test, not smaller -- and `-y`
+                # could not answer the password prompt that follows anyway,
+                # so saying yes on the user's behalf buys a hang.
+                if _prompt_yn(prompt, deliberate=True):
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)

@@ -1844,6 +1844,13 @@ def cli() -> None:
         start_parser.parse_args(remaining, namespace=args)
         args.command = "start"
         args.foreground = True
+    elif remaining:
+        # A subcommand matched, so whatever is left is a typo. Dropping it
+        # silently meant `quern setup --yse` ran a full setup with the flag
+        # discarded, which is worse than refusing: the caller believes they
+        # opted in. `parse_known_args` is needed only for the no-subcommand
+        # case above, where server flags live on `start_parser`.
+        parser.error("unrecognised arguments: " + " ".join(remaining))
 
     # Fill port defaults
     if hasattr(args, "port"):

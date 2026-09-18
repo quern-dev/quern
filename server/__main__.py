@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from server.lifecycle.stale_modules import refresh_if_stale
@@ -719,6 +720,39 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _check_args(
+    command: str,
+    rest: list[str],
+    *,
+    allowed: tuple[str, ...] = (),
+    usage: Callable[[], None] | None = None,
+) -> list[str]:
+    """Answer `-h`, refuse anything else unrecognised, return the operands.
+
+    These commands are dispatched before argparse (see the comment at the top
+    of `main`), and each one used to drop `sys.argv[2:]` wholesale. So
+    `quern mcp-install --help` rewrote every MCP client config, `quern update
+    --help` ran a real update, and a mistyped flag did whatever the command
+    does with no flag at all -- silently, while the caller believed they had
+    asked for something else. `capture-env` was fixed for this first; doing it
+    once here is what stops the next command being added without it.
+    """
+    def default_usage() -> None:
+        flags = "".join(f" [{flag}]" for flag in allowed)
+        print(f"Usage: quern {command}{flags}")
+
+    show = usage or default_usage
+    if any(arg in ("-h", "--help") for arg in rest):
+        show()
+        sys.exit(0)
+    unknown = [arg for arg in rest if arg.startswith("-") and arg not in allowed]
+    if unknown:
+        show()
+        print(f"unrecognised option: {unknown[0]}", file=sys.stderr)
+        sys.exit(2)
+    return [arg for arg in rest if not arg.startswith("-")]
+
+
 def _setup_usage() -> None:
     print("Usage: quern setup [-y|--yes]")
     print()
@@ -788,28 +822,21 @@ def main() -> None:
         # in. This is dispatched before argparse (see the comment at the top of
         # `main`), so the parsing has to be here.
         rest = sys.argv[2:]
-        if any(a in ("-h", "--help") for a in rest):
-            _setup_usage()
-            sys.exit(0)
-        assume_yes = False
-        for arg in rest:
-            if arg in ("-y", "--yes"):
-                assume_yes = True
-            else:
-                _setup_usage()
-                print(f"unrecognised option: {arg}", file=sys.stderr)
-                sys.exit(2)
+        _check_args("setup", rest, allowed=("-y", "--yes"), usage=_setup_usage)
         from server.lifecycle.setup import run_setup
-        sys.exit(run_setup(assume_yes=assume_yes))
+        sys.exit(run_setup(assume_yes=bool({"-y", "--yes"} & set(rest))))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
+        _check_args("uninstall", sys.argv[2:])
         from server.lifecycle.setup import run_uninstall
         sys.exit(run_uninstall())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
+        _check_args("mcp-install", sys.argv[2:])
         sys.exit(_cmd_mcp_install())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
+        _check_args("grant-full-perms", sys.argv[2:])
         sys.exit(_cmd_grant_full_perms())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "menubar":
@@ -820,10 +847,12 @@ def main() -> None:
         sys.exit(menubar_main(rest, force=force))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "install-precommit-hook":
+        _check_args("install-precommit-hook", sys.argv[2:])
         sys.exit(_cmd_install_precommit_hook())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import FINISH_FLAG, finish_update, run_update
+        _check_args("update", sys.argv[2:], allowed=("--tools", FINISH_FLAG))
         apply_tools = "--tools" in sys.argv[2:]
         if FINISH_FLAG in sys.argv[2:]:
             sys.exit(finish_update(apply_tools=apply_tools))

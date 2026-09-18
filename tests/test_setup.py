@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1067,17 +1068,58 @@ class TestAssumeYes:
             "it must still be reported as unasked, not silently skipped"
         )
 
-    def test_the_ca_prompt_is_marked_deliberate(self):
-        """The marking is the guard, so a test asserts the marking exists at
-        the call site rather than trusting the flag's own unit test."""
+    # Each entry is a token unique to the action a prompt leads to. The test
+    # walks back from it to the `_prompt_yn(` that guards it, so it pins the
+    # marking at the call site rather than trusting the flag's unit test --
+    # which passes happily while a prompt goes unmarked.
+    DELIBERATE_SITES = [
+        # A MITM root CA, in a trust store, outliving the capture window.
+        ("the capture CA", "Install mitmproxy CA cert into booted simulators?"),
+        # A LaunchDaemon running as root at boot, installed with sudo. Larger
+        # than the CA on CONTRIBUTING's own test, not smaller -- and `-y`
+        # cannot answer the password prompt that follows, so saying yes on the
+        # user's behalf buys a hang.
+        ("the tunneld daemon", "from server.device.tunneld import install_daemon"),
+        # sudo, writing outside $HOME.
+        ("a system-wide pipx install", 'pipx_bin, "install", "--global"'),
+        # A user-wide macOS setting that `quern uninstall` never reverts.
+        ("the crash dialog", '"DialogType", "none"'),
+        # Hands off to a macOS dialog somebody has to click, and an unattended
+        # run has nobody.
+        ("the Xcode CLT installer", "app). Open the installer?"),
+    ]
+
+    @pytest.mark.parametrize("name, anchor", DELIBERATE_SITES)
+    def test_the_privileged_prompts_are_marked_deliberate(self, name, anchor):
         import inspect
 
         from server.lifecycle import setup as setup_mod
 
         src = inspect.getsource(setup_mod)
-        idx = src.index("Install mitmproxy CA cert into booted simulators?")
-        assert "deliberate=True" in src[idx:idx + 200], (
-            "the CA prompt must never be answered by -y"
+        assert src.count(anchor) == 1, (
+            f"anchor for {name} is not unique ({src.count(anchor)} matches): "
+            f"{anchor!r} — an ambiguous one walks back to the wrong call, "
+            "and this test then passes against an unmarked prompt"
+        )
+        at = src.index(anchor)
+        opened = src.rfind("_prompt_yn(", 0, at + len(anchor))
+        assert opened != -1, f"{name}: no _prompt_yn guarding it"
+        # The whole call, by balancing parens: the marking can sit either side
+        # of the anchor -- after the prompt text, or before the action it
+        # guards -- and a fixed window catches one and misses the other.
+        depth, end = 0, len(src)
+        for i in range(opened + len("_prompt_yn"), len(src)):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        assert "deliberate" in src[opened:end], (
+            f"{name} is answered by -y, which either installs something "
+            "persistent and privileged without being asked, or waits forever "
+            "on a prompt no flag can answer"
         )
 
     def test_run_setup_sets_and_clears_nothing_behind_it(self, monkeypatch):
@@ -1093,6 +1135,113 @@ class TestAssumeYes:
         assert setup_mod._ASSUME_YES is False, (
             "a run without -y must not inherit a previous run's yes"
         )
+
+
+class TestTheFlagIsActuallyWired:
+    """The mutation that disconnected `-y` entirely -- `_ASSUME_YES =
+    assume_yes` becoming `= False` -- left the whole suite green, because
+    every other test here patches the module variable instead of going
+    through `run_setup`. A class named for a flag, passing with the flag
+    unplugged, is this repo's signature defect.
+    """
+
+    def test_run_setup_carries_the_flag_to_the_prompts(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup as setup_mod
+
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup_mod, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup_mod.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup_mod.sys, "base_prefix", "/usr/local", raising=False)
+
+        answers = []
+
+        def asks_then_fails(*a, **k):
+            # Asked from inside the run, with no terminal anywhere: without the
+            # flag this is False, with it the default.
+            with (
+                patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+                patch("builtins.open", side_effect=OSError("no tty")),
+            ):
+                mock_stdin.isatty.return_value = False
+                answers.append(setup_mod._prompt_yn("Install the thing?", default=True))
+                answers.append(setup_mod._prompt_yn("Wipe it?", default=False))
+            return False        # stop the run here
+
+        monkeypatch.setattr(setup_mod, "create_venv", asks_then_fails)
+        setup_mod.run_setup(assume_yes=True)
+
+        assert answers == [True, False], (
+            "the flag did not reach _prompt_yn — run_setup is not wiring it"
+        )
+
+    def test_without_the_flag_the_same_prompts_decline(self, monkeypatch, tmp_path):
+        """The other half: the test above passes if `_prompt_yn` simply
+        returns the default always."""
+        from server.lifecycle import setup as setup_mod
+
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup_mod, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup_mod.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup_mod.sys, "base_prefix", "/usr/local", raising=False)
+
+        answers = []
+
+        def asks_then_fails(*a, **k):
+            with (
+                patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+                patch("builtins.open", side_effect=OSError("no tty")),
+            ):
+                mock_stdin.isatty.return_value = False
+                answers.append(setup_mod._prompt_yn("Install the thing?", default=True))
+            return False
+
+        monkeypatch.setattr(setup_mod, "create_venv", asks_then_fails)
+        setup_mod.run_setup()
+
+        assert answers == [False], "a run without -y answered a prompt anyway"
+
+    def test_the_flag_survives_the_venv_re_exec(self, monkeypatch, tmp_path):
+        """Almost every prompt is *after* the re-exec, and a fresh install --
+        the flag's whole reason for existing -- is precisely the run that has
+        no venv and therefore re-execs. A child started without `-y` answered
+        one prompt out of a dozen."""
+        from server.lifecycle import setup as setup_mod
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        setup_mod._reexec_in_venv(venv)
+
+        assert "--yes" in seen["argv"], (
+            f"-y was dropped at the re-exec: {seen['argv']}"
+        )
+
+    def test_a_run_without_the_flag_does_not_pass_it_on(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup as setup_mod
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+
+        seen = {}
+        monkeypatch.setattr(setup_mod.subprocess, "run",
+                            lambda argv, **k: seen.update(argv=argv)
+                            or SimpleNamespace(returncode=0))
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", False)
+        setup_mod._reexec_in_venv(venv)
+
+        assert "--yes" not in seen["argv"]
 
 
 class TestTheStandingCertAnswer:
@@ -2481,3 +2630,89 @@ class TestAFailedVenvRecreateStopsThere:
         assert "found but not activated" not in out, (
             "it described a deleted directory as present"
         )
+
+
+class TestTheEntryPointsParseTheirArguments:
+    """Both dispatchers dropped everything after the subcommand, so a
+    mistyped flag did the command's whole job with the flag discarded --
+    worse than refusing, because the caller believes they opted in.
+
+    None of this had a test: mutating the `-y` wiring out of *either* entry
+    point left the suite green.
+    """
+
+    def _run_main(self, monkeypatch, argv):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+        called = {}
+        monkeypatch.setattr(
+            "server.lifecycle.setup.run_setup",
+            lambda assume_yes=False: called.update(assume_yes=assume_yes) or 0,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        return exc.value.code, called
+
+    def test_the_flag_reaches_run_setup(self, monkeypatch):
+        for flag in ("-y", "--yes"):
+            code, called = self._run_main(monkeypatch, ["setup", flag])
+            assert code == 0
+            assert called == {"assume_yes": True}, flag
+
+    def test_plain_setup_does_not_assume_yes(self, monkeypatch):
+        code, called = self._run_main(monkeypatch, ["setup"])
+        assert called == {"assume_yes": False}
+
+    def test_help_prints_usage_instead_of_running_setup(self, monkeypatch, capsys):
+        """`quern setup --help` ran a full setup, which is how a review agent
+        rewrote its own Claude hook while probing this."""
+        code, called = self._run_main(monkeypatch, ["setup", "--help"])
+        assert code == 0
+        assert called == {}, "--help ran setup instead of printing usage"
+        assert "Usage: quern setup" in capsys.readouterr().out
+
+    def test_a_mistyped_flag_is_refused(self, monkeypatch, capsys):
+        code, called = self._run_main(monkeypatch, ["setup", "--yse"])
+        assert code == 2, "a typo ran setup with the flag silently discarded"
+        assert called == {}
+        assert "--yse" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "uninstall", "mcp-install", "grant-full-perms", "install-precommit-hook",
+        "update",
+    ])
+    def test_the_siblings_refuse_a_stray_flag(self, monkeypatch, command, capsys):
+        """`quern mcp-install --help` rewrote every MCP client config, and
+        `quern update --help` ran a real update."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "--badflag"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2, f"{command} accepted a flag it does not take"
+        assert "--badflag" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "uninstall", "mcp-install", "grant-full-perms", "install-precommit-hook",
+        "update",
+    ])
+    def test_the_siblings_answer_help(self, monkeypatch, command, capsys):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "--help"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert f"Usage: quern {command}" in capsys.readouterr().out
+
+    def test_argparse_does_not_swallow_a_stray_flag(self, monkeypatch, capsys):
+        """The other entry point. `parse_known_args` kept the leftovers only
+        for the no-subcommand case, and discarded them everywhere else."""
+        from server import main as main_mod
+
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", "setup", "--yse"])
+        with pytest.raises(SystemExit) as exc:
+            main_mod.cli()
+        assert exc.value.code == 2
+        assert "--yse" in capsys.readouterr().err
