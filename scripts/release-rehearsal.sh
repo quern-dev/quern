@@ -525,7 +525,7 @@ EOF
   until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
     waited=$((waited + 1))
     if (( waited > 20 )); then
-      kill "$srv_pid" 2>/dev/null || true
+      { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
       bad "fresh install: the local release server never came up on $port"
       return "$failures"
     fi
@@ -548,7 +548,9 @@ EOF
     bash "$install_sh" > "$sb/install.log" 2>&1
   local rc=$?
   set -e
-  kill "$srv_pid" 2>/dev/null || true
+  # `wait` inside the same redirect, or bash reports "Terminated" on its own
+  # line in the middle of the results.
+  { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
 
   if [[ $rc -eq 0 ]]; then
     ok "install.sh exits 0 against a locally served candidate"

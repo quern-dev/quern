@@ -252,8 +252,29 @@ other way: 0.18.3 was fine to install and crashed every update into it.
 
 It runs in a sandbox with its own `HOME` and `QUERN_STATE_DIR` and stubs for
 `osascript`, `open`, `sudo`, `launchctl`, `pkill` and `killall`, so it writes
-nothing outside a temporary directory. It takes a couple of minutes, mostly
-building a venv and the MCP wrapper.
+nothing outside a temporary directory. It takes a few minutes, mostly building
+venvs and the MCP wrapper. It does start a server, which takes the first free
+port from 9100 as usual.
+
+The cases, each against the tree the update produced:
+
+- **A git update** from the published release, run by *that* release's updater.
+- **A GUI-style start** (#193), with `env -i` and launchd's four-entry PATH,
+  asserting `/health` answers rather than that a process appeared.
+- **The MCP wrapper**, asked to `initialize` — what every agent client runs.
+- **The Node arrangements** (#214), built to order in throwaway homes: a
+  version manager in `.zshrc` (login shells only), the same in `.zshenv`, a
+  Node three majors too old, no node at all, and a shell quern cannot drive.
+  The doctor rows are the product, so the rows are what is asserted.
+- **A fresh install** through the site repo's `install.sh` against a candidate
+  served locally, then the wrapper run from another directory. Skipped when
+  `quern.dev` is not checked out beside this repo, which is the case in CI.
+- **A tarball update**, declared and skipped until the previous release
+  honours `QUERN_RELEASES_URL`.
+
+Unattended, `install.sh` cannot ask whether to create a venv, so it declines,
+exits non-zero and names the step. The rehearsal asserts that rather than
+treating it as a pass, then finishes the install the way the message says to.
 
 It defaults to the newest *published* release rather than the newest tag: a
 release pulled back to a draft leaves its tag behind -- 0.18.3 did -- and no
