@@ -45,7 +45,7 @@ If you would rather answer once:
 quern set-auto-install-cert on
 ```
 
-That setting also appears in the menu-bar app's Settings window, under Network capture, so it is visible and reversible from the same place. `quern set-auto-install-cert` with no argument prints the current setting.
+That setting also appears in the Quern app's Settings window, under Network capture, so it is visible and reversible from the same place. `quern set-auto-install-cert` with no argument prints the current setting.
 
 The cert persists across app installs and simulator reboots — it's only lost if you erase the simulator entirely. Quern asks the simulator itself every time rather than trusting what it recorded earlier, so an erase is noticed at once: erasing through Quern withdraws the trust claim as it happens, and an erase from anywhere else is caught by the next check. Either way you are asked again rather than left capturing traffic that cannot succeed.
 

@@ -1285,11 +1285,55 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
     node_complete = _report_node()
+    menubar_checked, menubar_repaired = _report_menubar(fix)
     services_complete = _report_service_health(fix)
 
     if fix:
-        sys.exit(1 if repaired is False else 0)
-    sys.exit(0 if tools is not None and services_complete and node_complete else 1)
+        # Only repairs. A *diagnostic* that could not be made must not veto a
+        # repair that worked -- that is what this contract exists for, and
+        # folding both halves of the menu-bar section into one bool broke it:
+        # an unreadable Info.plist would have failed `doctor --fix && quern
+        # start` after the venv repair succeeded.
+        sys.exit(0 if repaired is not False and menubar_repaired is not False else 1)
+    sys.exit(0 if tools is not None and services_complete and node_complete
+             and menubar_checked else 1)
+
+
+def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
+    """The Quern app's own version, next to the server's (#201).
+
+    Returns `(checked, repaired)`: whether the section could look, and -- when
+    `--fix` repaired something -- whether that worked. They answer different
+    questions and go to different exit codes.
+
+    `--fix` repairs an app that is *damaged or stale*; it does not install one
+    that was never there. Fetching a release, writing an app into
+    ~/Applications and launching it is a first install, and `doctor` is run
+    non-interactively and unattended. `describe()` already prints the command
+    for that case.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return True, None
+    from server.lifecycle import menubar
+
+    print()
+    print("Quern app:")
+    try:
+        state = menubar.state()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False, None
+    for line in menubar.describe(state):
+        print(f"  {line}")
+    if fix and state.installed and state.needs_install:
+        print("  --fix: reinstalling the Quern app")
+        # The result reaches the exit code: `doctor --fix` printing "failed
+        # verification" and exiting 0 is the shape this whole file argues
+        # against.
+        return True, menubar.cmd_install() == 0
+    return True, None
 
 
 def _report_node() -> bool:
@@ -1683,6 +1727,7 @@ def cli() -> None:
             "                                Show or set automatic capture-certificate install\n"
             "  set-update-check [on|off]     Show or set the automatic update check\n"
             "  install-precommit-hook        Install the pre-commit checklist hook\n"
+            "  menubar [status|open|install] Show, start, or install the Quern app (menu bar)\n"
             "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

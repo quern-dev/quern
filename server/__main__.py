@@ -782,6 +782,13 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
         sys.exit(_cmd_grant_full_perms())
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "menubar":
+        from server.lifecycle.menubar import main as menubar_main
+        # Read here, like --tools, so tests/test_readme_sync.py sees the flag.
+        force = "--force" in sys.argv[2:]
+        rest = [a for a in sys.argv[2:] if a != "--force"]
+        sys.exit(menubar_main(rest, force=force))
+
     if len(sys.argv) >= 2 and sys.argv[1] == "install-precommit-hook":
         sys.exit(_cmd_install_precommit_hook())
 

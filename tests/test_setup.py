@@ -1494,6 +1494,7 @@ class TestFetchMenubarApp:
         assert "network is down" in (result.detail or "")
         assert "releases/tag" in (result.detail or ""), "no manual route offered"
 
+    @pytest.mark.release_download
     def test_extraction_goes_through_macos_tar(self, tmp_path, monkeypatch):
         """Python's tarfile cannot extract this bundle correctly.
 
@@ -1602,17 +1603,72 @@ class TestFetchMenubarApp:
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")  # must not raise
 
-    def test_the_download_is_bounded(self, tmp_path, monkeypatch):
-        """urlretrieve takes no timeout and defaults to none, so a stalled
-        transfer held setup open with no deadline."""
-        import inspect
+    @staticmethod
+    def _endless(monkeypatch, setup_mod, chunk=b"x" * 1024, clock_step=0.0):
+        """A server that never stops sending, and a clock `clock_step` apart
+        per read. Returns the kwargs urlopen was called with."""
+        seen = {}
+        now = {"t": 0.0}
 
+        sent = {"chunks": 0}
+
+        class Resp:
+            def read(self, _n):
+                now["t"] += clock_step
+                sent["chunks"] += 1
+                if sent["chunks"] > 4096:
+                    # The fake has to end. With the clock frozen for the
+                    # size-cap test, removing the cap left the loop with no
+                    # exit at all: the mutant filled the disk until CI killed
+                    # the job, which is not a readable failure.
+                    raise AssertionError("the download was never bounded")
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def urlopen(url, **kw):
+            seen.update(kw)
+            return Resp()
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        monkeypatch.setattr(setup_mod.time, "monotonic", lambda: now["t"])
+        return seen
+
+    @pytest.mark.release_download
+    def test_a_stalled_download_has_a_socket_timeout(self, tmp_path, monkeypatch):
+        """urlretrieve takes no timeout and defaults to none, so a stalled
+        transfer held setup open with no deadline. Run, not read: this used to
+        grep the source of a function the download has since moved out of."""
         from server.lifecycle import setup as setup_mod
 
-        src = inspect.getsource(setup_mod.fetch_menubar_app)
-        assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
-        assert "timeout=" in src, "the transfer has no socket timeout"
-        assert "deadline" in src, "the transfer has no whole-operation deadline"
+        seen = self._endless(monkeypatch, setup_mod, clock_step=10.0)
+        with pytest.raises(RuntimeError):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+        assert seen.get("timeout"), "the transfer has no socket timeout"
+
+    @pytest.mark.release_download
+    def test_a_download_that_never_ends_hits_the_deadline(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        self._endless(monkeypatch, setup_mod, clock_step=10.0)
+        with pytest.raises(RuntimeError, match="180s"):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+
+    @pytest.mark.release_download
+    def test_a_download_that_never_ends_hits_the_size_cap(self, tmp_path, monkeypatch):
+        """With the real 200MB cap this wrote 200MB to disk to prove it."""
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "MAX_ASSET_BYTES", 256 * 1024)
+        self._endless(monkeypatch, setup_mod, chunk=b"x" * (64 * 1024))
+        with pytest.raises(RuntimeError, match="MB"):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+        written = sum(f.stat().st_size for f in tmp_path.iterdir() if f.is_file())
+        assert written < 2 * 1024 * 1024, f"wrote {written} bytes"
 
     def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
         """Signature, team and Gatekeeper are all satisfied by any genuine
@@ -1650,6 +1706,7 @@ class TestFetchMenubarApp:
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise
 
 
+    @pytest.mark.release_download
     def test_verification_runs_before_the_app_is_installed(self, tmp_path, monkeypatch):
         """Every other test calls _verify_menubar_app directly. Deleting its
         call site left the whole suite green while setup would download,
@@ -1778,11 +1835,15 @@ class TestMenubarInstallLocation:
         apps = tmp_path / "Applications"
         (root / "Quern.app").mkdir(parents=True)
         calls: list[list[str]] = []
+        alive = {"yes": True}
 
         def record(cmd, timeout=30):
             calls.append(cmd)
             if cmd[0] == "pgrep":
-                return (1, "", "")   # nothing running after the quit
+                # Running until the quit, gone after it.
+                return (0, "4242", "") if alive["yes"] else (1, "", "")
+            if cmd[0] == "osascript":
+                alive["yes"] = False
             return (0, "", "")
 
         monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
@@ -1792,6 +1853,12 @@ class TestMenubarInstallLocation:
         quit_at = next(i for i, c in enumerate(calls) if c[0] == "osascript")
         open_at = next(i for i, c in enumerate(calls) if c[0] == "open")
         assert quit_at < open_at, "opened the app before asking the old one to quit"
+        # The bundle it is replacing, not any Quern: the quit asks by
+        # application name, so a generic question stops someone else's copy.
+        import re as _re
+
+        pgrep_before_quit = next(c for c in calls if c[0] == "pgrep")
+        assert _re.escape(str(apps / "Quern.app")) in pgrep_before_quit[-1], pgrep_before_quit
 
     def test_an_already_installed_app_is_not_refetched(self, tmp_path, monkeypatch):
         """After the first setup the app lives only in ~/Applications.
