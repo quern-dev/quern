@@ -199,6 +199,15 @@ release to an old install. Every one of those is a failure this project has
 shipped: a channel branch left behind (0.14.0), a downgrade offer (0.18.1), a
 wrapper with no dependencies, and an update that crashed for everyone (#212).
 
+It prints `–` for a check it could not make, and counts them in the summary, so
+a run with skips never reads like a clean one. The resolver checks are the ones
+that skip: they run the *released* updater, and a release from before 0.18.5
+has no `QUERN_RELEASES_URL` support and no trust check, so against a candidate
+served locally its resolver asks GitHub instead. That was found by rehearsing
+against 0.18.4, where it reported two passes it had not earned -- the local
+server was never asked -- and it matters because a rehearsal of an
+already-published tag is exactly when the wrong answer matches.
+
 **The tarball is no longer a pure `git archive`.** `--publish` now runs
 `npm ci && npm run build` inside the staged tree and ships `mcp/dist`, dropping
 `node_modules` again before tarring.

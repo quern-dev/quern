@@ -13,8 +13,9 @@
 # Read-only where it counts: it fetches, unpacks into a temporary directory,
 # and asserts. It installs nothing, changes no branch and writes nothing to
 # ~/.quern; it does `git fetch` the tag and main into the local object store,
-# which is what lets it tell whether main contains the release. Exits nonzero on the first failure,
-# naming what it expected.
+# which is what lets it tell whether main contains the release. Every check
+# runs; it names each failure and exits nonzero at the end, because stopping at
+# the first one hides how much else is wrong.
 #
 # The rehearsal (quern#219) sets QUERN_RELEASES_URL to point the same checks at
 # a candidate served locally; unset, everything below talks to GitHub.
@@ -32,7 +33,9 @@ REMOTE="$(git -C "$ROOT" remote get-url origin)"
 TEAM_ID="3QUH73KW5Q"
 
 failures=0
+skips=0
 ok()   { printf '  \033[0;32m✓\033[0m %s\n' "$1"; }
+skip() { printf '  – %s\n' "$1"; skips=$((skips + 1)); }
 bad()  { printf '  \033[0;31m✗\033[0m %s\n' "$1"; failures=$((failures + 1)); }
 step() { printf '\n==> %s\n' "$1"; }
 
@@ -76,7 +79,9 @@ step "Whether the updater checks can run at all"
 # and are skipped entirely when the asset cannot be downloaded, which is why
 # that failure is reported as one `bad` covering everything it took with it.
 PYTHON="$ROOT/.venv/bin/python"
-if [[ ! -x "$PYTHON" ]]; then
+if [[ -x "$PYTHON" ]]; then
+  ok "the venv interpreter is there"
+else
   bad "no venv interpreter at $PYTHON — the resolver checks need one; run setup"
 fi
 
@@ -142,23 +147,38 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from server.lifecycle.updater import _fetch_latest_release
 try:
-    # Only releases from 0.18.5 have this; older ones follow any URL.
+    # Only releases from 0.18.5 have this. Older ones ask GitHub whatever the
+    # environment says, and follow any URL -- reported as not checked rather
+    # than as checked and fine.
     from server.lifecycle.releases import asset_url_is_trusted
+    honours_override = "override-aware"
 except ImportError:
     asset_url_is_trusted = lambda _url: True
+    honours_override = "asks-github"
 got = _fetch_latest_release(sys.argv[2])
 if got:
-    print(got[0], got[1], "trusted" if asset_url_is_trusted(got[1]) else "REFUSED")
+    print(got[0], got[1], "trusted" if asset_url_is_trusted(got[1]) else "REFUSED",
+          honours_override)
 else:
-    print("- - no-answer")
+    print("- - no-answer", honours_override)
 ' "$tree" "$channel" 2>&1 | tail -1)"
-      read -r offered offered_url trusted <<<"$resolved"
-      if [[ "$offered" == "$VERSION" ]]; then
+      read -r offered offered_url trusted override_aware <<<"$resolved"
+      # A rehearsal against a release that predates the override is the
+      # dangerous case: its resolver silently asks GitHub about the *published*
+      # release, and when the candidate carries the same version -- which a
+      # rehearsal of an already-cut tag does -- the answer matches and the
+      # check reports a pass it did not earn. Measured: the local server was
+      # never asked, while two green lines said the candidate resolved.
+      if [[ -n "${QUERN_RELEASES_URL:-}" && "$override_aware" == "asks-github" ]]; then
+        skip "channel $channel: this release predates QUERN_RELEASES_URL, so its resolver asked GitHub — nothing here was checked against the candidate"
+      elif [[ "$offered" == "$VERSION" ]]; then
         ok "channel $channel offers $VERSION"
       else
         bad "channel $channel offers ${offered:-nothing}, expected $VERSION"
       fi
-      if [[ "$trusted" == "trusted" ]]; then
+      if [[ "$override_aware" == "asks-github" ]]; then
+        skip "channel $channel: the released code has no trust check to exercise"
+      elif [[ "$trusted" == "trusted" ]]; then
         ok "channel $channel resolves to a URL the released code will follow"
       else
         bad "channel $channel resolved ${offered_url:-nothing} ($trusted) — the released code would refuse it"
@@ -228,7 +248,7 @@ if [[ -z "${QUERN_RELEASES_URL:-}" ]]; then
     bad "quern.dev does not name $VERSION: ${answer:-no answer}"
   fi
 else
-  printf '  – skipped (QUERN_RELEASES_URL is set; quern.dev reads the real repo)\n'
+  skip "quern.dev: QUERN_RELEASES_URL is set, and quern.dev reads the real repo"
 fi
 
 printf '\n'
@@ -236,4 +256,12 @@ if (( failures )); then
   printf '\033[0;31m%d check(s) failed.\033[0m\n' "$failures"
   exit 1
 fi
-printf '\033[0;32mAll checks passed for %s.\033[0m\n' "$TAG"
+if (( skips )); then
+  # Not the same answer as a clean run, and it must not read like one: a skip
+  # is a check that did not happen, which is the state this whole script
+  # exists to stop being mistaken for a pass.
+  printf '\033[0;32mAll checks passed for %s\033[0m — %d skipped, listed above.\n' \
+    "$TAG" "$skips"
+else
+  printf '\033[0;32mAll checks passed for %s.\033[0m\n' "$TAG"
+fi
