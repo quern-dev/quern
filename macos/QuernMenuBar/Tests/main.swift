@@ -21,6 +21,7 @@ MinimumDisplayTests.all()
 FlagTests.all()
 AppVersionTests.all()
 InstallKindTests.all()
+RecoveryTests.all()
 // The count is deliberate. See Harness.report(expected:) -- without it, a suite
 // that runs nothing exits 0.
-exit(Harness.report(expected: 106))
+exit(Harness.report(expected: 141))
