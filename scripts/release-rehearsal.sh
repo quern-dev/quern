@@ -108,6 +108,10 @@ PROTECTED=(
   "$REAL_HOME/.quern/api-key"
   "$REAL_HOME/.quern/config.json"
   "$REAL_HOME/.claude/settings.json"
+  # A symlink into this checkout. Setup repoints it, and a review agent
+  # repointed this one at a temporary directory earlier today by running a
+  # real setup by accident -- so it is exactly the shape this guards.
+  "$REAL_HOME/.claude/skills/quern-api"
 )
 
 # The MCP client configs are watched by *content that belongs to quern* rather
@@ -137,11 +141,19 @@ quern = {k: v for k, v in servers.items() if "quern" in k.lower()}
 print(json.dumps(quern, sort_keys=True))' "$1" 2>/dev/null || echo "unreadable"
 }
 
+# Contents *and* the metadata that decides what the contents mean. A hash
+# alone misses a wrapper made non-executable, and misses a symlink repointed
+# at a tree whose file happens to be identical -- and `shasum` follows the
+# link, so it would report on the wrong file entirely without complaint.
 snapshot_protected() {
   local path
   for path in "${PROTECTED[@]}"; do
-    if [[ -e "$path" ]]; then
-      printf '%s\t%s\n' "$path" "$(shasum -a 256 "$path" | awk '{print $1}')"
+    if [[ -L "$path" ]]; then
+      printf '%s\tsymlink -> %s\n' "$path" "$(readlink "$path")"
+    elif [[ -e "$path" ]]; then
+      printf '%s\t%s mode=%s\n' "$path" \
+        "$(shasum -a 256 "$path" | awk '{print $1}')" \
+        "$(stat -f '%Lp' "$path" 2>/dev/null || echo '?')"
     else
       printf '%s\tabsent\n' "$path"
     fi

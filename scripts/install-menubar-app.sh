@@ -118,8 +118,21 @@ print(releases.download_url(sys.argv[1]))' "$VERSION" 2>/dev/null || true)"
   fi
   # The literal is the fallback, not the source of truth: this script runs
   # from a clone that may have no venv, and a missing interpreter should not
-  # stop an install. A rehearsal has one.
-  [[ -n "$URL" ]] || URL="https://github.com/quern-dev/quern/releases/download/$TAG/$ASSET"
+  # stop an ordinary install.
+  #
+  # But it is not a fallback when an override is set. Falling back to
+  # github.com there fetches the *published* app and installs it while the
+  # operator believes they are checking a candidate -- which is the exact
+  # substitution QUERN_RELEASES_URL exists to make visible. Refuse instead.
+  if [[ -z "$URL" ]]; then
+    if [[ -n "${QUERN_RELEASES_URL:-}" ]]; then
+      echo "error: QUERN_RELEASES_URL is set but the release URL could not be" >&2
+      echo "       resolved (no usable python at $PY), so this would have" >&2
+      echo "       installed the published app instead of your candidate." >&2
+      exit 1
+    fi
+    URL="https://github.com/quern-dev/quern/releases/download/$TAG/$ASSET"
+  fi
   echo "==> Fetching the signed app from $TAG"
   curl -fsSL --max-time 180 -o "$WORK/$ASSET" "$URL" || {
     echo "error: could not download $ASSET" >&2
