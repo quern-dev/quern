@@ -129,8 +129,20 @@ final class LifecycleController {
     func noteServerVersion(_ version: String?) {
         guard let version else { return }
         defer { lastKnownVersion = version }
-        guard updateRecovery != nil, let before = versionAtUpdateFailure,
-              version != before else { return }
+        guard updateRecovery != nil else { return }
+        guard let before = versionAtUpdateFailure else {
+            // No version was known when the update failed, which a git install
+            // can genuinely be: the update check writes no current version
+            // when there is a head_sha but nothing parses a version out of the
+            // tree. Without a baseline nothing could ever retire the item, so
+            // the first reading afterwards becomes one. It cannot retire
+            // anything by itself -- there is no change yet -- and if a version
+            // never becomes readable the way out stays, which is the honest
+            // answer to "could not ask".
+            versionAtUpdateFailure = version
+            return
+        }
+        guard version != before else { return }
         clearUpdateRecovery()
     }
 
@@ -144,10 +156,21 @@ final class LifecycleController {
     /// The daemon came up by some route other than us -- a terminal, another
     /// app. Whatever we were reporting is no longer true.
     func noteServerRunning() {
-        guard statusText != nil || hasFailed || recovery != nil else { return }
+        // Only an update's way out survives a healthy server, and it is
+        // retired by a version change instead. Anything else recorded here is
+        // about the server being down -- `Recovery.forUpdateFailure` hands
+        // back `.repair` when the update failed before the restart -- and a
+        // server that is up has answered it.
+        let staleUpdateRecovery = updateRecovery != nil && updateRecovery != .finishUpdate
+        guard statusText != nil || hasFailed || recovery != nil
+                || staleUpdateRecovery else { return }
         statusText = nil
         hasFailed = false
         recovery = nil
+        if staleUpdateRecovery {
+            updateRecovery = nil
+            versionAtUpdateFailure = nil
+        }
         changed()
     }
 

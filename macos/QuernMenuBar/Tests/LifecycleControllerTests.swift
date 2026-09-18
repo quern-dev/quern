@@ -253,14 +253,63 @@ enum LifecycleControllerTests {
                            "and coming back unchanged is not proof either")
         }
 
-        Harness.test("a version unknown at the failure cannot retire it") {
-            // Never saw a version, so nothing can be compared against: the
-            // safe answer is to keep offering the way out rather than to
-            // treat the first reading as a change.
+        Harness.test("a version unknown at the failure is baselined, not guessed") {
+            // A git install can genuinely report no version. Nothing could
+            // then ever retire the item, so the first reading afterwards
+            // becomes the baseline -- it is not a change by itself, and a
+            // later change retires the way out as usual.
             let rig = Rig(result: (0, ""))
             rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
             rig.controller.noteServerVersion("0.18.5")
-            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "the first reading is not proof of anything")
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "nor is repeating it")
+            rig.controller.noteServerVersion("0.18.6")
+            Harness.expect(rig.controller.updateRecovery, nil, "and now it landed")
+        }
+
+        Harness.test("a version that never becomes readable keeps the way out") {
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            for _ in 0..<5 { rig.controller.noteServerVersion(nil) }
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "could not ask is not an answer")
+        }
+
+        Harness.test("only an update's way out survives a healthy server") {
+            // `Recovery.forUpdateFailure` hands back .repair when the update
+            // failed before the restart, and that lands in updateRecovery --
+            // where the version guard can never retire it, because repairing
+            // the server does not change its version. A server that is up has
+            // answered it.
+            for stale in [Recovery.repair, .setUp] {
+                let rig = Rig(result: (0, ""))
+                rig.controller.noteServerVersion("0.18.4")
+                rig.controller.noteFailure(status: "Update failed", recovery: stale)
+                rig.changes = 0
+                rig.controller.noteServerRunning()
+                Harness.expect(rig.controller.updateRecovery, nil, "\(stale) is retired")
+                Harness.expect(rig.changes >= 1, "and the menu repaints")
+            }
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerRunning()
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "the update's is kept")
+        }
+
+        Harness.test("a retired start recovery takes its baseline with it") {
+            // Otherwise the next update failure is measured against a version
+            // recorded for an unrelated one.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Start failed", recovery: .repair)
+            rig.controller.noteServerRunning()
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.4")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "0.18.4 is the baseline, not a change")
         }
 
         Harness.test("a later update failure is measured from the later version") {
