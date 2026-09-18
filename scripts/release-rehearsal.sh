@@ -41,8 +41,10 @@ bad()  { printf '  \033[0;31m✗\033[0m %s\n' "$1"; failures=$((failures + 1)); 
 skip() { printf '  – %s\n' "$1"; skips=$((skips + 1)); }
 step() { printf '\n==> %s\n' "$1"; }
 
-candidate_version="$(git -C "$ROOT" show "$CANDIDATE:pyproject.toml" \
-  | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+# `|| true` so a bad ref reaches the message below instead of aborting the
+# script on this line with nothing said.
+candidate_version="$(git -C "$ROOT" show "$CANDIDATE:pyproject.toml" 2>/dev/null \
+  | sed -n 's/^version = "\(.*\)"/\1/p' | head -1 || true)"
 prev_version="${PREV#v}"
 
 printf 'Rehearsing %s (%s) from %s\n' "$CANDIDATE" "${candidate_version:-?}" "$PREV"
@@ -166,7 +168,7 @@ case_git_update() {
     ok "no traceback"
   fi
 
-  landed="$(sed -n 's/^version = "\(.*\)"/\1/p' "$sb/install/pyproject.toml" | head -1)"
+  landed="$(sed -n 's/^version = "\(.*\)"/\1/p' "$sb/install/pyproject.toml" 2>/dev/null | head -1 || true)"
   [[ "$landed" == "$candidate_version" ]] \
     && ok "the tree is $candidate_version" \
     || bad "the tree is ${landed:-nothing}, expected $candidate_version"
@@ -255,7 +257,7 @@ case_gui_start() {
 try:
     print(json.load(open(sys.argv[1])).get("server_port", ""))
 except Exception:
-    print("")' "$sb/state/state.json" 2>/dev/null)"
+    print("")' "$sb/state/state.json" 2>/dev/null || true)"
   if [[ -z "$port" ]]; then
     bad "no port in the sandbox state.json — the server never recorded itself"
   elif curl -fsS --max-time 10 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
@@ -463,6 +465,170 @@ case_node_matrix() {
 
 set +e
 ( case_node_matrix )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "A fresh install of the candidate"
+# --------------------------------------------------------------------------
+# The one-liner, against a candidate served locally. This is the path that has
+# no previous version to fall back on: if the asset is wrong, a new user's
+# first contact with quern is the failure.
+#
+# The installer lives in the site repo, so it is not here to run in CI, and
+# that is said rather than hidden.
+case_fresh_install() {
+  failures=0   # a subshell copy: a case reports only its own
+  local install="$WORK/git-update/install"
+  local site_root install_sh
+  site_root="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  install_sh="${site_root:+$(dirname "$(dirname "$site_root")")/quern.dev/public/_install.sh}"
+  if [[ -z "$install_sh" || ! -f "$install_sh" ]]; then
+    skip "fresh install: quern.dev is not checked out beside this repo, so there is no installer to run"
+    return 0
+  fi
+  if [[ ! -d "$install/mcp/dist" ]]; then
+    skip "fresh install: the update case left no built tree to package"
+    return 0
+  fi
+
+  # A terminal's PATH, not launchd's: the one-liner is pasted into a shell,
+  # and Homebrew's python is how most machines have a 3.11+. Giving it the
+  # four-entry GUI PATH tested nothing but Apple's system python.
+  local sb="$WORK/fresh"
+  mkdir -p "$sb/home" "$sb/srv/releases/download/v$candidate_version" "$sb/bin"
+  make_stubs "$sb/bin"
+
+  # The asset a release would carry, built from the tree the update case
+  # produced: source, mcp/dist and its node_modules. Not a `git archive` --
+  # that is the generated source tarball, which is exactly the thing whose
+  # absence of dependencies broke 0.18.3.
+  local staged="$sb/pkg/quern-$candidate_version"
+  mkdir -p "$staged"
+  ( cd "$install" && /usr/bin/tar --exclude .git --exclude .venv -cf - . ) \
+    | ( cd "$staged" && /usr/bin/tar -xf - )
+  ( cd "$sb/pkg" && /usr/bin/tar -czf \
+      "$sb/srv/releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
+      "quern-$candidate_version" )
+
+  local port=8907
+  cat > "$sb/srv/releases/latest" <<EOF
+{"tag_name": "v$candidate_version", "prerelease": false,
+ "assets": [{"name": "quern-$candidate_version.tar.gz",
+             "browser_download_url": "http://127.0.0.1:$port/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}]}
+EOF
+  python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
+  local srv_pid=$!
+  # Serve or fail loudly: a case that silently tests nothing is the thing this
+  # whole script exists to stop.
+  local waited=0
+  until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if (( waited > 20 )); then
+      kill "$srv_pid" 2>/dev/null || true
+      bad "fresh install: the local release server never came up on $port"
+      return "$failures"
+    fi
+    sleep 0.5
+  done
+
+  # Unattended. A rehearsal has no terminal to offer, and `script` cannot make
+  # one where there is no controlling tty to begin with. So this is the
+  # non-interactive contract: setup declines what it would have asked and says
+  # so, and the case then finishes the install the way that message tells the
+  # user to. Both halves are checked, because "installed the tree" and "left a
+  # working command" are different claims.
+  set +e
+  env -i \
+    HOME="$sb/home" \
+    QUERN_STATE_DIR="$sb/home/.quern" \
+    QUERN_RELEASES_URL="http://127.0.0.1:$port" \
+    PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
+    bash "$install_sh" > "$sb/install.log" 2>&1
+  local rc=$?
+  set -e
+  kill "$srv_pid" 2>/dev/null || true
+
+  if [[ $rc -eq 0 ]]; then
+    ok "install.sh exits 0 against a locally served candidate"
+  elif grep -q "quern setup" "$sb/install.log"; then
+    # Not a pass dressed up: exiting non-zero *and* naming the step is the
+    # documented answer to having nothing to ask with. Exiting 0 here would be
+    # the failure -- a caller told everything worked, with no venv.
+    ok "install.sh declined what it could not ask and named the next step (exit $rc)"
+  else
+    bad "install.sh exited $rc without naming a next step — see $sb/install.log"
+    tail -n 20 "$sb/install.log" | sed 's/^/      /'
+  fi
+
+  # It must have fetched *ours*. The override exists so a rehearsal tests the
+  # candidate; an installer that quietly went to GitHub would pass every check
+  # below while installing the published release.
+  if grep -q "releases/download/v$candidate_version" "$sb/srv.log"; then
+    ok "it downloaded the candidate from the local server"
+  else
+    bad "the local server was never asked for the asset — the installer went somewhere else"
+  fi
+
+  local installed="$sb/home/.local/share/quern"
+  # `|| true`: under `set -e` a substitution whose command fails takes the
+  # case down on its own line, and the case then reports fewer failures than
+  # it found -- which is how this one first read as one failure when it had
+  # two and had stopped early.
+  local got
+  got="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$got" == "$candidate_version" ]] \
+    && ok "it installed $candidate_version into ~/.local/share/quern" \
+    || bad "the install says ${got:-nothing}, expected $candidate_version"
+
+  # Finish it as its own message says to. A user who reads "Re-run ./quern
+  # setup" and does so must end up with a working command; this is the half
+  # that says whether the install is usable, not merely unpacked.
+  if [[ -d "$installed" && ! -x "$sb/home/.local/bin/quern" ]]; then
+    python3 -m venv "$installed/.venv" >"$sb/venv.log" 2>&1 || true
+    if [[ -x "$installed/.venv/bin/python" ]]; then
+      ok "a venv can be created in the installed tree"
+    else
+      bad "could not create a venv in the installed tree: $(tail -n 3 "$sb/venv.log" 2>/dev/null | tr '\n' ' ' || true)"
+    fi
+    "$installed/.venv/bin/pip" install -q -e "$installed" >"$sb/pip.log" 2>&1 \
+      || bad "pip install -e failed in the installed tree: $(tail -n 3 "$sb/pip.log" 2>/dev/null | tr '\n' ' ' || true)"
+    # From inside the install, which is where its own message tells the user
+    # to run it -- and it matters more than it looks. `python -m server` puts
+    # the caller's cwd first on sys.path, so running this from another quern
+    # checkout inspects *that* tree: setup reported "venv not found" about a
+    # directory it was never asked about. CONTRIBUTING names this hazard, and
+    # the rehearsal walked straight into it.
+    ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+        PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
+        "$installed/quern" setup ) > "$sb/setup.log" 2>&1 || true
+  fi
+
+  # From another directory, because the wrapper resolves its own location and
+  # a cwd-dependent one works inside the tree and nowhere else.
+  if [[ -x "$sb/home/.local/bin/quern" ]]; then
+    set +e
+    ( cd / && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+        PATH="$sb/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        "$sb/home/.local/bin/quern" --version ) > "$sb/version.log" 2>&1
+    local vrc=$?
+    set -e
+    if [[ $vrc -eq 0 ]] && grep -q "$candidate_version" "$sb/version.log"; then
+      ok "the wrapper runs from another directory and reports $candidate_version"
+    else
+      bad "the wrapper failed from / (exit $vrc): $(tail -n 3 "$sb/version.log" 2>/dev/null | tr '\n' ' ' || true)"
+    fi
+  else
+    bad "no wrapper at ~/.local/bin/quern after a fresh install and a setup run"
+    tail -n 25 "$sb/setup.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+  return "$failures"
+}
+
+set +e
+( case_fresh_install )
 failures=$((failures + $?))
 set -e
 
