@@ -1074,8 +1074,15 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             # application name, so asking for it when someone else's copy is
             # running stops an app this has no business stopping.
             stopped = _menubar_app_running(installed)
-            if stopped:
-                _quit_menubar_app(installed)
+            if stopped and not _quit_menubar_app(installed):
+                # Not replaced: a bundle swapped under a live app leaves it
+                # executing an image that no longer has a name.
+                return CheckResult(
+                    name="Quern app",
+                    status=CheckStatus.WARNING,
+                    message="Not updated — the running app would not quit",
+                    detail=f"Quit Quern from its menu, then run: {quern_cmd()} setup",
+                )
             shutil.rmtree(installed, ignore_errors=True)
             os.replace(str(staging), str(installed))
         except OSError as e:
@@ -1161,6 +1168,16 @@ def _menubar_app_running(app: Path | None = None) -> bool:
     return rc == 0 and bool(out.strip())
 
 
+def _menubar_app_pids(app: Path | None = None) -> list[str]:
+    """The running menu-bar processes -- any copy, or the one at `app`."""
+    import re
+
+    pattern = (f"{re.escape(str(app))}/Contents/MacOS/QuernMenuBar"
+               if app is not None else _MENUBAR_PROCESS)
+    rc, out, _err = _run(["pgrep", "-f", pattern])
+    return out.split() if rc == 0 else []
+
+
 def _open_menubar_app(app: Path) -> tuple[int, str]:
     """`open` the app, retrying only the error a just-quit app produces."""
     rc, err = 1, ""
@@ -1173,23 +1190,50 @@ def _open_menubar_app(app: Path) -> tuple[int, str]:
     return rc, err
 
 
-def _quit_menubar_app(app: Path | None = None) -> None:
-    """Ask a running menu-bar app to quit, so a new build can take over.
+def _quit_menubar_app(app: Path | None = None) -> bool:
+    """Stop the menu-bar app at `app`, and say whether it is gone.
 
-    `app` narrows only the *waiting*: AppleScript addresses an application by
-    name, so the quit itself reaches whichever copy is frontmost-registered.
-    The caller decides whether quitting is warranted; this waits for the
-    bundle it was given to go away rather than for any copy.
+    Returns True when nothing was running there, or when it exited. **False
+    means it is still alive**, and a caller about to replace its bundle must
+    stop: swapping the bundle under a live app leaves it executing an image
+    with no name on disk, which is a confusing state to debug and the reason
+    this quit exists at all.
 
-    Best-effort and deliberately gentle: `osascript` asks the app to quit
-    rather than killing it, so it can tear down its status item cleanly. If
-    nothing is running, this is a no-op that costs a fraction of a second.
+    Two ways, in order of politeness:
+
+    * `osascript` asks the application to quit, so it can tear down its status
+      item. But AppleScript addresses an application by *name*, so it reaches
+      whichever copy macOS has registered -- possibly someone else's checkout.
+      It is therefore used only when the copy we mean is the only one running.
+    * Otherwise, and as a fallback, SIGTERM to the pids of *that bundle*, which
+      cannot touch another copy.
+
+    With no `app`, this keeps the old behaviour for callers that mean "any
+    copy": ask by name, wait, report.
     """
-    _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
-    for _ in range(20):
+    ours = _menubar_app_pids(app)
+    if not ours:
+        return True
+
+    others = [pid for pid in _menubar_app_pids() if pid not in ours]
+    if not others:
+        _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
+        if _wait_for_exit(app):
+            return True
+
+    # Either another copy is running -- and asking by name could stop it -- or
+    # the polite request did not take.
+    if ours:
+        _run(["kill", "-TERM", *ours], timeout=10)
+    return _wait_for_exit(app)
+
+
+def _wait_for_exit(app: Path | None, attempts: int = 20) -> bool:
+    for _ in range(attempts):
         if not _menubar_app_running(app):
-            return
+            return True
         time.sleep(0.25)
+    return not _menubar_app_running(app)
 
 
 def _install_skills(project_root: Path) -> CheckResult:

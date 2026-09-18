@@ -42,6 +42,7 @@ class Machine:
         self.other_running = False
         self.downloads: list[str] = []
         self.quits: list = []
+        self.refuses_to_quit = False
         self.open_result = (0, "")
         wrapper_path = tmp_path / "bin" / "quern"
         if wrapper:
@@ -69,7 +70,10 @@ class Machine:
 
     def _quit(self, app=None):
         self.quits.append(app)
+        if self.refuses_to_quit:
+            return False
         self.running = False
+        return True
 
     def _open(self, app):
         self.opens.append(str(app))
@@ -346,6 +350,16 @@ class TestAFailedSwapKeepsAWorkingApp:
         assert not stale.exists(), "a stale staging bundle was left behind"
         assert m.version() == "0.18.5"
 
+    def test_an_app_that_will_not_quit_is_not_replaced(self, monkeypatch, tmp_path, capsys):
+        """Swapping the bundle under a live app leaves it executing an image
+        with no name on disk -- the state the quit exists to avoid."""
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", running=True, quern="0.18.5")
+        m.refuses_to_quit = True
+        assert menubar.cmd_install() == 1
+        assert m.version() == "0.18.3", "replaced the bundle under a running app"
+        out = capsys.readouterr().out
+        assert "would not quit" in out and "menu" in out
+
     def test_a_truncated_download_is_reported_not_raised(self, monkeypatch, tmp_path, capsys):
         """HTTPException is not an OSError, so it escaped the handler."""
         import http.client
@@ -382,9 +396,49 @@ class TestQuittingWaitsForTheRightApp:
 
         monkeypatch.setattr(setup_mod, "_run", run)
         monkeypatch.setattr(setup_mod.time, "sleep", lambda _s: None)
-        setup_mod._quit_menubar_app(ours)
+        assert setup_mod._quit_menubar_app(ours) is True
         assert asked, "it never checked whether the app had gone"
-        assert all(re.escape(str(ours)) in pattern for pattern in asked), asked
+        # One generic question -- "is another copy running?" -- and every
+        # other about this bundle. The *wait* must be bundle-specific.
+        generic = [p for p in asked if re.escape(str(ours)) not in p]
+        assert len(generic) <= 1, asked
+        assert re.escape(str(ours)) in asked[-1], asked
+
+    def test_another_copy_running_means_a_signal_not_an_applescript(self, monkeypatch):
+        """AppleScript addresses an application by name, so with two copies
+        running it could stop the wrong one. A signal cannot."""
+        ours = Path("/Users/u/Applications/Quern.app")
+        cmds = []
+        alive = {"ours": True}
+
+        def run(cmd, timeout=30):
+            cmds.append(cmd)
+            if cmd[0] == "pgrep":
+                if str(ours).replace(".", "\\.") in cmd[-1]:
+                    return (0, "111", "") if alive["ours"] else (1, "", "")
+                return (0, "111 222", "")          # ours plus somebody else's
+            if cmd[0] == "kill":
+                alive["ours"] = False
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        monkeypatch.setattr(setup_mod.time, "sleep", lambda _s: None)
+        assert setup_mod._quit_menubar_app(ours) is True
+        assert not [c for c in cmds if c[0] == "osascript"], "asked by name with two copies up"
+        kills = [c for c in cmds if c[0] == "kill"]
+        assert kills == [["kill", "-TERM", "111"]], kills
+
+    def test_an_app_that_will_not_die_is_reported_as_still_running(self, monkeypatch):
+        ours = Path("/Users/u/Applications/Quern.app")
+
+        def run(cmd, timeout=30):
+            if cmd[0] == "pgrep":
+                return (0, "111", "")              # never goes away
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        monkeypatch.setattr(setup_mod.time, "sleep", lambda _s: None)
+        assert setup_mod._quit_menubar_app(ours) is False
 
     def test_it_returns_at_once_when_that_bundle_was_never_running(self, monkeypatch):
         calls = []

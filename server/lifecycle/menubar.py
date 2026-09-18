@@ -191,12 +191,17 @@ def cmd_install(force: bool = False) -> int:
             fresh = setup.download_release_app(url, version, Path(tmp))
             stopped = s.installed and setup._menubar_app_running(s.path)
             if stopped:
-                # Only when the bundle being replaced is the one running.
-                # `_quit_menubar_app` asks *by application name*, so doing it
-                # unconditionally quit a Quern running from somewhere else --
-                # a dev build, another checkout -- which this command has no
-                # business stopping.
-                setup._quit_menubar_app(s.path)
+                # Only when the bundle being replaced is the one running:
+                # asking by application name would otherwise stop a Quern from
+                # somewhere else, which this command has no business doing.
+                if not setup._quit_menubar_app(s.path):
+                    # Replacing the bundle under a live app leaves it running
+                    # an image with no name on disk. Stop instead, with the
+                    # old app still there and still working.
+                    raise RuntimeError(
+                        f"the app at {s.path} would not quit, so it was not "
+                        "replaced. Quit it from its menu and try again"
+                    )
             staging = s.path.with_name("Quern.app.incoming")
             shutil.rmtree(staging, ignore_errors=True)
             os.replace(fresh, staging)
