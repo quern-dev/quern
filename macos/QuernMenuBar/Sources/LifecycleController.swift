@@ -82,6 +82,27 @@ final class LifecycleController {
     /// The way out has to survive both.
     private(set) var updateRecovery: Recovery?
 
+    /// The newest version the server has reported, and the one it was
+    /// reporting when the update failed. A version that has moved since is
+    /// proof the update landed -- by the Terminal recovery, by `quern update`
+    /// in the user's own shell, by any route.
+    ///
+    /// Something has to retire `updateRecovery`, and the two obvious
+    /// candidates do not: it deliberately survives `noteServerRunning()`, and
+    /// the retry items that call `clearUpdateRecovery()` are drawn only while
+    /// an update is still staged. Without this, finishing the update left a
+    /// bare "Finish Update in Terminal…" on the menu of a healthy, current
+    /// server for the life of the process.
+    ///
+    /// The last *known* version is kept rather than the latest reading,
+    /// because the reading goes nil while the install is being replaced --
+    /// exactly when an update fails.
+    ///
+    /// The baseline is written with `updateRecovery` and read only while it is
+    /// set, so there is nothing to clear alongside it.
+    private var lastKnownVersion: String?
+    private var versionAtUpdateFailure: String?
+
     /// Called whenever any of the three above change, so the icon can repaint.
     var onChange: (() -> Void)?
     /// Title, detail, and the recovery to offer, for a modal.
@@ -99,7 +120,18 @@ final class LifecycleController {
     func noteFailure(status: String, recovery: Recovery) {
         statusText = status
         updateRecovery = recovery
+        versionAtUpdateFailure = lastKnownVersion
         changed()
+    }
+
+    /// The version the server reports, on every state poll. See
+    /// `versionAtUpdateFailure`.
+    func noteServerVersion(_ version: String?) {
+        guard let version else { return }
+        defer { lastKnownVersion = version }
+        guard updateRecovery != nil, let before = versionAtUpdateFailure,
+              version != before else { return }
+        clearUpdateRecovery()
     }
 
     /// The user is trying again, so the last update's way out is stale.

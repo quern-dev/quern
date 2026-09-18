@@ -8,6 +8,44 @@
 import AppKit
 import Foundation
 
+/// What the menu draws between the header and the lifecycle actions.
+///
+/// A plain value so it can be tested. The bug this exists to prevent lived in
+/// the menu builder -- the update's way out was drawn only inside the
+/// server-is-down branch, and an update that stops partway usually leaves the
+/// server *up*, so the only route back was absent in the common case. Nothing
+/// reaches that builder: `AppDelegate` cannot be constructed without a status
+/// item, so every mutation of it shipped green.
+enum FailureRow: Equatable {
+    case status(String)
+    case recovery(Recovery)
+    case serverLog
+}
+
+enum FailureMenu {
+    /// - Parameters:
+    ///   - serverRunning: whether the daemon is up *right now*.
+    ///   - statusText: the last lifecycle message, if one is unresolved.
+    ///   - startRecovery: the way out of a failed start.
+    ///   - updateRecovery: the way out of an update that stopped partway.
+    ///   - hasFailed: whether a lifecycle action failed, which is what makes
+    ///     the server log worth offering.
+    ///   - logExists: whether there is a log file to open.
+    static func rows(serverRunning: Bool, statusText: String?,
+                     startRecovery: Recovery?, updateRecovery: Recovery?,
+                     hasFailed: Bool, logExists: Bool) -> [FailureRow]
+    {
+        var rows: [FailureRow] = []
+        // Deliberately not gated on `serverRunning`. See the type's note.
+        if let updateRecovery { rows.append(.recovery(updateRecovery)) }
+        guard !serverRunning, let statusText else { return rows }
+        rows.append(.status(statusText))
+        if let startRecovery { rows.append(.recovery(startRecovery)) }
+        if hasFailed, logExists { rows.append(.serverLog) }
+        return rows
+    }
+}
+
 enum Recovery: Equatable {
     /// `quern update` stopped partway: setup, then restart (#212).
     case finishUpdate
@@ -17,8 +55,32 @@ enum Recovery: Equatable {
     case setUp
 
     var buttonTitle: String { "Fix in Terminal" }
+
+    /// Distinct per case, because two of these can be on the menu at once: an
+    /// update that stopped partway leaves the server up or down, and a start
+    /// that then fails records its own. Two rows reading "Troubleshoot in
+    /// Terminal…" a few lines apart, running different scripts, is a coin
+    /// flip for the user.
     var menuTitle: String {
-        self == .setUp ? "Set Up in Terminal…" : "Troubleshoot in Terminal…"
+        switch self {
+        case .finishUpdate: return "Finish Update in Terminal…"
+        case .repair: return "Troubleshoot in Terminal…"
+        case .setUp: return "Set Up in Terminal…"
+        }
+    }
+
+    /// The menu item, carrying the recovery itself.
+    ///
+    /// It rides on the item rather than in one property on the delegate
+    /// because both rows can be present at once and the second writer was
+    /// overwriting the first. Captured as the menu is built: reading the
+    /// controller again on click let the three-second state poll clear it
+    /// while the menu was open, and the click then did nothing at all.
+    func menuItem(target: AnyObject, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: menuTitle, action: action, keyEquivalent: "")
+        item.target = target
+        item.representedObject = self
+        return item
     }
 
     /// The `.command` body. `quern` is the resolved wrapper, if there is one.

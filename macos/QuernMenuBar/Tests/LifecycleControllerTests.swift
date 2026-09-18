@@ -209,11 +209,72 @@ enum LifecycleControllerTests {
             // An update can stop partway with the server still up, and the
             // next poll then says "running" -- which cleared the only route
             // back. The two failures are tracked apart for this.
-            let rig = Rig(result: (0, ""))
+            //
+            // The start recovery is set up first so that "the start one is
+            // cleared" is asserted against a field that actually held
+            // something: against a nil it passes whatever the code does.
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "the start one, before")
             rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
             rig.controller.noteServerRunning()
             Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
-            Harness.expect(rig.controller.recovery, nil, "and not the start one")
+            Harness.expect(rig.controller.recovery, nil, "and the start one is cleared")
+        }
+
+        Harness.test("finishing the update retires its way out") {
+            // Nothing else does. It survives noteServerRunning() by design,
+            // and the retry items that clear it are drawn only while an
+            // update is still staged -- so a finished update used to leave a
+            // dead "Finish Update in Terminal…" on a healthy server forever.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.4")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "the same version is not proof of anything")
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, nil, "the update landed")
+        }
+
+        Harness.test("a version that goes unreadable does not retire it") {
+            // state.json is missing or half-written exactly while the install
+            // is being replaced, which is when an update fails. A nil reading
+            // is "could not ask", not "a different version".
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion(nil)
+            rig.controller.noteServerVersion(nil)
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
+            rig.controller.noteServerVersion("0.18.4")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "and coming back unchanged is not proof either")
+        }
+
+        Harness.test("a version unknown at the failure cannot retire it") {
+            // Never saw a version, so nothing can be compared against: the
+            // safe answer is to keep offering the way out rather than to
+            // treat the first reading as a change.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
+        }
+
+        Harness.test("a later update failure is measured from the later version") {
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, nil, "the first one landed")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "0.18.5 was the baseline this time, not the change")
+            rig.controller.noteServerVersion("0.18.6")
+            Harness.expect(rig.controller.updateRecovery, nil, "and now it landed")
         }
 
         Harness.test("a start failure and an update failure do not overwrite each other") {

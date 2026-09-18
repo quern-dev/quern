@@ -90,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.snapshot = snap
             if snap.server.running { self.lifecycle.noteServerRunning() }
+            self.lifecycle.noteServerVersion(snap.update.currentVersion)
             // Same reasoning, for the other status line: without this a failed
             // update left its message in the menu for the life of the process,
             // including long after the user had fixed the cause.
@@ -261,18 +262,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let status = updateStatusText {
             menu.addItem(info(status))
         }
-        // Outside the `!s.running` section on purpose: an update can stop
-        // partway with the server still up, and the way out must not be drawn
-        // only when the daemon happens to be down.
-        if let recovery = lifecycle.updateRecovery {
-            menu.addItem(recoveryItem(recovery))
-        }
-        if !s.running, let status = lifecycle.statusText {
-            menu.addItem(info(status))
-            if let recovery = lifecycle.recovery {
-                menu.addItem(recoveryItem(recovery))
-            }
-            if lifecycle.hasFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
+        // Which rows, and in what order, is decided in FailureMenu so it can
+        // be tested -- nothing here can be.
+        for row in FailureMenu.rows(
+            serverRunning: s.running,
+            statusText: lifecycle.statusText,
+            startRecovery: lifecycle.recovery,
+            updateRecovery: lifecycle.updateRecovery,
+            hasFailed: lifecycle.hasFailed,
+            logExists: FileManager.default.fileExists(atPath: Self.serverLog.path))
+        {
+            switch row {
+            case .status(let text):
+                menu.addItem(info(text))
+            case .recovery(let recovery):
+                menu.addItem(recovery.menuItem(target: self,
+                                               action: #selector(recoverInTerminal)))
+            case .serverLog:
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
             }
         }
@@ -511,17 +517,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.reportFailure("Could not open Terminal to update",
                                 detail: error + "\n\nRun `quern update` in a terminal instead.")
         }
-    }
-
-    /// Both failures can be on the menu at once, so the recovery rides on the
-    /// item rather than in one shared property. It is captured as the menu is
-    /// built: reading the controller again on click meant the three-second
-    /// state poll could clear it while the menu was open, and the click then
-    /// did nothing at all.
-    private func recoveryItem(_ recovery: Recovery) -> NSMenuItem {
-        let item = action(recovery.menuTitle, #selector(recoverInTerminal))
-        item.representedObject = recovery
-        return item
     }
 
     @objc private func recoverInTerminal(_ sender: NSMenuItem) {

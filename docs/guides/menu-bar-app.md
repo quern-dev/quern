@@ -116,12 +116,19 @@ Terminal…** instead — see [Updating](#updating).
 **Troubleshoot in Terminal.** Appears when the server didn't start, next to
 **Open Server Log**. It opens a Terminal window that runs `quern doctor --fix`,
 which repairs what it can, then `quern start`. The window stays open
-afterwards, so you can read what happened and carry on from there. Every start or
-update failure that has a way out offers the same step as a **Fix in Terminal**
-button. After an
-update that didn't finish, the button runs `quern setup` and then
-`quern restart` instead. If the `quern` command can't be found at all, the
-item is **Set Up in Terminal…**.
+afterwards, so you can read what happened and carry on from there. If the
+`quern` command can't be found at all, the item is **Set Up in Terminal…**.
+
+**Finish Update in Terminal.** Appears when an update stopped partway, and
+runs `quern setup` then `quern restart`. It is a separate item, with its own
+name, because it is shown whether or not the server is running — an update can
+fail with the daemon still up, and a way out drawn only when the daemon is
+down would be missing in that case. It stays until the server comes back on a
+different version, so finishing the update by any route retires it, including
+running `quern update` in your own terminal.
+
+Every start or update failure that has a way out offers the same step as a
+**Fix in Terminal** button on its alert.
 
 Nothing opens Terminal by itself; it always takes a click. A failed start at
 login only shows in the menu, but if the server fails to start within a few

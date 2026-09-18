@@ -1,5 +1,6 @@
 // A Terminal button for every failure worth recovering from (#225).
 
+import AppKit
 import Foundation
 
 enum RecoveryTests {
@@ -132,6 +133,84 @@ enum RecoveryTests {
             Harness.expect(report(record(.updated, secondsAgo: nil)), .menuOnly, "no timestamp")
             Harness.expect(report(record(.updated, secondsAgo: -600)), .menuOnly, "a future timestamp")
             Harness.expect(report(nil), .menuOnly, "no record")
+        }
+
+        Harness.test("each way out is named for what it does") {
+            // Two of these can be on the menu at once -- an update that
+            // stopped partway, and a start that then failed. Identical
+            // titles a few rows apart, running different scripts, is a coin
+            // flip.
+            let titles = [Recovery.finishUpdate, .repair, .setUp].map(\.menuTitle)
+            Harness.expect(Set(titles).count, titles.count, "all distinct")
+            Harness.expect(Recovery.finishUpdate.menuTitle, "Finish Update in Terminal…", "the update's")
+        }
+
+        Harness.test("the item carries the recovery it runs") {
+            // It rides on the item because one shared property was being
+            // overwritten by whichever row was built second.
+            let target = NSObject()
+            let items = [Recovery.finishUpdate, .repair].map {
+                $0.menuItem(target: target, action: #selector(NSObject.self.description as () -> String))
+            }
+            Harness.expect(items[0].representedObject as? Recovery, .finishUpdate, "first")
+            Harness.expect(items[1].representedObject as? Recovery, .repair, "second")
+            Harness.expect(items[0].title, Recovery.finishUpdate.menuTitle, "title")
+        }
+
+        Harness.test("an update's way out is drawn whether or not the server is up") {
+            // The bug: it was drawn only inside the server-is-down branch,
+            // and an update that stops partway usually leaves the server
+            // running -- so the only route back was absent in the common
+            // case. Nothing reaches the menu builder, so this is the seam
+            // that pins it.
+            for running in [true, false] {
+                let rows = FailureMenu.rows(
+                    serverRunning: running, statusText: nil,
+                    startRecovery: nil, updateRecovery: .finishUpdate,
+                    hasFailed: false, logExists: false)
+                Harness.expect(rows, [.recovery(.finishUpdate)], "running=\(running)")
+            }
+        }
+
+        Harness.test("a failed start's way out is drawn only while the server is down") {
+            let up = FailureMenu.rows(
+                serverRunning: true, statusText: "Start failed",
+                startRecovery: .repair, updateRecovery: nil,
+                hasFailed: true, logExists: true)
+            Harness.expect(up, [], "a running server has no start failure to report")
+            let down = FailureMenu.rows(
+                serverRunning: false, statusText: "Start failed",
+                startRecovery: .repair, updateRecovery: nil,
+                hasFailed: true, logExists: true)
+            Harness.expect(down, [.status("Start failed"), .recovery(.repair), .serverLog], "down")
+        }
+
+        Harness.test("both ways out can be on the menu, update first") {
+            let rows = FailureMenu.rows(
+                serverRunning: false, statusText: "Start failed",
+                startRecovery: .repair, updateRecovery: .finishUpdate,
+                hasFailed: false, logExists: true)
+            Harness.expect(rows, [.recovery(.finishUpdate), .status("Start failed"),
+                                  .recovery(.repair)], "order, and no log without a failure")
+        }
+
+        Harness.test("nothing to report draws nothing") {
+            Harness.expect(
+                FailureMenu.rows(serverRunning: false, statusText: nil,
+                                 startRecovery: .repair, updateRecovery: nil,
+                                 hasFailed: true, logExists: true),
+                [], "no status means no unresolved failure to explain")
+        }
+
+        Harness.test("the server log needs a failure and a file") {
+            func rows(hasFailed: Bool, logExists: Bool) -> [FailureRow] {
+                FailureMenu.rows(serverRunning: false, statusText: "Start failed",
+                                 startRecovery: nil, updateRecovery: nil,
+                                 hasFailed: hasFailed, logExists: logExists)
+            }
+            Harness.expect(rows(hasFailed: true, logExists: false).contains(.serverLog), false, "no file")
+            Harness.expect(rows(hasFailed: false, logExists: true).contains(.serverLog), false, "no failure")
+            Harness.expect(rows(hasFailed: true, logExists: true).contains(.serverLog), true, "both")
         }
     }
 }
