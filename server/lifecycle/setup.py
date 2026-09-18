@@ -975,7 +975,9 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     )
 
     try:
-        api = f"https://api.github.com/repos/quern-dev/quern/releases/tags/v{version}"
+        from server.lifecycle import releases
+
+        api = f"{releases.api_base()}/releases/tags/v{version}"
         with urllib.request.urlopen(api, timeout=15) as resp:  # noqa: S310
             release = _json.loads(resp.read())
 
@@ -987,11 +989,13 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             ),
             None,
         )
-        if url and not url.startswith("https://github.com/"):
+        if url and not releases.asset_url_is_trusted(url):
             # The URL comes out of the API response. Releases are served from
-            # github.com; anything else means the response is not what we
-            # think it is, and following it would fetch code from elsewhere.
-            raise _UntrustedBundle(f"asset URL is not on github.com: {url}")
+            # github.com -- or from wherever QUERN_RELEASES_URL points, when an
+            # operator has said so; anything else means the response is not
+            # what we think it is, and following it would fetch code from
+            # somewhere nobody chose.
+            raise _UntrustedBundle(f"asset URL is not on the release host: {url}")
         if not url:
             # Releases cut before the asset existed have nothing to offer, and
             # saying "not available for this release" is more useful than a

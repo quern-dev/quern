@@ -22,7 +22,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from server.lifecycle import setup
+from server.lifecycle import releases, setup
 
 
 @dataclass(frozen=True)
@@ -181,7 +181,7 @@ def cmd_install(force: bool = False) -> int:
         return 1
 
     version = s.quern_version
-    url = f"https://github.com/quern-dev/quern/releases/download/v{version}/quern-{version}.tar.gz"
+    url = releases.download_url(version)
     print(f"Fetching the signed menu-bar app from v{version}...")
     apps = s.path.parent
     try:

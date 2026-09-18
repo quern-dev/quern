@@ -2098,7 +2098,7 @@ class TestFetchMenubarApp:
         monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
         result = setup_mod.fetch_menubar_app(tmp_path)
         assert result.status == CheckStatus.ERROR
-        assert "not on github.com" in (result.detail or "")
+        assert "not on the release host" in (result.detail or "")
 
 
 def _boom_oserror(*a, **kw):
