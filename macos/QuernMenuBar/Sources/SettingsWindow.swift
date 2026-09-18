@@ -216,6 +216,12 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    /// The app's own version, in its own box so it cannot be read as the
+    /// server's -- which is what the Server box's Version row was taken for.
+    static func appRows(version: String?) -> [(String, String)] {
+        [("Version", version ?? "unknown")]
+    }
+
     /// The Server section, as label/value pairs.
     ///
     /// Built here rather than inline in `body` so a test can read it. The
@@ -394,6 +400,10 @@ struct SettingsView: View {
 
             GroupBox("Server") {
                 grid("Server", model.serverRows(now: Date()))
+            }
+
+            GroupBox("Quern app") {
+                grid("Quern app", SettingsModel.appRows(version: AppVersion.current))
             }
 
             GroupBox("Proxy") {
