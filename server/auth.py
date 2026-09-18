@@ -20,6 +20,8 @@ from __future__ import annotations
 import hmac
 import json
 
+from starlette.types import ASGIApp, Receive, Scope, Send
+
 #: Reachable without a key. Matched exactly, as the paths themselves are.
 PUBLIC_PATHS = frozenset({
     "/", "/health", "/api/v1/health", "/tools", "/docs", "/redoc",
@@ -34,11 +36,15 @@ _UNAUTHORISED_BODY = json.dumps(
 class APIKeyMiddleware:
     """Validate an API key on every request outside `PUBLIC_PATHS`."""
 
-    def __init__(self, app, api_key: str) -> None:  # noqa: ANN001
+    def __init__(self, app: ASGIApp, api_key: str) -> None:
         self.app = app
         self.api_key = api_key
+        # Encoded once, so a key that cannot be encoded fails at startup
+        # rather than on an unauthenticated request, and the encode is off
+        # the hot path. ServerConfig refuses a non-ASCII key before this.
+        self._expected = api_key.encode("utf-8")
 
-    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         # lifespan and websocket scopes carry no headers to check and no way
         # to answer 401; they are not this middleware's business.
         if scope["type"] != "http":
@@ -59,7 +65,7 @@ class APIKeyMiddleware:
         })
         await send({"type": "http.response.body", "body": _UNAUTHORISED_BODY})
 
-    def _has_valid_key(self, scope) -> bool:  # noqa: ANN001
+    def _has_valid_key(self, scope: Scope) -> bool:
         """Is either header carrying the configured key?
 
         An empty configured key authorises nobody. The previous version
@@ -74,7 +80,7 @@ class APIKeyMiddleware:
         # was satisfied by `abcdef`, and a key of only emoji by an empty
         # token -- a bypass anyone could send. ~/.quern/api-key is a file a
         # user can edit, and one pasted smart quote is enough to reach it.
-        expected = self.api_key.encode("utf-8")
+        expected = self._expected
         if not expected:
             return False
 

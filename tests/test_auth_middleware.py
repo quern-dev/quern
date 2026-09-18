@@ -85,7 +85,6 @@ def test_a_valid_key_wins_even_when_another_header_is_wrong(client):
 @pytest.mark.parametrize("headers", [
     {},
     {"Authorization": "Bearer wrong-key"},
-    {"Authorization": f"Bearer {KEY} "},          # trailing space is not the key
     {"Authorization": KEY},                       # no scheme
     {"Authorization": f"Basic {KEY}"},            # wrong scheme
     {"Authorization": f"bearer {KEY}"},           # scheme is matched case-sensitively
@@ -316,3 +315,40 @@ async def test_a_disconnect_reaches_the_handler():
         "the handler could not see the client had gone, so no endpoint can "
         "stop work it is doing on a caller's behalf"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("padded", [b" " + KEY.encode(), KEY.encode() + b" "])
+async def test_a_padded_key_is_not_the_key(padded):
+    """Asserted at the middleware, not through a client.
+
+    A second review measured what the wire does with a padded header value and
+    got three different answers: uvicorn's httptools strips a leading space but
+    not a trailing one, h11 strips both, and a test client strips neither. The
+    middleware's own rule is the only invariant this code owns -- an exact
+    match -- and OWS-stripping a padded *correct* key only ever helps someone
+    who already has it.
+    """
+    assert await _status(_get(headers=[(b"x-api-key", padded)])) == 401
+    assert await _status(_get(headers=[(b"authorization", b"Bearer " + padded)])) == 401
+
+
+@pytest.mark.asyncio
+async def test_a_scope_with_no_path_is_refused():
+    """`scope.get("path")` with a default of "/" would make every path-less
+    scope public, since "/" is on the list. Not reachable through uvicorn, but
+    it is the bypass shape, and one line to pin."""
+    assert await _status(
+        {"type": "http", "method": "GET", "headers": [(b"x-api-key", b"wrong")]},
+    ) == 401
+
+
+@pytest.mark.asyncio
+async def test_a_good_bearer_survives_a_wrong_x_api_key():
+    """The mirror of the case at the top of this file: neither header may
+    short-circuit the other. This direction is a lockout rather than a
+    bypass, and nothing pinned it."""
+    assert await _status(_get(headers=[
+        (b"authorization", b"Bearer " + KEY.encode()),
+        (b"x-api-key", b"wrong"),
+    ])) == 200

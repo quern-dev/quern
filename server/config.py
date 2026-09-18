@@ -55,6 +55,20 @@ class ServerConfig:
         if API_KEY_FILE.exists():
             key = API_KEY_FILE.read_text().strip()
             if key:
+                if not key.isascii():
+                    # No HTTP client can send it: httpx raises
+                    # UnicodeEncodeError and node's Headers a TypeError, both
+                    # naming a character rather than the file it came from.
+                    # The server would start and refuse every request. This is
+                    # a hand-edited file, so a pasted smart quote is the likely
+                    # cause -- say that here rather than let it present as
+                    # "authentication is broken".
+                    raise ValueError(
+                        f"The API key in {API_KEY_FILE} contains non-ASCII "
+                        "characters, which HTTP headers cannot carry, so no "
+                        "client could authenticate. Edit the file, or delete "
+                        "it to have a new key generated."
+                    )
                 return key
 
         key = secrets.token_urlsafe(32)

@@ -13,6 +13,8 @@ what motivated the guard.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from starlette.requests import Request
 
@@ -101,3 +103,65 @@ def _sink():
     async def send(message):
         pass
     return send
+
+
+@pytest.mark.asyncio
+async def test_polling_for_a_disconnect_first_does_not_eat_the_body():
+    """F1 from the second review of #228.
+
+    `Request.is_disconnected()` reads the channel inside an already-cancelled
+    scope and discards whatever is not a disconnect. A `receive` that returns
+    the buffered body without ever awaiting therefore loses it, and the
+    endpoint's later `body()` waits on the real channel -- which, under
+    uvicorn, says nothing until the client actually leaves. The endpoint hangs
+    until the disconnect it was checking for.
+
+    Not reachable through FastAPI today, because the Pydantic body is parsed
+    before the handler runs. #204's guard polls `is_disconnected()` on exactly
+    these endpoints, so it is one dependency or middleware away.
+    """
+    order = []
+
+    async def app(scope, receive, send):
+        request = Request(scope, receive)
+        order.append(("disconnected", await request.is_disconnected()))
+        order.append(("body", await asyncio.wait_for(request.body(), timeout=2.0)))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    served = [{"type": "http.request", "body": b'{"udid": "SIM"}', "more_body": False}]
+
+    async def receive():
+        if served:
+            return served.pop(0)
+        await asyncio.sleep(10)          # the real channel: silent until it isn't
+        return {"type": "http.disconnect"}
+
+    await TimelineMiddleware(app)(_scope(_App, ACTION_PATH), receive, _sink())
+
+    assert order == [("disconnected", False), ("body", b'{"udid": "SIM"}')]
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_after_the_body_is_still_seen():
+    """The checkpoint must not cost what the delegation bought."""
+    seen = []
+
+    async def app(scope, receive, send):
+        request = Request(scope, receive)
+        await request.body()
+        seen.append(await request.is_disconnected())
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    messages = [
+        {"type": "http.request", "body": b"{}", "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+
+    async def receive():
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    await TimelineMiddleware(app)(_scope(_App, ACTION_PATH), receive, _sink())
+
+    assert seen == [True]

@@ -185,6 +185,15 @@ class TimelineMiddleware:
             nonlocal body_delivered
             if body_delivered:
                 return await receive()
+            # Yield first. `Request.is_disconnected()` reads the channel inside
+            # an already-cancelled scope and throws away anything that is not a
+            # disconnect, so a receive that returns without ever awaiting hands
+            # over the buffered body and watches it be discarded -- and the
+            # endpoint's later `await request.body()` then waits on the real
+            # channel, which does not speak again until the client leaves. The
+            # checkpoint gives that cancellation somewhere to land, so the poll
+            # answers "still connected" and the body survives for its reader.
+            await asyncio.sleep(0)
             body_delivered = True
             return {
                 "type": "http.request", "body": body_bytes, "more_body": False,

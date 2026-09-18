@@ -51,3 +51,35 @@ def test_channel_to_release_branch():
     from server.config import channel_to_release_branch
     assert channel_to_release_branch("stable") == "release/stable"
     assert channel_to_release_branch("beta") == "release/beta"
+
+
+class TestTheApiKeyFileMustBeSendable:
+    """`~/.quern/api-key` is hand-edited, and its contents become an HTTP
+    header value."""
+
+    def test_a_non_ascii_key_is_refused_and_the_message_names_the_file(
+        self, tmp_path, monkeypatch,
+    ):
+        """No client can send one: httpx raises UnicodeEncodeError and node's
+        Headers a TypeError, each naming a character rather than the file the
+        character came from. Without this the server starts and then refuses
+        every request, which reads as "authentication is broken"."""
+        from server import config as config_mod
+
+        key_file = tmp_path / "api-key"
+        key_file.write_text("abc\u2019def\n")          # a pasted smart quote
+        monkeypatch.setattr(config_mod, "API_KEY_FILE", key_file)
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+
+        with pytest.raises(ValueError, match=str(key_file)):
+            config_mod.ServerConfig()
+
+    def test_an_ascii_key_is_used_as_written(self, tmp_path, monkeypatch):
+        from server import config as config_mod
+
+        key_file = tmp_path / "api-key"
+        key_file.write_text("  plain-key  \n")
+        monkeypatch.setattr(config_mod, "API_KEY_FILE", key_file)
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+
+        assert config_mod.ServerConfig().api_key == "plain-key"
