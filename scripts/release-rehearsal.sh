@@ -127,6 +127,7 @@ step "A git install updating from $PREV to $candidate_version"
 # did not do that, printed a ✗ and summarised "the rehearsal passed": the exact
 # defect it exists to catch, inside itself.
 case_git_update() {
+  failures=0   # a subshell copy: a case reports only its own
   sb="$WORK/git-update"
   mkdir -p "$sb/home" "$sb/state" "$sb/bin"
   make_stubs "$sb/bin"
@@ -136,7 +137,6 @@ case_git_update() {
   git -C "$sb/install" reset -q --hard HEAD~1     # the user is on the previous release
 
   export HOME="$sb/home" QUERN_STATE_DIR="$sb/state" PATH="$sb/bin:$PATH"
-  export QUERN_PORT=9187
 
   # The venv the user would already have. Built from the *previous* release's
   # metadata, because that is what they installed.
@@ -203,6 +203,266 @@ case_git_update() {
 
 set +e
 ( case_git_update )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "Starting the candidate the way a GUI app would"
+# --------------------------------------------------------------------------
+# #193: the menu-bar app launches the server from a launchd context, which
+# inherits a four-entry PATH and none of the user's shell startup files. A node
+# installed by fnm, nvm, Volta, asdf or mise is not there. The server shells out
+# to npm on every start, so a machine that could `quern start` in a terminal
+# could not start the server from the menu bar at all.
+#
+# Runs against the tree the update case just produced, with `env -i` so the
+# environment is built rather than inherited -- an exported variable leaking in
+# from this shell is how a test like this passes for the wrong reason.
+case_gui_start() {
+  failures=0   # a subshell copy: a case reports only its own
+  local sb="$WORK/git-update" install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "GUI-style start: the update case did not leave an install to start"
+    return 0
+  fi
+
+  set +e
+  env -i \
+    HOME="$sb/home" \
+    QUERN_STATE_DIR="$sb/state" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$install/quern" start > "$sb/gui-start.log" 2>&1
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    ok "the server starts with launchd's PATH and no shell startup files"
+  else
+    bad "start exited $rc under a GUI-style environment — see $sb/gui-start.log"
+    sed -n '1,25p' "$sb/gui-start.log" | sed 's/^/      /'
+  fi
+
+  # Healthy, not merely launched: #193 presented as a process that came up and
+  # then could not serve. The port is whatever the scan settled on and is
+  # recorded in the sandbox's own state.json -- assuming one would test a
+  # number rather than the server.
+  # `server_port`, and read as JSON rather than matched with a regex: the
+  # first version of this looked for "port", which is not a field -- and a
+  # pattern that matches nothing reads exactly like a server that recorded
+  # nothing.
+  local port
+  port="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("server_port", ""))
+except Exception:
+    print("")' "$sb/state/state.json" 2>/dev/null)"
+  if [[ -z "$port" ]]; then
+    bad "no port in the sandbox state.json — the server never recorded itself"
+  elif curl -fsS --max-time 10 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+    ok "it answers /health on port $port"
+  else
+    bad "nothing answered http://127.0.0.1:$port/health"
+  fi
+
+  env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$install/quern" stop >/dev/null 2>&1 || true
+  return "$failures"
+}
+
+set +e
+( case_gui_start )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "The MCP wrapper the candidate ships"
+# --------------------------------------------------------------------------
+# What every agent client actually runs. A wrapper that cannot answer
+# `initialize` is a quern that no agent can reach, and the tarball has shipped
+# one: 0.18.3's had no dependencies at all.
+case_mcp_handshake() {
+  failures=0   # a subshell copy: a case reports only its own
+  local sb="$WORK/git-update" install="$WORK/git-update/install"
+  local launcher="$install/mcp/dist/launcher.cjs"
+  if [[ ! -f "$launcher" ]]; then
+    skip "MCP handshake: the candidate has no mcp/dist/launcher.cjs to run"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    skip "MCP handshake: no node on PATH to run the wrapper with"
+    return 0
+  fi
+
+  local req='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"rehearsal","version":"0"}}}'
+  local out
+  out="$(printf '%s\n' "$req" \
+    | env HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+        timeout 30 node "$launcher" 2>&1 | head -c 4000 || true)"
+
+  if printf '%s' "$out" | grep -q '"result"'; then
+    ok "the wrapper answers initialize"
+  else
+    bad "the wrapper did not answer initialize"
+    printf '%s\n' "$out" | sed -n '1,12p' | sed 's/^/      /'
+  fi
+
+  # A wrapper built for a newer Node than it runs on fails as a SyntaxError at
+  # parse time, which reads as a corrupt file rather than as a version problem.
+  if printf '%s' "$out" | grep -q "SyntaxError"; then
+    bad "the wrapper raised a SyntaxError on this node ($(node --version))"
+  else
+    ok "no SyntaxError on $(node --version)"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_mcp_handshake )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "What each Node arrangement looks like from the candidate"
+# --------------------------------------------------------------------------
+# #214: four places choose a `node`, and a machine can be fine in every
+# terminal while a GUI MCP client has none at all. The rows are the product --
+# each carries a different fix -- so the rows are what this asserts, against
+# arrangements built to order rather than against whatever this machine has.
+#
+# A fake `node` rather than a real one: what is under test is which place can
+# *see* a node and what quern says about it, and a shim answers `--version`
+# exactly as well as 90MB of V8. The version-specific behaviour that does need
+# a real old Node -- the wrapper's own refusal to run on it -- is its own case.
+make_fake_node() {
+  mkdir -p "$1"
+  cat > "$1/node" <<EOF
+#!/bin/sh
+[ "\$1" = "--version" ] && { echo "$2"; exit 0; }
+exit 0
+EOF
+  chmod +x "$1/node"
+}
+
+# Just the Node block of a doctor run. Scoped because doctor prints `?` rows in
+# other sections too -- the tool list alone has three on a bare machine -- and
+# an assertion that greps the whole log is answered by the wrong section. The
+# first version of this did exactly that and reported a failure that was not
+# there.
+node_section() {
+  awk '/^Node\.js \(/{f=1} f&&/^$/{exit} f' "$1"
+}
+
+# The mark quern printed for one place: ✓, ✗, ? or –.
+mark_for() {
+  node_section "$1" | sed -n "s/^  \(.\) $2 —.*/\1/p" | head -1
+}
+
+expect_mark() {
+  local log="$1" place="$2" want="$3" what="$4"
+  local got
+  got="$(mark_for "$log" "$place")"
+  if [[ "$got" == "$want" ]]; then
+    ok "$what: $place is $want"
+  else
+    bad "$what: $place is '${got:-nothing}', expected $want"
+  fi
+}
+
+case_node_matrix() {
+  failures=0   # a subshell copy: a case reports only its own
+  local install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "Node arrangements: the update case did not leave an install to ask"
+    return 0
+  fi
+
+  # Each arrangement gets a home of its own: dotfiles are the whole point.
+  local arrangements="$WORK/node"
+  mkdir -p "$arrangements"
+
+  run_doctor() {      # $1 = home, $2 = shell; prints nothing, writes $1/doctor.log
+    ( cd "$install" && timeout 300 env -i \
+        HOME="$1" QUERN_STATE_DIR="$1/state" SHELL="$2" \
+        PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+        "$install/quern" doctor ) > "$1/doctor.log" 2>&1 || true
+  }
+
+  # A version manager set up in .zshrc: interactive shells only. The common
+  # arrangement, and the one where the machine looks fine and an agent's tools
+  # have no node.
+  local h="$arrangements/zshrc-only"
+  mkdir -p "$h/state"
+  make_fake_node "$h/nodebin" "v22.9.0"
+  : > "$h/.zshenv"
+  echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshrc"
+  run_doctor "$h" /bin/zsh
+  expect_mark "$h/doctor.log" "login shell" "✓" "node in .zshrc"
+  expect_mark "$h/doctor.log" "non-interactive shell" "✗" "node in .zshrc"
+  expect_mark "$h/doctor.log" "GUI apps" "✗" "node in .zshrc"
+  if node_section "$h/doctor.log" | grep -q "zshenv"; then
+    ok "node in .zshrc: the non-interactive row names ~/.zshenv"
+  else
+    bad "node in .zshrc: no ~/.zshenv advice, which is the whole fix for that row"
+  fi
+
+  # The same node, moved to .zshenv: every shell sees it, GUI apps still do not.
+  h="$arrangements/zshenv"
+  mkdir -p "$h/state"
+  make_fake_node "$h/nodebin" "v22.9.0"
+  echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshenv"
+  : > "$h/.zshrc"
+  run_doctor "$h" /bin/zsh
+  expect_mark "$h/doctor.log" "login shell" "✓" "node in .zshenv"
+  expect_mark "$h/doctor.log" "non-interactive shell" "✓" "node in .zshenv"
+  expect_mark "$h/doctor.log" "GUI apps" "✗" "node in .zshenv"
+
+  # The field machine from #214: a real node, three majors too old, reported
+  # with a green tick before that release.
+  h="$arrangements/node20"
+  mkdir -p "$h/state"
+  make_fake_node "$h/nodebin" "v20.11.0"
+  echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshenv"
+  : > "$h/.zshrc"
+  run_doctor "$h" /bin/zsh
+  expect_mark "$h/doctor.log" "login shell" "✗" "node 20"
+  if node_section "$h/doctor.log" | grep -q "v20.11.0"; then
+    ok "node 20: the row names the version it found"
+  else
+    bad "node 20: the row does not say which version it found"
+  fi
+
+  # Nobody's node. Must read as missing rather than as an unanswered probe.
+  h="$arrangements/none"
+  mkdir -p "$h/state"
+  : > "$h/.zshenv"; : > "$h/.zshrc"
+  run_doctor "$h" /bin/zsh
+  expect_mark "$h/doctor.log" "login shell" "✗" "no node"
+  expect_mark "$h/doctor.log" "GUI apps" "✗" "no node"
+  if node_section "$h/doctor.log" | grep -q "^  ? "; then
+    bad "no node: a row reported itself unanswered, not missing"
+  else
+    ok "no node: every row is an answer, not a failed probe"
+  fi
+
+  # A shell quern cannot drive. Not a failure: it is a permanent fact about
+  # the machine, and treating it as one would fail every doctor run there.
+  h="$arrangements/fish"
+  mkdir -p "$h/state"
+  : > "$h/.zshenv"; : > "$h/.zshrc"
+  run_doctor "$h" /usr/local/bin/fish
+  local fish_mark
+  fish_mark="$(mark_for "$h/doctor.log" "login shell")"
+  if [[ "$fish_mark" == "–" || "$fish_mark" == "?" ]]; then
+    ok "an unsupported shell: login shell is '$fish_mark', not a false missing"
+  else
+    bad "an unsupported shell: login shell is '${fish_mark:-nothing}', which reads as a real answer"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_node_matrix )
 failures=$((failures + $?))
 set -e
 
