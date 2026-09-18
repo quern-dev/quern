@@ -83,3 +83,32 @@ class TestTheApiKeyFileMustBeSendable:
         monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
 
         assert config_mod.ServerConfig().api_key == "plain-key"
+
+
+class TestStartingWithAnUnusableKeyFile:
+    def test_it_stops_with_the_reason_and_no_traceback(self, tmp_path, monkeypatch, capsys):
+        """The check is only worth having if its sentence is what the operator
+        sees; a traceback buries it."""
+        from server import main as main_mod
+
+        def boom(**kwargs):
+            raise ValueError(f"The API key in {tmp_path}/api-key is unusable")
+
+        monkeypatch.setattr(main_mod, "ServerConfig", boom)
+
+        with pytest.raises(SystemExit) as exit_info:
+            main_mod._config_or_exit(host="127.0.0.1", port=9100, ring_buffer_size=10)
+
+        assert exit_info.value.code == 1
+        assert "api-key is unusable" in capsys.readouterr().out
+
+    def test_a_usable_key_file_is_returned(self, tmp_path, monkeypatch):
+        from server import main as main_mod
+
+        key_file = tmp_path / "api-key"
+        key_file.write_text("usable-key")
+        monkeypatch.setattr("server.config.API_KEY_FILE", key_file)
+
+        config = main_mod._config_or_exit(host="127.0.0.1", port=9100, ring_buffer_size=10)
+
+        assert config.api_key == "usable-key"

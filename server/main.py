@@ -772,6 +772,20 @@ def _is_our_process(pid: int) -> bool:
     return _is_quern_process(pid)
 
 
+def _config_or_exit(**kwargs) -> ServerConfig:
+    """Build the config, or stop with the reason on one line.
+
+    An api-key file quern cannot use is a setup problem with a one-line fix,
+    and the sentence saying what to do is the whole value of the check. A
+    traceback buries it under frames from inside a dataclass.
+    """
+    try:
+        return ServerConfig(**kwargs)
+    except ValueError as exc:
+        print(f"\n  {exc}\n")
+        sys.exit(1)
+
+
 def _cmd_start(args: argparse.Namespace) -> None:
     """Start the server (daemon or foreground)."""
     # Reconcile Python deps before anything imports them. Cheap when in sync
@@ -864,10 +878,8 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
         threading.Thread(target=_bg_update_check, daemon=True).start()
 
-    config = ServerConfig(
-        host=args.host,
-        port=server_port,
-        ring_buffer_size=args.buffer_size,
+    config = _config_or_exit(
+        host=args.host, port=server_port, ring_buffer_size=args.buffer_size,
     )
 
     enable_syslog = args.syslog is True and not args.no_syslog
