@@ -17,8 +17,10 @@
 # runs; it names each failure and exits nonzero at the end, because stopping at
 # the first one hides how much else is wrong.
 #
-# The rehearsal (quern#219) sets QUERN_RELEASES_URL to point the same checks at
-# a candidate served locally; unset, everything below talks to GitHub.
+# QUERN_RELEASES_URL points these checks at a candidate served locally, which
+# is how a release is rehearsed before it exists (quern#219). Unset, everything
+# below talks to GitHub. `release-rehearsal.sh` is the separate script that
+# rehearses the *move* to a candidate; it does not invoke this one.
 set -euo pipefail
 
 TAG="${1:-}"
@@ -134,10 +136,20 @@ else
 fi
 if curl -fsSL --max-time 300 -o "$WORK/$asset" "$asset_url"; then
   ok "$asset downloaded"
-  /usr/bin/tar -xzf "$WORK/$asset" -C "$WORK"
+  # Guarded, for the reason the node_modules check below is: under
+  # `set -euo pipefail` a failed extract ends the run on this line, printing
+  # no `bad`, skipping every check after it and never reaching the summary --
+  # so a corrupt or truncated asset, which is one of the things this script
+  # exists to catch, read as a run that stopped for no stated reason.
+  if ! /usr/bin/tar -xzf "$WORK/$asset" -C "$WORK" 2>"$WORK/tar.err"; then
+    bad "$asset could not be extracted: $(tr -d '\n' < "$WORK/tar.err" | head -c 200)"
+  fi
   tree="$WORK/quern-$VERSION"
+  if [[ ! -d "$tree" ]]; then
+    bad "$asset did not contain quern-$VERSION/ — skipping everything inside it"
+  fi
 
-  if [[ -x "$PYTHON" ]]; then
+  if [[ -d "$tree" && -x "$PYTHON" ]]; then
     for channel in stable beta; do
       # Both halves: the version *and* the URL. Dropping the URL was how the
       # first version of this script could not have caught its own branch
@@ -169,14 +181,31 @@ else:
       # rehearsal of an already-cut tag does -- the answer matches and the
       # check reports a pass it did not earn. Measured: the local server was
       # never asked, while two green lines said the candidate resolved.
-      if [[ -n "${QUERN_RELEASES_URL:-}" && "$override_aware" == "asks-github" ]]; then
-        skip "channel $channel: this release predates QUERN_RELEASES_URL, so its resolver asked GitHub — nothing here was checked against the candidate"
+      #
+      # Decided on where the answer *came from*, not on whether the release
+      # ships `releases.py`. Importing the module proves the module is there;
+      # it does not prove `_fetch_latest_release` goes through it, and a tree
+      # carrying the module with an updater that still builds an api.github.com
+      # URL -- main plus a partial backport -- reported "override-aware" and
+      # suppressed the skip, which is the exact failure the skip is for.
+      answered_locally=0
+      if [[ -n "${QUERN_RELEASES_URL:-}" && "$offered_url" == "$API"* ]]; then
+        answered_locally=1
+      fi
+      if [[ -n "${QUERN_RELEASES_URL:-}" ]] && (( ! answered_locally )); then
+        if [[ "$override_aware" == "asks-github" ]]; then
+          skip "channel $channel: this release predates QUERN_RELEASES_URL, so its resolver asked GitHub — nothing here was checked against the candidate"
+        else
+          bad "channel $channel: the release carries releases.py but resolved ${offered_url:-nothing}, which is not under $API — the override is not wired into its updater"
+        fi
       elif [[ "$offered" == "$VERSION" ]]; then
         ok "channel $channel offers $VERSION"
       else
         bad "channel $channel offers ${offered:-nothing}, expected $VERSION"
       fi
-      if [[ "$override_aware" == "asks-github" ]]; then
+      if [[ -n "${QUERN_RELEASES_URL:-}" ]] && (( ! answered_locally )); then
+        skip "channel $channel: the trust check was not exercised — the resolver did not answer from $API"
+      elif [[ "$override_aware" == "asks-github" ]]; then
         skip "channel $channel: the released code has no trust check to exercise"
       elif [[ "$trusted" == "trusted" ]]; then
         ok "channel $channel resolves to a URL the released code will follow"

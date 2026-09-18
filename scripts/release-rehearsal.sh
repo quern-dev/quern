@@ -29,17 +29,41 @@ CANDIDATE="${1:-HEAD}"
 # this -- and no user is on it, so rehearsing from it rehearses a move nobody
 # will make. `releases/latest` excludes drafts and prereleases by definition.
 latest_published() {
-  gh api repos/quern-dev/quern/releases/latest -q .tag_name 2>/dev/null \
-    || git -C "$ROOT" tag --list 'v*' --sort=-v:refname | head -1
+  local tag
+  tag="$(gh api repos/quern-dev/quern/releases/latest -q .tag_name 2>/dev/null || true)"
+  if [[ -n "$tag" ]]; then
+    printf '%s' "$tag"
+    return 0
+  fi
+  # Not a silent fall back to the newest tag: this function exists *because*
+  # the newest tag can be a release that was pulled back to a draft, and
+  # quietly using one would rehearse a move nobody will make.
+  echo "error: could not ask GitHub for the latest published release." >&2
+  echo "       Pass the previous tag explicitly: $0 <candidate> <tag>" >&2
+  return 1
 }
 PREV="${2:-$(latest_published)}"
 
 failures=0
-skips=0
 ok()   { printf '  \033[0;32m✓\033[0m %s\n' "$1"; }
 bad()  { printf '  \033[0;31m✗\033[0m %s\n' "$1"; failures=$((failures + 1)); }
-skip() { printf '  – %s\n' "$1"; skips=$((skips + 1)); }
 step() { printf '\n==> %s\n' "$1"; }
+
+# Skips go to a file rather than a variable. A case runs in a subshell, so it
+# can only hand back one number, and that is its failure count -- a skip
+# incremented inside one was counted in a copy and thrown away. Four cases can
+# skip everything they do and the summary said "the rehearsal passed" with no
+# mention of a skip at all, which is the shape of the bug this whole script
+# exists to catch.
+SKIPS_FILE=""
+skip() {
+  printf '  – %s\n' "$1"
+  [[ -n "$SKIPS_FILE" ]] && printf '%s\n' "$1" >> "$SKIPS_FILE"
+  return 0
+}
+skip_count() {
+  [[ -s "$SKIPS_FILE" ]] && wc -l < "$SKIPS_FILE" | tr -d ' ' || echo 0
+}
 
 # `|| true` so a bad ref reaches the message below instead of aborting the
 # script on this line with nothing said.
@@ -56,6 +80,8 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+SKIPS_FILE="$WORK/skips"
+: > "$SKIPS_FILE"
 
 # Caches from the real home, so a case is not a network test. Deliberately the
 # only two things a sandbox borrows from outside it, and both are read-mostly
@@ -64,6 +90,84 @@ export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
 export npm_config_cache="${npm_config_cache:-$HOME/.npm}"
 
 REAL_HOME="$HOME"
+
+# Well clear of 9100/9101. See the note in case_gui_start: the default ports
+# are the developer's, and quern reclaims a port by killing whatever quern-ish
+# process holds it.
+REHEARSAL_PORT=9187
+REHEARSAL_PROXY_PORT=9188
+
+# Everything outside the sandbox that a case could plausibly damage, recorded
+# before anything runs and compared after. A snapshot, because the check this
+# replaces asked whether ~/.local/bin/quern still *existed* -- so deleting it
+# printed a skip, left `failures` at zero, and the run reported "the rehearsal
+# passed". The one disaster this repo has actually had, reported as a shrug.
+# Rewriting it in place passed too, and setup bakes a project path into it.
+PROTECTED=(
+  "$REAL_HOME/.local/bin/quern"
+  "$REAL_HOME/.quern/api-key"
+  "$REAL_HOME/.quern/config.json"
+  "$REAL_HOME/.claude/settings.json"
+)
+
+# The MCP client configs are watched by *content that belongs to quern* rather
+# than by file hash. Their owners rewrite them for their own reasons -- Claude
+# Code stores session state in ~/.claude.json and changes it every few seconds
+# -- so a whole-file hash reports a failure on every run that takes a minute.
+# A backstop that cries wolf is one that gets ignored, which is how the thing
+# it guards against ships. What matters here is quern's own registration: the
+# entry setup rewrites, and the one this project has twice pointed at a
+# temporary directory.
+MCP_CONFIGS=(
+  "$REAL_HOME/.claude.json"
+  "$REAL_HOME/.cursor/mcp.json"
+)
+
+quern_entries() {
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+except Exception:
+    print("unreadable")
+    raise SystemExit
+servers = data.get("mcpServers") or {}
+quern = {k: v for k, v in servers.items() if "quern" in k.lower()}
+print(json.dumps(quern, sort_keys=True))' "$1" 2>/dev/null || echo "unreadable"
+}
+
+snapshot_protected() {
+  local path
+  for path in "${PROTECTED[@]}"; do
+    if [[ -e "$path" ]]; then
+      printf '%s\t%s\n' "$path" "$(shasum -a 256 "$path" | awk '{print $1}')"
+    else
+      printf '%s\tabsent\n' "$path"
+    fi
+  done
+  for path in "${MCP_CONFIGS[@]}"; do
+    if [[ -e "$path" ]]; then
+      printf '%s (quern entry)\t%s\n' "$path" "$(quern_entries "$path")"
+    else
+      printf '%s (quern entry)\tabsent\n' "$path"
+    fi
+  done
+}
+
+# The developer's server, if one is running. Killing it is the specific
+# accident the sandbox ports exist to prevent, so it is also the one this
+# checks rather than assumes.
+real_server_pid() {
+  python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("pid", ""))
+except Exception:
+    print("")' "$REAL_HOME/.quern/state.json" 2>/dev/null || true
+}
+
+BEFORE="$(snapshot_protected)"
+REAL_PID="$(real_server_pid)"
 
 # --------------------------------------------------------------------------
 # Sandbox
@@ -74,8 +178,11 @@ REAL_HOME="$HOME"
 # `pkill`/`killall` would find the developer's own processes, and `sudo` is
 # never acceptable unattended. Each records that it was called, so a case can
 # assert on what was attempted.
+STUB_BIN=""
+
 make_stubs() {
   local bin="$1"
+  STUB_BIN="$bin"
   mkdir -p "$bin"
   local tool
   for tool in osascript open sudo launchctl pkill killall; do
@@ -96,6 +203,10 @@ EOF
 # would exit 2 having tested nothing.
 build_origin() {
   local origin="$1" build="$2"
+  # The developer's ~/.gitconfig is not the rehearsal's: a global
+  # `core.hooksPath` or `init.templateDir` would otherwise run their hooks
+  # against this synthetic repository.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
   git init -q --bare "$origin"
   git init -q -b release/stable "$build"
   git -C "$build" config user.email rehearsal@localhost
@@ -142,7 +253,9 @@ case_git_update() {
 
   # The venv the user would already have. Built from the *previous* release's
   # metadata, because that is what they installed.
-  python3 -m venv -q "$sb/install/.venv" 2>/dev/null || python3 -m venv "$sb/install/.venv"
+  # No `-q`: venv has no such flag, so the first branch always failed and the
+  # fallback ran with its chatter in the middle of the results.
+  python3 -m venv "$sb/install/.venv" > "$sb/venv.log" 2>&1 || true
   "$sb/install/.venv/bin/pip" install -q -e "$sb/install" >"$sb/pip.log" 2>&1 || {
     echo "    (pip install failed; see $sb/pip.log)" >&2
   }
@@ -228,12 +341,19 @@ case_gui_start() {
     return 0
   fi
 
+  # Ports of its own, and this is not tidiness. `quern start` reclaims its
+  # port: it looks up whatever holds it and, if the argv looks like a quern,
+  # SIGTERMs and then SIGKILLs it (server/lifecycle/ports.py). A separate
+  # QUERN_STATE_DIR does not enter into that decision, so a sandbox server
+  # taking the default 9100 would kill the *developer's* running server, and
+  # its proxy on 9101. No stub can cover it -- the kill is os.kill, in process.
   set +e
   env -i \
     HOME="$sb/home" \
     QUERN_STATE_DIR="$sb/state" \
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$install/quern" start > "$sb/gui-start.log" 2>&1
+    PATH="$sb/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$install/quern" start --port "$REHEARSAL_PORT" \
+      --proxy-port "$REHEARSAL_PROXY_PORT" > "$sb/gui-start.log" 2>&1
   local rc=$?
   set -e
 
@@ -267,7 +387,7 @@ except Exception:
   fi
 
   env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    PATH="$sb/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$install/quern" stop >/dev/null 2>&1 || true
   return "$failures"
 }
@@ -297,24 +417,38 @@ case_mcp_handshake() {
   fi
 
   local req='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"rehearsal","version":"0"}}}'
+  # Absolute paths, resolved out here: `env -i` with a built PATH loses
+  # anything Homebrew provides, and `timeout` is one -- so the wrapper never
+  # ran and the case reported an `env` error as the wrapper's answer.
+  local node_bin timeout_bin
+  node_bin="$(command -v node)"
+  timeout_bin="$(command -v timeout || command -v gtimeout || true)"
   local out
   out="$(printf '%s\n' "$req" \
-    | env HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
-        timeout 30 node "$launcher" 2>&1 | head -c 4000 || true)"
+    | env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+        PATH="$STUB_BIN:$(dirname "$node_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
+        ${timeout_bin:+"$timeout_bin" 30} "$node_bin" "$launcher" 2>&1 \
+    | head -c 4000 || true)"
 
+  local answered=0
   if printf '%s' "$out" | grep -q '"result"'; then
     ok "the wrapper answers initialize"
+    answered=1
   else
     bad "the wrapper did not answer initialize"
     printf '%s\n' "$out" | sed -n '1,12p' | sed 's/^/      /'
   fi
 
-  # A wrapper built for a newer Node than it runs on fails as a SyntaxError at
-  # parse time, which reads as a corrupt file rather than as a version problem.
-  if printf '%s' "$out" | grep -q "SyntaxError"; then
-    bad "the wrapper raised a SyntaxError on this node ($(node --version))"
+  # Only meaningful if the wrapper actually ran. Grepping the output of a
+  # wrapper that never started finds no SyntaxError and reports a tick, which
+  # is the same false pass as grepping an empty section for a `?` row -- and
+  # it happened here, against `env: timeout: No such file or directory`.
+  if (( ! answered )); then
+    skip "SyntaxError check: the wrapper did not run, so there is nothing to judge"
+  elif printf '%s' "$out" | grep -q "SyntaxError"; then
+    bad "the wrapper raised a SyntaxError on this node ($("$node_bin" --version))"
   else
-    ok "no SyntaxError on $(node --version)"
+    ok "no SyntaxError on $("$node_bin" --version)"
   fi
   return "$failures"
 }
@@ -357,7 +491,9 @@ node_section() {
 
 # The mark quern printed for one place: ✓, ✗, ? or –.
 mark_for() {
-  node_section "$1" | sed -n "s/^  \(.\) $2 —.*/\1/p" | head -1
+  # `|| true`: under `pipefail`, `head` closing the pipe early can surface as
+  # 141 and, in a bare assignment under `set -e`, take the case down mid-way.
+  node_section "$1" | sed -n "s/^  \(.\) $2 —.*/\1/p" | head -1 || true
 }
 
 expect_mark() {
@@ -384,9 +520,13 @@ case_node_matrix() {
   mkdir -p "$arrangements"
 
   run_doctor() {      # $1 = home, $2 = shell; prints nothing, writes $1/doctor.log
+    # The stub directory first on PATH, like every other case. Nothing on
+    # doctor's path calls the stubbed tools today, but `open` and `osascript`
+    # are one refactor away in setup.py -- and the second quits the
+    # developer's real menu-bar app, by name.
     ( cd "$install" && timeout 300 env -i \
         HOME="$1" QUERN_STATE_DIR="$1/state" SHELL="$2" \
-        PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+        PATH="$STUB_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
         "$install/quern" doctor ) > "$1/doctor.log" 2>&1 || true
   }
 
@@ -441,10 +581,18 @@ case_node_matrix() {
   run_doctor "$h" /bin/zsh
   expect_mark "$h/doctor.log" "login shell" "✗" "no node"
   expect_mark "$h/doctor.log" "GUI apps" "✗" "no node"
-  if node_section "$h/doctor.log" | grep -q "^  ? "; then
+  # The positive precondition first. A negative grep over an *empty* section
+  # is satisfied by nothing at all, and that is not hypothetical: 0.18.3's
+  # doctor has no Node section, so this printed a tick against a section that
+  # did not exist. Same shape as the `port` field that was never there.
+  local rows
+  rows="$(node_section "$h/doctor.log" | grep -c "^  [✓✗?–] " || true)"
+  if (( rows < 3 )); then
+    bad "no node: the Node section has $rows rows — there is nothing to judge"
+  elif node_section "$h/doctor.log" | grep -q "^  ? "; then
     bad "no node: a row reported itself unanswered, not missing"
   else
-    ok "no node: every row is an answer, not a failed probe"
+    ok "no node: all $rows rows are answers, not failed probes"
   fi
 
   # A shell quern cannot drive. Not a failure: it is a permanent fact about
@@ -511,7 +659,12 @@ case_fresh_install() {
       "$sb/srv/releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
       "quern-$candidate_version" )
 
-  local port=8907
+  # A port nobody else is on, so two rehearsals can run at once.
+  local port
+  port="$(python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8907)"
   cat > "$sb/srv/releases/latest" <<EOF
 {"tag_name": "v$candidate_version", "prerelease": false,
  "assets": [{"name": "quern-$candidate_version.tar.gz",
@@ -554,10 +707,14 @@ EOF
 
   if [[ $rc -eq 0 ]]; then
     ok "install.sh exits 0 against a locally served candidate"
-  elif grep -q "quern setup" "$sb/install.log"; then
-    # Not a pass dressed up: exiting non-zero *and* naming the step is the
-    # documented answer to having nothing to ask with. Exiting 0 here would be
-    # the failure -- a caller told everything worked, with no venv.
+  elif grep -q "declined without asking" "$sb/install.log"; then
+    # Not a pass dressed up: exiting non-zero *and* reporting what it could
+    # not ask is the documented answer to having no terminal. Exiting 0 here
+    # would be the failure -- a caller told everything worked, with no venv.
+    #
+    # Matched on that report rather than on the string "quern setup", which
+    # appears in the output of a genuinely failed setup too, so any non-zero
+    # exit satisfied it.
     ok "install.sh declined what it could not ask and named the next step (exit $rc)"
   else
     bad "install.sh exited $rc without naming a next step — see $sb/install.log"
@@ -567,10 +724,19 @@ EOF
   # It must have fetched *ours*. The override exists so a rehearsal tests the
   # candidate; an installer that quietly went to GitHub would pass every check
   # below while installing the published release.
-  if grep -q "releases/download/v$candidate_version" "$sb/srv.log"; then
+  # The status code, not just the path. `python -m http.server` logs a 404
+  # exactly as it logs a 200, so an asset staged under the wrong name still
+  # read as "the installer fetched the candidate". The version goes through
+  # `grep -F` too: unescaped, its dots match any character.
+  local asset_line
+  asset_line="$(grep -F "releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
+    "$sb/srv.log" | tail -1 || true)"
+  if [[ -z "$asset_line" ]]; then
+    bad "the local server was never asked for the asset — the installer went somewhere else"
+  elif [[ "$asset_line" == *'" 200 '* ]]; then
     ok "it downloaded the candidate from the local server"
   else
-    bad "the local server was never asked for the asset — the installer went somewhere else"
+    bad "the local server was asked but did not serve it: ${asset_line##*\" }"
   fi
 
   local installed="$sb/home/.local/share/quern"
@@ -653,17 +819,35 @@ fi
 step "Nothing outside the sandbox was touched"
 # --------------------------------------------------------------------------
 # The backstop, because the cost of getting this wrong is measured in this
-# repo's own history rather than in theory.
-[[ "$HOME" == "$REAL_HOME" ]] && ok "the real HOME was restored" || bad "HOME is $HOME"
-if [[ -e "$REAL_HOME/.local/bin/quern" ]]; then
-  ok "the real ~/.local/bin/quern is still there"
+# repo's own history rather than in theory: the suite has twice deleted the
+# developer's `quern` command and twice rewritten a Claude hook.
+#
+# A comparison, not an existence check, and `bad` rather than `skip` -- a
+# file that is absent in both snapshots is fine, and one that changed is a
+# failure however it changed.
+AFTER="$(snapshot_protected)"
+if [[ "$BEFORE" == "$AFTER" ]]; then
+  ok "every protected path outside the sandbox is unchanged"
 else
-  skip "no ~/.local/bin/quern to protect on this machine"
+  bad "something outside the sandbox changed:"
+  diff <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | sed 's/^/      /' || true
+fi
+
+if [[ -z "$REAL_PID" ]]; then
+  ok "no server of yours was running to disturb"
+elif kill -0 "$REAL_PID" 2>/dev/null; then
+  ok "your own server (pid $REAL_PID) is still running"
+else
+  # `quern start` reclaims a port by killing the quern-looking process that
+  # holds it, and does not consult QUERN_STATE_DIR when deciding.
+  bad "your own server (pid $REAL_PID) is gone — the rehearsal killed it"
 fi
 
 printf '\n'
+skips="$(skip_count)"
 if (( failures )); then
   printf '\033[0;31m%d check(s) failed.\033[0m\n' "$failures"
+  (( skips )) && printf '%d also skipped, listed above.\n' "$skips"
   exit 1
 fi
 if (( skips )); then

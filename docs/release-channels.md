@@ -281,8 +281,9 @@ release pulled back to a draft leaves its tag behind -- 0.18.3 did -- and no
 user is on it. Pass a second argument to rehearse from somewhere else.
 
 Proof that it works: `scripts/release-rehearsal.sh v0.18.3 v0.18.2` still
-reproduces #212, `ImportError: cannot import name 'quern_cmd'`, and fails four
-checks.
+reproduces #212 — `ImportError: cannot import name 'quern_cmd'` — and exits
+non-zero. Deliberately no count: a number here is a regression detector that
+goes stale the first time a case is added, and then never fires again.
 
 Doing it first is the point of the split. Notarization is the slow step, the
 one that depends on Apple's service being reachable, and the one that would
