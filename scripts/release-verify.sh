@@ -48,7 +48,12 @@ step "What the release API says"
 # remove.
 latest_json="$(curl -fsSL "$API/releases/latest" 2>/dev/null || true)"
 latest_tag="$(printf '%s' "$latest_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
-if [[ "$latest_tag" == "$TAG" ]]; then
+if [[ -z "$latest_json" ]]; then
+  # Rate limited, offline, or a network in the way. Distinct from an answer:
+  # "none" here would read as an unpublished release and send the reader to
+  # the wrong place.
+  bad "could not ask GitHub for the latest release (rate limited or offline?)"
+elif [[ "$latest_tag" == "$TAG" ]]; then
   ok "latest release is $TAG"
 else
   # A draft, or a release created but never published, reads exactly like this.
@@ -56,7 +61,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "What quern's own updater would offer"
+step "Whether the updater checks can run at all"
 # --------------------------------------------------------------------------
 # The *released* updater, not this checkout's: 0.18.1's downgrade bug lived in
 # the resolver users were running, and a check that ran the fixed local copy
@@ -65,6 +70,11 @@ step "What quern's own updater would offer"
 #
 # The interpreter is this checkout's venv, for its dependencies (`packaging`);
 # the *code* comes from the release.
+#
+# Only the prerequisite is settled here. The resolver checks themselves need
+# the unpacked tarball, so they run inside "What the tarball contains" below --
+# and are skipped entirely when the asset cannot be downloaded, which is why
+# that failure is reported as one `bad` covering everything it took with it.
 PYTHON="$ROOT/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
   bad "no venv interpreter at $PYTHON — the resolver checks need one; run setup"
@@ -75,12 +85,12 @@ step "Where the refs point"
 # --------------------------------------------------------------------------
 # Git installs update by fast-forwarding a channel branch, so a branch left
 # behind strands them silently -- 0.14.0 left release/beta 27 commits back.
-tag_sha="$(git ls-remote "$REMOTE" "$TAG^{}" | awk '{print $1}' | head -1)"
+tag_sha="$(git ls-remote "$REMOTE" "$TAG^{}" 2>/dev/null | awk '{print $1}' | head -1 || true)"
 if [[ -z "$tag_sha" ]]; then
   bad "$TAG is not on the remote"
 else
   for branch in release/stable release/beta; do
-    sha="$(git ls-remote "$REMOTE" "refs/heads/$branch" | awk '{print $1}' | head -1)"
+    sha="$(git ls-remote "$REMOTE" "refs/heads/$branch" 2>/dev/null | awk '{print $1}' | head -1 || true)"
     if [[ "$sha" == "$tag_sha" ]]; then
       ok "$branch is at $TAG"
     else
@@ -94,8 +104,14 @@ else
   # Both refs fetched first: against a stale checkout this reported that main
   # did not contain a tag it has had for hours. This is the one thing here that
   # writes anything, and it writes only to the local object store.
-  git -C "$ROOT" fetch -q origin "$TAG" main 2>/dev/null || true
-  if git -C "$ROOT" merge-base --is-ancestor "$tag_sha" "origin/main" 2>/dev/null; then
+  # Offline, or without a readable origin/main, the answer is "could not ask"
+  # -- which must not print as "the release was cut from something unmerged".
+  # That misreport already happened once here against a stale checkout, and it
+  # sends the reader to audit a release process that is fine.
+  if ! git -C "$ROOT" fetch -q origin "$TAG" main 2>/dev/null \
+     || ! git -C "$ROOT" rev-parse -q --verify origin/main >/dev/null 2>&1; then
+    bad "could not read origin/main, so nothing was checked about $TAG's ancestry"
+  elif git -C "$ROOT" merge-base --is-ancestor "$tag_sha" "origin/main" 2>/dev/null; then
     ok "main contains $TAG"
   else
     bad "main does not contain $TAG — it was cut from something unmerged"
@@ -150,7 +166,7 @@ else:
     done
   fi
 
-  stamped="$(sed -n 's/^version = "\(.*\)"/\1/p' "$tree/pyproject.toml" | head -1)"
+  stamped="$(sed -n 's/^version = "\(.*\)"/\1/p' "$tree/pyproject.toml" 2>/dev/null | head -1 || true)"
   [[ "$stamped" == "$VERSION" ]] && ok "pyproject says $VERSION" \
     || bad "pyproject says ${stamped:-nothing}, expected $VERSION"
 
@@ -158,7 +174,13 @@ else:
   # bar, where a version-managed node is invisible.
   [[ -f "$tree/mcp/dist/launcher.cjs" ]] && ok "mcp/dist is built" \
     || bad "mcp/dist/launcher.cjs is missing — the wrapper would need npm"
-  modules="$(find "$tree/mcp/node_modules" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+  # `|| true` on every one of these: under `set -euo pipefail` a command
+  # substitution that fails takes the whole script down on its own line, so
+  # the missing-node_modules case -- the one this check exists to catch --
+  # killed the run before `bad` could name it, and skipped every check after
+  # it. A verifier that dies where it should report is worse than no verifier:
+  # the operator reads a truncated run with no failure in it.
+  modules="$(find "$tree/mcp/node_modules" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ' || true)"
   if [[ "${modules:-0}" -gt 10 ]]; then
     ok "mcp/node_modules ships ($modules entries)"
   else

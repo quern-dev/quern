@@ -12,6 +12,7 @@ and when an operator has redirected the base, only that host.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,33 @@ import pytest
 from server.lifecycle import releases
 
 LOCAL = "http://127.0.0.1:8899/repos/quern-dev/quern"
-#: The site repo, checked out beside this one. Relative, not absolute: an
-#: absolute path made these tests pass on one machine and skip everywhere else,
-#: including CI.
-INSTALL_SH = Path(__file__).resolve().parents[2] / "quern.dev" / "public" / "_install.sh"
+def _install_sh() -> Path:
+    """The site repo's installer, checked out beside the *main* checkout.
+
+    Not `parents[2]`: inside a git worktree that is the worktree's container
+    (`.claude/worktrees`), so these assertions skipped in every review worktree
+    as well as in CI -- three tests reading green because the file they check
+    was not there. `--git-common-dir` points at the main checkout's `.git`
+    whichever tree this runs in.
+    """
+    root = Path(__file__).resolve().parents[1]
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        if common:
+            root = Path(common).parent
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return root.parent / "quern.dev" / "public" / "_install.sh"
+
+
+#: Still skipped in CI, which checks out this repo alone. That is a real gap
+#: -- the installer is the one fetcher no test here can reach -- and it is
+#: named in the skip rather than hidden by a path that could never resolve.
+INSTALL_SH = _install_sh()
 
 
 class TestTheBase:
@@ -71,6 +95,34 @@ class TestWhatMayBeFollowed:
         ("https://example.com/quern.tar.gz", False),
         ("file:///etc/passwd", False),
         ("x.tgz", False),
+        # A prefix compare reads left to right, and `..` is how a path that
+        # starts inside the allowlist ends up outside it. api.github.com
+        # resolves these server-side and urllib sends the path unchanged, so
+        # this one passed the check and fetched octocat/Hello-World's tree --
+        # the substitution the repo pin exists to prevent, through the pin.
+        ("https://api.github.com/repos/quern-dev/quern/tarball/../../../"
+         "octocat/Hello-World/tarball/master", False),
+        ("https://api.github.com/repos/quern-dev/quern/tarball/%2e%2e/%2e%2e/evil", False),
+        ("https://github.com/quern-dev/quern/releases/download/../../evil/x.tar.gz", False),
+        ("https://github.com/quern-dev/quern/releases/download/./v1/q.tar.gz", False),
+        # An encoded separator is one character to the server and a boundary
+        # to a reader. The two readings must not disagree about the repo.
+        ("https://github.com/quern-dev%2Fquern%2Freleases%2Fdownload%2Fv1/q.tar.gz", False),
+        # A default port written out is the same origin, and a false refusal
+        # here is how the last version of this check would have blocked every
+        # v0.14.1 user's update.
+        ("https://github.com:443/quern-dev/quern/releases/download/v1/q.tar.gz", True),
+        ("https://github.com:8443/quern-dev/quern/releases/download/v1/q.tar.gz", False),
+        ("https://github.com:notaport/quern-dev/quern/releases/download/v1/q.tar.gz", False),
+        # Userinfo: the host a person reads is not the host urllib connects to.
+        ("https://github.com:x@evil.example/quern-dev/quern/releases/download/v1/q", False),
+        # And the other way round, which is the case the host check alone does
+        # not cover: this really does resolve to github.com, on a real path,
+        # so only the explicit refusal stops urllib sending those credentials.
+        # A release response naming credentials is not one to follow.
+        ("https://evil.example@github.com/quern-dev/quern/releases/download/v1/q.tar.gz", False),
+        # A version string is not a path segment worth splitting on.
+        ("https://github.com/quern-dev/quern/releases/download/v1.2.3/q.tar.gz", True),
     ])
     def test_by_default_only_this_repository(self, url, ok):
         assert releases.asset_url_is_trusted(url, {}) is ok
@@ -150,6 +202,33 @@ class TestEveryFetcherUsesIt:
         monkeypatch.setattr("urllib.request.urlopen", urlopen)
         setup_mod.fetch_menubar_app(tmp_path)
         assert seen == [LOCAL + "/releases/tags/v1.0.0"]
+
+    def test_menubar_install_resolves_through_the_base(self, monkeypatch, tmp_path):
+        """The caller the module docstring names, and the one that was missed:
+        it built the github.com URL itself, so a rehearsal fetched and verified
+        the *published* app while claiming to check the candidate."""
+        from server.lifecycle import menubar
+
+        monkeypatch.setenv(releases.ENV_VAR, LOCAL)
+        state = menubar.AppState(
+            path=tmp_path / "Applications" / "Quern.app",
+            installed=False, version=None, running=False, quern_version="1.0.0",
+        )
+        monkeypatch.setattr(menubar, "state", lambda: state)
+        monkeypatch.setattr(menubar.setup, "WRAPPER_PATH", tmp_path / "quern")
+        (tmp_path / "quern").write_text("#!/bin/sh\n")
+        (tmp_path / "quern").chmod(0o755)
+        (tmp_path / "Applications").mkdir()
+
+        seen = []
+
+        def download(url, version, dest):
+            seen.append(url)
+            raise OSError("stop here; the base is what this checks")
+
+        monkeypatch.setattr(menubar.setup, "download_release_app", download)
+        menubar.cmd_install(force=True)
+        assert seen == [LOCAL + "/releases/download/v1.0.0/quern-1.0.0.tar.gz"]
 
     def test_the_updater_refuses_a_download_off_the_release_host(
         self, monkeypatch, tmp_path, capsys,

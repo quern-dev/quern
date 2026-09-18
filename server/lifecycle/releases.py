@@ -17,7 +17,7 @@ verifying something other than what runs.
 from __future__ import annotations
 
 import os
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 GITHUB_REPO = "quern-dev/quern"
 DEFAULT_API = f"https://api.github.com/repos/{GITHUB_REPO}"
@@ -73,17 +73,63 @@ def asset_url_is_trusted(url: str, env: dict[str, str] | None = None) -> bool:
     and urllib follows that redirect, so it establishes *which release* we
     asked for rather than which bytes come back -- see #227 for signing them.
     """
-    parsed = urlparse(url)
-    if parsed.scheme.lower() not in ("https", "http"):
+    origin = _origin(url)
+    if origin is None:
         return False
-    normalised = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"
+    parsed = urlparse(url)
+    # A prefix compare reads the path left to right, and `..` is how a path
+    # that starts inside the allowlist ends up outside it. api.github.com
+    # resolves dot segments server-side and urllib sends the path unchanged,
+    # so `.../quern-dev/quern/tarball/../../../someone/else/tarball/master`
+    # passed this check and fetched another repository's tree -- which is the
+    # exact substitution the repo pin exists to prevent. Refused rather than
+    # normalised: a release naming a URL that has to be resolved to be
+    # understood is not one to follow.
+    if _has_dot_segment(parsed.path):
+        return False
     for prefix in allowed_prefixes(env):
-        head = urlparse(prefix)
-        if normalised.startswith(
-            f"{head.scheme.lower()}://{head.netloc.lower()}{head.path}"
-        ):
+        head = _origin(prefix)
+        if head is None:
+            continue
+        # The raw path, not the decoded one: `%2F` reads as a separator here
+        # and as one character to the server, and the two readings must not be
+        # allowed to disagree about which repository is being named.
+        if f"{origin}{parsed.path}".startswith(f"{head}{urlparse(prefix).path}"):
             return True
     return False
+
+
+def _has_dot_segment(path: str) -> bool:
+    """Whether any segment is `.` or `..`, percent-encoding included."""
+    return any(seg in (".", "..") for seg in unquote(path).split("/"))
+
+
+def _origin(url: str) -> str | None:
+    """`scheme://host[:port]`, lowercased, or None if it cannot be trusted to
+    mean what it reads as.
+
+    Userinfo is refused outright: in `https://github.com@evil.example/x` the
+    host a person reads is not the host urllib connects to. A default port is
+    dropped so that `https://github.com:443/...` -- which no one emits, but
+    which is the same origin -- is not a false refusal. The last false refusal
+    in this check would have blocked every v0.14.1 user's update.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in ("https", "http"):
+        return None
+    if parsed.username or parsed.password:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:      # a non-numeric port; urlparse raises on access
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if port is None or port == (443 if scheme == "https" else 80):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
 
 
 def download_url(version: str, env: dict[str, str] | None = None) -> str:
