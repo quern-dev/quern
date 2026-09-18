@@ -39,7 +39,9 @@ class Machine:
         self.running = running
         self.opens: list[str] = []
         self.asked: list = []
+        self.other_running = False
         self.downloads: list[str] = []
+        self.quits: list = []
         self.open_result = (0, "")
         wrapper_path = tmp_path / "bin" / "quern"
         if wrapper:
@@ -59,9 +61,14 @@ class Machine:
 
     def _running(self, app=None):
         self.asked.append(app)
+        # `other` stands for a Quern running from somewhere else: the generic
+        # question says yes, the question about *this* bundle says no.
+        if app is None:
+            return self.running or self.other_running
         return self.running
 
-    def _quit(self):
+    def _quit(self, app=None):
+        self.quits.append(app)
         self.running = False
 
     def _open(self, app):
@@ -298,15 +305,25 @@ class TestAFailedSwapKeepsAWorkingApp:
         menubar.cmd_install()
         assert seen.get("dir") == m.apps
 
+    def test_another_quern_is_not_quit_out_from_under_someone(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """`_quit_menubar_app` asks by application name, so quitting
+        unconditionally stopped a Quern running from another checkout."""
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5")
+        m.other_running = True
+        assert menubar.cmd_install() == 0
+        assert m.quits == [], "quit an app this command does not own"
+        assert m.opens == [], "activated someone else's app instead of starting ours"
+        out = capsys.readouterr().out
+        assert "running from somewhere else" in out and "menubar open" in out
+
     def test_a_running_app_is_quit_before_it_is_replaced(self, monkeypatch, tmp_path):
         """`open` activates a running instance rather than starting the new
         binary, so without the quit the old build keeps running."""
         m = Machine(monkeypatch, tmp_path, installed="0.18.3", running=True, quern="0.18.5")
-        quits = []
-        monkeypatch.setattr(setup_mod, "_quit_menubar_app",
-                            lambda: quits.append(True) or setattr(m, "running", False))
         assert menubar.cmd_install() == 0
-        assert quits, "the running app was replaced underneath itself"
+        assert m.quits == [m.app], "the running app was replaced underneath itself"
 
     def test_a_stale_incoming_bundle_is_cleared_first(self, monkeypatch, tmp_path):
         m = Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5")

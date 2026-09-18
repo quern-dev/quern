@@ -190,7 +190,13 @@ def cmd_install(force: bool = False) -> int:
         with tempfile.TemporaryDirectory(dir=apps, prefix=".quern-app-") as tmp:
             fresh = setup.download_release_app(url, version, Path(tmp))
             stopped = s.installed and setup._menubar_app_running(s.path)
-            setup._quit_menubar_app()
+            if stopped:
+                # Only when the bundle being replaced is the one running.
+                # `_quit_menubar_app` asks *by application name*, so doing it
+                # unconditionally quit a Quern running from somewhere else --
+                # a dev build, another checkout -- which this command has no
+                # business stopping.
+                setup._quit_menubar_app(s.path)
             staging = s.path.with_name("Quern.app.incoming")
             shutil.rmtree(staging, ignore_errors=True)
             os.replace(fresh, staging)
@@ -225,6 +231,14 @@ def cmd_install(force: bool = False) -> int:
             print(f"The app that was there is at {s.path.with_name('Quern.app.replaced')}")
         print(f"Manual download: https://github.com/quern-dev/quern/releases/tag/v{version}")
         return 1
+
+    if not stopped and setup._menubar_app_running():
+        # `open` activates a running instance rather than starting the new
+        # binary, so say so instead of reporting a launch that did not happen.
+        print(f"Installed v{version} to {s.path}, but another Quern app is "
+              "running from somewhere else. Quit it, then run "
+              f"`{setup.quern_cmd()} menubar open`.")
+        return 0
 
     rc, err = setup._open_menubar_app(s.path)
     if rc != 0:

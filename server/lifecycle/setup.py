@@ -1168,8 +1168,13 @@ def _open_menubar_app(app: Path) -> tuple[int, str]:
     return rc, err
 
 
-def _quit_menubar_app() -> None:
+def _quit_menubar_app(app: Path | None = None) -> None:
     """Ask a running menu-bar app to quit, so a new build can take over.
+
+    `app` narrows only the *waiting*: AppleScript addresses an application by
+    name, so the quit itself reaches whichever copy is frontmost-registered.
+    The caller decides whether quitting is warranted; this waits for the
+    bundle it was given to go away rather than for any copy.
 
     Best-effort and deliberately gentle: `osascript` asks the app to quit
     rather than killing it, so it can tear down its status item cleanly. If
@@ -1177,7 +1182,7 @@ def _quit_menubar_app() -> None:
     """
     _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
     for _ in range(20):
-        if not _menubar_app_running():
+        if not _menubar_app_running(app):
             return
         time.sleep(0.25)
 
