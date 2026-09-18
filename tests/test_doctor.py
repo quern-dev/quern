@@ -15,9 +15,9 @@ import pytest
 from server.main import _cmd_doctor
 
 
+@pytest.fixture(autouse=True)
 def _no_slow_sections(monkeypatch):
-    """The sections that shell out or reach the network, stubbed for every test
-    in this file.
+    """The sections that do real machine work, stubbed for every test here.
 
     Autouse, because the exit-contract tests do not take `stub_sections` and
     CI caught the consequence: on a runner with no app and no wrapper,
@@ -27,11 +27,6 @@ def _no_slow_sections(monkeypatch):
     """
     monkeypatch.setattr("server.main._report_node", lambda: True)
     monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
-
-
-@pytest.fixture(autouse=True)
-def _autouse_no_slow_sections(monkeypatch):
-    _no_slow_sections(monkeypatch)
 
 
 @pytest.fixture

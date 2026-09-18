@@ -1069,8 +1069,13 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             # no longer has a name, which is a confusing state to debug.
             # Whether it was running is recorded first: a first install has
             # nothing to stop, and must not later claim it stopped something.
-            stopped = _menubar_app_running()
-            _quit_menubar_app()
+            #
+            # The bundle being replaced, not any Quern: the quit asks by
+            # application name, so asking for it when someone else's copy is
+            # running stops an app this has no business stopping.
+            stopped = _menubar_app_running(installed)
+            if stopped:
+                _quit_menubar_app(installed)
             shutil.rmtree(installed, ignore_errors=True)
             os.replace(str(staging), str(installed))
         except OSError as e:

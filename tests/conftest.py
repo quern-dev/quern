@@ -406,6 +406,16 @@ def _no_real_release_downloads(monkeypatch, request):
     """
     if request.node.get_closest_marker("release_download"):
         return
+
+    class ReleaseFetchBlocked(BaseException):
+        """Not an Exception on purpose.
+
+        `updater._fetch_latest_release` and friends catch `Exception` around
+        exactly these calls, so an AssertionError here was swallowed: the test
+        passed with a silently wrong answer and the guard's message went into
+        captured stdout. A BaseException reaches the runner.
+        """
+
     import urllib.request
 
     from server.lifecycle import setup as setup_mod
@@ -415,7 +425,7 @@ def _no_real_release_downloads(monkeypatch, request):
     def guarded_urlopen(url, *a, **kw):
         target = getattr(url, "full_url", url)
         if isinstance(target, str) and "/releases" in target:
-            raise AssertionError(
+            raise ReleaseFetchBlocked(
                 f"a test tried to fetch {target}. Patch urlopen, or stub the "
                 "section that calls it."
             )
@@ -424,7 +434,7 @@ def _no_real_release_downloads(monkeypatch, request):
     monkeypatch.setattr(urllib.request, "urlopen", guarded_urlopen)
 
     def refuse(url, version, work):
-        raise AssertionError(
+        raise ReleaseFetchBlocked(
             f"a test tried to download {url}. Patch download_release_app, or "
             "stub the section that calls it."
         )

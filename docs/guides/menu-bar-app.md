@@ -45,8 +45,10 @@ If you're working on the app itself, build it from your checkout instead:
 scripts/install-menubar-app.sh --build
 ```
 
-Both install to `~/Applications/Quern.app`, quit a running copy first, then
-launch it. The app starts the server itself, so that one command is the whole
+Both install to `~/Applications/Quern.app` and launch the app. A copy running
+from *that* location is quit first so the new build actually starts; a Quern
+running from somewhere else is left alone and reported, since quitting it is
+not this command's business. The app starts the server itself, so that one command is the whole
 setup — from there you can drive Quern from the menu bar and leave the CLI
 alone.
 

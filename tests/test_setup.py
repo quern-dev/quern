@@ -1835,11 +1835,15 @@ class TestMenubarInstallLocation:
         apps = tmp_path / "Applications"
         (root / "Quern.app").mkdir(parents=True)
         calls: list[list[str]] = []
+        alive = {"yes": True}
 
         def record(cmd, timeout=30):
             calls.append(cmd)
             if cmd[0] == "pgrep":
-                return (1, "", "")   # nothing running after the quit
+                # Running until the quit, gone after it.
+                return (0, "4242", "") if alive["yes"] else (1, "", "")
+            if cmd[0] == "osascript":
+                alive["yes"] = False
             return (0, "", "")
 
         monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
@@ -1849,6 +1853,12 @@ class TestMenubarInstallLocation:
         quit_at = next(i for i, c in enumerate(calls) if c[0] == "osascript")
         open_at = next(i for i, c in enumerate(calls) if c[0] == "open")
         assert quit_at < open_at, "opened the app before asking the old one to quit"
+        # The bundle it is replacing, not any Quern: the quit asks by
+        # application name, so a generic question stops someone else's copy.
+        import re as _re
+
+        pgrep_before_quit = next(c for c in calls if c[0] == "pgrep")
+        assert _re.escape(str(apps / "Quern.app")) in pgrep_before_quit[-1], pgrep_before_quit
 
     def test_an_already_installed_app_is_not_refetched(self, tmp_path, monkeypatch):
         """After the first setup the app lives only in ~/Applications.

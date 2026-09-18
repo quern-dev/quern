@@ -232,13 +232,20 @@ def cmd_install(force: bool = False) -> int:
         print(f"Manual download: https://github.com/quern-dev/quern/releases/tag/v{version}")
         return 1
 
-    if not stopped and setup._menubar_app_running():
+    # "Is anything running that is not the copy just installed?" -- which is
+    # the question, and was asked as `not stopped` before: with *both* ours and
+    # another checkout's copy running, that skipped the check entirely and
+    # claimed a launch that never happened.
+    if setup._menubar_app_running() and not setup._menubar_app_running(s.path):
         # `open` activates a running instance rather than starting the new
         # binary, so say so instead of reporting a launch that did not happen.
         print(f"Installed v{version} to {s.path}, but another Quern app is "
               "running from somewhere else. Quit it, then run "
               f"`{setup.quern_cmd()} menubar open`.")
-        return 0
+        # Same outcome as a failed launch -- a new app on disk and nothing in
+        # the menu bar -- so the same status. `install && ...` should not
+        # continue as though the app were up.
+        return 1
 
     rc, err = setup._open_menubar_app(s.path)
     if rc != 0:

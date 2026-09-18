@@ -312,11 +312,24 @@ class TestAFailedSwapKeepsAWorkingApp:
         unconditionally stopped a Quern running from another checkout."""
         m = Machine(monkeypatch, tmp_path, installed="0.18.3", quern="0.18.5")
         m.other_running = True
-        assert menubar.cmd_install() == 0
+        # 1, not 0: a new app on disk and nothing in the menu bar is the same
+        # outcome as a failed launch, and `install && ...` must not carry on.
+        assert menubar.cmd_install() == 1
         assert m.quits == [], "quit an app this command does not own"
         assert m.opens == [], "activated someone else's app instead of starting ours"
         out = capsys.readouterr().out
         assert "running from somewhere else" in out and "menubar open" in out
+
+    def test_both_ours_and_another_copy_running_is_still_reported(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Asking `not stopped` skipped the check when ours was running too,
+        and claimed a launch that never happened."""
+        m = Machine(monkeypatch, tmp_path, installed="0.18.3", running=True, quern="0.18.5")
+        m.other_running = True
+        assert menubar.cmd_install() == 1
+        assert "running from somewhere else" in capsys.readouterr().out
+        assert m.opens == [], "activated the other copy and called it ours"
 
     def test_a_running_app_is_quit_before_it_is_replaced(self, monkeypatch, tmp_path):
         """`open` activates a running instance rather than starting the new
@@ -345,6 +358,46 @@ class TestAFailedSwapKeepsAWorkingApp:
         assert menubar.cmd_install() == 1
         assert m.version() == "0.18.3"
         assert "Could not install" in capsys.readouterr().out
+
+
+class TestQuittingWaitsForTheRightApp:
+    """`_quit_menubar_app` asks by application name; the *wait* is what knows
+    which bundle. Reverting that wait to the generic form passed the whole
+    suite, because every test replaced the function wholesale."""
+
+    def test_it_waits_for_the_bundle_it_was_given(self, monkeypatch):
+        import re
+
+        ours = Path("/Users/u/Applications/Quern.app")
+        asked = []
+        alive = {"ours": True}
+
+        def run(cmd, timeout=30):
+            if cmd[0] == "pgrep":
+                asked.append(cmd[-1])
+                return (0, "4242", "") if alive["ours"] else (1, "", "")
+            if cmd[0] == "osascript":
+                alive["ours"] = False
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        monkeypatch.setattr(setup_mod.time, "sleep", lambda _s: None)
+        setup_mod._quit_menubar_app(ours)
+        assert asked, "it never checked whether the app had gone"
+        assert all(re.escape(str(ours)) in pattern for pattern in asked), asked
+
+    def test_it_returns_at_once_when_that_bundle_was_never_running(self, monkeypatch):
+        calls = []
+
+        def run(cmd, timeout=30):
+            calls.append(cmd[0])
+            return (1, "", "") if cmd[0] == "pgrep" else (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        monkeypatch.setattr(setup_mod.time, "sleep",
+                            lambda _s: pytest.fail("waited for an app that was not running"))
+        setup_mod._quit_menubar_app(Path("/Users/u/Applications/Quern.app"))
+        assert calls.count("pgrep") == 1
 
 
 class TestCommandLine:
@@ -444,6 +497,15 @@ class TestDoctorAndSetup:
         main._report_menubar(fix=True)
         assert m.downloads == []
         assert "installing" not in capsys.readouterr().out
+
+    def test_doctor_fix_repairs_a_damaged_app(self, monkeypatch, tmp_path):
+        """The CHANGELOG says --fix reinstalls one that is "stale or damaged";
+        only the stale half was pinned."""
+        m = Machine(monkeypatch, tmp_path, quern="0.18.5")
+        (m.app / "Contents").mkdir(parents=True)          # installed, no version
+        checked, repaired = main_report(monkeypatch, fix=True)
+        assert (checked, repaired) == (True, True)
+        assert m.version() == "0.18.5"
 
     def test_doctor_fix_does_not_install_an_app_that_was_never_there(
         self, monkeypatch, tmp_path, capsys,
