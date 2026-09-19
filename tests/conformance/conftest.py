@@ -415,7 +415,8 @@ def bypass_sandbox(quern: client_mod.QuernClient, proxy_running: dict):
 
 
 def _install_and_launch(
-    client: client_mod.QuernClient, udid: str, artifact, contract
+    client: client_mod.QuernClient, udid: str, artifact, contract,
+    bundle_id: str = probe_mod.BUNDLE_ID,
 ):
     """Install the built artifact and bring the app to the foreground."""
     client.json_ok(
@@ -424,9 +425,9 @@ def _install_and_launch(
     )
     client.json_ok(
         "POST", "/api/v1/device/app/launch",
-        json={"udid": udid, "bundle_id": probe_mod.BUNDLE_ID}, timeout=180.0,
+        json={"udid": udid, "bundle_id": bundle_id}, timeout=180.0,
     )
-    driver = probe_mod.ProbeDriver(client, udid, contract)
+    driver = probe_mod.ProbeDriver(client, udid, contract, bundle_id)
     driver.wait_until_ready()
     return driver
 
@@ -447,12 +448,20 @@ def ios_probe(quern: client_mod.QuernClient, ios_simulator: Device):
             json={"udid": ios_simulator.udid}, timeout=300.0,
         )
 
+    # iOS 27 will not launch a bundle without a scene manifest, and reports the
+    # launch as successful anyway (#235), so the fixture has to choose before it
+    # builds rather than fail afterwards. Below 27 the app-delegate build stays
+    # the one under test: it is the older shape, and it is covered nowhere else.
+    scene = probe_mod.scene_lifecycle_required(ios_simulator.os_version)
     try:
-        bundle = probe_mod.build_ios()
+        bundle = probe_mod.build_ios(scene=scene)
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"iOS probe app unavailable: {exc}")
 
-    return _install_and_launch(quern, ios_simulator.udid, bundle, probe_mod.IOS)
+    return _install_and_launch(
+        quern, ios_simulator.udid, bundle, probe_mod.IOS,
+        probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
+    )
 
 
 @pytest.fixture(scope="session")

@@ -221,6 +221,29 @@ narrow test, because the defect is that *every* tap-driven endpoint 500s.
 
 ---
 
+### F5 addendum — it also fires on the read right after a relaunch (2026-09-18)
+
+Reproduced on the iOS 27.0 simulator, server v0.19.0, in a different endpoint:
+`GET /api/v1/device/ui/element` returned `500 Internal Server Error` five times
+in one run, erroring every typing test at `relaunch()`. The server log carries
+
+```
+RuntimeError: sim-bridge: Failed to query accessibility tree.
+Is the simulator booted with a frontmost app?
+```
+
+raised from `_send_admitted` through `describe_all`, so the read landed in the
+window between `terminate` and the relaunched app becoming frontmost.
+
+Two things this adds to #178. The path is a *read*, not a tap, so a fix applied
+to the tap endpoints alone would leave it. And the discarded message is the
+useful one here -- "is the simulator booted with a frontmost app?" names the
+condition exactly, and the caller is told `Internal Server Error` instead. A
+transient no-frontmost-app is also arguably not a 500 at all: the same run
+recovered on the next poll.
+
+---
+
 ## F6 — backend selection is latched at startup and never re-checked
 
 **Status:** filed as [#179](https://github.com/quern-dev/quern/issues/179) — confirmed — root cause of F5's trigger, on this machine.
@@ -630,3 +653,28 @@ wrong.
 
 Merge the branch that carries the fixture change before reading any result
 from it.
+
+## F18 — on iOS 27 the app-delegate fixture cannot launch, and the suite said nothing useful → #235
+
+Every iOS test errored in the fixture against an iOS 27.0 simulator: `the probe
+app did not show 'tab_text' within 30s after launch`, with the home screen in
+the summary. The cause is not the suite -- iOS 27 requires a scene manifest, so
+`QuernProbe.app` (app-delegate lifecycle, no manifest) dies at startup with
+"UIScene life cycle is required for apps built with this SDK" -- but two things
+about the report were the suite's doing.
+
+`launch_app` returned success with a pid, because the process really did start;
+it is the scene assertion that kills it a moment later. So the only signal the
+fixture had was a sentinel that never appeared, which is also what a slow cold
+start, a wrong tab and a broken build look like. The message named none of
+them.
+
+`ios_probe` now asks the runtime version and builds the scene variant
+(`com.quern.probe.scene`, the same sources under `Info-Scene.plist`) at iOS 27
+and above, and the readiness failure names the lifecycle mismatch as a
+candidate. Below 27 the app-delegate build stays the one under test: it is the
+older shape and nothing else covers it.
+
+The product bug is still open. `launch_app` reporting success for a launch that
+cannot survive is what made this cost a suite run to diagnose, and no fixture
+change fixes that for anyone else's app.

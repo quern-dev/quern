@@ -32,6 +32,37 @@ BUNDLE_ID = "com.quern.probe"
 #: A second bundle the iOS app builds for scene-lifecycle coverage.
 SCENE_BUNDLE_ID = "com.quern.probe.scene"
 
+#: The first iOS release that refuses to launch an app with no scene manifest.
+#: Below it, the app-delegate build is what this suite runs -- it is the older
+#: and more common shape, and dropping it would stop covering it anywhere.
+SCENE_REQUIRED_IOS_MAJOR = 27
+
+
+def scene_lifecycle_required(os_version: str) -> bool:
+    """Does this runtime refuse the app-delegate build?
+
+    iOS 27 makes a scene manifest mandatory: a bundle without one dies at
+    startup with "UIScene life cycle is required for apps built with this SDK",
+    and `launch_app` still reports success with a pid, because the process did
+    start (#235). Nothing downstream can tell that apart from a slow launch, so
+    the choice is made here, from the runtime version, rather than by trying the
+    app-delegate build and reading the wreckage.
+
+    Unparseable or empty versions answer False: the app-delegate build is the
+    default, and guessing "scene" for a runtime we could not identify would swap
+    what is covered on every machine whose device list shapes its versions
+    differently.
+    """
+    digits = ""
+    for char in os_version:
+        if char.isdigit():
+            digits += char
+        elif digits:
+            break
+    if not digits:
+        return False
+    return int(digits) >= SCENE_REQUIRED_IOS_MAJOR
+
 
 class Ids:
     """Logical element names. Values are the keys into `ProbeContract.ids`."""
@@ -231,8 +262,13 @@ class ProbeUnavailable(RuntimeError):
     """The fixture app could not be built or installed, with the reason."""
 
 
-def build_ios(*, timeout: float = 600.0) -> Path:
+def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
     """Build the iOS probe app and return the bundle path.
+
+    `scene` builds the scene-lifecycle variant instead. The two are the same
+    sources under two Info.plists, so which one a test runs against changes the
+    lifecycle and nothing the contract names -- see `scene_lifecycle_required`
+    for when the choice is forced.
 
     Raises `ProbeUnavailable` rather than failing a test directly, so the caller
     decides between skip and fail. A missing Xcode is a skip; a build that breaks
@@ -246,7 +282,7 @@ def build_ios(*, timeout: float = 600.0) -> Path:
 
     try:
         result = subprocess.run(  # noqa: S603 - fixed path in this repo
-            [str(script)],
+            [str(script), *(["--scene"] if scene else [])],
             cwd=str(IOS.source_dir),
             capture_output=True,
             text=True,
@@ -258,7 +294,8 @@ def build_ios(*, timeout: float = 600.0) -> Path:
             f"probe-app build did not finish in {timeout:.0f}s"
         ) from exc
 
-    bundle = IOS.source_dir / "build" / "QuernProbe.app"
+    name = "QuernProbeScene.app" if scene else "QuernProbe.app"
+    bundle = IOS.source_dir / "build" / name
     if result.returncode != 0 or not bundle.exists():
         raise ProbeUnavailable(
             f"probe-app build failed (exit {result.returncode}):\n"
@@ -319,10 +356,21 @@ class ProbeDriver:
     #: testing scroll-to-find.
     NO_SCROLL = {"scroll_to_find": False}
 
-    def __init__(self, client, udid: str, contract: ProbeContract):
+    def __init__(
+        self,
+        client,
+        udid: str,
+        contract: ProbeContract,
+        bundle_id: str = BUNDLE_ID,
+    ):
         self.client = client
         self.udid = udid
         self.contract = contract
+        #: Which of the two iOS bundles is installed. Carried rather than read
+        #: from the module, because `relaunch` terminating the bundle that is
+        #: *not* running succeeds and leaves the app up, so the reset silently
+        #: does nothing and the next test inherits the last one's state.
+        self.bundle_id = bundle_id
 
     # -- reading -----------------------------------------------------------
 
@@ -512,11 +560,11 @@ class ProbeDriver:
         """
         self.client.post(
             "/api/v1/device/app/terminate",
-            json={"udid": self.udid, "bundle_id": BUNDLE_ID}, timeout=90.0,
+            json={"udid": self.udid, "bundle_id": self.bundle_id}, timeout=90.0,
         )
         self.client.json_ok(
             "POST", "/api/v1/device/app/launch",
-            json={"udid": self.udid, "bundle_id": BUNDLE_ID}, timeout=180.0,
+            json={"udid": self.udid, "bundle_id": self.bundle_id}, timeout=180.0,
         )
         self.wait_until_ready()
 
@@ -550,8 +598,10 @@ class ProbeDriver:
             params={"udid": self.udid}, timeout=60.0,
         )
         raise AssertionError(
-            f"the probe app did not show {sentinel!r} within {timeout_s:.0f}s "
-            f"after launch. On screen instead: {summary.text[:400]}"
+            f"{self.bundle_id} did not show {sentinel!r} within {timeout_s:.0f}s "
+            f"after launch. A launch reported as successful whose UI never "
+            f"appears is what an iOS 27 lifecycle mismatch looks like (#235). "
+            f"On screen instead: {summary.text[:400]}"
         )
 
     # -- scroll fixture ----------------------------------------------------

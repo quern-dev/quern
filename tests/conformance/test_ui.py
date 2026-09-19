@@ -41,8 +41,8 @@ def test_the_probe_app_is_installed(quern, probe) -> None:
     )
     apps = body.get("apps") or []
     ids = {a.get("bundle_id") for a in apps}
-    assert "com.quern.probe" in ids, (
-        f"the probe app is not installed; {len(ids)} app(s) present"
+    assert probe.bundle_id in ids, (
+        f"{probe.bundle_id} is not installed; {len(ids)} app(s) present"
     )
 
 
