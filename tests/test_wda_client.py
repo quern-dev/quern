@@ -266,6 +266,34 @@ class TestFindElementAtPoint:
         # Should prefer Button (deeper) over Window/Application
         assert result["type"] == "Button"
 
+    def test_a_later_full_screen_overlay_does_not_hide_the_row_beneath(self):
+        """iOS 26 Settings: full-screen `Other` views follow the rows.
+
+        Picking the last match returned an overlay for every point, whose frame
+        never moves, so the scroll sweep saw no progress and gave up.
+        """
+        screen = {"x": 0, "y": 0, "width": 414, "height": 896}
+        elements = [
+            {"type": "Application", "frame": screen},
+            {"type": "Cell", "label": "General",
+             "frame": {"x": 20, "y": 300, "width": 374, "height": 52}},
+            {"type": "StaticText", "label": "General",
+             "frame": {"x": 80, "y": 314, "width": 200, "height": 24}},
+            {"type": "Other", "frame": screen},
+            {"type": "Other", "frame": screen},
+        ]
+        result = find_element_at_point(elements, 150, 320)
+        assert result["label"] == "General"
+        assert result["type"] == "StaticText"
+
+    def test_a_child_sharing_its_parents_frame_wins(self):
+        frame = {"x": 0, "y": 0, "width": 100, "height": 100}
+        elements = [
+            {"type": "Other", "frame": frame},
+            {"type": "Button", "frame": frame},
+        ]
+        assert find_element_at_point(elements, 50, 50)["type"] == "Button"
+
     def test_no_frame_elements_skipped(self):
         elements = [
             {"type": "Other", "frame": None},

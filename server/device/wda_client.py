@@ -202,6 +202,10 @@ def _parse_wda_error(resp: httpx.Response, udid: str) -> WdaError | None:
 class WdaBackend:
     """Speaks WDA's HTTP API for UI automation on physical iOS devices."""
 
+    #: A WDA swipe returns once the app is idle, so a read straight after it
+    #: is at rest. Measured on an iPhone 11, including at the end of a list.
+    swipe_returns_at_rest = True
+
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
         self._next_port = FORWARD_START_PORT
@@ -854,6 +858,10 @@ class WdaBackend:
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        # Accepted for interface parity with SimBridgeBackend and IdbBackend,
+        # and ignored: XCUITest's /source enumerates container children, so there is
+        # nothing to probe and nothing for the caller to switch off.
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
 
@@ -983,8 +991,15 @@ class WdaBackend:
         end_x: float,
         end_y: float,
         duration: float = 0.5,
+        hold: float = 0.0,
     ) -> None:
-        """Swipe gesture via WDA."""
+        """Swipe gesture via WDA.
+
+        `hold` is accepted for parity with sim-bridge and ignored. WDA's drag is
+        XCUITest's press-then-drag, not a flick: measured on an iPhone 11, a
+        358pt drag moved the list 349pt, and nothing was moving once the call
+        returned, including at the end of a list.
+        """
         await self._request("post", udid, "/wda/dragfromtoforduration",
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={
@@ -1210,12 +1225,21 @@ def _map_wda_element_from_query(el: dict, class_name: str) -> dict | None:
 
 
 def find_element_at_point(elements: list[dict], x: float, y: float) -> dict | None:
-    """Find the deepest (last in flat list) element whose frame contains (x, y).
+    """Find the smallest element whose frame contains (x, y).
 
-    Since flatten_wda_tree outputs parents before children, the last match
-    is the most specific (deepest) element.
+    Smallest, not last. flatten_wda_tree emits parents before children, so the
+    last match used to stand in for the deepest -- but a sibling that comes
+    *after* the content is also last, however large it is. iOS 26 Settings has
+    several full-screen `Other` views after its rows, so every point on the
+    screen resolved to one of them. Their frame never moves, which made the
+    scroll sweep's progress check conclude that nothing scrolled and give up
+    after one swipe on a list it could have scrolled.
+
+    Ties go to the later element, which keeps the deeper of a parent and a
+    child that share a frame.
     """
     best = None
+    best_area = float("inf")
     for el in elements:
         frame = el.get("frame")
         if not frame:
@@ -1225,5 +1249,7 @@ def find_element_at_point(elements: list[dict], x: float, y: float) -> dict | No
         fw = frame["width"]
         fh = frame["height"]
         if fx <= x <= fx + fw and fy <= y <= fy + fh:
-            best = el
+            area = fw * fh
+            if area <= best_area:
+                best, best_area = el, area
     return best

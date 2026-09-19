@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import pathlib
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -578,3 +580,276 @@ class TestTheTwoHalvesAgreeOnSymlinkedDeveloperDirs:
             "report unavailable for an Xcode that works"
         )
         assert found.name == "SimulatorKit.framework"
+
+
+class TestDescribeAllProbeSkip:
+    """`probe=False` is a performance escape hatch with a correctness cost.
+
+    The probe finds hidden children of containers the static walk reports as
+    childless. Skipping it is right only when the caller knows its target is in
+    the static tree, so the flag has to actually reach the probing decision --
+    and it has to survive the poisoned-tree retry, or a caller that opted out
+    silently pays again on recovery.
+    """
+
+    def _backend(self, nested, probe_calls):
+        mgr = SimBridgeManager()
+        backend = SimBridgeBackend(mgr)
+        backend._fetch_nested = AsyncMock(return_value=nested)  # type: ignore[method-assign]
+
+        async def _describe_point(udid, x, y):
+            probe_calls.append((x, y))
+            return None
+
+        backend.describe_point = _describe_point  # type: ignore[method-assign]
+        return backend
+
+    #: A container the static walk reports as childless, so it gets probed.
+    #: Shaped to match `is_probeable_container`: a Group whose label names it a
+    #: tab bar, with no enumerated children. This is the real tab-bar case, not
+    #: an invented one -- an invented shape would make the default-probing test
+    #: pass or fail for reasons unrelated to the flag.
+    PROBEABLE = [{
+        "type": "Group", "AXLabel": "Tab Bar", "children": [],
+        "frame": {"x": 0, "y": 800, "width": 400, "height": 80},
+    }]
+
+    @pytest.mark.asyncio
+    async def test_probing_happens_by_default(self):
+        calls: list = []
+        backend = self._backend(self.PROBEABLE, calls)
+        await backend.describe_all("udid")
+        assert calls, "the default call did not probe an empty container"
+
+    @pytest.mark.asyncio
+    async def test_probe_false_skips_the_hit_tests(self):
+        calls: list = []
+        backend = self._backend(self.PROBEABLE, calls)
+        await backend.describe_all("udid", probe=False)
+        assert calls == [], (
+            f"probe=False still issued {len(calls)} describe_point call(s); "
+            "this is 92% of the cost the flag exists to avoid"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_static_tree_is_still_returned_when_probing_is_skipped(self):
+        """Skipping the probe must not skip the answer."""
+        calls: list = []
+        backend = self._backend(self.PROBEABLE, calls)
+        result = await backend.describe_all("udid", probe=False)
+        assert len(result) == 1
+        assert result[0]["type"] == "Group"
+
+
+class TestCancellationIsNotSwallowed:
+    """A cancelled command stays cancelled; a crashed bridge stays a failure.
+
+    `_send_locked` sees `CancelledError` from two different sources, and they
+    need different exits:
+
+    * **this task was cancelled** — `_run_until_client_leaves` does that when a
+      client disconnects. The cancellation must propagate, or the caller that
+      asked for it never finds out.
+    * **the future was cancelled under us** — `_stdout_reader` calls
+      `_cleanup_state()` when the subprocess exits, which cancels
+      `_pending_response`. Nobody cancelled anything; the bridge crashed. That
+      is a failed command and must be reported as one.
+
+    Both are driven for real here: `_send_locked` awaits a genuine future, and
+    the test either cancels the *task* or cancels the *future*. The first
+    version of these tests patched `asyncio.wait_for` to raise, which looks the
+    same in both cases — so it passed against an implementation that turned
+    every crash into a cancellation.
+    """
+
+    def _manager(self):
+        mgr = SimBridgeManager()
+        mgr._process = MagicMock()
+        mgr._process.stdin = MagicMock()
+        mgr._process.stdin.drain = AsyncMock()
+        mgr._ensure_process = AsyncMock()  # type: ignore[method-assign]
+        mgr._kill_process = AsyncMock()  # type: ignore[method-assign]
+        return mgr
+
+    async def _until_waiting(self, mgr):
+        """Yield until `_send_locked` has created its future and is awaiting it."""
+        for _ in range(100):
+            if mgr._pending_response is not None:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("_send_locked never reached its wait")
+
+    @pytest.mark.asyncio
+    async def test_cancelling_the_task_propagates_the_cancellation(self):
+        mgr = self._manager()
+        task = asyncio.ensure_future(mgr._send_locked({"cmd": "tap"}))
+        await self._until_waiting(mgr)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert mgr._kill_process.await_count == 1, (
+            "the subprocess was not killed on cancellation; a late response can "
+            "still be handed to the next command, which the protocol cannot detect"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_bridge_crash_is_a_failure_not_a_cancellation(self):
+        """The regression the review caught.
+
+        Cancelling the *future* is what `_cleanup_state()` does when the
+        subprocess dies. The waiting task was not cancelled, so it must not
+        come out looking cancelled — that would skip every `except Exception`
+        fallback between here and the endpoint.
+        """
+        mgr = self._manager()
+        task = asyncio.ensure_future(mgr._send_locked({"cmd": "tap"}))
+        await self._until_waiting(mgr)
+
+        mgr._pending_response.cancel()  # what the reader's cleanup does
+
+        with pytest.raises(RuntimeError, match="exited"):
+            await task
+        assert not task.cancelled(), (
+            "a crashed bridge surfaced as a cancelled task; nothing cancelled it"
+        )
+        assert mgr._kill_process.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_still_becomes_a_runtime_error(self):
+        """The control: the timeout path is unchanged."""
+        mgr = self._manager()
+
+        async def _times_out(*_a, **_kw):
+            raise TimeoutError
+
+        with patch("asyncio.wait_for", _times_out):
+            with pytest.raises(RuntimeError, match="timed out"):
+                await mgr._send_locked({"cmd": "tap"})
+        assert mgr._kill_process.await_count == 1
+
+
+class TestProbeFlagIsHonouredOnEveryPath:
+    """`probe=False` must mean no hit-tests, on the retry and on idb too.
+
+    Two paths the review found unguarded. Both take the flag and could drop it
+    without any test noticing, and dropping it silently restores the ~3.5s cost
+    the flag exists to skip.
+    """
+
+    #: A tab bar the static walk reports as childless — what probing targets.
+    TAB_BAR = [{
+        "type": "Group", "AXLabel": "Tab Bar", "children": [],
+        "frame": {"x": 0, "y": 800, "width": 400, "height": 80},
+    }]
+
+    @pytest.mark.asyncio
+    async def test_the_poisoned_tree_retry_keeps_probe_false(self):
+        """M5.
+
+        A poisoned accessibility bridge (#66) is healed by one reset and a
+        recursive retry. The retry must carry the caller's `probe` choice, or a
+        caller that opted out pays for probing anyway — exactly when the bridge
+        is already struggling.
+        """
+        backend = SimBridgeBackend(SimBridgeManager())
+        backend._fetch_nested = AsyncMock(side_effect=lambda *_a, **_k: [dict(self.TAB_BAR[0])])  # type: ignore[method-assign]
+        hits: list = []
+
+        async def _describe_point(*_a, **_k):
+            hits.append(_a)
+            return None
+
+        backend.describe_point = _describe_point  # type: ignore[method-assign]
+
+        poisoned = iter([True, False])
+        with (
+            patch("server.device.sim_bridge.ax_recovery.looks_poisoned",
+                  lambda _flat: next(poisoned, False)),
+            patch("server.device.sim_bridge.ax_recovery.reset_bridge",
+                  AsyncMock(return_value=True)),
+        ):
+            await backend.describe_all("udid", probe=False)
+
+        assert backend._fetch_nested.await_count == 2, "the retry did not run"
+        assert hits == [], (
+            f"probe=False, yet {len(hits)} hit-test(s) ran — the retry after a "
+            "bridge reset dropped the caller's choice"
+        )
+
+    @pytest.mark.asyncio
+    async def test_idb_honours_probe_false(self):
+        """M9.
+
+        idb probes the same way sim-bridge does, and is the backend in use
+        whenever sim-bridge is unavailable. Checking only that it *accepts* the
+        keyword let an implementation that ignored it pass.
+        """
+        from server.device.idb import IdbBackend
+
+        backend = IdbBackend()
+        backend._run = AsyncMock(  # type: ignore[method-assign]
+            return_value=(json.dumps(self.TAB_BAR), ""),
+        )
+        backend.describe_point = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        await backend.describe_all("udid", probe=False)
+        assert backend.describe_point.await_count == 0, (
+            "idb ran hit-tests with probe=False"
+        )
+
+        await backend.describe_all("udid", probe=True)
+        assert backend.describe_point.await_count > 0, (
+            "idb did not probe with probe=True — the control for the check above"
+        )
+
+
+class TestSwipesCanBeHeld:
+    """The sweep's swipes stop dead only if the hold reaches the bridge."""
+
+    async def test_the_hold_is_sent_to_the_bridge(self):
+        sent: list[dict] = []
+
+        async def send(cmd):
+            sent.append(cmd)
+            return {"ok": True}
+
+        backend, _ = _backend_with_send(send)
+        await backend.swipe("SIM", 100, 700, 100, 100, 0.3, hold=0.15)
+        assert sent[-1]["cmd"] == "swipe"
+        assert sent[-1]["hold"] == 0.15
+
+    async def test_a_plain_swipe_still_flings(self):
+        """The public swipe keeps its behaviour: a caller asking for a swipe
+        may want the momentum."""
+        sent: list[dict] = []
+
+        async def send(cmd):
+            sent.append(cmd)
+            return {"ok": True}
+
+        backend, _ = _backend_with_send(send)
+        await backend.swipe("SIM", 100, 700, 100, 100)
+        assert sent[-1]["hold"] == 0
+
+    def test_only_idb_declares_its_swipes_uncontrolled(self):
+        """The sweep skips its per-step settle unless a backend says it flings.
+
+        idb has no way to hold a swipe, so losing this flag would put the #84
+        failure back on every simulator that falls back to idb.
+        """
+        from server.device.idb import IdbBackend
+        from server.device.wda_client import WdaBackend
+
+        assert IdbBackend.swipe_is_controlled is False
+        assert getattr(SimBridgeBackend, "swipe_is_controlled", True) is not False
+        assert getattr(WdaBackend, "swipe_is_controlled", True) is not False
+
+    def test_the_bridge_source_reads_the_hold(self):
+        """The Python side sending `hold` is only half of it."""
+        source = (
+            Path(__file__).resolve().parent.parent / "tools" / "sim-bridge.swift"
+        ).read_text()
+        assert 'dict["hold"]' in source
+        assert "hold: hold" in source
