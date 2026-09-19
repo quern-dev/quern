@@ -111,7 +111,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `restore_simulator_input` | POST | `/api/v1/device/ui/restore-input` | Take a simulator's touch, button and keyboard services back from Xcode 27's Device Hub. Restarts SpringBoard, so running apps are killed |
 | `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier |
 | `swipe` | POST | `/api/v1/device/ui/swipe` | Swipe gesture |
-| `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it |
+| `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it. On iOS, bounded by a wall-clock deadline as well as `max_swipes` |
 | `get_web_content` | POST | `/api/v1/device/ui/web-content` | Read WKWebView content the accessibility tree cannot see (iOS simulator only) |
 | `wait_for_settle` | POST | `/api/v1/device/ui/wait-settled` | Wait until the screen stops changing, by comparing successive screenshots |
 | `type_text` | POST | `/api/v1/device/ui/type` | Type text |

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
+from collections.abc import Coroutine
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -404,17 +407,25 @@ async def tap_element(request: Request, body: TapElementRequest):
             resolved = await controller.resolve_udid(body.udid)
             before = await _capture_action_screenshot(controller, resolved, "tap_before")
 
-        result = await controller.tap_element(
-            label=body.label,
-            label_contains=body.label_contains,
-            label_prefix=body.label_prefix,
-            identifier=body.identifier,
-            element_type=body.element_type,
-            udid=body.udid,
-            skip_stability_check=body.skip_stability_check,
-            source_timeout=body.source_timeout,
-            value=body.value,
-            scroll_to_find=body.scroll_to_find,
+        # Guarded like scroll_to_element, and for the same reason: with
+        # `scroll_to_find` on -- the default -- an off-screen target runs the
+        # same sweep, and this is the path most callers reach it by. Guarding
+        # only the dedicated scroll endpoint left the common one unbounded.
+        result = await _run_until_client_leaves(
+            request,
+            controller.tap_element(
+                label=body.label,
+                label_contains=body.label_contains,
+                label_prefix=body.label_prefix,
+                identifier=body.identifier,
+                element_type=body.element_type,
+                udid=body.udid,
+                skip_stability_check=body.skip_stability_check,
+                source_timeout=body.source_timeout,
+                value=body.value,
+                scroll_to_find=body.scroll_to_find,
+            ),
+            what="tap_element",
         )
 
         end = time.perf_counter()
@@ -517,6 +528,66 @@ async def swipe(request: Request, body: SwipeRequest):
         raise _handle_device_error(e)
 
 
+
+#: What the wrapped coroutine returns, so a caller keeps its own type
+#: rather than being handed Any back.
+T = TypeVar("T")
+
+
+async def _run_until_client_leaves(
+    request: Request,
+    coro: Coroutine[Any, Any, T],
+    *,
+    what: str,
+    poll_s: float = 2.0,
+) -> T:
+    """Run a long device operation, and abandon it if the caller disconnects.
+
+    Uvicorn does not cancel a handler when its client goes away, so a request
+    the caller timed out of at 180s goes on driving the device. Measured on
+    #84: sweeps of 413s and 523s continued against a client that had left,
+    holding a simulator the next test was trying to use and, worse, swiping it
+    while that test ran.
+
+    The coroutine is run as a task and polled against `is_disconnected()`
+    rather than wrapped in a timeout, because there is no single right timeout
+    -- the operation's own deadline belongs to the operation. This only answers
+    the narrower question of whether anyone is still listening.
+
+    Cancellation is cooperative: the task stops at its next await. A device
+    command already in flight completes, which is correct -- half-sending one
+    is worse than finishing it.
+    """
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=poll_s)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                task.cancel()
+                logger.info(
+                    "%s: client disconnected — cancelling rather than "
+                    "continuing to drive the device", what,
+                )
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                raise HTTPException(
+                    status_code=499, detail=f"{what} cancelled: client disconnected",
+                )
+    except asyncio.CancelledError:
+        # This coroutine was cancelled, not the client's connection. Cancel the
+        # work and let the cancellation propagate rather than converting it into
+        # a 499, which would report the caller as having disconnected when it
+        # was the server shutting the request down.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise
+    finally:
+        if not task.done():
+            task.cancel()
+
 @router.post("/ui/scroll-to-element")
 async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """Scroll a scrollable container until the target element is in view.
@@ -526,11 +597,15 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """
     controller = _get_controller(request)
     try:
-        result = await controller.scroll_to_element(
-            label=body.label,
-            identifier=body.identifier,
-            udid=body.udid,
-            max_swipes=body.max_swipes,
+        result = await _run_until_client_leaves(
+            request,
+            controller.scroll_to_element(
+                label=body.label,
+                identifier=body.identifier,
+                udid=body.udid,
+                max_swipes=body.max_swipes,
+            ),
+            what="scroll_to_element",
         )
         if result.get("status") == "not_found":
             raise HTTPException(status_code=404, detail=result)
