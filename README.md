@@ -119,11 +119,19 @@ itself — the virtualenv, the dependencies, the MCP wrapper and the `quern`
 command — and declines the optional extras it would otherwise have asked about,
 listing them at the end.
 
-One prompt is not covered by `-y`: installing the capture certificate authority
-into booted simulators. A CA outlives the session that wanted it and has to be
-removed deliberately, so it is always asked or declined, never assumed. Set it
-as a standing policy with `quern set-auto-install-cert` if you want it answered
-once.
+Five prompts are not covered by `-y`, and are listed at the end of the run:
+
+| Prompt | Why `-y` leaves it |
+|---|---|
+| Install the capture CA into booted simulators | A certificate authority outlives the session that wanted it and has to be removed deliberately. Answer it once with `quern set-auto-install-cert`. |
+| Install the tunneld LaunchDaemon | Runs as root at boot and survives reboots. Needs sudo. |
+| `sudo pipx install --global pymobiledevice3` | Writes outside your home directory. Needs sudo. |
+| Disable the macOS crash reporter dialog | A user-wide setting that `quern uninstall` does not put back. |
+| Open the Xcode Command Line Tools installer | Hands off to a macOS dialog someone has to click. |
+
+Three of those need a sudo password or a click that no flag can supply, so
+answering yes on your behalf would leave the run waiting on something that
+never comes. The other two outlive Quern itself.
 
 ### Uninstall
 

@@ -2706,6 +2706,57 @@ class TestTheEntryPointsParseTheirArguments:
         assert exc.value.code == 0
         assert f"Usage: quern {command}" in capsys.readouterr().out
 
+    @pytest.mark.parametrize("command", [
+        "setup", "uninstall", "mcp-install", "grant-full-perms",
+        "install-precommit-hook", "update",
+    ])
+    def test_a_stray_operand_is_refused(self, monkeypatch, command, capsys):
+        """Rejecting unknown *flags* and then discarding leftover words is the
+        same silent drop one level down: `quern update typo` ran a real
+        update."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "typo"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2, f"{command} dispatched with a stray operand"
+        assert "typo" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "set-channel", "set-auto-install-cert", "set-update-check",
+    ])
+    def test_a_setting_takes_one_value_and_no_more(self, monkeypatch, command, capsys):
+        """Each helper reads only its first argument, so a second word was
+        persisted-and-ignored: `quern set-channel stable typo` wrote stable
+        and said nothing about the word it did not understand."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "stable", "typo"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2, f"{command} persisted a value it half-understood"
+        assert "typo" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "set-channel", "set-auto-install-cert", "set-update-check",
+    ])
+    def test_a_setting_still_takes_its_one_value(self, monkeypatch, command):
+        """The other half: the guard must not refuse the ordinary call."""
+        import server.__main__ as entry
+
+        seen = {}
+        monkeypatch.setattr(entry, "_cmd_set_channel",
+                            lambda a: seen.update(args=a) or 0)
+        monkeypatch.setattr(entry, "_cmd_set_auto_install_cert",
+                            lambda a: seen.update(args=a) or 0)
+        monkeypatch.setattr(entry, "_cmd_set_update_check",
+                            lambda a: seen.update(args=a) or 0)
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "on"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert seen == {"args": ["on"]}, f"{command} did not receive its value"
+
     def test_argparse_does_not_swallow_a_stray_flag(self, monkeypatch, capsys):
         """The other entry point. `parse_known_args` kept the leftovers only
         for the no-subcommand case, and discarded them everywhere else."""

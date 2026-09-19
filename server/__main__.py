@@ -725,6 +725,7 @@ def _check_args(
     rest: list[str],
     *,
     allowed: tuple[str, ...] = (),
+    operands: int = 0,
     usage: Callable[[], None] | None = None,
 ) -> list[str]:
     """Answer `-h`, refuse anything else unrecognised, return the operands.
@@ -739,7 +740,8 @@ def _check_args(
     """
     def default_usage() -> None:
         flags = "".join(f" [{flag}]" for flag in allowed)
-        print(f"Usage: quern {command}{flags}")
+        args = "".join(" <value>" for _ in range(operands))
+        print(f"Usage: quern {command}{flags}{args}")
 
     show = usage or default_usage
     if any(arg in ("-h", "--help") for arg in rest):
@@ -750,7 +752,17 @@ def _check_args(
         show()
         print(f"unrecognised option: {unknown[0]}", file=sys.stderr)
         sys.exit(2)
-    return [arg for arg in rest if not arg.startswith("-")]
+    # Operands too, not just flags. Returning them and leaving each caller to
+    # ignore them is the same silent drop one level down: `quern update typo`
+    # ran a real update, and `quern set-channel stable typo` persisted stable
+    # while saying nothing about the word it did not understand. A command
+    # that takes no operands says so; one that takes a value says how many.
+    ops = [arg for arg in rest if not arg.startswith("-")]
+    if len(ops) > operands:
+        show()
+        print(f"unexpected argument: {ops[operands]}", file=sys.stderr)
+        sys.exit(2)
+    return ops
 
 
 def _setup_usage() -> None:
@@ -867,14 +879,18 @@ def main() -> None:
         cli()
         return
 
+    # One operand each -- the value being set. Each helper reads only its
+    # first argument, so without this a second word was persisted-and-ignored.
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
-        sys.exit(_cmd_set_channel(sys.argv[2:]))
+        sys.exit(_cmd_set_channel(_check_args("set-channel", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-auto-install-cert":
-        sys.exit(_cmd_set_auto_install_cert(sys.argv[2:]))
+        sys.exit(_cmd_set_auto_install_cert(
+            _check_args("set-auto-install-cert", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-update-check":
-        sys.exit(_cmd_set_update_check(sys.argv[2:]))
+        sys.exit(_cmd_set_update_check(
+            _check_args("set-update-check", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
         from server.device.tunneld import cli_tunneld
