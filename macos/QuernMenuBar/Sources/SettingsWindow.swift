@@ -197,6 +197,11 @@ final class SettingsModel: ObservableObject {
     /// enough that doing it there would spawn one per redraw.
     @Published var version: VersionReading = .pending
 
+    /// Git checkout or release, so the Update item's behaviour is explicable
+    /// from here. Read on demand: it is a couple of file checks.
+    var readInstall: () -> InstallKind = { InstallKind.current }
+    var install: InstallKind { readInstall() }
+
     /// How the version is read. Injected for the same reason `Updater` injects
     /// its own: without a seam here the only production caller of
     /// `apply(version:)` was untested, and reinstating a `guard let version
@@ -209,6 +214,12 @@ final class SettingsModel: ObservableObject {
         readVersion { [weak self] version, _ in
             self?.apply(version: version)
         }
+    }
+
+    /// The app's own version, in its own box so it cannot be read as the
+    /// server's -- which is what the Server box's Version row was taken for.
+    static func appRows(version: String?) -> [(String, String)] {
+        [("Version", version ?? "unknown")]
     }
 
     /// The Server section, as label/value pairs.
@@ -225,6 +236,7 @@ final class SettingsModel: ObservableObject {
             ("Status", s.running ? "Running" : "Stopped"),
             ("Address", s.host != nil ? "\(s.host!):\(s.port ?? 0)" : "—"),
             ("Version", version.display),
+            ("Install", install.display),
             ("Uptime", Self.uptime(since: s.startedAt, now: now)),
         ]
     }
@@ -390,6 +402,10 @@ struct SettingsView: View {
                 grid("Server", model.serverRows(now: Date()))
             }
 
+            GroupBox("Quern app") {
+                grid("Quern app", SettingsModel.appRows(version: AppVersion.current))
+            }
+
             GroupBox("Proxy") {
                 grid("Proxy", [
                     ("Status", s.proxyStatus?.capitalized ?? (s.proxyEnabled ? "Enabled" : "Disabled")),
@@ -509,7 +525,8 @@ struct SettingsView: View {
 
                 HStack {
                     Button("Documentation") {
-                        NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
+                        // Not /docs, which the site does not have: it answered 404.
+                        NSWorkspace.shared.open(URL(string: "https://quern.dev/getting-started/installation-and-setup/")!)
                     }
                     Spacer()
                 }

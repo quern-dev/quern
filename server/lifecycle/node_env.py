@@ -1,0 +1,427 @@
+"""Which `node` each part of the system will actually run (#214).
+
+Setup used to ask one question -- is there a `node` on *this* process's PATH --
+and accepted any version. But four different places choose a `node`, and they
+routinely disagree:
+
+- **this process**: whoever ran setup or update. It builds `mcp/dist` on a git
+  install.
+- **a login shell**: a new Terminal window, and CLI MCP clients started from
+  one. Reads `.zprofile` and `.zshrc`.
+- **a non-interactive shell**: agents' tools, scripts, anything a program
+  spawns. zsh reads only `.zshenv`; bash reads only `$BASH_ENV`.
+- **GUI apps**: MCP clients launched from the Dock or at login. launchd's PATH
+  and no shell startup files at all -- and launchd's PATH does not include
+  Homebrew, so `brew install node` does not put a node here.
+- **the Quern app**: the same, plus the few directories it adds for itself
+  (`QuernCLI.searchPath`), which is why it can find a Homebrew node when a
+  Dock-launched client cannot.
+
+fnm and nvm usually live in `.zshrc`, so a machine can be fine in a terminal and
+have no `node` for a GUI client -- measured on the maintainer's machine, where
+Claude Desktop's `"command": "node"` would have found nothing.
+
+Read-only. Every external lookup is injectable, because a test that ran the
+developer's real shells would be both slow and a report about the developer.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import re
+import shutil
+import signal
+import subprocess
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+
+#: The MCP wrapper's floor. Mirrors `REQUIRED_MAJOR` in `mcp/src/launcher.cjs`
+#: and `engines` in `mcp/package.json`; a test keeps the three in step.
+MIN_NODE_MAJOR = 22
+
+#: launchd's default PATH for a user's GUI apps.
+GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+#: What the menu-bar app puts in front of it (`QuernCLI.searchPath`).
+MENUBAR_EXTRA_PATH = ("{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
+
+PROBE_TIMEOUT = 10.0
+
+# Printed by the shell probe after anything its startup files print, so their
+# output cannot be mistaken for the answer.
+_MARKER = "__QUERN_NODE__"
+# The leading newline matters: a startup file whose last write has no newline
+# (a p10k instant prompt, `echo -n`, a spinner) would otherwise have the marker
+# appended to its line, and a perfectly good Node 22 was then reported as
+# "could not ask".
+_SHELL_PROBE = (
+    f'p=$(command -v node 2>/dev/null); '
+    f'if [ -n "$p" ]; then v=$("$p" --version 2>/dev/null); fi; '
+    f'printf "\\n%s\\t%s\\t%s\\n" "{_MARKER}" "$p" "$v"'
+)
+
+OK = "ok"
+TOO_OLD = "too_old"     # a readable version below the floor
+UNUSABLE = "unusable"   # found, but it did not run or say what it is
+MISSING = "missing"
+UNKNOWN = "unknown"     # the probe failed -- not the same as "no node"
+SKIPPED = "skipped"     # not checkable here (an unsupported shell); not a failure
+
+
+@dataclass(frozen=True)
+class NodeSite:
+    place: str        # short name, e.g. "GUI apps"
+    used_by: str      # who runs node from here
+    status: str       # one of the statuses above
+    path: str | None = None
+    version: str | None = None
+    detail: str = ""  # why UNKNOWN or SKIPPED, or anything else worth saying
+    shell: str | None = None  # "zsh" or "bash", for the shell places
+
+    @property
+    def ok(self) -> bool:
+        return self.status == OK
+
+
+Runner = Callable[..., subprocess.CompletedProcess]
+
+
+def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
+                timeout: float = PROBE_TIMEOUT, **_kw) -> subprocess.CompletedProcess:
+    """The default runner: bounded, lenient about bytes, and tidy on timeout.
+
+    `errors="replace"` because a startup file that writes one non-UTF-8 byte
+    would otherwise raise `UnicodeDecodeError` -- a `ValueError`, which the
+    handlers below do not catch -- out of a probe, through `check_node`, and
+    out of `run_setup`. An update calls that *after* pulling, so a machine
+    whose node is fine ends up pulled but not rebuilt, with a traceback. A
+    p10k instant prompt is enough to produce the byte.
+
+    The shell gets its own process group, and on timeout the group is killed:
+    `subprocess`'s own timeout kills the direct child only, and real startup
+    files spawn daemons (gitstatusd, atuin, direnv) that would be left behind.
+    """
+    proc = subprocess.Popen(  # noqa: S603
+        argv, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, errors="replace", start_new_session=True,
+    )
+    try:
+        out, _err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            # `proc.pid` *is* the group id, because start_new_session made the
+            # child a session leader. Asking `getpgid` for it again fails with
+            # ESRCH once that child has exited -- which is exactly the case
+            # this cleanup is for: the shell exits, a daemon it started holds
+            # stdout open, and `communicate` waits for the pipe.
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.SubprocessError, OSError):
+            proc.communicate(timeout=5)
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, "")
+
+
+def major_version(version: str | None) -> int | None:
+    """22 from "v22.22.2"; None when there is nothing to parse."""
+    if not version:
+        return None
+    m = re.match(r"v?(\d+)\.", version.strip())
+    return int(m.group(1)) if m else None
+
+
+def _classify(path: str | None, version: str | None) -> str:
+    if not path:
+        return MISSING
+    major = major_version(version)
+    if major is None:
+        # Found but would not report a version: a broken binary is not a
+        # working one, and calling it OK is the false all-clear. Nor is it
+        # "too old" -- that advice would be to upgrade something that does not
+        # run at all.
+        return UNUSABLE
+    return OK if major >= MIN_NODE_MAJOR else TOO_OLD
+
+
+def _version_of(path: str, run: Runner) -> str | None:
+    try:
+        result = run([path, "--version"], capture_output=True, text=True,
+                     timeout=PROBE_TIMEOUT, stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError covers UnicodeDecodeError from a node shim that writes
+        # something undecodable; a broken shim is not a reason to raise.
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _on_path(place: str, used_by: str, path_dirs: list[str], run: Runner,
+             which: Callable[..., str | None]) -> NodeSite:
+    found = which("node", path=os.pathsep.join(path_dirs))
+    version = _version_of(found, run) if found else None
+    return NodeSite(place, used_by, _classify(found, version), found, version)
+
+
+def _in_shell(place: str, used_by: str, argv: list[str], env: dict[str, str],
+              run: Runner) -> NodeSite:
+    shell = Path(argv[0]).name
+    site = _in_shell_unnamed(place, used_by, argv, env, run)
+    return NodeSite(site.place, site.used_by, site.status, site.path, site.version,
+                    site.detail, shell)
+
+
+def _in_shell_unnamed(place: str, used_by: str, argv: list[str], env: dict[str, str],
+                      run: Runner) -> NodeSite:
+    try:
+        result = run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                     env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        return NodeSite(place, used_by, UNKNOWN,
+                        detail=f"the shell did not answer within {PROBE_TIMEOUT:.0f}s")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return NodeSite(place, used_by, UNKNOWN, detail=f"could not start the shell: {exc}")
+
+    for line in reversed(result.stdout.splitlines()):
+        if line.startswith(_MARKER):
+            _, path, version = (line.split("\t") + ["", ""])[:3]
+            path, version = path.strip() or None, version.strip() or None
+            return NodeSite(place, used_by, _classify(path, version), path, version)
+    # No marker: the startup files failed or exited early. That is "could not
+    # look", and reporting it as "no node" would send someone to install one.
+    return NodeSite(place, used_by, UNKNOWN,
+                    detail="the shell exited before answering "
+                           f"(exit {result.returncode})")
+
+
+def here(
+    *,
+    run: Runner = run_bounded,
+    which: Callable[..., str | None] = shutil.which,
+    env: dict[str, str] | None = None,
+) -> NodeSite:
+    """Just this process's `node`: the one that builds the MCP wrapper."""
+    return _here(run, which, dict(os.environ if env is None else env))
+
+
+def _here(run: Runner, which: Callable[..., str | None], env: dict[str, str]) -> NodeSite:
+    return _on_path("this command", "building the MCP wrapper (git installs)",
+                    env.get("PATH", "").split(os.pathsep), run, which)
+
+
+def user_shell(env: dict[str, str]) -> str | None:
+    """The user's shell, if it is one whose startup files we understand."""
+    shell = env.get("SHELL", "")
+    return shell if Path(shell).name in ("zsh", "bash") else None
+
+
+def probe(
+    *,
+    run: Runner = run_bounded,
+    which: Callable[..., str | None] = shutil.which,
+    env: dict[str, str] | None = None,
+    home: str | None = None,
+) -> list[NodeSite]:
+    """Where each of the four places finds `node`, and whether it is usable."""
+    env = dict(os.environ if env is None else env)
+    home = home or env.get("HOME") or str(Path.home())
+    checks: list[Callable[[], NodeSite]] = [lambda: _here(run, which, env)]
+
+    shell = user_shell(env)
+    if shell is None:
+        reason = f"unsupported shell {env.get('SHELL') or '(unset)'}; zsh and bash are checked"
+        checks.append(lambda: NodeSite("login shell", "Terminal, and CLI MCP clients",
+                                       SKIPPED, detail=reason))
+        checks.append(lambda: NodeSite("non-interactive shell", "agents' tools and scripts",
+                                       SKIPPED, detail=reason))
+    else:
+        # ZDOTDIR decides which files zsh reads at all: without it a user who
+        # keeps their config in ~/.config/zsh gets a shell that reads nothing,
+        # is reported as having no node, and is then told to edit a file their
+        # shell never opens. LANG/LC_* change what startup files print.
+        base = {k: env[k] for k in ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR",
+                                    "ZDOTDIR", "LANG", "LC_ALL", "LC_CTYPE")
+                if k in env}
+        base["HOME"] = home
+        minimal = {**base, "PATH": os.pathsep.join(GUI_PATH)}
+        # bash reads $BASH_ENV in a non-interactive shell; carry it through,
+        # since that is the one file such a shell would consult.
+        non_interactive = dict(minimal)
+        if Path(shell).name == "bash" and "BASH_ENV" in env:
+            non_interactive["BASH_ENV"] = env["BASH_ENV"]
+        checks.append(lambda: _in_shell("login shell", "Terminal, and CLI MCP clients",
+                                        [shell, "-lic", _SHELL_PROBE], minimal, run))
+        checks.append(lambda: _in_shell(
+            "non-interactive shell",
+            "scripts and agents' tools started without your terminal's PATH",
+            [shell, "-c", _SHELL_PROBE], non_interactive, run))
+
+    # Two rows, because they are two different PATHs and one of them was
+    # flattering the other: a Homebrew node made "GUI apps" green while a
+    # Dock-launched MCP client still could not see it, and the advice to
+    # `brew install node` then "fixed" a row that was never broken.
+    checks.append(lambda: _on_path(
+        "GUI apps", "MCP clients opened from the Dock or at login",
+        list(GUI_PATH), run, which))
+    menubar_dirs = [d.format(home=home) for d in MENUBAR_EXTRA_PATH] + list(GUI_PATH)
+    checks.append(lambda: _on_path(
+        "the Quern app", "the menu bar app, which adds a few directories of its own",
+        menubar_dirs, run, which))
+
+    # Concurrently: each can take up to PROBE_TIMEOUT, and one after another
+    # that was a 40s worst case in front of setup and doctor. Threads rather
+    # than asyncio because both callers are synchronous CLI steps.
+    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+        return list(pool.map(lambda check: check(), checks))
+
+
+#: Where each installer puts node, most specific first. Matched against the
+#: path as found *and* with symlinks resolved: Intel Homebrew's
+#: `/usr/local/bin/node` is only recognisable from where it points.
+_MANAGER_PATHS = (
+    ("/.local/share/mise/", "mise"),
+    ("/.asdf/", "asdf"),
+    ("/.nodenv/", "nodenv"),
+    ("/.volta/", "volta"),
+    ("/.nvm/", "nvm"),
+    ("/fnm", "fnm"),                       # fnm_multishells and share/fnm
+    ("/library/pnpm/", "pnpm"),
+    ("/.local/share/pnpm/", "pnpm"),
+    ("/nix/store/", "nix"),
+    ("/.nix-profile/", "nix"),
+    ("/run/current-system/", "nix"),
+    ("/opt/local/", "macports"),
+    ("/opt/homebrew/", "brew"),
+    ("/usr/local/cellar/", "brew"),
+    ("/usr/local/opt/", "brew"),
+)
+
+#: n installs node into /usr/local/bin and keeps its versions here.
+N_PREFIX = "/usr/local/n"
+
+
+def manager_of(
+    path: str | None,
+    *,
+    resolve: Callable[[str], str] = os.path.realpath,
+    is_dir: Callable[[str], bool] = os.path.isdir,
+) -> str | None:
+    """Which tool installed this node, judged from where it lives."""
+    if not path:
+        return None
+    try:
+        real = resolve(path)
+    except OSError:
+        real = path
+    for candidate in (path.lower(), real.lower()):
+        # A versioned Homebrew formula is keg-only: upgrading `node` leaves it
+        # where it is, so it gets its own advice.
+        if "/opt/node@" in candidate or "/cellar/node@" in candidate:
+            return "brew-keg"
+        for needle, name in _MANAGER_PATHS:
+            if needle in candidate:
+                return name
+    # A real file in /usr/local/bin is n's or the official installer's; they
+    # put it in the same place, and only n keeps a versions directory.
+    if real.startswith("/usr/local/bin/"):
+        return "n" if is_dir(N_PREFIX) else "installer"
+    return None
+
+
+def upgrade_command(manager: str | None, major: int = MIN_NODE_MAJOR) -> str:
+    """How to get Node `major` with the tool that installed the current one."""
+    return {
+        "fnm": f"fnm install {major} && fnm default {major}",
+        "nvm": f"nvm install {major} && nvm alias default {major}",
+        "volta": f"volta install node@{major}",
+        "mise": f"mise use -g node@{major}",
+        "asdf": (f"asdf install nodejs latest:{major}, then make it the default with "
+                 f"`asdf set --home nodejs <version>` (`asdf global` before asdf 0.16)"),
+        "nodenv": (f"nodenv install <{major}.x.y> && nodenv global <{major}.x.y> "
+                   f"(`nodenv install -l | grep '^ *{major}'` lists them)"),
+        "n": f"n {major} (with sudo if /usr/local is not writable)",
+        "installer": f"install Node {major} from https://nodejs.org",
+        "pnpm": f"pnpm env use --global {major}",
+        "macports": f"sudo port install nodejs{major}",
+        "nix": f"add nodejs_{major} to your Nix configuration",
+        "brew": "brew upgrade node",
+        "brew-keg": ("brew install node (a versioned node@ formula is not linked, "
+                     "and upgrading `node` does not touch it)"),
+    }.get(manager or "", "brew install node")
+
+
+_NON_INTERACTIVE_FIX = {
+    "fnm": 'Add `eval "$(fnm env)"` to {file}.',
+    "nvm": "Load nvm from {file}, not only from your interactive startup file.",
+    "mise": ('Add `eval "$(mise activate {shell} --shims)"` to {file}. Plain '
+             "`mise activate` only works in interactive shells."),
+    "asdf": "Put asdf's shims directory on PATH in {file}.",
+    "volta": "Put ~/.volta/bin on PATH in {file}.",
+    "nodenv": 'Add `eval "$(nodenv init - {shell})"` to {file}.',
+}
+
+#: What each shell reads, per kind of shell. Non-interactive bash reads only
+#: the file $BASH_ENV names, so the advice has to include creating that.
+_STARTUP = {
+    ("zsh", "non-interactive"): ("~/.zshenv", ""),
+    ("bash", "non-interactive"): (
+        "~/.bashenv",
+        " Non-interactive bash reads only the file named by $BASH_ENV, so also "
+        "add `export BASH_ENV=~/.bashenv` to ~/.bash_profile.",
+    ),
+    ("zsh", "login"): ("~/.zshrc", ""),
+    ("bash", "login"): ("~/.bash_profile", ""),
+}
+
+
+def _startup(shell: str | None, kind: str) -> tuple[str, str]:
+    return _STARTUP[(shell if shell in ("zsh", "bash") else "zsh", kind)]
+
+
+def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
+    """One actionable line for a site that is not OK."""
+    if site.status in (UNKNOWN, SKIPPED):
+        return site.detail
+    # This node's own installer first: a too-old node is upgraded with the tool
+    # that put it there, whatever the other places use.
+    manager = manager_of(site.path) or next(
+        (m for m in (manager_of(s.path) for s in sites) if m), None)
+    upgrade = upgrade_command(manager)
+
+    if site.status == TOO_OLD:
+        return f"Node {site.version} is below {MIN_NODE_MAJOR}. Run: {upgrade}"
+    if site.status == UNUSABLE:
+        return (f"{site.path} did not run or report its version, so it is "
+                f"probably broken. Reinstall it: {upgrade}")
+
+    # MISSING: where the fix goes depends on the place.
+    if site.place == "GUI apps":
+        # Not "brew install node": /opt/homebrew/bin is not on launchd's PATH
+        # either, so that would change nothing here. Only these two do.
+        return (f"Apps launched from the Dock get {':'.join(GUI_PATH)} and no "
+                "shell startup files, so a version manager's node is invisible "
+                "to them. Either set your MCP client's \"command\" to an absolute "
+                f"path to a Node {MIN_NODE_MAJOR}+ binary (the reliable fix), or "
+                "add a directory to every GUI app's PATH with "
+                "`sudo launchctl config user path ...` and log out and in.")
+    if site.place == "the Quern app":
+        return ("The Quern app looks in ~/.local/bin, /opt/homebrew/bin and "
+                "/usr/local/bin as well as launchd's PATH. Install a node into "
+                "one of those (`brew install node`, or the installer from "
+                f"https://nodejs.org; not `node@{MIN_NODE_MAJOR}`, which Homebrew "
+                "does not link onto PATH).")
+    shell = site.shell or "zsh"
+    if site.place == "non-interactive shell":
+        file, extra = _startup(shell, "non-interactive")
+        template = _NON_INTERACTIVE_FIX.get(
+            manager or "", "Put your Node setup in {file}, which non-interactive {shell} reads.")
+        return template.format(file=file, shell=shell) + extra
+    if site.place == "login shell" and manager:
+        # A node exists elsewhere, so this is about loading it, not installing.
+        file, _ = _startup(shell, "login")
+        return f"Node is installed ({manager}) but your login shell does not load it. " \
+               f"Load it from {file}."
+    return f"No node found. Run: {upgrade}"

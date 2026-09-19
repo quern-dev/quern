@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -564,21 +565,67 @@ class TestCheckMitmdump:
 # ── Node.js check ────────────────────────────────────────────────────────
 
 
+def _sites(**status_by_place):
+    """Four NodeSites, OK unless named: `_sites(gui=("missing", None))`."""
+    from server.lifecycle import node_env
+
+    keys = {"here": "this command", "login": "login shell",
+            "script": "non-interactive shell", "gui": "GUI apps",
+            "app": "the Quern app"}
+    out = []
+    for key, place in keys.items():
+        status, version = status_by_place.get(key, (node_env.OK, "v22.1.0"))
+        path = None if status == node_env.MISSING else f"/x/{key}/node"
+        out.append(node_env.NodeSite(place, "someone", status, path, version))
+    return out
+
+
 class TestCheckNode:
-    def test_installed(self):
-        with (
-            _patch_which({"node": "/opt/homebrew/bin/node"}),
-            _patch_run(_mock_run(stdout="v20.10.0")),
-        ):
-            result = check_node()
-            assert result.status == CheckStatus.OK
-            assert "v20" in result.message
+    """#214: the version and the other three places now count, and nothing
+    here can make setup fail for an install that has been working."""
+
+    def test_installed_everywhere(self):
+        result = check_node(_sites())
+        assert result.status == CheckStatus.OK
+        assert "v22" in result.message
 
     def test_not_installed(self):
-        with _patch_which({"node": None}):
-            result = check_node()
-            assert result.status == CheckStatus.MISSING
-            assert result.fixable
+        result = check_node(_sites(here=("missing", None)))
+        assert result.status == CheckStatus.MISSING
+        assert result.fixable
+
+    def test_node_20_is_a_warning_not_a_pass(self):
+        """The old test asserted v20 was OK; the MCP wrapper refuses it."""
+        result = check_node(_sites(here=("too_old", "v20.10.0")))
+        assert result.status == CheckStatus.WARNING
+        assert "22" in result.message
+
+    def test_a_gui_with_no_node_is_named(self):
+        result = check_node(_sites(gui=("missing", None)))
+        assert result.status == CheckStatus.WARNING
+        assert "GUI apps" in result.message
+        assert "absolute path" in result.detail
+
+    def test_the_quern_apps_own_row_is_named_separately(self):
+        """Two PATHs, two rows: a Homebrew node is invisible to a Dock-launched
+        client and visible to the app."""
+        result = check_node(_sites(app=("missing", None)))
+        assert result.status == CheckStatus.WARNING
+        assert "the Quern app" in result.message
+        assert "brew install node" in result.detail
+
+    def test_an_unsupported_shell_alone_is_not_a_warning(self):
+        result = check_node(_sites(login=("skipped", None), script=("skipped", None)))
+        assert result.status == CheckStatus.OK
+
+    def test_the_wrapper_still_builds_on_a_warning(self):
+        """Node 20 builds `mcp/dist`. Gating the build on OK would leave it
+        stale on exactly the machines the warning is about."""
+        from server.lifecycle.setup import _node_can_build
+
+        assert _node_can_build(check_node(_sites(here=("too_old", "v20.10.0"))))
+        assert _node_can_build(check_node(_sites(gui=("missing", None))))
+        assert not _node_can_build(check_node(_sites(here=("missing", None))))
 
 
 # ── VPN detection ────────────────────────────────────────────────────────
@@ -970,6 +1017,308 @@ class TestPromptYn:
             mock_stdin.isatty.return_value = False
             assert _prompt_yn("Install it?", default=True) is False
 
+class TestAssumeYes:
+    """`-y`, the way `apt-get -y` means it: answer with the default rather
+    than decline. It exists because an unattended install declined the venv
+    and stopped with a tree it could not run."""
+
+    @pytest.fixture(autouse=True)
+    def _restore(self):
+        import server.lifecycle.setup as setup_mod
+        before = setup_mod._ASSUME_YES
+        yield
+        setup_mod._ASSUME_YES = before
+
+    def test_it_takes_the_default_without_a_terminal(self, capsys, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        # No terminal at all: the case -y is for.
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert setup_mod._prompt_yn("Install it?", default=True) is True
+            assert setup_mod._prompt_yn("Wipe it?", default=False) is False
+
+        out = capsys.readouterr().out
+        assert "Install it?" in out and "(-y)" in out, (
+            "an answer given on the user's behalf must still be shown"
+        )
+
+    def test_it_does_not_answer_a_deliberate_prompt(self, capsys, monkeypatch):
+        """Installing a MITM certificate authority outlives the session that
+        wanted it, and the user has to know it happened to undo it. No flag
+        answers that one -- which is also why the flag cannot simply be "yes
+        to anything that does not need sudo": this needs none."""
+        from server.lifecycle import setup as setup_mod
+
+        setup_mod._UNASKED.clear()
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        with (
+            patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+            patch("builtins.open", side_effect=OSError("no tty")),
+        ):
+            mock_stdin.isatty.return_value = False
+            assert setup_mod._prompt_yn("Install the CA?", default=True,
+                                        deliberate=True) is False
+
+        assert setup_mod._UNASKED == ["Install the CA?"], (
+            "it must still be reported as unasked, not silently skipped"
+        )
+
+    # Each entry is a token unique to the action a prompt leads to. The test
+    # walks back from it to the `_prompt_yn(` that guards it, so it pins the
+    # marking at the call site rather than trusting the flag's unit test --
+    # which passes happily while a prompt goes unmarked.
+    DELIBERATE_SITES = [
+        # A MITM root CA, in a trust store, outliving the capture window.
+        ("the capture CA", "Install mitmproxy CA cert into booted simulators?"),
+        # A LaunchDaemon running as root at boot, installed with sudo. Larger
+        # than the CA on CONTRIBUTING's own test, not smaller -- and `-y`
+        # cannot answer the password prompt that follows, so saying yes on the
+        # user's behalf buys a hang.
+        ("the tunneld daemon", "from server.device.tunneld import install_daemon"),
+        # sudo, writing outside $HOME.
+        ("a system-wide pipx install", 'pipx_bin, "install", "--global"'),
+        # A user-wide macOS setting that `quern uninstall` never reverts.
+        ("the crash dialog", '"DialogType", "none"'),
+        # Hands off to a macOS dialog somebody has to click, and an unattended
+        # run has nobody.
+        ("the Xcode CLT installer", "app). Open the installer?"),
+    ]
+
+    @pytest.mark.parametrize("name, anchor", DELIBERATE_SITES)
+    def test_the_privileged_prompts_are_marked_deliberate(self, name, anchor):
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        src = inspect.getsource(setup_mod)
+        assert src.count(anchor) == 1, (
+            f"anchor for {name} is not unique ({src.count(anchor)} matches): "
+            f"{anchor!r} — an ambiguous one walks back to the wrong call, "
+            "and this test then passes against an unmarked prompt"
+        )
+        at = src.index(anchor)
+        opened = src.rfind("_prompt_yn(", 0, at + len(anchor))
+        assert opened != -1, f"{name}: no _prompt_yn guarding it"
+        # The whole call, by balancing parens: the marking can sit either side
+        # of the anchor -- after the prompt text, or before the action it
+        # guards -- and a fixed window catches one and misses the other.
+        depth, end = 0, len(src)
+        for i in range(opened + len("_prompt_yn"), len(src)):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        assert "deliberate" in src[opened:end], (
+            f"{name} is answered by -y, which either installs something "
+            "persistent and privileged without being asked, or waits forever "
+            "on a prompt no flag can answer"
+        )
+
+    def test_run_setup_sets_and_clears_nothing_behind_it(self, monkeypatch):
+        """The flag is module state, so it must be written by run_setup rather
+        than left from whatever ran last."""
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        monkeypatch.setattr(setup_mod, "_can_prompt", lambda: False)
+        monkeypatch.setattr(setup_mod, "check_homebrew", lambda: CheckResult(
+            name="Homebrew", status=CheckStatus.MISSING, message="not found"))
+        setup_mod.run_setup()
+        assert setup_mod._ASSUME_YES is False, (
+            "a run without -y must not inherit a previous run's yes"
+        )
+
+
+class TestTheFlagIsActuallyWired:
+    """The mutation that disconnected `-y` entirely -- `_ASSUME_YES =
+    assume_yes` becoming `= False` -- left the whole suite green, because
+    every other test here patches the module variable instead of going
+    through `run_setup`. A class named for a flag, passing with the flag
+    unplugged, is this repo's signature defect.
+    """
+
+    def test_run_setup_carries_the_flag_to_the_prompts(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup as setup_mod
+
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup_mod, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup_mod.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup_mod.sys, "base_prefix", "/usr/local", raising=False)
+
+        answers = []
+
+        def asks_then_fails(*a, **k):
+            # Asked from inside the run, with no terminal anywhere: without the
+            # flag this is False, with it the default.
+            with (
+                patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+                patch("builtins.open", side_effect=OSError("no tty")),
+            ):
+                mock_stdin.isatty.return_value = False
+                answers.append(setup_mod._prompt_yn("Install the thing?", default=True))
+                answers.append(setup_mod._prompt_yn("Wipe it?", default=False))
+            return False        # stop the run here
+
+        monkeypatch.setattr(setup_mod, "create_venv", asks_then_fails)
+        setup_mod.run_setup(assume_yes=True)
+
+        assert answers == [True, False], (
+            "the flag did not reach _prompt_yn — run_setup is not wiring it"
+        )
+
+    def test_without_the_flag_the_same_prompts_decline(self, monkeypatch, tmp_path):
+        """The other half: the test above passes if `_prompt_yn` simply
+        returns the default always."""
+        from server.lifecycle import setup as setup_mod
+
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup_mod, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup_mod.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup_mod.sys, "base_prefix", "/usr/local", raising=False)
+
+        answers = []
+
+        def asks_then_fails(*a, **k):
+            with (
+                patch("server.lifecycle.setup.sys.stdin") as mock_stdin,
+                patch("builtins.open", side_effect=OSError("no tty")),
+            ):
+                mock_stdin.isatty.return_value = False
+                answers.append(setup_mod._prompt_yn("Install the thing?", default=True))
+            return False
+
+        monkeypatch.setattr(setup_mod, "create_venv", asks_then_fails)
+        setup_mod.run_setup()
+
+        assert answers == [False], "a run without -y answered a prompt anyway"
+
+    def test_the_flag_survives_the_venv_re_exec(self, monkeypatch, tmp_path):
+        """Almost every prompt is *after* the re-exec, and a fresh install --
+        the flag's whole reason for existing -- is precisely the run that has
+        no venv and therefore re-execs. A child started without `-y` answered
+        one prompt out of a dozen."""
+        from server.lifecycle import setup as setup_mod
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", True)
+        setup_mod._reexec_in_venv(venv)
+
+        assert "--yes" in seen["argv"], (
+            f"-y was dropped at the re-exec: {seen['argv']}"
+        )
+
+    def test_a_run_without_the_flag_does_not_pass_it_on(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup as setup_mod
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+
+        seen = {}
+        monkeypatch.setattr(setup_mod.subprocess, "run",
+                            lambda argv, **k: seen.update(argv=argv)
+                            or SimpleNamespace(returncode=0))
+        monkeypatch.setattr(setup_mod, "_ASSUME_YES", False)
+        setup_mod._reexec_in_venv(venv)
+
+        assert "--yes" not in seen["argv"]
+
+
+class TestTheStandingCertAnswer:
+    """`auto_install_cert` answers the CA question once. Setup's own prompt
+    ignored it, which is the one place CONTRIBUTING says it must not be
+    ignored -- so a user who had turned it on was asked anyway, and one who
+    had turned it off was asked again."""
+
+    def test_on_installs_without_asking(self):
+        from server.lifecycle.setup import _cert_install_decision
+
+        asked = []
+        install, note = _cert_install_decision(True, lambda: asked.append(1) or False)
+        assert install is True
+        assert asked == [], "it asked a question the user had already answered"
+        assert "auto_install_cert is on" in note
+
+    def test_off_skips_without_asking(self):
+        """The half that matters most: re-asking is how a considered no
+        becomes a tired yes."""
+        from server.lifecycle.setup import _cert_install_decision
+
+        asked = []
+        install, note = _cert_install_decision(False, lambda: asked.append(1) or True)
+        assert install is False
+        assert asked == [], "it re-asked a question the user had declined"
+        assert "not installing" in note
+        assert "set-auto-install-cert" in note, "it does not say how to change it"
+
+    def test_unset_asks(self):
+        from server.lifecycle.setup import _cert_install_decision
+
+        assert _cert_install_decision(None, lambda: True) == (True, None)
+        assert _cert_install_decision(None, lambda: False) == (False, None)
+
+    def test_setup_never_writes_the_setting(self):
+        """Saying yes once at a prompt is not choosing a standing policy."""
+        import inspect
+
+        from server.lifecycle import setup as setup_mod
+
+        assert "set_auto_install_cert" not in inspect.getsource(setup_mod), (
+            "setup writes auto_install_cert, turning one answer into a policy"
+        )
+
+
+class TestTheCertChoiceIsThreeWay:
+    def test_unset_is_not_a_no(self, monkeypatch):
+        from server import config
+
+        monkeypatch.setattr(config, "read_user_config", lambda: {})
+        assert config.auto_install_cert_choice() is None
+        assert config.get_auto_install_cert() is False, (
+            "the two-way reader must still fold unset into no — silence is "
+            "not permission for the callers that install"
+        )
+
+    def test_a_literal_boolean_is_the_answer(self, monkeypatch):
+        from server import config
+
+        for stored in (True, False):
+            monkeypatch.setattr(config, "read_user_config",
+                                lambda stored=stored: {"auto_install_cert": stored})
+            assert config.auto_install_cert_choice() is stored
+
+    def test_a_typo_reads_as_never_answered(self, monkeypatch):
+        """Same rule as the two-way reader: a typo means "ask me", never
+        consent — and never a silent no either."""
+        from server import config
+
+        for junk in ("yes", "true", 1, None, [], {}):
+            monkeypatch.setattr(config, "read_user_config",
+                                lambda junk=junk: {"auto_install_cert": junk})
+            assert config.auto_install_cert_choice() is None, junk
+
+
+class TestPromptYnMore:
     def test_tty_stdin(self):
         """Normal TTY stdin reads via input()."""
         from server.lifecycle.setup import _prompt_yn
@@ -1448,6 +1797,7 @@ class TestFetchMenubarApp:
         assert "network is down" in (result.detail or "")
         assert "releases/tag" in (result.detail or ""), "no manual route offered"
 
+    @pytest.mark.release_download
     def test_extraction_goes_through_macos_tar(self, tmp_path, monkeypatch):
         """Python's tarfile cannot extract this bundle correctly.
 
@@ -1556,17 +1906,72 @@ class TestFetchMenubarApp:
         monkeypatch.setattr(setup_mod.subprocess, "run", fake_run)
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "9.9.9")  # must not raise
 
-    def test_the_download_is_bounded(self, tmp_path, monkeypatch):
-        """urlretrieve takes no timeout and defaults to none, so a stalled
-        transfer held setup open with no deadline."""
-        import inspect
+    @staticmethod
+    def _endless(monkeypatch, setup_mod, chunk=b"x" * 1024, clock_step=0.0):
+        """A server that never stops sending, and a clock `clock_step` apart
+        per read. Returns the kwargs urlopen was called with."""
+        seen = {}
+        now = {"t": 0.0}
 
+        sent = {"chunks": 0}
+
+        class Resp:
+            def read(self, _n):
+                now["t"] += clock_step
+                sent["chunks"] += 1
+                if sent["chunks"] > 4096:
+                    # The fake has to end. With the clock frozen for the
+                    # size-cap test, removing the cap left the loop with no
+                    # exit at all: the mutant filled the disk until CI killed
+                    # the job, which is not a readable failure.
+                    raise AssertionError("the download was never bounded")
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def urlopen(url, **kw):
+            seen.update(kw)
+            return Resp()
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        monkeypatch.setattr(setup_mod.time, "monotonic", lambda: now["t"])
+        return seen
+
+    @pytest.mark.release_download
+    def test_a_stalled_download_has_a_socket_timeout(self, tmp_path, monkeypatch):
+        """urlretrieve takes no timeout and defaults to none, so a stalled
+        transfer held setup open with no deadline. Run, not read: this used to
+        grep the source of a function the download has since moved out of."""
         from server.lifecycle import setup as setup_mod
 
-        src = inspect.getsource(setup_mod.fetch_menubar_app)
-        assert "urlretrieve(" not in src, "urlretrieve cannot be given a timeout"
-        assert "timeout=" in src, "the transfer has no socket timeout"
-        assert "deadline" in src, "the transfer has no whole-operation deadline"
+        seen = self._endless(monkeypatch, setup_mod, clock_step=10.0)
+        with pytest.raises(RuntimeError):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+        assert seen.get("timeout"), "the transfer has no socket timeout"
+
+    @pytest.mark.release_download
+    def test_a_download_that_never_ends_hits_the_deadline(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        self._endless(monkeypatch, setup_mod, clock_step=10.0)
+        with pytest.raises(RuntimeError, match="180s"):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+
+    @pytest.mark.release_download
+    def test_a_download_that_never_ends_hits_the_size_cap(self, tmp_path, monkeypatch):
+        """With the real 200MB cap this wrote 200MB to disk to prove it."""
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod, "MAX_ASSET_BYTES", 256 * 1024)
+        self._endless(monkeypatch, setup_mod, chunk=b"x" * (64 * 1024))
+        with pytest.raises(RuntimeError, match="MB"):
+            setup_mod.download_release_app("https://github.com/x", "0.18.4", tmp_path)
+        written = sum(f.stat().st_size for f in tmp_path.iterdir() if f.is_file())
+        assert written < 2 * 1024 * 1024, f"wrote {written} bytes"
 
     def test_an_older_genuine_build_is_refused(self, tmp_path, monkeypatch):
         """Signature, team and Gatekeeper are all satisfied by any genuine
@@ -1604,6 +2009,7 @@ class TestFetchMenubarApp:
         setup_mod._verify_menubar_app(tmp_path / "Quern.app", "0.15.0")  # must not raise
 
 
+    @pytest.mark.release_download
     def test_verification_runs_before_the_app_is_installed(self, tmp_path, monkeypatch):
         """Every other test calls _verify_menubar_app directly. Deleting its
         call site left the whole suite green while setup would download,
@@ -1692,7 +2098,7 @@ class TestFetchMenubarApp:
         monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
         result = setup_mod.fetch_menubar_app(tmp_path)
         assert result.status == CheckStatus.ERROR
-        assert "not on github.com" in (result.detail or "")
+        assert "not on the release host" in (result.detail or "")
 
 
 def _boom_oserror(*a, **kw):
@@ -1732,11 +2138,15 @@ class TestMenubarInstallLocation:
         apps = tmp_path / "Applications"
         (root / "Quern.app").mkdir(parents=True)
         calls: list[list[str]] = []
+        alive = {"yes": True}
 
         def record(cmd, timeout=30):
             calls.append(cmd)
             if cmd[0] == "pgrep":
-                return (1, "", "")   # nothing running after the quit
+                # Running until the quit, gone after it.
+                return (0, "4242", "") if alive["yes"] else (1, "", "")
+            if cmd[0] == "osascript":
+                alive["yes"] = False
             return (0, "", "")
 
         monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
@@ -1746,6 +2156,12 @@ class TestMenubarInstallLocation:
         quit_at = next(i for i, c in enumerate(calls) if c[0] == "osascript")
         open_at = next(i for i, c in enumerate(calls) if c[0] == "open")
         assert quit_at < open_at, "opened the app before asking the old one to quit"
+        # The bundle it is replacing, not any Quern: the quit asks by
+        # application name, so a generic question stops someone else's copy.
+        import re as _re
+
+        pgrep_before_quit = next(c for c in calls if c[0] == "pgrep")
+        assert _re.escape(str(apps / "Quern.app")) in pgrep_before_quit[-1], pgrep_before_quit
 
     def test_an_already_installed_app_is_not_refetched(self, tmp_path, monkeypatch):
         """After the first setup the app lives only in ~/Applications.
@@ -1809,6 +2225,126 @@ class TestMenubarInstallLocation:
 
         monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", tmp_path / "Applications")
         assert setup_mod.launch_menubar_app(tmp_path / "install") is None
+
+
+class TestTheMenubarAppIsNotLeftStopped:
+    """#215: setup quit the running app and reopened it on every run -- every
+    run on a git install, where nothing is ever delivered -- and a failed
+    reopen (`-600`) left the machine with no menu bar at all."""
+
+    @staticmethod
+    def _machine(monkeypatch, setup_mod, tmp_path, *, running, open_results):
+        """`_run` for a machine whose app is (not) running and whose `open`
+        answers from `open_results` in turn. Returns the commands seen."""
+        apps = tmp_path / "Applications"
+        (apps / "Quern.app").mkdir(parents=True)
+        monkeypatch.setattr(setup_mod, "MENUBAR_APP_DIR", apps)
+        monkeypatch.setattr(setup_mod.time, "sleep", lambda _s: None)
+        state = {"running": running}
+        answers = list(open_results)
+        calls: list[list[str]] = []
+
+        def run(cmd, timeout=30):
+            calls.append(cmd)
+            if cmd[0] == "pgrep":
+                return (0, "4242", "") if state["running"] else (1, "", "")
+            if cmd[0] == "osascript":
+                state["running"] = False
+                return (0, "", "")
+            if cmd[0] == "open":
+                rc, err = answers.pop(0) if answers else (0, "")
+                if rc == 0:
+                    state["running"] = True
+                return (rc, "", err)
+            return (0, "", "")
+
+        monkeypatch.setattr(setup_mod, "_run", run)
+        return calls
+
+    def test_a_running_app_with_nothing_new_is_left_alone(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=True, open_results=[])
+        (tmp_path / "install").mkdir()
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.OK
+        assert not [c for c in calls if c[0] in ("osascript", "open")], (
+            f"restarted an app that had nothing new to run: {calls}"
+        )
+
+    def test_a_stopped_app_with_nothing_new_is_started(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=False,
+                              open_results=[(0, "")])
+        (tmp_path / "install").mkdir()
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.OK
+        assert [c[0] for c in calls if c[0] in ("osascript", "open")] == ["open"]
+
+    def test_the_error_a_just_quit_app_gives_is_retried(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        busy = "_LSOpenURLsWithCompletionHandler() failed with error -600."
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=True,
+                              open_results=[(1, busy), (1, busy), (0, "")])
+        (tmp_path / "install" / "Quern.app").mkdir(parents=True)
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.OK, result
+        assert len([c for c in calls if c[0] == "open"]) == 3
+
+    def test_other_failures_are_not_retried(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=False,
+                              open_results=[(1, "The application cannot be opened.")] * 5)
+        (tmp_path / "install").mkdir()
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.WARNING
+        assert len([c for c in calls if c[0] == "open"]) == 1
+
+    def test_stopping_it_and_failing_to_restart_says_so(self, tmp_path, monkeypatch):
+        """The machine has no menu bar because setup stopped it. "Could not
+        launch" hides that; the reader needs to know it was running before."""
+        from server.lifecycle import setup as setup_mod
+
+        busy = "failed with error -600."
+        calls = self._machine(monkeypatch, setup_mod, tmp_path, running=True,
+                              open_results=[(1, busy)] * 99)
+        (tmp_path / "install" / "Quern.app").mkdir(parents=True)
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.WARNING
+        assert "Stopped" in result.message, result.message
+        installed = tmp_path / "Applications" / "Quern.app"
+        assert f"open {installed}" in result.detail, result.detail
+        opens = len([c for c in calls if c[0] == "open"])
+        assert opens == setup_mod._OPEN_ATTEMPTS, f"retried {opens} times"
+
+    def test_a_first_install_that_fails_to_launch_does_not_claim_it_stopped_one(
+        self, tmp_path, monkeypatch,
+    ):
+        """Nothing was running, so nothing was stopped. Found in review."""
+        from server.lifecycle import setup as setup_mod
+
+        self._machine(monkeypatch, setup_mod, tmp_path, running=False,
+                      open_results=[(1, "The application cannot be opened.")])
+        (tmp_path / "install" / "Quern.app").mkdir(parents=True)
+
+        result = setup_mod.launch_menubar_app(tmp_path / "install")
+
+        assert result.status == CheckStatus.WARNING
+        assert "Stopped" not in result.message, result.message
+        assert result.message == "Could not launch Quern.app"
 
 
 class TestOtherQuernOnPath:
@@ -1930,41 +2466,55 @@ def _stub_the_checks_before_the_venv(monkeypatch):
     )
 
 
-class TestDecliningTheVenvStopsThere:
-    """Answering "no" to the venv prompt used to fall through to the block
-    commented "we're inside the venv", which reports the check OK.
+class TestTheVenvIsNotAQuestion:
+    """A venv inside the install directory *is* the install, the way
+    node_modules is `npm install`, so setup creates one rather than asking.
 
-    It is not inside a venv, so the run continued until the first third-party
-    import and died with `ModuleNotFoundError: No module named 'httpx'` --
-    several hundred lines from the decision that caused it, naming a dependency
-    the user never mentioned. A deliberate "no" is not an error to be reported
-    as a missing module.
+    It used to ask, and with no terminal `_prompt_yn` declines rather than
+    hanging -- so an unattended install (the `curl | bash` one-liner in a
+    provisioning script, or the menu bar's update) stopped with a tree it
+    could not run. There was never a second answer either: every check past
+    this point needs the venv.
 
-    This is also where an *unaskable* prompt lands: with no terminal
-    `_prompt_yn` declines rather than hanging, so a GUI or piped setup arrives
-    here without anyone having said anything.
+    What must survive from the old behaviour is the *stop*. Falling through
+    reaches a block commented "we're inside the venv" that reports the check
+    OK, and the run then died at the first third-party import with
+    `ModuleNotFoundError: No module named 'httpx'` -- several hundred lines
+    from the cause, naming a dependency the user never mentioned.
     """
 
-    def _decline(self, monkeypatch, tmp_path):
+    def _no_venv(self, monkeypatch, tmp_path):
         from server.lifecycle import setup
 
         _stub_the_checks_before_the_venv(monkeypatch)
         (tmp_path / "pyproject.toml").write_text("")
         monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
-        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: False)
         # Not in a venv.
         monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
         monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
         return setup
 
-    def test_it_exits_nonzero_instead_of_continuing(
-        self, monkeypatch, tmp_path, capsys
-    ):
-        setup = self._decline(monkeypatch, tmp_path)
-        created = []
-        monkeypatch.setattr(
-            setup, "create_venv", lambda *a, **k: created.append(True) or True,
+    def test_it_is_created_without_being_asked_about(self, monkeypatch, tmp_path):
+        """The regression guard for the change itself: no prompt, and a venv."""
+        setup = self._no_venv(monkeypatch, tmp_path)
+        asked, created = [], []
+        monkeypatch.setattr(setup, "_prompt_yn",
+                            lambda q, *a, **k: asked.append(q) or False)
+        monkeypatch.setattr(setup, "create_venv",
+                            lambda *a, **k: created.append(True) or True)
+        monkeypatch.setattr(setup, "_reexec_in_venv", lambda *a, **k: 0)
+
+        setup.run_setup()
+
+        assert created == [True], "no venv was created"
+        assert not any("virtual environment" in q.lower() for q in asked), (
+            "setup asked whether to create the venv, which an unattended run "
+            "answers no to, leaving a tree it cannot run"
         )
+
+    def test_a_failure_to_create_one_stops_there(self, monkeypatch, tmp_path, capsys):
+        setup = self._no_venv(monkeypatch, tmp_path)
+        monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
 
         # The load-bearing assertion. `run_setup` returns 1 for plenty of
         # reasons in a sandbox, so an exit code alone does not show it stopped
@@ -1973,54 +2523,48 @@ class TestDecliningTheVenvStopsThere:
         # ends in 1. Pinning the first check past the venv block is what
         # distinguishes "stopped" from "carried on and failed anyway".
         reached = []
-        monkeypatch.setattr(
-            setup, "check_mitmdump", lambda *a, **k: reached.append(True),
-        )
+        monkeypatch.setattr(setup, "check_mitmdump",
+                            lambda *a, **k: reached.append(True))
 
         rc = setup.run_setup()
 
         assert reached == [], (
-            "setup carried on past the venv it was told not to create, which "
-            "is how this surfaced as ModuleNotFoundError several hundred lines "
+            "setup carried on without the venv it failed to create, which is "
+            "how this surfaced as ModuleNotFoundError several hundred lines "
             "later"
         )
-        assert rc == 1, "declining was reported as success"
-        assert created == [], "it created a venv after being told not to"
+        assert rc == 1, "a failed venv was reported as success"
         out = capsys.readouterr().out
-        assert "Declined" in out, "the summary does not say why it stopped"
+        assert "Failed to create virtual environment" in out, (
+            "the summary does not say why it stopped"
+        )
         assert "httpx" not in out, (
             "the failure surfaced as a missing dependency rather than the "
-            "decision that caused it"
+            "step that caused it"
         )
 
-    def test_an_unasked_prompt_still_gets_the_no_terminal_report(
+    def test_a_failure_still_reports_what_was_never_asked(
         self, monkeypatch, tmp_path, capsys
     ):
-        """Without a terminal every prompt declines rather than hanging, so a
-        menu-bar or `curl | bash` setup on a machine with no venv lands on this
-        exit *every time* -- and the early return skipped the block that names
-        what was never asked and says to run setup in a terminal. Being told you
-        "declined" a question nobody put to you is the worse half of that."""
-        from server.lifecycle import setup
+        """The early return skips the block that names unanswered questions and
+        says to run setup in a terminal. Other prompts run before this one, so
+        a machine with no terminal still needs that report."""
+        setup_mod = self._no_venv(monkeypatch, tmp_path)
 
-        setup_mod = self._decline(monkeypatch, tmp_path)
-        monkeypatch.setattr(setup_mod, "create_venv", lambda *a, **k: True)
-
-        # Record the question the way the real no-terminal path does, rather
-        # than pre-seeding the list: `run_setup` clears `_UNASKED` on entry, so
-        # anything seeded beforehand is gone by the time the branch runs.
-        def declines_and_records(question, *a, **k):
-            setup._UNASKED.append(question.strip())
+        # Stands in for an earlier prompt that went unanswered, recorded at the
+        # point the real no-terminal path would have recorded it. It cannot be
+        # pre-seeded -- `run_setup` clears `_UNASKED` on entry -- and it cannot
+        # be the venv question any more, which is the point of this change.
+        def fails_after_something_went_unasked(*a, **k):
+            setup_mod._UNASKED.append("Node.js not found. Install via Homebrew?")
             return False
 
-        monkeypatch.setattr(setup_mod, "_prompt_yn", declines_and_records)
+        monkeypatch.setattr(setup_mod, "create_venv",
+                            fails_after_something_went_unasked)
 
         setup_mod.run_setup()
 
         out = capsys.readouterr().out
-        assert "No virtual environment found. Create one?" in out, (
-            "the block naming what was never asked was skipped by the early exit"
-        )
         assert "declined without asking" in out
         assert "quern setup" in out, "it does not say how to answer the question"
 
@@ -2086,3 +2630,140 @@ class TestAFailedVenvRecreateStopsThere:
         assert "found but not activated" not in out, (
             "it described a deleted directory as present"
         )
+
+
+class TestTheEntryPointsParseTheirArguments:
+    """Both dispatchers dropped everything after the subcommand, so a
+    mistyped flag did the command's whole job with the flag discarded --
+    worse than refusing, because the caller believes they opted in.
+
+    None of this had a test: mutating the `-y` wiring out of *either* entry
+    point left the suite green.
+    """
+
+    def _run_main(self, monkeypatch, argv):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+        called = {}
+        monkeypatch.setattr(
+            "server.lifecycle.setup.run_setup",
+            lambda assume_yes=False: called.update(assume_yes=assume_yes) or 0,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        return exc.value.code, called
+
+    def test_the_flag_reaches_run_setup(self, monkeypatch):
+        for flag in ("-y", "--yes"):
+            code, called = self._run_main(monkeypatch, ["setup", flag])
+            assert code == 0
+            assert called == {"assume_yes": True}, flag
+
+    def test_plain_setup_does_not_assume_yes(self, monkeypatch):
+        code, called = self._run_main(monkeypatch, ["setup"])
+        assert called == {"assume_yes": False}
+
+    def test_help_prints_usage_instead_of_running_setup(self, monkeypatch, capsys):
+        """`quern setup --help` ran a full setup, which is how a review agent
+        rewrote its own Claude hook while probing this."""
+        code, called = self._run_main(monkeypatch, ["setup", "--help"])
+        assert code == 0
+        assert called == {}, "--help ran setup instead of printing usage"
+        assert "Usage: quern setup" in capsys.readouterr().out
+
+    def test_a_mistyped_flag_is_refused(self, monkeypatch, capsys):
+        code, called = self._run_main(monkeypatch, ["setup", "--yse"])
+        assert code == 2, "a typo ran setup with the flag silently discarded"
+        assert called == {}
+        assert "--yse" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "uninstall", "mcp-install", "grant-full-perms", "install-precommit-hook",
+        "update",
+    ])
+    def test_the_siblings_refuse_a_stray_flag(self, monkeypatch, command, capsys):
+        """`quern mcp-install --help` rewrote every MCP client config, and
+        `quern update --help` ran a real update."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "--badflag"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2, f"{command} accepted a flag it does not take"
+        assert "--badflag" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "uninstall", "mcp-install", "grant-full-perms", "install-precommit-hook",
+        "update",
+    ])
+    def test_the_siblings_answer_help(self, monkeypatch, command, capsys):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "--help"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert f"Usage: quern {command}" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("command", [
+        "setup", "uninstall", "mcp-install", "grant-full-perms",
+        "install-precommit-hook", "update",
+    ])
+    def test_a_stray_operand_is_refused(self, monkeypatch, command, capsys):
+        """Rejecting unknown *flags* and then discarding leftover words is the
+        same silent drop one level down: `quern update typo` ran a real
+        update."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "typo"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2, f"{command} dispatched with a stray operand"
+        assert "typo" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "set-channel", "set-auto-install-cert", "set-update-check",
+    ])
+    def test_a_setting_takes_one_value_and_no_more(self, monkeypatch, command, capsys):
+        """Each helper reads only its first argument, so a second word was
+        persisted-and-ignored: `quern set-channel stable typo` wrote stable
+        and said nothing about the word it did not understand."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "stable", "typo"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2, f"{command} persisted a value it half-understood"
+        assert "typo" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", [
+        "set-channel", "set-auto-install-cert", "set-update-check",
+    ])
+    def test_a_setting_still_takes_its_one_value(self, monkeypatch, command):
+        """The other half: the guard must not refuse the ordinary call."""
+        import server.__main__ as entry
+
+        seen = {}
+        monkeypatch.setattr(entry, "_cmd_set_channel",
+                            lambda a: seen.update(args=a) or 0)
+        monkeypatch.setattr(entry, "_cmd_set_auto_install_cert",
+                            lambda a: seen.update(args=a) or 0)
+        monkeypatch.setattr(entry, "_cmd_set_update_check",
+                            lambda a: seen.update(args=a) or 0)
+        monkeypatch.setattr(entry.sys, "argv", ["quern", command, "on"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert seen == {"args": ["on"]}, f"{command} did not receive its value"
+
+    def test_argparse_does_not_swallow_a_stray_flag(self, monkeypatch, capsys):
+        """The other entry point. `parse_known_args` kept the leftovers only
+        for the no-subcommand case, and discarded them everywhere else."""
+        from server import main as main_mod
+
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", "setup", "--yse"])
+        with pytest.raises(SystemExit) as exc:
+            main_mod.cli()
+        assert exc.value.code == 2
+        assert "--yse" in capsys.readouterr().err
