@@ -103,7 +103,36 @@ if [[ "$MODE" == "build" ]]; then
 else
   TAG="v$VERSION"
   ASSET="quern-$VERSION.tar.gz"
-  URL="https://github.com/quern-dev/quern/releases/download/$TAG/$ASSET"
+  # Through the same resolver the updater and `quern menubar install` use, so
+  # a rehearsal against QUERN_RELEASES_URL fetches the candidate app rather
+  # than quietly verifying the published one. One source of truth or none:
+  # a second copy of this URL is how the check ends up checking something
+  # other than what runs.
+  PY="$REPO_ROOT/.venv/bin/python"
+  [[ -x "$PY" ]] || PY="$(command -v python3 || true)"
+  URL=""
+  if [[ -n "$PY" ]]; then
+    URL="$(cd "$REPO_ROOT" && "$PY" -c 'import sys
+from server.lifecycle import releases
+print(releases.download_url(sys.argv[1]))' "$VERSION" 2>/dev/null || true)"
+  fi
+  # The literal is the fallback, not the source of truth: this script runs
+  # from a clone that may have no venv, and a missing interpreter should not
+  # stop an ordinary install.
+  #
+  # But it is not a fallback when an override is set. Falling back to
+  # github.com there fetches the *published* app and installs it while the
+  # operator believes they are checking a candidate -- which is the exact
+  # substitution QUERN_RELEASES_URL exists to make visible. Refuse instead.
+  if [[ -z "$URL" ]]; then
+    if [[ -n "${QUERN_RELEASES_URL:-}" ]]; then
+      echo "error: QUERN_RELEASES_URL is set but the release URL could not be" >&2
+      echo "       resolved (no usable python at $PY), so this would have" >&2
+      echo "       installed the published app instead of your candidate." >&2
+      exit 1
+    fi
+    URL="https://github.com/quern-dev/quern/releases/download/$TAG/$ASSET"
+  fi
   echo "==> Fetching the signed app from $TAG"
   curl -fsSL --max-time 180 -o "$WORK/$ASSET" "$URL" || {
     echo "error: could not download $ASSET" >&2

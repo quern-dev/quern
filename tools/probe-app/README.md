@@ -20,9 +20,42 @@ isolated the HID shift-drop bug (see `fix/sim-bridge-keyboard-modifier-drop`).
 ./build.sh                    # build only → build/QuernProbe.app
 ./build.sh --install          # build + install on the booted simulator
 ./build.sh --install <udid>   # build + install on a specific simulator
+./build.sh --scene            # the scene-lifecycle bundle (see below)
 ```
 
 Bundle id: `com.quern.probe`.
+
+### On a real iPhone
+
+```sh
+./build.sh --device <device-udid>            # build + sign
+./build.sh --device <device-udid> --install  # and install it
+```
+
+`<device-udid>` is the hardware udid from `xcrun devicectl list devices`, not
+the identifier Quern shows for the same phone.
+
+Same sources and same `Info.plist` as the simulator build, so a test means the
+same thing on both; the build adds `MinimumOSVersion` and
+`CFBundleSupportedPlatforms`, which only device installs require.
+
+Signing needs a **development** provisioning profile that lists the device.
+`find-profile.py` finds one, preferring a profile issued for `com.quern.probe`
+over a wildcard `TEAM.*` team profile, and rejecting any profile with no device
+list — that is a distribution profile, which signs and installs and then fails
+to launch. If nothing matches it says so and tells you the fix: open any iOS
+project in Xcode once with your account signed in, which is enough to get a
+wildcard team profile covering your registered devices.
+
+Nothing here is checked in or configured: the profile, the team and the signing
+certificate are all discovered at build time, because a pasted team id and
+profile uuid both go stale — profiles expire yearly and Xcode reissues them
+with a new uuid.
+
+Why it was simulator-only until now: the build targeted the `iphonesimulator`
+SDK with an `-ios16.0-simulator` triple and never signed anything. That suffix
+is the whole difference between a bundle the simulator loads and one a phone
+does, and the mismatch surfaces at install as a signature error.
 
 ## Tabs
 

@@ -23,6 +23,10 @@ class IdbBackend:
 
     _QUERN_COMPANION = CONFIG_DIR / "bin" / "idb_companion"
 
+    #: `idb ui swipe` releases at speed, so the list flings on. The scroll
+    #: sweep reads this to keep settling between swipes here.
+    swipe_is_controlled = False
+
     def __init__(self) -> None:
         self._binary: str | None = None
 
@@ -154,6 +158,7 @@ class IdbBackend:
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
@@ -204,7 +209,10 @@ class IdbBackend:
             )
 
         # Find empty containers before flattening (which pops children)
-        empty_containers = probing.find_empty_containers(data)
+        # `probe=False` returns the static tree alone. See SimBridgeBackend for
+        # what that costs and why a caller would skip it; this backend probes
+        # the same way and pays the same price.
+        empty_containers = probing.find_empty_containers(data) if probe else []
 
         # Before flatten
         t5 = time.perf_counter()
@@ -394,8 +402,14 @@ class IdbBackend:
         end_x: float,
         end_y: float,
         duration: float = 0.5,
+        hold: float = 0.0,
     ) -> None:
-        """Swipe gesture. Runs: idb ui swipe <x1> <y1> <x2> <y2> --udid <udid> --duration <d>"""
+        """Swipe gesture. Runs: idb ui swipe <x1> <y1> <x2> <y2> --udid <udid> --duration <d>
+
+        `hold` is accepted for parity with sim-bridge and ignored: `idb ui
+        swipe` has no way to keep the finger down at the end, so a swipe here
+        still flings.
+        """
         await self._run(
             "ui", "swipe",
             str(int(round(start_x))), str(int(round(start_y))),

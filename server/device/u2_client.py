@@ -287,6 +287,10 @@ class U2Backend:
         udid: str,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        # Accepted for interface parity with SimBridgeBackend and IdbBackend,
+        # and ignored: uiautomator's dump is complete, so there is
+        # nothing to probe and nothing for the caller to switch off.
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI elements as a flat list of idb-compatible dicts."""
 

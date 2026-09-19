@@ -949,7 +949,17 @@ func doTap(udid: String, x: Double, y: Double, hold: Double = 0.05) -> Bool {
     return sendDigitizerEvent(point: point, identifier: id, isDown: false, client: client)
 }
 
-func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, duration: Double = 0.3) -> Bool {
+/// `hold` keeps the finger down at the end point for that many seconds before
+/// lifting. With no hold a 0.3s swipe releases at speed and the list keeps
+/// going: measured on iOS 18.6 it travelled 1020pt for a 389pt drag, which is
+/// more than a screen, so a sweep stepping with it skips rows outright. A 0.15s
+/// hold brings that down to the drag itself (350pt) and the list stops at once.
+///
+/// The hold events alternate by half a thousandth of the screen. Repeating the
+/// identical point was tried first and changed nothing -- the travel was the
+/// same 1000pt -- so the unchanged position is evidently not treated as the
+/// finger coming to rest.
+func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, duration: Double = 0.3, hold: Double = 0) -> Bool {
     guard let client = ensureHIDClient(udid: udid) else { return false }
     let size = devicePointSize(for: resolveDevice(udid: udid)!)
     let start = CGPoint(x: CGFloat(clamp01(x1 / Double(size.width))),
@@ -971,6 +981,14 @@ func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, durat
         if sendDigitizerEvent(point: p, identifier: id, isDown: true, client: client) { ok += 1 }
     }
     usleep(stepMs * 1000)
+    if hold > 0 {
+        let holdSteps = max(1, Int(hold * 1000 / 16))
+        for k in 0..<holdSteps {
+            let p = CGPoint(x: end.x, y: end.y + CGFloat(k % 2) * 0.0005)
+            _ = sendDigitizerEvent(point: p, identifier: id, isDown: true, client: client)
+            usleep(16_000)
+        }
+    }
     return sendDigitizerEvent(point: end, identifier: id, isDown: false, client: client) && ok >= steps / 2
 }
 
@@ -1408,7 +1426,8 @@ func handleCommand(_ dict: [String: Any]) {
             return
         }
         let duration = dict["duration"] as? Double ?? 0.3
-        if doSwipe(udid: udid, x1: x1, y1: y1, x2: x2, y2: y2, duration: duration) {
+        let hold = dict["hold"] as? Double ?? 0
+        if doSwipe(udid: udid, x1: x1, y1: y1, x2: x2, y2: y2, duration: duration, hold: hold) {
             respond(["ok": true])
         } else {
             respond(["ok": false, "error": "swipe failed"])

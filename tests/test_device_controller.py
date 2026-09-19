@@ -578,7 +578,7 @@ class TestGetUIElements:
         assert elements[0].type == "Application"
         assert elements[1].label == "Settings"
         ctrl.idb.describe_all.assert_called_once_with(
-            "AAAA-1111", snapshot_depth=None, source_timeout=None
+            "AAAA-1111", snapshot_depth=None, source_timeout=None, probe=True
         )
 
     async def test_with_explicit_udid(self):
@@ -588,7 +588,7 @@ class TestGetUIElements:
         elements, udid = await ctrl.get_ui_elements(udid="BBBB-2222")
         assert udid == "BBBB-2222"
         ctrl.idb.describe_all.assert_called_once_with(
-            "BBBB-2222", snapshot_depth=None, source_timeout=None
+            "BBBB-2222", snapshot_depth=None, source_timeout=None, probe=True
         )
 
 
@@ -1007,6 +1007,30 @@ class TestGetUIElementsWdaDispatch:
         ctrl.wda_client.describe_all.assert_not_called()
 
 
+    async def test_an_unprobed_read_is_not_cached(self):
+        """The sweep reads without probing; the cache key is the udid alone.
+
+        So storing that tree hands a caller that asked for probing a tree with
+        the tab-bar and nav-bar children missing, and nothing in the entry says
+        probing was skipped. tap_element builds screen context right after
+        scroll_to_element returns, inside the 300ms TTL.
+        """
+        ctrl = DeviceController()
+        ctrl._active_udid = "SIM-0001"
+        ctrl._device_type_cache["SIM-0001"] = DeviceType.SIMULATOR
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        await ctrl.get_ui_elements("SIM-0001", probe_containers=False)
+        assert "SIM-0001" not in ctrl._ui_cache, (
+            "a tree read without container probing was stored in the shared cache"
+        )
+
+        await ctrl.get_ui_elements("SIM-0001", probe_containers=True)
+        assert "SIM-0001" in ctrl._ui_cache, (
+            "a probed read should still be cached"
+        )
+
+
 class TestGetScreenSummaryStrategy:
     """Test strategy parameter on get_screen_summary."""
 
@@ -1391,9 +1415,12 @@ class TestScrollToElement:
         backend = MagicMock()
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
-        # First below the viewport (center 1020), then in view after a swipe
-        # (the third fetch is the settle re-confirm).
+        # Reads, in order: the cold (probing) lookup finds it below the
+        # viewport; a plain read finds it too, so it is an ordinary element
+        # rather than a probe-only one and the sweep may stop probing; after the
+        # swipe it is in view; then the settle re-confirm.
         ctrl.get_ui_elements = AsyncMock(side_effect=[
+            ([self._el(1000)], "AAAA-1111"),
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
@@ -1412,9 +1439,12 @@ class TestScrollToElement:
         backend = MagicMock()
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
-        # First tucked under the top nav bar (top edge 4 < 50 inset), then in
-        # view after scrolling up (the third fetch is the settle re-confirm).
+        # Reads, in order: the cold lookup finds it tucked under the top nav bar
+        # (top edge 4 < 50 inset); a plain read finds it too, so it is not
+        # probe-only; after scrolling up it is in view; then the settle
+        # re-confirm.
         ctrl.get_ui_elements = AsyncMock(side_effect=[
+            ([self._el(4)], "AAAA-1111"),
             ([self._el(4)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),

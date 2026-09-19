@@ -1180,6 +1180,12 @@ class TapRequest(BaseModel):
     udid: str | None = None
 
 
+class RestoreInputRequest(BaseModel):
+    """Request body for POST /device/ui/restore-input."""
+
+    udid: str | None = None
+
+
 class TapElementRequest(BaseModel):
     """Request body for POST /device/ui/tap-element."""
 
