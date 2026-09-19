@@ -387,6 +387,9 @@ class TestATransientFailureDoesNotDisableTheCheck:
         with patch.object(sim_input, "legacy_input_is_suppressed", state):
             await controller.tap(1.0, 2.0, udid="SIM")
             assert controller._input_checked == {}, "a failed read was cached"
+            # Rate-limited rather than cached, so the next ask is due only
+            # after the cooldown -- cleared here to make it due now.
+            controller._input_probe_cooldown.clear()
             await controller.tap(1.0, 2.0, udid="SIM")
 
         assert controller._input_checked == {"SIM": False}
@@ -619,3 +622,69 @@ class TestRepairsDoNotInterleave:
         assert started[:2] == ["SIM-A", "SIM-B"], (
             f"one simulator's repair waited for another's: {started}"
         )
+
+
+class TestAnUnreadableStateIsNotProbedOnEveryKeystroke:
+    """Found from dev-d6's note about unit tests spawning subprocesses.
+
+    An unreadable state is deliberately not cached, so that a device which
+    becomes readable is noticed. Without a cooldown that means one
+    `xcrun simctl spawn` per tap, swipe and keystroke, forever, for a device
+    that never answers -- measured at ~0.11s each against an unknown udid, and
+    in the unit suite it was a real subprocess per call.
+    """
+
+    def _controller(self):
+        from server.device.controller import DeviceController
+
+        controller = DeviceController()
+        controller._is_android = lambda udid: False
+        controller._is_physical = lambda udid: False
+        controller.resolve_udid = AsyncMock(return_value="SIM")
+        controller._ui_backend = lambda udid: type(
+            "B", (), {"tap": staticmethod(AsyncMock())},
+        )()
+        controller._invalidate_ui_cache = lambda udid: None
+        return controller
+
+    async def test_an_unreadable_state_is_asked_once_within_the_cooldown(self):
+        controller = self._controller()
+        probe = AsyncMock(return_value=None)
+
+        with patch.object(sim_input, "legacy_input_is_suppressed", probe):
+            for _ in range(5):
+                await controller.tap(1.0, 2.0, udid="SIM")
+
+        assert probe.await_count == 1, (
+            f"{probe.await_count} probes for five taps; each one is a subprocess"
+        )
+        assert controller._input_checked == {}, "an unreadable state was cached"
+
+    async def test_it_is_asked_again_once_the_cooldown_passes(self):
+        """Not cached, only rate-limited: a device that starts answering is
+        noticed rather than written off for the session."""
+        import time as time_mod
+
+        controller = self._controller()
+        probe = AsyncMock(side_effect=[None, True])
+
+        with patch.object(sim_input, "legacy_input_is_suppressed", probe):
+            await controller.tap(1.0, 2.0, udid="SIM")
+            controller._input_probe_cooldown["SIM"] = (
+                time_mod.monotonic() - controller._INPUT_PROBE_COOLDOWN_S - 1
+            )
+            await controller.tap(1.0, 2.0, udid="SIM")
+
+        assert probe.await_count == 2
+        assert controller._input_checked == {"SIM": False}
+
+    async def test_a_readable_state_is_not_rate_limited_into_silence(self):
+        """The cooldown must not swallow the first real answer."""
+        controller = self._controller()
+
+        with patch.object(
+            sim_input, "legacy_input_is_suppressed", AsyncMock(return_value=True),
+        ):
+            await controller.tap(1.0, 2.0, udid="SIM")
+
+        assert controller._input_checked == {"SIM": False}

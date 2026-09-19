@@ -88,6 +88,7 @@ class DeviceControllerUI:
     - self._device_info_cache: dict[str, DeviceInfo]
     - self._device_type_cache: dict[str, DeviceType]
     - self._input_checked: dict[str, bool]
+    - self._input_probe_cooldown: dict[str, float]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
@@ -106,6 +107,11 @@ class DeviceControllerUI:
 
     # Maximum scroll-into-view attempts before giving up
     _MAX_SCROLL_ATTEMPTS = 3
+
+    #: How long to wait before asking again about a device whose
+    #: input-service state could not be read. Without it, an unreadable state
+    #: costs a `simctl spawn` on every single input call.
+    _INPUT_PROBE_COOLDOWN_S = 60.0
 
     # Known screen dimensions by device model (portrait orientation)
     _SCREEN_DIMENSIONS = {
@@ -1309,6 +1315,14 @@ class DeviceControllerUI:
         """
         if self._input_checked.get(resolved) is not None:
             return
+        # A state that cannot be read is not cached, so that a device which
+        # becomes readable is noticed -- but without a cooldown that means a
+        # `simctl spawn` on *every* tap, swipe and keystroke for a device that
+        # never answers. Measured at ~0.11s each against an unknown udid.
+        asked_at = self._input_probe_cooldown.get(resolved)
+        now = time.monotonic()
+        if asked_at is not None and now - asked_at < self._INPUT_PROBE_COOLDOWN_S:
+            return
         if self._is_android(resolved) or self._is_physical(resolved):
             self._input_checked[resolved] = True
             return
@@ -1322,7 +1336,9 @@ class DeviceControllerUI:
         if suppressed is None:
             # Asked and got nothing back. Recording that as healthy would
             # disable the check for this device for the rest of the session on
-            # the strength of one transient failure.
+            # the strength of one transient failure, so only the cooldown is
+            # recorded: ask again, but not on every keystroke.
+            self._input_probe_cooldown[resolved] = now
             return
         self._input_checked[resolved] = not suppressed
         if suppressed:

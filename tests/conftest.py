@@ -440,3 +440,33 @@ def _no_real_release_downloads(monkeypatch, request):
         )
 
     monkeypatch.setattr(setup_mod, "download_release_app", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_simulator_input_probes(monkeypatch, request):
+    """Keep the input-service probe off the real machine.
+
+    `_warn_if_input_is_suppressed` runs on every tap, swipe, keystroke and
+    button press, and asks the device through `xcrun simctl spawn`. Against
+    the fake udids unit tests use, that is a real subprocess per call -- ~0.11s
+    each, answering nothing. CONTRIBUTING's rule is that tests inject every
+    external lookup; this is the backstop for the ones that do not.
+
+    Healthy, so the check passes silently. A test about suppression patches
+    `legacy_input_is_suppressed` itself, which overrides this.
+    """
+    if request.module.__name__.endswith("test_sim_input"):
+        # The file that tests this machinery drives the real functions with
+        # `_spawn` stubbed, which this fixture would replace out from under it.
+        return
+
+    from server.device import sim_input
+
+    async def not_suppressed(udid):
+        return False
+
+    async def no_device_hub():
+        return False
+
+    monkeypatch.setattr(sim_input, "legacy_input_is_suppressed", not_suppressed)
+    monkeypatch.setattr(sim_input, "device_hub_is_running", no_device_hub)

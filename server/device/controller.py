@@ -122,6 +122,9 @@ class DeviceController(DeviceControllerUI):
         # spawn` (~0.5s), so it is paid once per device rather than per
         # tap.
         self._input_checked: dict[str, bool] = {}
+        # When each device was last asked about an input-service state that
+        # could not be read; see _INPUT_PROBE_COOLDOWN_S.
+        self._input_probe_cooldown: dict[str, float] = {}
         # Device name cache: udid -> human-readable name (populated by
         # list_devices). Only consumer is the active-device sidecar, so that
         # readers outside the server can show a name instead of a UDID.
