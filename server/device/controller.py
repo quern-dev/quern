@@ -644,6 +644,14 @@ class DeviceController(DeviceControllerUI):
         """
         from server.device import sim_input
 
+        # A previous boot of this udid may have left a verdict behind, and it
+        # describes a device that no longer exists. Cleared before the probe,
+        # so a boot that cannot read the state leaves nothing stale: otherwise
+        # an old True survives, the first input call skips its probe, and a
+        # simulator whose services were taken never warns.
+        self._input_checked.pop(udid, None)
+        self._input_probe_cooldown.pop(udid, None)
+
         try:
             # Device Hub attaches a few seconds after the boot returns, so a
             # repair applied immediately is undone by an attachment that has

@@ -31,6 +31,7 @@ and offer the repair everywhere else.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from server.models import DeviceError
@@ -75,9 +76,20 @@ async def _spawn(udid: str, *argv: str) -> tuple[int, str]:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=_SPAWN_TIMEOUT_S,
         )
+    except asyncio.CancelledError:
+        # Cancelling the *wait* leaves the child running, and the command it is
+        # running may be half of a repair. Kill it and reap it before
+        # re-raising, so a caller holding the repair lock still holds it until
+        # the subprocess has actually stopped -- otherwise the next repair can
+        # overlap a `kickstart` that is still going.
+        proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
+        raise
     except TimeoutError:
         proc.kill()
-        await proc.wait()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
         # Distinct from a failure, because a timeout does not say the command
         # did nothing: `notifyutil -s` may have written the state before the
         # wait expired, and a caller that treats that as "no change" leaves

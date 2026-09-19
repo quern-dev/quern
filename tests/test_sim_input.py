@@ -12,6 +12,7 @@ only warns.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -74,7 +75,12 @@ class TestReadingTheState:
             patch.object(sim_input, "_SPAWN_TIMEOUT_S", 0.05),
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
         ):
-            assert await sim_input.legacy_input_is_suppressed("SIM") is None
+            # Bounded: without the guard under test this waits forever, and a
+            # suite that hangs says less than one that fails.
+            answer = await asyncio.wait_for(
+                sim_input.legacy_input_is_suppressed("SIM"), timeout=5,
+            )
+        assert answer is None
 
 
 class TestTheRepair:
@@ -587,9 +593,12 @@ class TestRepairsDoNotInterleave:
             patch.object(sim_input, "_spawn", spawn),
             patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
         ):
-            await asyncio.gather(
-                sim_input.restore_legacy_input("SIM"),
-                sim_input.restore_legacy_input("SIM"),
+            await asyncio.wait_for(
+                asyncio.gather(
+                    sim_input.restore_legacy_input("SIM"),
+                    sim_input.restore_legacy_input("SIM"),
+                ),
+                timeout=5,          # a lock that never releases fails, not hangs
             )
 
         # Each repair is a clear then a restart; interleaved they would read
@@ -614,9 +623,12 @@ class TestRepairsDoNotInterleave:
             patch.object(sim_input, "_spawn", spawn),
             patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
         ):
-            await asyncio.gather(
-                sim_input.restore_legacy_input("SIM-A"),
-                sim_input.restore_legacy_input("SIM-B"),
+            await asyncio.wait_for(
+                asyncio.gather(
+                    sim_input.restore_legacy_input("SIM-A"),
+                    sim_input.restore_legacy_input("SIM-B"),
+                ),
+                timeout=5,
             )
 
         assert started[:2] == ["SIM-A", "SIM-B"], (
@@ -688,3 +700,95 @@ class TestAnUnreadableStateIsNotProbedOnEveryKeystroke:
             await controller.tap(1.0, 2.0, udid="SIM")
 
         assert controller._input_checked == {"SIM": False}
+
+
+class TestABootClearsTheLastBootsVerdict:
+    """CodeRabbit on #234: a verdict outlives the device it described.
+
+    `_input_checked[udid] = True` from an earlier boot survives a reboot, and
+    a boot whose probe then fails or times out leaves it in place -- so the
+    first input call skips its check and a simulator whose services were taken
+    never warns.
+    """
+
+    def _controller(self):
+        from server.device.controller import DeviceController
+
+        controller = DeviceController()
+        controller._is_android = lambda udid: False
+        controller._is_physical = lambda udid: False
+        controller.simctl.boot = AsyncMock()
+        controller._require_simulator = lambda udid, what: None
+        controller._input_checked = {"SIM": True}
+        controller._input_probe_cooldown = {"SIM": 1.0}
+        return controller
+
+    async def test_an_unreadable_probe_does_not_leave_the_old_verdict(self):
+        controller = self._controller()
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=False)),
+            patch.object(sim_input, "legacy_input_is_suppressed", AsyncMock(return_value=None)),
+        ):
+            await controller.boot(udid="SIM")
+
+        assert controller._input_checked == {}
+        assert controller._input_probe_cooldown == {}
+
+    async def test_a_wait_that_times_out_does_not_either(self):
+        controller = self._controller()
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=True)),
+            patch.object(sim_input, "wait_for_device_hub_to_attach", AsyncMock(return_value=False)),
+        ):
+            await controller.boot(udid="SIM")
+
+        assert controller._input_checked == {}
+
+
+class TestCancellationDoesNotOutliveTheChild:
+    """CodeRabbit on #234: cancelling the wait does not cancel the process.
+
+    `restore_legacy_input` holds a lock so two repairs cannot interleave. If a
+    cancelled `_spawn` returns while its child is still running, the lock is
+    released over a live `kickstart` and the next repair overlaps it.
+    """
+
+    async def test_a_cancelled_spawn_kills_and_reaps_its_child(self):
+        killed = []
+
+        class Proc:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+            def kill(self):
+                killed.append(True)
+
+            async def wait(self):
+                return 0
+
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=Proc())),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            task = asyncio.ensure_future(sim_input._spawn("SIM", "notifyutil"))
+            await asyncio.sleep(0)
+            task.cancel()
+            await task
+
+        assert killed == [True], "the child was left running after cancellation"
+
+    async def test_a_cancelled_repair_does_not_report_success(self):
+        """It must propagate, not be swallowed into a successful repair."""
+        async def hangs(udid, *argv):
+            await asyncio.sleep(3600)
+
+        with patch.object(sim_input, "_spawn", hangs):
+            task = asyncio.ensure_future(sim_input.restore_legacy_input("SIM"))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
