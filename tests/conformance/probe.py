@@ -116,6 +116,20 @@ class ProbeContract:
     def row_label(self, index: int) -> str:
         return self.row_label_template.format(index=index)
 
+    def row_locator(self, index: int) -> dict:
+        """How to ask for a row on this platform.
+
+        By identifier where the rows have one, by label otherwise. Android's
+        RecyclerView gives every row the same resource id, so a test written
+        against `row_identifier` alone cannot run there -- which is how the
+        four scroll tests came to skip on Android, and how #232 (its sweep
+        cannot reach past ~110 rows) went unnoticed.
+        """
+        identifier = self.row_identifier(index)
+        if identifier is not None:
+            return {"identifier": identifier}
+        return {"label": self.row_label(index)}
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -194,11 +208,7 @@ ANDROID = ProbeContract(
     },
     tab_identifier=None,
     row_identifier_template=None,
-    # The Android fixture labels its rows `row_41`, not `Row 41`. The iOS
-    # template was copied here and never checked against the device, so every
-    # lookup by label missed -- and because the scroll tests skip on this
-    # platform (no per-row identifier), nothing caught it.
-    row_label_template="row_{index}",
+    row_label_template="Row {index}",
     ready_identifier="probe_tabs",
 )
 
@@ -403,6 +413,20 @@ class ProbeDriver:
             timeout=90.0,
         )
 
+    def row(self, index: int) -> dict | None:
+        """The row's element, however this platform identifies its rows."""
+        locator = self.contract.row_locator(index)
+        if "identifier" in locator:
+            return self.element(locator["identifier"])
+        wanted = locator["label"]
+        for element in self.ui_tree().get("elements") or []:
+            if element.get("label") == wanted:
+                return element
+        return None
+
+    def scroll_to_row(self, index: int, **kw):
+        return self.scroll_to(**self.contract.row_locator(index), **kw)
+
     def scroll_to(self, *, identifier: str | None = None, label: str | None = None,
                   max_swipes: int = 15):
         return self.client.json_ok(
@@ -571,10 +595,15 @@ class ProbeDriver:
         """
         for key in ("identifier", "label"):
             value = element.get(key) or ""
-            if value.startswith("row_"):
-                tail = value[4:]
-                if tail.isdigit():
-                    return int(tail)
+            # iOS says `row_41` in the identifier and `Row 41` in the label;
+            # Android has no per-row identifier and says `Row 41`. Both
+            # spellings are read here rather than one per platform, because a
+            # parser that knows only one of them fails silently -- it did,
+            # returning no rows at all on Android, which reads as "the list is
+            # empty" rather than as a mismatch.
+            head, _, tail = value.replace("_", " ").partition(" ")
+            if head.lower() == "row" and tail.isdigit():
+                return int(tail)
         return None
 
     def swipe_down(self, *, settle: float = 0.9) -> None:

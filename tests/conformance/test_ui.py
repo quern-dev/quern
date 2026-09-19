@@ -252,11 +252,8 @@ def test_the_app_records_the_control_change(probe, probe_id) -> None:
 def test_the_first_row_is_visible_without_scrolling(probe) -> None:
     probe.goto("scroll")
     probe.scroll_reset(to="top")
-    first = probe.contract.row_identifier(0)
-    if first is None:
-        pytest.skip("rows are not individually identified on this platform")
-    assert probe.element(first) is not None, (
-        f"{first} is not on screen at the top of the list"
+    assert probe.row(0) is not None, (
+        f"{probe.contract.row_locator(0)} is not on screen at the top of the list"
     )
 
 
@@ -268,10 +265,8 @@ def test_the_last_row_needs_scrolling_to_reach(probe) -> None:
     """
     probe.goto("scroll")
     probe.scroll_reset(to="top")
-    last = probe.contract.row_identifier(SCROLL_ROW_COUNT - 1)
-    if last is None:
-        pytest.skip("rows are not individually identified on this platform")
-    assert probe.element(last) is None, (
+    last = probe.contract.row_locator(SCROLL_ROW_COUNT - 1)
+    assert probe.row(SCROLL_ROW_COUNT - 1) is None, (
         f"{last} is on screen at the top of the list; the scroll fixture is "
         "not taller than the viewport"
     )
@@ -334,16 +329,14 @@ def test_scroll_to_element_brings_an_offscreen_row_into_view(probe) -> None:
     probe.scroll_reset(to="top")
 
     target_index = 60
-    target = probe.contract.row_identifier(target_index)
-    if target is None:
-        pytest.skip("rows are not individually identified on this platform")
+    target = probe.contract.row_locator(target_index)
 
     tracer = ScrollTracer(probe, screenshots=True)
     server_log = ServerLogWindow()
     server_log.start()
     phase_started = datetime.now(UTC)
     tracer.sample("before")
-    assert probe.element(target) is None, (
+    assert probe.row(target_index) is None, (
         f"{target} was already visible at the top of the list; pick a row "
         "further down"
     )
@@ -355,14 +348,14 @@ def test_scroll_to_element_brings_an_offscreen_row_into_view(probe) -> None:
     # data at all, which is the exact problem this test exists to avoid.
     outcome = "found"
     try:
-        probe.scroll_to(identifier=target, max_swipes=25)
+        probe.scroll_to_row(target_index, max_swipes=25)
     except AssertionError as exc:
         outcome = f"scroll_to_element refused: {str(exc).splitlines()[0]}"
     except Exception as exc:  # noqa: BLE001 - transport failure is a result here
         outcome = f"scroll_to_element never returned: {exc!r}"
     tracer.sample("after scroll_to")
 
-    if outcome == "found" and probe.element(target) is not None:
+    if outcome == "found" and probe.row(target_index) is not None:
         return
 
     # Failed. Sweep manually with a settle delay so the report can say whether
@@ -406,12 +399,10 @@ def test_scroll_to_element_does_not_tap_what_it_scrolls_to(probe) -> None:
     # Row 20, not something distant. This test is about scroll-without-tap, and
     # a far target makes it fail for #84's reasons instead — one bug should not
     # be able to fail two tests for different stated reasons.
-    target = probe.contract.row_identifier(20)
-    if target is None:
-        pytest.skip("rows are not individually identified on this platform")
+    target = probe.contract.row_locator(20)
 
-    probe.scroll_to(identifier=target, max_swipes=25)
-    assert probe.element(target) is not None, (
+    probe.scroll_to_row(20, max_swipes=25)
+    assert probe.row(20) is not None, (
         f"{target} did not come into view; this test cannot check the "
         "no-tap property without it"
     )
