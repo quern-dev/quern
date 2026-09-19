@@ -19,6 +19,7 @@ from server.models import (
     ClearTextRequest,
     DeviceError,
     PressButtonRequest,
+    RestoreInputRequest,
     ScrollToElementRequest,
     SwipeRequest,
     TapElementRequest,
@@ -318,6 +319,47 @@ async def get_screen_summary(
             summary["confidence"] = result["confidence"]
 
         return summary
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/ui/restore-input")
+async def restore_input(request: Request, body: RestoreInputRequest):
+    """Take a simulator's input services back from Xcode 27's Device Hub.
+
+    Xcode 27 attaches a guest HID daemon to booted simulators, and backboardd
+    answers by disconnecting the legacy touch, button and keyboard services --
+    the ones quern drives. Taps and keystrokes are then accepted and discarded,
+    so the device looks healthy and the screen never changes.
+
+    **Restarts SpringBoard, so apps running on the simulator are killed.** That
+    is why this is a call rather than something quern does silently; the one
+    place it is automatic is a boot quern performed itself, where nothing is
+    running yet.
+    """
+    from server.device import sim_input
+
+    controller = _get_controller(request)
+    try:
+        udid = await controller.resolve_udid(body.udid)
+        if controller._is_android(udid) or controller._is_physical(udid):
+            raise DeviceError(
+                "Only simulators have the legacy input services this restores.",
+                tool="simctl",
+            )
+        was_suppressed = await sim_input.legacy_input_is_suppressed(udid)
+        await sim_input.restore_legacy_input(udid)
+        controller._input_checked[udid] = True
+        return {
+            "status": "ok",
+            "udid": udid,
+            # False means the services were already the guest's, and this was a
+            # SpringBoard restart for nothing -- worth saying rather than
+            # reporting an indistinguishable success. None means the state
+            # could not be read.
+            "was_suppressed": was_suppressed,
+            "detail": "SpringBoard was restarted; any running app was killed.",
+        }
     except DeviceError as e:
         raise _handle_device_error(e)
 

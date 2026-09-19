@@ -117,6 +117,11 @@ class DeviceController(DeviceControllerUI):
         self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        # Simulators whose input services have been checked this boot.
+        # See server/device/sim_input.py; the check costs a `simctl
+        # spawn` (~0.5s), so it is paid once per device rather than per
+        # tap.
+        self._input_checked: dict[str, bool] = {}
         # Device name cache: udid -> human-readable name (populated by
         # list_devices). Only consumer is the active-device sidecar, so that
         # readers outside the server can show a name instead of a UDID.
@@ -596,6 +601,7 @@ class DeviceController(DeviceControllerUI):
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
             self._active_udid = udid
+            await self._restore_input_after_boot(udid)
             return udid
 
         if name:
@@ -616,9 +622,44 @@ class DeviceController(DeviceControllerUI):
             target = matches[0]
             await self.simctl.boot(target.udid)
             self._active_udid = target.udid
+            await self._restore_input_after_boot(target.udid)
             return target.udid
 
         raise DeviceError("Either udid or name is required to boot", tool="simctl")
+
+    async def _restore_input_after_boot(self, udid: str) -> None:
+        """Take the input services back, if Xcode 27's Device Hub has them.
+
+        Done here because a simulator quern has just booted is running
+        nothing, so the SpringBoard restart the repair needs costs the caller
+        nothing. On a device that was already booted the same repair would
+        kill whatever the user has open, so there it is offered rather than
+        taken (see `_require_input_can_land`).
+
+        Never fatal to a boot: a simulator that cannot receive input is worth
+        far more than no simulator, and the next input call says so plainly.
+        """
+        from server.device import sim_input
+
+        try:
+            # Device Hub attaches a few seconds after the boot returns, so a
+            # repair applied immediately is undone by an attachment that has
+            # not happened yet. Wait for it, but only when Device Hub is
+            # running -- otherwise there is nothing to wait for.
+            if await sim_input.device_hub_is_running():
+                suppressed = await sim_input.wait_for_device_hub_to_attach(udid)
+            else:
+                suppressed = await sim_input.legacy_input_is_suppressed(udid)
+            if suppressed:
+                logger.info(
+                    "Input services on %s are held by Device Hub; restoring "
+                    "them now, while nothing is running", udid[:8],
+                )
+                await sim_input.restore_legacy_input(udid)
+            self._input_checked[udid] = True
+        except (DeviceError, OSError) as exc:
+            logger.warning("Could not restore input services on %s: %s", udid[:8], exc)
+            self._input_checked.pop(udid, None)
 
     async def shutdown(self, udid: str) -> None:
         """Shutdown a simulator or Android emulator."""

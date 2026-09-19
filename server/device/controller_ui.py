@@ -87,6 +87,7 @@ class DeviceControllerUI:
     - self._cache_misses: int
     - self._device_info_cache: dict[str, DeviceInfo]
     - self._device_type_cache: dict[str, DeviceType]
+    - self._input_checked: dict[str, bool]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
@@ -1297,9 +1298,35 @@ class DeviceControllerUI:
             )
         return generate_screen_summary(elements, max_elements=max_elements), elements, resolved
 
+    async def _warn_if_input_is_suppressed(self, resolved: str) -> None:
+        """Say once per device when Device Hub holds its input services.
+
+        Once, because the check costs a `simctl spawn` (~0.5s) and the answer
+        cannot change without a reboot or the repair, both of which clear the
+        record. Not a refusal: the state is not conclusive (see
+        server/device/sim_input.py), and refusing input that would have worked
+        is worse than the warning.
+        """
+        if self._input_checked.get(resolved) is not None:
+            return
+        if self._is_android(resolved) or self._is_physical(resolved):
+            self._input_checked[resolved] = True
+            return
+        from server.device import sim_input
+
+        try:
+            suppressed = await sim_input.legacy_input_is_suppressed(resolved)
+        except OSError as exc:
+            logger.debug("Could not read the input-service state: %s", exc)
+            return
+        self._input_checked[resolved] = not suppressed
+        if suppressed:
+            logger.warning(sim_input.suppressed_input_warning(resolved))
+
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
         """Tap at coordinates. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).tap(resolved, x, y)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
@@ -2036,6 +2063,7 @@ class DeviceControllerUI:
     ) -> str:
         """Swipe gesture. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).swipe(resolved, start_x, start_y, end_x, end_y, duration)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
@@ -2126,6 +2154,7 @@ class DeviceControllerUI:
         which is why it is asked for rather than assumed.
         """
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         if not (label or identifier):
             await self._ui_backend(resolved).type_text(resolved, text)
             self._invalidate_ui_cache(resolved)
@@ -2332,6 +2361,7 @@ class DeviceControllerUI:
     async def press_button(self, button: str, udid: str | None = None) -> str:
         """Press a hardware button. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).press_button(resolved, button)
         return resolved
 
