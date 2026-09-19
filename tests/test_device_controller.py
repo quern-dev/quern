@@ -9,6 +9,73 @@ import pytest
 from server.device.controller import DeviceController
 from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
+
+@pytest.fixture(autouse=True)
+def _device_type_is_not_looked_up_on_the_machine(monkeypatch, request):
+    """Keep this file off the real device stack, as its docstring claims.
+
+    Every test here builds a real `DeviceController` and drives it with a
+    made-up UDID. Any UI call then reaches `_ensure_device_type_cached`,
+    which does not recognise the UDID and calls `list_devices()` to find out
+    what it is -- a live `simctl list` / `idb list-targets` / `devicectl` /
+    `adb devices` sweep. Once per test, because each test constructs its own
+    controller and nothing caches across them.
+
+    Measured before this: 17 real enumerations totalling 20.1s of the 21.3s
+    the `TestTapElement` class took, and 56s for the file. It is also the
+    likeliest source of the intermittent errors seen here -- an enumeration
+    that talks to a live simulator stack under load can fail in ways a
+    mocked unit test never should, and it errors in whichever test happens
+    to be running.
+
+    For most tests here nothing is lost: an unknown UDID already defaults to
+    `SIMULATOR`, which is what they expect, so the lookup only confirmed the
+    default. The exceptions are the tests that assert the *warming* itself --
+    that resolving a UDID fills in the device's name and type. Those stub
+    every backend and drive the real aggregation, so they were already
+    hermetic, and they opt out with `@pytest.mark.enumerates_devices`.
+    """
+    # Unconditional, and not covered by the marker: this is a *different*
+    # external lookup, reached by `list_devices` itself. Six tests here stub
+    # simctl, devicectl, usbmux.list_devices and adb but not this one, so
+    # they each spent ~0.3s asking the machine about USB devices. An instance
+    # stub still wins over this, so the tests that set their own are
+    # unaffected.
+    from server.device.usbmux import UsbmuxBackend
+
+    async def no_usb_devices(self) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(UsbmuxBackend, "get_usb_udid_map", no_usb_devices)
+
+    # The tap paths capture a screenshot on their timeout branch, best-effort
+    # and swallowing failures -- so against these tests' invented UDIDs it ran
+    # `xcrun simctl io AAAA-1111 screenshot` for real, failed, and nobody
+    # noticed. That is the one remaining call into the simulator stack from
+    # this file, and the likeliest source of the intermittent errors here:
+    # it is a live call that can hang or fail for reasons having nothing to
+    # do with the test, and it lands in whichever test is running.
+    # The helper, not `DeviceController.screenshot` itself: two tests here
+    # assert that screenshot delegates to the right backend, and patching the
+    # method would replace the thing they are testing.
+    async def no_capture(controller, udid: str, label: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "server.device.controller_ui._capture_screenshot", no_capture,
+    )
+
+    if request.node.get_closest_marker("enumerates_devices"):
+        return
+
+    async def already_classified(self, udid: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        DeviceController, "_ensure_device_type_cached", already_classified,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -35,6 +102,7 @@ def _device(
 
 
 class TestActiveDeviceName:
+    @pytest.mark.enumerates_devices
     async def test_name_is_persisted_beside_the_udid(self):
         """Readers outside the server -- the menu-bar app -- show the active
         device, and a 36-character UDID is not something a person recognises."""
@@ -68,6 +136,7 @@ class TestActiveDeviceName:
 
         assert read_active_device() == {"udid": "ZZZZ-9999"}
 
+    @pytest.mark.enumerates_devices
     async def test_a_restored_device_gains_its_name_and_type(self):
         """The restore path is the one a restart actually takes. __init__ puts
         the persisted UDID straight into the backing field, deliberately
