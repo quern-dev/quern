@@ -566,3 +566,43 @@ to one of them. Their frames never move, so the sweep's progress check called
 a scrollable list static and gave up after one swipe: 3 of 4 targets returned
 404 on an iPhone 11. It now takes the smallest containing element, and the
 sweep no longer hit-tests at all.
+
+## F13 — a simulator booted while the Mac is locked ignores all input → #231
+
+Every tap, swipe, keystroke and button press returns success and does nothing;
+reads, screenshots and `open_url` keep working. Both backends fail identically
+(sim-bridge and idb), as does a sim-bridge binary built two days earlier, so it
+is neither ours nor a regression. Unlocking and rebooting the simulator fixes
+it immediately.
+
+It cost an hour here, and two confident hypotheses on the way -- an Xcode 27
+regression, then the iOS 26.5 runtime -- were both wrong. What eventually
+distinguished them was a control: the *same* test on the simulator that had
+been booted earlier, which also failed, so the variable was the boot rather
+than the runtime.
+
+## F14 — Android's sweep cannot reach past ~110 rows, and never turns around → #232
+
+The two faults #204 fixed for iOS, still present on Android: no end detection
+(from the bottom of a list, the whole downward budget is spent on swipes that
+move nothing) and reach capped by `max_swipes`. Measured on a Pixel 3 XL:
+`row_40` from the top found in 3.4s, `row_150` from the top and `row_3` from
+the bottom both 404 after ~17.6s. Identical on main and on #204's branch.
+
+## F15 — typing and clearing do not work on iOS 26.5 simulators → #233
+
+20 of 25 iOS UI tests pass on an iPhone 17 Pro (iOS 26.5, Xcode 27); the five
+failures are exactly the typing and clearing ones. The same suite passes on
+iOS 18.6, and the failure reproduces against main.
+
+## F16 — this suite's Android row labels were wrong, and the skips hid it
+
+`ANDROID.row_label_template` was `"Row {index}"`, copied from iOS; the fixture
+labels its rows `row_41`. Nothing caught it because the four scroll tests skip
+on Android -- they resolve rows by identifier, and Android's RecyclerView gives
+every row the same one. Template fixed here.
+
+**Still open:** making those four tests run on Android needs a row *locator*
+(identifier where there is one, label otherwise) rather than
+`contract.row_identifier`. Until then Android scrolling has no regression gate
+in this suite, which is how #232 went unnoticed.

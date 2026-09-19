@@ -194,7 +194,11 @@ ANDROID = ProbeContract(
     },
     tab_identifier=None,
     row_identifier_template=None,
-    row_label_template="Row {index}",
+    # The Android fixture labels its rows `row_41`, not `Row 41`. The iOS
+    # template was copied here and never checked against the device, so every
+    # lookup by label missed -- and because the scroll tests skip on this
+    # platform (no per-row identifier), nothing caught it.
+    row_label_template="row_{index}",
     ready_identifier="probe_tabs",
 )
 
