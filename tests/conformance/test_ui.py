@@ -386,6 +386,67 @@ def test_scroll_to_element_brings_an_offscreen_row_into_view(probe) -> None:
     )
 
 
+def _report_miss(probe, index: int, exc: Exception | None) -> str:
+    """Where the list actually ended up, for a sweep that did not arrive."""
+    viewport = probe.viewport()
+    seen = f"rows {viewport.first}-{viewport.last}" if viewport else "no rows on screen"
+    refusal = f" ({str(exc).splitlines()[0]})" if exc else ""
+    return f"row {index} was not reached{refusal}; the list is at {seen}"
+
+
+def test_a_row_far_down_the_list_is_reached(probe) -> None:
+    """The reach of one sweep, which is a different question from #84's.
+
+    The tests above use rows 20 and 60, both within any plausible budget, so
+    they pass on a sweep that cannot go further. Row 150 of 200 is past what
+    Android's *default* budget covers: ~11 rows a swipe against `max_swipes`
+    of 10.
+
+    Deliberately not raising `max_swipes`. Asking for 25 makes this pass on
+    both platforms today, which is worth knowing -- the sweep works, the reach
+    is the budget -- and makes the test prove nothing about what a caller who
+    did not think to ask for more will get. The default is the contract.
+
+    Expected to fail on Android until #232: the caller cannot tell "not on
+    this screen" from "further than the default budget", because both answer
+    404. Left failing rather than skipped, for the reason F9 is: a known bug
+    that reports as a pass is worse than no test.
+    """
+    probe.goto("scroll")
+    probe.scroll_reset(to="top")
+    index = 150
+
+    failure = None
+    try:
+        probe.scroll_to_row(index)         # the default budget, deliberately
+    except AssertionError as exc:          # a 404 from scroll_to_element
+        failure = exc
+
+    assert probe.row(index) is not None, _report_miss(probe, index, failure)
+
+
+def test_a_row_above_is_reached_from_the_bottom(probe) -> None:
+    """Turning around, which a sweep that only goes one way never does.
+
+    From the bottom of the list every downward swipe moves nothing, so a
+    sweep without end detection spends its downward budget before it reverses.
+    With the default budget that is most of it. iOS turns around as soon as a
+    swipe changes nothing (#204).
+
+    Expected to fail on Android until #232.
+    """
+    probe.goto("scroll")
+    probe.scroll_reset(to="bottom")
+
+    failure = None
+    try:
+        probe.scroll_to_row(3)             # the default budget, deliberately
+    except AssertionError as exc:
+        failure = exc
+
+    assert probe.row(3) is not None, _report_miss(probe, 3, failure)
+
+
 def test_scroll_to_element_does_not_tap_what_it_scrolls_to(probe) -> None:
     """The reference is explicit: scroll into view *without* tapping it.
 

@@ -581,13 +581,23 @@ distinguished them was a control: the *same* test on the simulator that had
 been booted earlier, which also failed, so the variable was the boot rather
 than the runtime.
 
-## F14 — Android's sweep cannot reach past ~110 rows, and never turns around → #232
+## F14 — Android's sweep cannot reach a deep row at the default budget → #232
 
-The two faults #204 fixed for iOS, still present on Android: no end detection
-(from the bottom of a list, the whole downward budget is spent on swipes that
-move nothing) and reach capped by `max_swipes`. Measured on a Pixel 3 XL:
-`row_40` from the top found in 3.4s, `row_150` from the top and `row_3` from
-the bottom both 404 after ~17.6s. Identical on main and on #204's branch.
+Reach is capped by `max_swipes`: at the default of 10, row 150 of a 200-row
+list is unreachable, and the 404 cannot be told from "no such element".
+`max_swipes=25` finds it, so the sweep works and the budget is the limit.
+
+**The first version of this finding also said Android never turns around at
+the end of a list. That was wrong**, and the measurement behind it was taken
+against a stale fixture: the suite reinstalls the probe app from its own
+worktree, so the label fix on `main` was being overwritten on every run and
+every lookup by label missed. From the bottom, Android spends its downward
+budget on swipes that move nothing and then sweeps up, finding the row within
+the default budget -- wasted time, not a failure.
+
+Both halves are now gated at the default budget by
+`test_a_row_far_down_the_list_is_reached` (red on Android) and
+`test_a_row_above_is_reached_from_the_bottom` (green, kept as the guard).
 
 ## F15 — typing and clearing do not work on iOS 26.5 simulators → #233
 
@@ -606,3 +616,17 @@ every row the same one. Template fixed here.
 (identifier where there is one, label otherwise) rather than
 `contract.row_identifier`. Until then Android scrolling has no regression gate
 in this suite, which is how #232 went unnoticed.
+
+
+## F17 — the suite reinstalls the fixture from its own worktree
+
+Worth knowing before trusting any fixture change: the `ios_probe` and
+`android_probe` fixtures build and install the probe app from the checkout the
+tests are running in. A change installed by hand from another worktree is
+overwritten on the next run, silently, and the failures that follow look like
+product bugs -- three Android scroll tests failed this way, and the
+measurement they produced went into #232 as a claim that turned out to be
+wrong.
+
+Merge the branch that carries the fixture change before reading any result
+from it.
