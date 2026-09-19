@@ -61,10 +61,16 @@ class ScrollFragment : Fragment() {
         override fun onBindViewHolder(holder: Holder, position: Int) {
             // The label carries the index rather than the id, because
             // RecyclerView recycles views and a per-row resource id would not
-            // survive. Tests match on text; row_199 is only reachable by
+            // survive. Tests match on text; row 199 is only reachable by
             // actually scrolling.
-            holder.view.text = "row_$position"
-            holder.view.contentDescription = "row_$position"
+            //
+            // Worded exactly as the iOS fixture words it ("Row 41"), so one
+            // contract describes both. It read "row_41" here until the
+            // conformance suite's Android row lookups were found to have been
+            // missing every time: the suite's template was iOS's, and nothing
+            // caught the difference because its scroll tests skip on Android.
+            holder.view.text = "Row $position"
+            holder.view.contentDescription = "Row $position"
         }
 
         override fun getItemCount() = ROWS

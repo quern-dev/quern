@@ -73,8 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.refreshStatusButton()
         }
-        controller.onAlert = { [weak self] message, detail in
-            self?.reportFailure(message, detail: detail)
+        controller.onAlert = { [weak self] message, detail, recovery in
+            self?.reportFailure(message, detail: detail, recovery: recovery)
         }
         return controller
     }()
@@ -90,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.snapshot = snap
             if snap.server.running { self.lifecycle.noteServerRunning() }
+            self.lifecycle.noteServerVersion(snap.update.currentVersion)
             // Same reasoning, for the other status line: without this a failed
             // update left its message in the menu for the life of the process,
             // including long after the user had fixed the cause.
@@ -119,9 +120,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         didAttemptLaunchStart = true
         guard StartOnLaunch.isEnabled, !reader.snapshot.server.running else { return }
 
-        // menuOnly, not an alert: this can fire at login, and a modal taking
-        // focus as you open your laptop is worse than the failure it reports.
-        lifecycle.run(.start, reporting: .menuOnly)
+        // Quiet by default: this can fire at login, and a modal taking focus
+        // as you open your laptop is worse than the failure it reports. Loud
+        // right after an update, when the user just clicked it and is watching
+        // (#225).
+        // The one place that knows an update just landed. It chooses how loud
+        // to be *and* which recovery fits: a server that will not start right
+        // after an update is finished with setup + restart, not doctor --fix.
+        let reporting = FailureReporting.forLaunchStart(
+            lastUpdate: UpdateResult.read(), now: Date())
+        lifecycle.run(.start, reporting: reporting,
+                      recoveryOnFailure: reporting == .alert ? .finishUpdate : .repair)
     }
 
     // MARK: - Status button
@@ -253,9 +262,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let status = updateStatusText {
             menu.addItem(info(status))
         }
-        if !s.running, let status = lifecycle.statusText {
-            menu.addItem(info(status))
-            if lifecycle.hasFailed, FileManager.default.fileExists(atPath: Self.serverLog.path) {
+        // Which rows, and in what order, is decided in FailureMenu so it can
+        // be tested -- nothing here can be.
+        for row in FailureMenu.rows(
+            serverRunning: s.running,
+            statusText: lifecycle.statusText,
+            startRecovery: lifecycle.recovery,
+            updateRecovery: lifecycle.updateRecovery,
+            hasFailed: lifecycle.hasFailed,
+            logExists: FileManager.default.fileExists(atPath: Self.serverLog.path))
+        {
+            switch row {
+            case .status(let text):
+                menu.addItem(info(text))
+            case .recovery(let recovery):
+                menu.addItem(recovery.menuItem(target: self,
+                                               action: #selector(recoverInTerminal)))
+            case .serverLog:
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
             }
         }
@@ -277,8 +300,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // The Ollama parallel: only appears once an update is staged.
         if u.updateAvailable {
-            let title = u.latestVersion.map { "Restart to Update — v\($0)" } ?? "Restart to Update"
-            menu.addItem(action(title, #selector(restartToUpdate)))
+            // A git install is updated in Terminal: its update needs npm and
+            // a git that may prompt, and a GUI app has neither the user's
+            // Node nor anywhere to show a prompt. See InstallKind.swift.
+            switch UpdateMenuItem.forStaged(latestVersion: u.latestVersion,
+                                            install: InstallKind.current) {
+            case .restartToUpdate(let title):
+                menu.addItem(action(title, #selector(restartToUpdate)))
+            case .updateInTerminal(let title):
+                menu.addItem(action(title, #selector(updateInTerminal)))
+                menu.addItem(action("Why Terminal? (git install)", #selector(openInstallDocs)))
+            }
         } else if !checkingForUpdates {
             // Always offered when there is nothing staged. The item above is
             // driven by a cached answer the server refreshes at most once a
@@ -310,6 +342,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // indented Screen Mirror and Documentation with it. Given the icon
         // cannot be removed, it gets its own section instead of a fight.
         menu.addItem(.separator())
+        // The app's own version, not the server's (#201). A git install's
+        // updates do not replace the app, so this is how drift gets noticed.
+        menu.addItem(info(AppVersion.menuLine(AppVersion.current)))
         menu.addItem(action("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
 
@@ -455,23 +490,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func restartToUpdate() {
+        lifecycle.clearUpdateRecovery()
         updater.restartToUpdate(
             status: { [weak self] progress in
                 self?.updateStatusText = progress.text
                 self?.activityText = progress.isWorking ? progress.text : nil
             },
             failure: { [weak self] message, detail in
-                self?.reportFailure(message, detail: detail)
+                // "Could not start the update" means nothing ran -- the
+                // installed version could not even be read -- so there is no
+                // half-done update to finish.
+                let recovery = Recovery.forUpdateFailure(
+                    started: message != "Could not start the update")
+                // Recorded as well as shown: dismissing the alert must not
+                // take the only route out with it.
+                self?.lifecycle.noteFailure(status: message, recovery: recovery)
+                self?.reportFailure(message, detail: detail, recovery: recovery)
             }
         )
     }
+
+    @objc private func updateInTerminal() {
+        lifecycle.clearUpdateRecovery()
+        TerminalUpdate.open { [weak self] error in
+            guard let error else { return }
+            self?.reportFailure("Could not open Terminal to update",
+                                detail: error + "\n\nRun `quern update` in a terminal instead.")
+        }
+    }
+
+    @objc private func recoverInTerminal(_ sender: NSMenuItem) {
+        guard let recovery = sender.representedObject as? Recovery else { return }
+        openRecovery(recovery)
+    }
+
+    private func openRecovery(_ recovery: Recovery) {
+        recovery.open { [weak self] error in
+            guard let error else { return }
+            self?.reportFailure("Could not open Terminal", detail: error)
+        }
+    }
+
+    @objc private func openInstallDocs() { NSWorkspace.shared.open(TerminalUpdate.docs) }
 
     @objc private func openServerLog() { NSWorkspace.shared.open(Self.serverLog) }
 
     @objc private func openSettings() { settings.show() }
 
     @objc private func openDocs() {
-        NSWorkspace.shared.open(URL(string: "https://quern.dev/docs")!)
+        // Not /docs, which the site does not have: it answered 404.
+        NSWorkspace.shared.open(URL(string: "https://quern.dev/getting-started/installation-and-setup/")!)
     }
 
     /// The screen-mirror bundle quern installs alongside its other binaries,
@@ -526,8 +594,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// path out of a modal they cannot copy from.
     static var serverLog: URL { StateReader.quernDir.appendingPathComponent("server.log") }
 
-    private func reportFailure(_ message: String, detail: String) {
-        DispatchQueue.main.async {
+    private func reportFailure(_ message: String, detail: String, recovery: Recovery? = nil) {
+        DispatchQueue.main.async { [weak self] in
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = message
@@ -535,29 +603,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.informativeText = trimmed.isEmpty
                 ? "Run `quern status` to see what state it is in."
                 : trimmed
-            alert.addButton(withTitle: "OK")
-            // Copy before Open Log: when the CLI could not do something itself
-            // it prints the command to run instead, and getting that onto the
-            // clipboard is the next step. Copying rather than launching a
-            // terminal is deliberate -- running a `sudo` command on one menu
-            // click is a larger commitment than this app makes anywhere else,
-            // it would pick a terminal on the user's behalf, and driving one
-            // needs an Automation permission prompt. The command is visible
-            // here and gets pasted wherever they actually work.
-            let canCopy = !trimmed.isEmpty
-            if canCopy { alert.addButton(withTitle: "Copy") }
-            let hasLog = FileManager.default.fileExists(atPath: Self.serverLog.path)
-            if hasLog { alert.addButton(withTitle: "Open Log") }
+            let buttons = FailureAlert.buttons(
+                detail: trimmed,
+                hasLog: FileManager.default.fileExists(atPath: Self.serverLog.path),
+                recovery: recovery
+            )
+            for button in buttons { alert.addButton(withTitle: button.title) }
 
-            switch alert.runModal() {
-            case .alertSecondButtonReturn where canCopy:
+            let index = alert.runModal().rawValue
+                - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            guard buttons.indices.contains(index) else { return }
+            switch buttons[index] {
+            case .ok:
+                break
+            case .fixInTerminal(let recovery):
+                self?.openRecovery(recovery)
+            case .copy:
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(trimmed, forType: .string)
-            case .alertSecondButtonReturn where hasLog,
-                 .alertThirdButtonReturn where hasLog:
+            case .openLog:
                 NSWorkspace.shared.open(Self.serverLog)
-            default:
-                break
             }
         }
     }

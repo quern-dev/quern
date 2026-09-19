@@ -20,6 +20,7 @@ same way `probe_container` takes `describe_point`.
 
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -458,15 +459,32 @@ def test_already_up_to_date_still_checks_tools(monkeypatch):
     assert called == [False], "the up-to-date path skipped the tool check"
 
 
-def test_the_tools_flag_reaches_the_updater(monkeypatch):
+@pytest.mark.parametrize("argv, called, tools", [
+    (["update"], "run_update", False),
+    (["update", "--tools"], "run_update", True),
+    (["update", "--finish"], "finish_update", False),
+    (["update", "--finish", "--tools"], "finish_update", True),
+])
+def test_the_tools_flag_reaches_the_updater(monkeypatch, argv, called, tools):
     """Pin the argv wiring: a correct planner behind a flag nobody parses is
-    the same as no planner."""
-    import inspect
-
+    the same as no planner. Run rather than read: this used to assert on the
+    source text, which any reformatting of the line broke."""
     from server import __main__ as entry
+    from server.lifecycle import updater
 
-    source = inspect.getsource(entry)
-    assert 'run_update(apply_tools="--tools" in sys.argv[2:])' in source
+    seen = []
+    monkeypatch.setattr(updater, "run_update",
+                        lambda apply_tools=False: seen.append(("run_update", apply_tools)) or 0)
+    monkeypatch.setattr(updater, "finish_update",
+                        lambda apply_tools=False: seen.append(("finish_update", apply_tools)) or 0)
+    monkeypatch.setattr(entry, "_maybe_reexec_in_venv", lambda: None)
+    monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+
+    with pytest.raises(SystemExit) as exit_:
+        entry.main()
+
+    assert exit_.value.code == 0
+    assert seen == [(called, tools)]
 
 
 # --------------------------------------------------------------------------
@@ -819,6 +837,11 @@ def test_doctor_passes_the_fix_flag_through(monkeypatch):
     `_cmd_doctor` look like a regression while a genuinely dropped flag inside
     an unchanged-looking line would have passed.
     """
+    # The menu-bar section too: it does real machine work under --fix, and a
+    # test that runs `doctor --fix` without stubbing it exercised that for
+    # real. CI found this shape in test_doctor.py; this file had it too.
+    monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
+    monkeypatch.setattr("server.main._report_node", lambda: True)
     import argparse
 
     import pytest
@@ -1054,7 +1077,10 @@ def rebuild(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=state["restart"])
 
     monkeypatch.setattr(updater.subprocess, "run", fake_run)
-    state["_run"] = lambda: updater._rebuild_and_restart(tmp_path)
+    # The real one, deliberately: conftest refuses it by default, and every
+    # step it takes is faked above.
+    real = inspect.unwrap(updater._rebuild_and_restart)
+    state["_run"] = lambda: real(tmp_path)
     return state
 
 

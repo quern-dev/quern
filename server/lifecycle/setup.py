@@ -13,17 +13,27 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from server.config import CONFIG_DIR, quern_cmd
-from server.device._xcode import xcode_available
-from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself
+# Before the server imports below, not after: an updater from 0.18.3 or older
+# imports this file into a process still holding the previous release's
+# `server.config`, and the next line asks it for a name that release lacks
+# (#212). `stale_modules` has no server imports, so it is always current.
+from server.lifecycle.stale_modules import refresh_if_stale
+
+refresh_if_stale()
+
+from server.config import CONFIG_DIR, quern_cmd  # noqa: E402
+from server.device._xcode import xcode_available  # noqa: E402
+from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself  # noqa: E402
 
 # ── Result types ──────────────────────────────────────────────────────────
 
@@ -357,7 +367,14 @@ def _can_prompt() -> bool:
     return True
 
 
-def _prompt_yn(question: str, default: bool = True) -> bool:
+#: Set once by `run_setup`, read by `_prompt_yn`. A parameter would have to be
+#: threaded through some twenty call sites and every function between them,
+#: which is how one gets missed and a single prompt goes on blocking an
+#: unattended run.
+_ASSUME_YES = False
+
+
+def _prompt_yn(question: str, default: bool = True, *, deliberate: bool = False) -> bool:
     """Prompt the user for yes/no confirmation.
 
     When stdin is not a TTY (e.g. ``curl | bash``), reopens /dev/tty so
@@ -370,8 +387,24 @@ def _prompt_yn(question: str, default: bool = True) -> bool:
     terminal one, and said so nowhere. The question is printed and kept, so the
     output shows what was asked and `run_setup` can say how many went
     unanswered.
+
+    `-y` answers with the default instead, the way `apt-get -y` does -- except
+    for a prompt marked `deliberate`, which it must not answer at all. Consent
+    that the user has to be told about afterwards is not consent: installing a
+    MITM certificate authority outlives the session that wanted it, and the
+    user has to know it happened in order to undo it. Those keep declining, and
+    are still recorded as unasked.
     """
     suffix = " [Y/n] " if default else " [y/N] "
+    if _ASSUME_YES and not deliberate:
+        # Printed, not silent: the transcript has to show what was asked and
+        # what was answered on the user's behalf.
+        print(f"{question}{suffix}— {'yes' if default else 'no'} (-y)")
+        return default
+    if _ASSUME_YES and deliberate:
+        _UNASKED.append(question)
+        print(f"{question}{suffix}— not answered by -y; this one is yours to make")
+        return False
     if sys.stdin.isatty():
         try:
             answer = input(question + suffix).strip().lower()
@@ -668,9 +701,13 @@ def build_preview_app() -> CheckResult:
             detail="Install with: xcode-select --install",
             fixable=True,
         )
+        # `-y` must not answer this: it opens a macOS dialog that somebody has
+        # to click, and an unattended run has nobody. Saying yes there leaves
+        # a window open on a machine no one is looking at.
         if _prompt_yn(
             "    Xcode Command Line Tools not found (needed for the screen-mirror "
             "app). Open the installer?",
+            deliberate=True,
         ):
             # `xcode-select --install` hands off to a macOS dialog and returns
             # immediately, so there is nothing to wait on and no exit code
@@ -805,6 +842,92 @@ def _verify_menubar_app(app: Path, expected_version: str) -> None:
         )
 
 
+#: A size cap as well as a clock. The deadline bounds how long a hostile or
+#: broken server can stream, not how much it can write: at line rate, 180s is
+#: tens of gigabytes into the install volume. The real asset is single-digit
+#: megabytes. A module constant so a test can shrink it rather than writing
+#: 200MB to prove the cap exists.
+MAX_ASSET_BYTES = 200 * 1024 * 1024
+
+
+def download_release_app(url: str, version: str, work: Path) -> Path:
+    """Download the release asset at `url` into `work` and return its verified
+    Quern.app. Raises `_UntrustedBundle` if it does not verify, and RuntimeError
+    or OSError for anything else.
+
+    `work` should be on the same filesystem as wherever the app ends up. On
+    this project's own machines the install and $TMPDIR sit on different
+    volumes, and a move between them is copytree + rmtree: a failure mid-copy
+    leaves a partial Quern.app, and what gets verified is not byte-for-byte
+    what gets installed. Staying on one filesystem makes the final step a
+    rename.
+    """
+    import urllib.request
+
+    asset_name = f"quern-{version}.tar.gz"
+    tarball = work / asset_name
+    # urlretrieve takes no timeout and defaults to none, so a stalled
+    # transfer hangs setup with no deadline at all. Stream it instead,
+    # with a socket timeout and a whole-operation deadline -- a partial
+    # download that never finishes is the failure mode here, not a slow
+    # one.
+    deadline = time.monotonic() + 180
+    max_bytes = MAX_ASSET_BYTES
+    written = 0
+    with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
+        with open(tarball, "wb") as out:
+            while True:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        "download exceeded 180s; giving up rather than "
+                        "holding setup open"
+                    )
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise RuntimeError(
+                        f"download exceeded {max_bytes // (1024 * 1024)}MB; "
+                        "refusing to keep writing"
+                    )
+                out.write(chunk)
+
+    # macOS tar, not Python's tarfile. The archive carries AppleDouble
+    # metadata (`._Contents` and friends); macOS tar applies those as
+    # extended attributes and removes them, while tarfile extracts them
+    # as literal files *inside* the bundle. That breaks the code
+    # signature seal -- CodeResources sealed a directory that did not
+    # contain them -- and Gatekeeper then rejects the app with "a
+    # sealed resource is missing or invalid". Measured: 21 entries
+    # extracted where a correct bundle has 10.
+    #
+    # Only the app is extracted. The source tree beside it is already
+    # installed, and unpacking it over a running install is not this
+    # step's job.
+    member = f"quern-{version}/Quern.app"
+    proc = subprocess.run(  # noqa: S603
+        ["/usr/bin/tar", "-xzf", str(tarball), "-C", str(work), member],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"could not extract {member}: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    extracted = work / member
+    if not extracted.is_dir():
+        raise RuntimeError(f"{asset_name} contains no Quern.app")
+
+    # Verify before installing. This is an executable fetched over the
+    # network and then launched, so "the release asset said so" is not
+    # sufficient provenance: a replaced asset would otherwise be
+    # installed and run. Checked against the identity that signs
+    # releases, not merely "validly signed by someone".
+    _verify_menubar_app(extracted, version)
+
+    return extracted
+
+
 def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     """Fetch the menu-bar app when a release install is missing it.
 
@@ -835,13 +958,14 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     if app.exists() or menubar_app_path().exists():
         return None
 
+    import http.client
     import json as _json
     import tempfile
     import urllib.request
 
     from server import get_version
 
-    name = "Menu-bar app"
+    name = "Quern app"
     version = get_version()
     asset_name = f"quern-{version}.tar.gz"
     manual = (
@@ -851,7 +975,9 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
     )
 
     try:
-        api = f"https://api.github.com/repos/quern-dev/quern/releases/tags/v{version}"
+        from server.lifecycle import releases
+
+        api = f"{releases.api_base()}/releases/tags/v{version}"
         with urllib.request.urlopen(api, timeout=15) as resp:  # noqa: S310
             release = _json.loads(resp.read())
 
@@ -863,11 +989,13 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
             ),
             None,
         )
-        if url and not url.startswith("https://github.com/"):
+        if url and not releases.asset_url_is_trusted(url):
             # The URL comes out of the API response. Releases are served from
-            # github.com; anything else means the response is not what we
-            # think it is, and following it would fetch code from elsewhere.
-            raise _UntrustedBundle(f"asset URL is not on github.com: {url}")
+            # github.com -- or from wherever QUERN_RELEASES_URL points, when an
+            # operator has said so; anything else means the response is not
+            # what we think it is, and following it would fetch code from
+            # somewhere nobody chose.
+            raise _UntrustedBundle(f"asset URL is not on the release host: {url}")
         if not url:
             # Releases cut before the asset existed have nothing to offer, and
             # saying "not available for this release" is more useful than a
@@ -876,81 +1004,14 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
                 name=name,
                 status=CheckStatus.SKIPPED,
                 message=f"Not published with v{version}",
-                detail="This release has no menu-bar app asset.",
+                detail="This release has no Quern app asset.",
             )
 
-        print(f"    Menu-bar app missing — fetching it from the v{version} release...")
-        # Beside the destination, not in $TMPDIR. On this project's own
-        # machines project_root and $TMPDIR sit on different volumes, and
-        # shutil.move then falls back to copytree + rmtree: a failure mid-copy
-        # leaves a partial Quern.app that later runs treat as installed, and
-        # what gets verified is not byte-for-byte what gets installed. Staying
-        # on one filesystem makes the final step a rename.
+        print(f"    Quern app missing — fetching it from the v{version} release...")
+        # Beside the destination, so the final step is a rename -- see
+        # download_release_app.
         with tempfile.TemporaryDirectory(dir=project_root) as tmp:
-            tarball = Path(tmp) / asset_name
-            # urlretrieve takes no timeout and defaults to none, so a stalled
-            # transfer hangs setup with no deadline at all. Stream it instead,
-            # with a socket timeout and a whole-operation deadline -- a partial
-            # download that never finishes is the failure mode here, not a slow
-            # one.
-            deadline = time.monotonic() + 180
-            # A size cap as well as a clock. The deadline bounds how long a
-            # hostile or broken server can stream, not how much it can write:
-            # at line rate, 180s is tens of gigabytes into the install volume.
-            # The real asset is single-digit megabytes.
-            max_bytes = 200 * 1024 * 1024
-            written = 0
-            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
-                with open(tarball, "wb") as out:
-                    while True:
-                        if time.monotonic() > deadline:
-                            raise RuntimeError(
-                                "download exceeded 180s; giving up rather than "
-                                "holding setup open"
-                            )
-                        chunk = resp.read(64 * 1024)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > max_bytes:
-                            raise RuntimeError(
-                                f"download exceeded {max_bytes // (1024 * 1024)}MB; "
-                                "refusing to keep writing"
-                            )
-                        out.write(chunk)
-
-            # macOS tar, not Python's tarfile. The archive carries AppleDouble
-            # metadata (`._Contents` and friends); macOS tar applies those as
-            # extended attributes and removes them, while tarfile extracts them
-            # as literal files *inside* the bundle. That breaks the code
-            # signature seal -- CodeResources sealed a directory that did not
-            # contain them -- and Gatekeeper then rejects the app with "a
-            # sealed resource is missing or invalid". Measured: 21 entries
-            # extracted where a correct bundle has 10.
-            #
-            # Only the app is extracted. The source tree beside it is already
-            # installed, and unpacking it over a running install is not this
-            # step's job.
-            member = f"quern-{version}/Quern.app"
-            proc = subprocess.run(  # noqa: S603
-                ["/usr/bin/tar", "-xzf", str(tarball), "-C", tmp, member],
-                capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"could not extract {member}: {proc.stderr.strip() or proc.stdout.strip()}"
-                )
-            extracted = Path(tmp) / member
-            if not extracted.is_dir():
-                raise RuntimeError(f"{asset_name} contains no Quern.app")
-
-            # Verify before installing. This is an executable fetched over the
-            # network and then launched, so "the release asset said so" is not
-            # sufficient provenance: a replaced asset would otherwise be
-            # installed and run. Checked against the identity that signs
-            # releases, not merely "validly signed by someone".
-            _verify_menubar_app(extracted, version)
-
+            extracted = download_release_app(url, version, Path(tmp))
             # os.replace, so the destination either has the whole verified
             # bundle or nothing at all. A half-written Quern.app would be
             # launched by the next step and would make every future setup
@@ -964,7 +1025,7 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
         return CheckResult(
             name=name,
             status=CheckStatus.ERROR,
-            message="The downloaded menu-bar app failed verification",
+            message="The downloaded Quern app failed verification",
             detail=(
                 f"{e}\n"
                 "      Not installed. This is not a network problem -- the "
@@ -972,13 +1033,16 @@ def fetch_menubar_app(project_root: Path) -> CheckResult | None:
                 "      Do not install it by hand; report it instead."
             ),
         )
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
-        # Never fatal. A missing menu-bar app is a missing convenience, and
+    except (OSError, RuntimeError, ValueError, http.client.HTTPException,
+            subprocess.SubprocessError) as e:
+        # Never fatal. A missing Quern app is a missing convenience, and
         # failing setup over it would be worse than the gap it fills.
+        # HTTPException is not an OSError, so a truncated response used to come
+        # out of here as a traceback despite that intent.
         return CheckResult(
             name=name,
             status=CheckStatus.WARNING,
-            message="Could not fetch the menu-bar app",
+            message="Could not fetch the Quern app",
             detail=f"{e}\n      {manual}",
         )
 
@@ -1014,6 +1078,17 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
     if not delivered.exists() and not installed.exists():
         return None
 
+    if not delivered.exists() and _menubar_app_running():
+        # Nothing new to run, so nothing to restart. This used to quit and
+        # reopen the app on every setup -- which is every setup on a git
+        # install, where nothing is ever delivered -- and when the reopen
+        # failed it left the machine with no menu bar at all (#215).
+        return CheckResult(
+            name="Quern app",
+            status=CheckStatus.OK,
+            message=f"Running from {installed}",
+        )
+
     # Move the delivered copy into place, replacing any older install.
     if delivered.exists():
         try:
@@ -1024,7 +1099,22 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
             # Quit before replacing: a running app whose bundle is swapped
             # underneath it keeps executing the old image from an inode that
             # no longer has a name, which is a confusing state to debug.
-            _quit_menubar_app()
+            # Whether it was running is recorded first: a first install has
+            # nothing to stop, and must not later claim it stopped something.
+            #
+            # The bundle being replaced, not any Quern: the quit asks by
+            # application name, so asking for it when someone else's copy is
+            # running stops an app this has no business stopping.
+            stopped = _menubar_app_running(installed)
+            if stopped and not _quit_menubar_app(installed):
+                # Not replaced: a bundle swapped under a live app leaves it
+                # executing an image that no longer has a name.
+                return CheckResult(
+                    name="Quern app",
+                    status=CheckStatus.WARNING,
+                    message="Not updated — the running app would not quit",
+                    detail=f"Quit Quern from its menu, then run: {quern_cmd()} setup",
+                )
             shutil.rmtree(installed, ignore_errors=True)
             os.replace(str(staging), str(installed))
         except OSError as e:
@@ -1048,42 +1138,134 @@ def launch_menubar_app(project_root: Path) -> CheckResult | None:
                 )
             )
             return CheckResult(
-                name="Menu-bar app",
+                name="Quern app",
                 status=CheckStatus.WARNING,
                 message=f"Could not install to {MENUBAR_APP_DIR}",
                 detail=f"{e}\n      {where}",
             )
     else:
-        _quit_menubar_app()
+        stopped = False
 
-    rc, _out, err = _run(["open", str(installed)])
+    rc, err = _open_menubar_app(installed)
     if rc == 0:
         return CheckResult(
-            name="Menu-bar app",
+            name="Quern app",
             status=CheckStatus.OK,
             message=f"Running from {installed}",
         )
+    start = f"open {shlex.quote(str(installed))}"
+    if stopped:
+        # We stopped the running app to install this one, so the machine now
+        # has no menu bar because of us. Say that, not merely that a launch
+        # failed.
+        return CheckResult(
+            name="Quern app",
+            status=CheckStatus.WARNING,
+            message="Stopped to install the new version, and did not restart",
+            detail=f"{err.strip() or 'open failed'}\n      Start it with: {start}",
+        )
     return CheckResult(
-        name="Menu-bar app",
+        name="Quern app",
         status=CheckStatus.WARNING,
         message="Could not launch Quern.app",
-        detail=err.strip() or f"Try: open {installed}",
+        detail=f"{err.strip() or 'open failed'}\n      Try: {start}",
     )
 
 
-def _quit_menubar_app() -> None:
-    """Ask a running menu-bar app to quit, so a new build can take over.
+_MENUBAR_PROCESS = "Quern.app/Contents/MacOS/QuernMenuBar"
 
-    Best-effort and deliberately gentle: `osascript` asks the app to quit
-    rather than killing it, so it can tear down its status item cleanly. If
-    nothing is running, this is a no-op that costs a fraction of a second.
+#: `open` answering -600 (procNotFound) right after a quit, measured once on
+#: a live update: a manual `open` a minute later worked. The quit wait below
+#: ends when pgrep stops listing the process, which is not necessarily when
+#: LaunchServices has finished with it, so a short retry covers the gap.
+_OPEN_ATTEMPTS = 5
+_OPEN_RETRY_DELAY = 1.0
+_LS_PROC_NOT_FOUND = "-600"
+
+
+def _menubar_app_running(app: Path | None = None) -> bool:
+    """Whether a menu-bar app is running -- any copy, or the one at `app`.
+
+    Any copy by default, which is the cautious answer for setup: opening a
+    second app beside one already running is worse than leaving it. `quern
+    menubar` names its bundle, because "running" there is a claim about that
+    app, and with a second copy anywhere on disk the general match reported a
+    freshly installed, never-launched app as running.
     """
-    _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
-    for _ in range(20):
-        rc, out, _err = _run(["pgrep", "-f", "Quern.app/Contents/MacOS/QuernMenuBar"])
-        if rc != 0 or not out.strip():
-            return
+    import re
+
+    pattern = (f"{re.escape(str(app))}/Contents/MacOS/QuernMenuBar"
+               if app is not None else _MENUBAR_PROCESS)
+    rc, out, _err = _run(["pgrep", "-f", pattern])
+    return rc == 0 and bool(out.strip())
+
+
+def _menubar_app_pids(app: Path | None = None) -> list[str]:
+    """The running menu-bar processes -- any copy, or the one at `app`."""
+    import re
+
+    pattern = (f"{re.escape(str(app))}/Contents/MacOS/QuernMenuBar"
+               if app is not None else _MENUBAR_PROCESS)
+    rc, out, _err = _run(["pgrep", "-f", pattern])
+    return out.split() if rc == 0 else []
+
+
+def _open_menubar_app(app: Path) -> tuple[int, str]:
+    """`open` the app, retrying only the error a just-quit app produces."""
+    rc, err = 1, ""
+    for attempt in range(_OPEN_ATTEMPTS):
+        rc, _out, err = _run(["open", str(app)])
+        if rc == 0 or _LS_PROC_NOT_FOUND not in err:
+            return rc, err
+        if attempt + 1 < _OPEN_ATTEMPTS:
+            time.sleep(_OPEN_RETRY_DELAY)
+    return rc, err
+
+
+def _quit_menubar_app(app: Path | None = None) -> bool:
+    """Stop the menu-bar app at `app`, and say whether it is gone.
+
+    Returns True when nothing was running there, or when it exited. **False
+    means it is still alive**, and a caller about to replace its bundle must
+    stop: swapping the bundle under a live app leaves it executing an image
+    with no name on disk, which is a confusing state to debug and the reason
+    this quit exists at all.
+
+    Two ways, in order of politeness:
+
+    * `osascript` asks the application to quit, so it can tear down its status
+      item. But AppleScript addresses an application by *name*, so it reaches
+      whichever copy macOS has registered -- possibly someone else's checkout.
+      It is therefore used only when the copy we mean is the only one running.
+    * Otherwise, and as a fallback, SIGTERM to the pids of *that bundle*, which
+      cannot touch another copy.
+
+    With no `app`, this keeps the old behaviour for callers that mean "any
+    copy": ask by name, wait, report.
+    """
+    ours = _menubar_app_pids(app)
+    if not ours:
+        return True
+
+    others = [pid for pid in _menubar_app_pids() if pid not in ours]
+    if not others:
+        _run(["osascript", "-e", 'tell application "Quern" to quit'], timeout=10)
+        if _wait_for_exit(app):
+            return True
+
+    # Either another copy is running -- and asking by name could stop it -- or
+    # the polite request did not take.
+    if ours:
+        _run(["kill", "-TERM", *ours], timeout=10)
+    return _wait_for_exit(app)
+
+
+def _wait_for_exit(app: Path | None, attempts: int = 20) -> bool:
+    for _ in range(attempts):
+        if not _menubar_app_running(app):
+            return True
         time.sleep(0.25)
+    return not _menubar_app_running(app)
 
 
 def _install_skills(project_root: Path) -> CheckResult:
@@ -1601,23 +1783,91 @@ def check_mitmdump() -> CheckResult:
     )
 
 
-def check_node() -> CheckResult:
-    """Check for Node.js (needed to run the MCP server)."""
-    node = _which("node")
-    if node:
-        version = _get_version(["node", "--version"])
-        msg = version or "installed"
+def check_node(sites: list | None = None) -> CheckResult:
+    """Check the `node` every part of the system will run, not just ours (#214).
+
+    Four places pick a `node` and they disagree routinely -- see
+    `server.lifecycle.node_env`. Only a *missing* node here is MISSING, since
+    that is the one setup can offer to fix and the one the MCP build needs.
+    Anything else wrong -- too old, or absent where GUI apps look -- is a
+    WARNING, never a failure: an install that has been working must not have
+    setup or an update refuse over the user's Node arrangement.
+    """
+    from server.lifecycle import node_env
+
+    if sites is None:
+        try:
+            sites = node_env.probe()
+        except Exception as exc:  # noqa: BLE001
+            # Never fatal. This runs inside `quern update`, *after* the pull:
+            # a probe that raised there left the install pulled but not
+            # rebuilt, with a traceback, on a machine whose node was fine.
+            return CheckResult(
+                name="Node.js", status=CheckStatus.WARNING,
+                message="could not be checked",
+                detail=f"{exc}\nThe MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+; "
+                       f"{quern_cmd()} doctor shows each place a node is picked.",
+            )
+    here = sites[0]
+    if here.status == node_env.MISSING:
         return CheckResult(
             name="Node.js",
-            status=CheckStatus.OK,
-            message=msg,
+            status=CheckStatus.MISSING,
+            message="Not installed (needed for MCP server)",
+            fixable=True,
         )
+
+    problems = [site for site in sites if site.status not in (node_env.OK, node_env.SKIPPED)]
+    if not problems:
+        return CheckResult(name="Node.js", status=CheckStatus.OK,
+                           message=here.version or "installed")
+
+    lines = []
+    for site in problems:
+        found = f"{site.version or 'no version'} at {site.path}" if site.path else site.status
+        lines.append(f"{site.place} ({site.used_by}): {found}")
+        lines.append(f"  {node_env.fix_for(site, sites)}")
+    lines.append(f"Details: {quern_cmd()} doctor")
+    names = ", ".join(site.place for site in problems)
     return CheckResult(
         name="Node.js",
-        status=CheckStatus.MISSING,
-        message="Not installed (needed for MCP server)",
-        fixable=True,
+        status=CheckStatus.WARNING,
+        message=f"{here.version or 'installed'} here; needs attention for: {names} "
+                f"(the MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+)",
+        detail="\n".join(lines),
     )
+
+
+def check_menubar_current(project_root: Path) -> CheckResult | None:
+    """Say when a git install's menu-bar app is older than quern (#200).
+
+    A release install gets the matching app with every update; a git install
+    never does, and nothing said so. A warning with the command, not an
+    install: a developer may be running their own build on purpose.
+    """
+    if platform.system() != "Darwin" or not (project_root / ".git").exists():
+        return None
+    from server.lifecycle import menubar
+
+    state = menubar.state()
+    if not state.behind:
+        return None
+    return CheckResult(
+        name="Quern app version",
+        status=CheckStatus.WARNING,
+        message=f"v{state.version} is older than quern v{state.quern_version}",
+        detail=f"A git install's updates don't include the app. Run: {quern_cmd()} menubar install",
+    )
+
+def _node_can_build(node_result: CheckResult) -> bool:
+    """Whether to build the MCP wrapper after the Node check.
+
+    Present is enough: Node 20 builds it fine, and a warning about some *other*
+    place's node -- or about this one being too old to *run* it -- is no reason
+    to leave the wrapper stale. Before #214 this read `status == OK`, which was
+    only equivalent while the check could say nothing but OK or MISSING.
+    """
+    return node_result.status in (CheckStatus.OK, CheckStatus.WARNING)
 
 
 def check_idb() -> CheckResult:
@@ -1944,7 +2194,10 @@ def configure_crash_reporter_dialog() -> CheckResult:
         )
 
     desc = f"Currently: '{current}'" if current else "Currently: default (shows dialog)"
-    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})"):
+    # A persistent, user-wide macOS setting that `quern uninstall` does not
+    # revert, so it outlives quern itself. Same test as the CA.
+    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})",
+                  deliberate=True):
         rc, _, stderr = _run([
             "defaults", "write", "com.apple.CrashReporter", "DialogType", "none",
         ])
@@ -2025,6 +2278,30 @@ def _is_cert_installed(udid: str) -> bool:
         return False
 
 
+def _cert_install_decision(
+    standing: bool | None, ask: Callable[[], bool],
+) -> tuple[bool, str | None]:
+    """Whether to install the CA into booted simulators, and what to say.
+
+    A standing answer is an answer. This decision used to ignore
+    `auto_install_cert` entirely: someone who had turned it on was asked
+    anyway -- the prompt they had paid to be rid of -- and someone who had
+    turned it off was asked again, which is how a considered no becomes a
+    tired yes. CONTRIBUTING says the setting means the same thing everywhere,
+    and this was the place it did not.
+
+    Setup reads the setting and never writes it. Turning it on because
+    somebody said yes once at a prompt would convert a single answer into a
+    standing policy they never chose.
+    """
+    if standing is True:
+        return True, "    auto_install_cert is on — installing without asking."
+    if standing is False:
+        return False, ("    auto_install_cert is off — not installing.\n"
+                       "    Turn it on with `quern set-auto-install-cert on`.")
+    return ask(), None
+
+
 def install_cert_simulator(udid: str, name: str) -> CheckResult:
     """Install mitmproxy CA cert into a booted simulator.
 
@@ -2094,7 +2371,13 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
 # ── Main setup flow ──────────────────────────────────────────────────────
 
 def _reexec_in_venv(venv_path: Path) -> int:
-    """Re-execute setup inside the venv so all checks run in the right environment."""
+    """Re-execute setup inside the venv so all checks run in the right environment.
+
+    `-y` has to be carried across. Almost every prompt lives *after* this
+    point, so a child started without it answers nothing on the run that most
+    needs it: a fresh install has no venv, which is exactly when the re-exec
+    happens, and `-y` reached one prompt out of a dozen.
+    """
     venv_python = venv_path / "bin" / "python"
     if not venv_python.exists():
         return -1
@@ -2113,8 +2396,11 @@ def _reexec_in_venv(venv_path: Path) -> int:
             stdin_arg = os.open("/dev/tty", os.O_RDONLY)
         except OSError:
             pass
+    argv = [str(venv_python), "-m", "server.main", "setup"]
+    if _ASSUME_YES:
+        argv.append("--yes")
     result = subprocess.run(
-        [str(venv_python), "-m", "server.main", "setup"],
+        argv,
         cwd=str(venv_path.parent),
         stdin=stdin_arg,
         env=env,
@@ -2138,7 +2424,17 @@ def _print_unasked() -> None:
     # Named, not counted. "3 questions were skipped" tells the reader they
     # missed something without telling them what, which is the same dead
     # end as saying nothing.
-    print("  Setup had no terminal, so these were declined without asking:")
+    #
+    # And named for the right reason. Under `-y` these are not questions
+    # nobody could ask -- there may well be a terminal -- they are the ones
+    # the flag deliberately does not answer. Saying "no terminal" there is the
+    # same defect this function exists to fix, reintroduced by a new route,
+    # and the remedy differs too: rerunning `quern setup -y` prints this
+    # again forever, because `-y` is what declined them.
+    if _ASSUME_YES:
+        print("  These need a decision of their own, so -y left them alone:")
+    else:
+        print("  Setup had no terminal, so these were declined without asking:")
     for question in _UNASKED:
         print(f"    • {question}")
     print()
@@ -2147,8 +2443,15 @@ def _print_unasked() -> None:
     print()
 
 
-def run_setup() -> int:
-    """Run the interactive setup. Returns 0 on success, 1 on errors."""
+def run_setup(assume_yes: bool = False) -> int:
+    """Run the interactive setup. Returns 0 on success, 1 on errors.
+
+    `assume_yes` answers every prompt with its default, the way `apt-get -y`
+    does -- except the ones marked `deliberate`, which no flag answers. See
+    `_prompt_yn`.
+    """
+    global _ASSUME_YES
+    _ASSUME_YES = assume_yes
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
     if sys.prefix != sys.base_prefix:
         venv_bin = str(Path(sys.prefix) / "bin")
@@ -2162,7 +2465,12 @@ def run_setup() -> int:
     print()
 
     _UNASKED.clear()
-    if not _can_prompt():
+    if _ASSUME_YES:
+        print("  Running with -y, so each question is answered with its default.")
+        print("  A few need a decision of their own; those are left alone and")
+        print("  listed at the end.")
+        print()
+    elif not _can_prompt():
         print("  No terminal attached, so nothing can be asked. Setup will do")
         print("  what it can and decline the rest rather than answer for you.")
         if invoked_by() == MENUBAR:
@@ -2278,49 +2586,33 @@ def run_setup() -> int:
             print(f"    Re-running setup inside {venv_path}...")
             return _reexec_in_venv(venv_path)
         else:
-            # No venv — create it, then re-exec
-            if _prompt_yn("    No virtual environment found. Create one?"):
-                if create_venv(project_root):
-                    return _reexec_in_venv(venv_path)
-                else:
-                    report.add(CheckResult(
-                        name="Virtual env",
-                        status=CheckStatus.ERROR,
-                        message="Failed to create virtual environment",
-                        detail="Try manually:\n"
-                               f"  python3 -m venv {project_root / '.venv'}\n"
-                               f"  source {project_root / '.venv'}/bin/activate\n"
-                               '  pip install -e ".[dev]"',
-                    ))
-                    report.print_summary()
-                    return 1
-            else:
-                # Declining used to fall through to the block below, which is
-                # commented "we're inside the venv" and reports the check OK.
-                # It is not inside a venv, so the next third-party import ended
-                # setup with `ModuleNotFoundError: No module named 'httpx'` --
-                # several hundred lines from the decision that caused it, and
-                # naming a dependency the user never mentioned.
-                #
-                # This branch is also where an *unaskable* prompt lands: with no
-                # terminal, `_prompt_yn` declines rather than hanging, so a GUI
-                # or piped setup arrives here without anyone having said no.
-                report.add(CheckResult(
-                    name="Virtual env",
-                    status=CheckStatus.ERROR,
-                    message="Declined — nothing further can run",
-                    detail=(
-                        "Quern's dependencies live in the virtualenv, so the "
-                        "checks after this one cannot run without it.\n"
-                        "To create it later:\n"
-                        f"  python3 -m venv {project_root / '.venv'}\n"
-                        f"  source {project_root / '.venv'}/bin/activate\n"
-                        '  pip install -e ".[dev]"'
-                    ),
-                ))
-                report.print_summary()
-                _print_unasked()
-                return 1
+            # No venv — create it, then re-exec. Not asked about: a venv inside
+            # the install directory *is* the install, the way node_modules is
+            # `npm install`. Asking made an unattended run decline it and stop
+            # with a tree it could not run, and there was never a second
+            # answer: every check below this point needs it.
+            #
+            # What used to live here was the *declined* branch, which existed
+            # because declining fell through to the block below -- commented
+            # "we're inside the venv" and reporting the check OK -- and setup
+            # then died several hundred lines later on `ModuleNotFoundError:
+            # No module named 'httpx'`, naming a dependency the user never
+            # mentioned. There is nothing left to decline.
+            print("    No virtual environment found. Creating one...")
+            if create_venv(project_root):
+                return _reexec_in_venv(venv_path)
+            report.add(CheckResult(
+                name="Virtual env",
+                status=CheckStatus.ERROR,
+                message="Failed to create virtual environment",
+                detail="Try manually:\n"
+                       f"  python3 -m venv {project_root / '.venv'}\n"
+                       f"  source {project_root / '.venv'}/bin/activate\n"
+                       '  pip install -e ".[dev]"',
+            ))
+            report.print_summary()
+            _print_unasked()
+            return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(
@@ -2516,7 +2808,11 @@ def run_setup() -> int:
                     )
                 else:
                     prompt = "    pymobiledevice3 not found. Install via pipx?"
-                if _prompt_yn(prompt):
+                # Only the system-wide install is out of reach of `-y`: it
+                # writes outside $HOME under sudo, and the password prompt is
+                # not something a flag can answer. The plain pipx install is
+                # ordinary setup work.
+                if _prompt_yn(prompt, deliberate=wants_global or misplaced):
                     if wants_global:
                         # Inherit stdin so sudo can prompt for the password.
                         cmd = ["sudo", pipx_bin, "install", "--global",
@@ -2585,7 +2881,12 @@ def run_setup() -> int:
                         "    tunneld not installed. Install LaunchDaemon "
                         "now (requires sudo)?"
                     )
-                if _prompt_yn(prompt):
+                # Both branches install a LaunchDaemon that runs as root at
+                # boot and survives reboots, via sudo. Larger than the CA
+                # prompt on CONTRIBUTING's own test, not smaller -- and `-y`
+                # could not answer the password prompt that follows anyway,
+                # so saying yes on the user's behalf buys a hang.
+                if _prompt_yn(prompt, deliberate=True):
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
@@ -2720,7 +3021,18 @@ def run_setup() -> int:
                     print(f"    Found {len(needs_cert)} booted simulator(s) needing CA cert:")
                     for sim in needs_cert:
                         print(f"      • {sim['name']} ({sim['udid'][:8]}…)")
-                    if _prompt_yn("    Install mitmproxy CA cert into booted simulators?"):
+                    from server.config import auto_install_cert_choice
+
+                    install_it, note = _cert_install_decision(
+                        auto_install_cert_choice(),
+                        lambda: _prompt_yn(
+                            "    Install mitmproxy CA cert into booted simulators?",
+                            deliberate=True,
+                        ),
+                    )
+                    if note:
+                        print(note)
+                    if install_it:
                         for sim in needs_cert:
                             result = install_cert_simulator(sim["udid"], sim["name"])
                             report.add(result)
@@ -2751,6 +3063,9 @@ def run_setup() -> int:
         menubar_result = launch_menubar_app(project_root)
         if menubar_result is not None:
             report.add(menubar_result)
+        stale = check_menubar_current(project_root)
+        if stale is not None:
+            report.add(stale)
 
     # ── Claude Code skills ──
 
@@ -2766,7 +3081,7 @@ def run_setup() -> int:
     # Build the TypeScript MCP server so it's ready when Claude Code connects.
     # Without this, the MCP shows as broken until the first `quern start`.
 
-    if node_result.status == CheckStatus.OK and project_root:
+    if _node_can_build(node_result) and project_root:
         report.add(_build_mcp(project_root))
 
     # ── Tool inventory ──

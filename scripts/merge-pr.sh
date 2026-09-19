@@ -91,7 +91,11 @@ fi
 if [ -n "$FORCE" ]; then
   echo "Skipping the CI gate deliberately (--force)."
 else
-  CHECKS=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+  # $REPO is HOST/OWNER/NAME, which `--repo` accepts and an API path does not:
+  # `repos/github.com/owner/name/...` is a 404. That made this gate refuse
+  # every merge from the day it was added, unseen because each one until then
+  # was a --force.
+  CHECKS=$(gh api --hostname "${REPO%%/*}" "repos/${REPO#*/}/commits/$HEAD_SHA/check-runs" --paginate \
     --jq '.check_runs[] | "\(.conclusion // "pending")\t\(.name)"' 2>/dev/null) || {
       echo "Not merging #$PR: could not read CI status for $HEAD_SHA."; exit 1; }
 
