@@ -18,6 +18,21 @@ manager with a **Restart to Update** action.
 - **Start / Stop / Restart** — shells out to the installed `quern` CLI.
 - **Restart to Update** — appears only when `~/.quern/update-info.json` reports
   `update_available`; runs `quern update`, then relaunches into the new build.
+  On a **git install** the item is **Update in Terminal…** instead, which opens
+  a Terminal window running `quern update`. A git update rebuilds the MCP
+  wrapper with npm, and an app launched from the Dock or at login cannot see a
+  Node installed by fnm, nvm, Volta, asdf or mise, because those are set up in
+  shell startup files it never reads; `git pull` may also want credentials, and
+  a menu-bar app has nowhere to show that prompt.
+- **Troubleshoot in Terminal…** — appears when the server did not start, next
+  to **Open Server Log**. Opens a Terminal window running `quern doctor --fix`
+  and then `quern start`. Nothing opens Terminal without a click.
+- **Finish Update in Terminal…** — appears when an update stopped partway, and
+  runs `quern setup` then `quern restart`. Its own item, with its own name,
+  because it is shown whether or not the server is running: an update can fail
+  with the daemon still up, and a way out drawn only when the daemon is down
+  would be missing exactly then. It clears once the server comes back on a
+  different version, so finishing the update by any route retires it.
 - **Check for Updates…** — shown instead, when nothing is staged. That cache is
   refreshed at most once a day, so without this a release landing in the
   afternoon would not be offered until tomorrow and there was no way to ask.
@@ -44,6 +59,11 @@ manager with a **Restart to Update** action.
   config file. It reads a *literal* JSON boolean — `JSONSerialization` hands
   back `NSNumber` for numbers too, and `as? Bool` accepts a numeric 1, which
   would show the policy enabled while the server treated it as unset.
+- **Quern app version** — the app's own, above **Settings…**, and again in
+  Settings under **Quern app**. The only version the app used to show was the
+  server's, so an app several releases behind looked current — and on a git
+  install the two genuinely differ, because `quern update` does not replace
+  the app there.
 - **Server version** — read live from the CLI, and reported as `checking…` or
   `unavailable` when it cannot be. It used to fall back to `current_version` in
   `update-info.json`, which only the server rewrites and only on an update
