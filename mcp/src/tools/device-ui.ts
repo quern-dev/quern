@@ -308,6 +308,50 @@ This is the recommended first step before interacting with UI. Use this to disco
     }
   });
 
+  server.registerTool("restore_simulator_input", {
+    description: `Take a simulator's touch, button and keyboard services back from Xcode 27's Device Hub, when taps and keystrokes are being accepted but nothing on screen changes.
+
+Xcode 27 attaches a guest HID daemon to every booted simulator, and the guest answers by disconnecting the legacy input services quern drives. Every tap, swipe, keystroke and button press is then accepted and discarded, while reads, screenshots and app launches keep working — so the device looks healthy and the screen simply never changes. The keyboard is lost whenever the daemon has attached; touch and buttons depend on the boot order, so typing can fail while tapping still works.
+
+RESTARTS SPRINGBOARD: apps running on the simulator are killed, and the device returns to its home screen in a few seconds. Nothing is reinstalled and the simulator does not reboot.
+
+Not needed for a simulator quern booted itself — that path restores the services before anything is running. Use this for a simulator that was already booted, typically one booted while Xcode or its Device Hub was open.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/restore-input",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("tap", {
     description: `Tap at specific screen coordinates on the simulator.
 
