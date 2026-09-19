@@ -1786,7 +1786,14 @@ def cli() -> None:
         "check-updates",
         help="Check for a new release now, ignoring the once-a-day rate limit",
     )
-    subparsers.add_parser("setup", help="Check environment and install dependencies")
+    setup_parser = subparsers.add_parser(
+        "setup", help="Check environment and install dependencies")
+    # `server.__main__` dispatches setup before this parser is reached, and
+    # parses the same flag itself. Declared here too so the two entry points
+    # do not disagree about what `quern setup` accepts.
+    setup_parser.add_argument(
+        "-y", "--yes", action="store_true", dest="assume_yes",
+        help="Answer prompts with their default (unattended)")
 
     # uninstall
     subparsers.add_parser("uninstall", help="Remove Quern and its dependencies")
@@ -1837,6 +1844,13 @@ def cli() -> None:
         start_parser.parse_args(remaining, namespace=args)
         args.command = "start"
         args.foreground = True
+    elif remaining:
+        # A subcommand matched, so whatever is left is a typo. Dropping it
+        # silently meant `quern setup --yse` ran a full setup with the flag
+        # discarded, which is worse than refusing: the caller believes they
+        # opted in. `parse_known_args` is needed only for the no-subcommand
+        # case above, where server flags live on `start_parser`.
+        parser.error("unrecognised arguments: " + " ".join(remaining))
 
     # Fill port defaults
     if hasattr(args, "port"):
@@ -1867,7 +1881,7 @@ def cli() -> None:
         sys.exit(_cmd_check_updates())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
-        sys.exit(run_setup())
+        sys.exit(run_setup(assume_yes=getattr(args, "assume_yes", False)))
     elif args.command == "uninstall":
         from server.lifecycle.setup import run_uninstall
         sys.exit(run_uninstall())

@@ -104,6 +104,35 @@ from anywhere as `quern`.
 
 </details>
 
+### Unattended setup
+
+```bash
+quern setup -y
+quern setup --yes          # the same thing, spelled out
+```
+
+`-y` (or `--yes`) answers setup's prompts with their default instead of asking,
+for a provisioning script, a Dockerfile, or anything else with no terminal.
+
+Without it and with no terminal to ask on, setup still completes the install
+itself — the virtualenv, the dependencies, the MCP wrapper and the `quern`
+command — and declines the optional extras it would otherwise have asked about,
+listing them at the end.
+
+Five prompts are not covered by `-y`, and are listed at the end of the run:
+
+| Prompt | Why `-y` leaves it |
+|---|---|
+| Install the capture CA into booted simulators | A certificate authority outlives the session that wanted it and has to be removed deliberately. Answer it once with `quern set-auto-install-cert`. |
+| Install the tunneld LaunchDaemon | Runs as root at boot and survives reboots. Needs sudo. |
+| `sudo pipx install --global pymobiledevice3` | Writes outside your home directory. Needs sudo. |
+| Disable the macOS crash reporter dialog | A user-wide setting that `quern uninstall` does not put back. |
+| Open the Xcode Command Line Tools installer | Hands off to a macOS dialog someone has to click. |
+
+Three of those need a sudo password or a click that no flag can supply, so
+answering yes on your behalf would leave the run waiting on something that
+never comes. The other two outlive Quern itself.
+
 ### Uninstall
 
 ```bash
