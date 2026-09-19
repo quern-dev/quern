@@ -7,7 +7,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Coroutine
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -529,13 +529,18 @@ async def swipe(request: Request, body: SwipeRequest):
 
 
 
+#: What the wrapped coroutine returns, so a caller keeps its own type
+#: rather than being handed Any back.
+T = TypeVar("T")
+
+
 async def _run_until_client_leaves(
     request: Request,
-    coro: Coroutine[Any, Any, Any],
+    coro: Coroutine[Any, Any, T],
     *,
     what: str,
     poll_s: float = 2.0,
-) -> Any:
+) -> T:
     """Run a long device operation, and abandon it if the caller disconnects.
 
     Uvicorn does not cancel a handler when its client goes away, so a request

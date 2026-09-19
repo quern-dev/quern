@@ -539,9 +539,21 @@ class DeviceControllerUI:
             tree, so a playing video elsewhere on screen does not hold it up.
             """
             if not controlled:
-                settle = await self.wait_for_settle(udid=resolved, timeout=2.5)
-                if not settle["settled"]:
-                    _note(f"  did not settle before reading ({settle.get('reason')})")
+                # Clamped to what is left of the deadline. A settle that can
+                # run its full 2.5s after the loop's last deadline check is
+                # 2.5s spent past a deadline the caller was promised; this is
+                # the one step inside an iteration that takes a timeout, so it
+                # is the one that can be told about the deadline.
+                remaining = deadline - time.perf_counter()
+                if remaining > 0:
+                    settle = await self.wait_for_settle(
+                        udid=resolved, timeout=min(2.5, remaining),
+                    )
+                    if not settle["settled"]:
+                        _note(
+                            "  did not settle before reading "
+                            f"({settle.get('reason')})"
+                        )
             previous = await _read(probe)
             if at_rest:
                 return previous
@@ -1239,7 +1251,15 @@ class DeviceControllerUI:
             # could never satisfy the 300ms TTL. The cache was effectively dead
             # on this path: a not-found did two full reads back to back, the
             # second of them for screen context, both ~1.8s.
-            self._ui_cache[resolved] = (elements, time.time())
+            # Only a fully probed tree goes in. The key is the udid alone, so
+            # an entry cannot say that probing was skipped -- and the sweep
+            # reads with probe_containers=False, which omits the tab-bar and
+            # nav-bar children only probing reveals. Storing that tree served
+            # it to the next caller that asked for probing, inside the 300ms
+            # TTL: tap_element builds screen context immediately after
+            # scroll_to_element returns, which is exactly that window.
+            if probe_containers:
+                self._ui_cache[resolved] = (elements, time.time())
 
             # Apply filters in memory if needed
             if has_filters:

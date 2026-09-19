@@ -966,3 +966,34 @@ async def test_a_sweep_up_does_not_start_on_the_app_header():
         f"an upward swipe started on the chrome: {screen.events[:12]}"
     )
     assert found is not None, f"row_3 was not reached: {screen.swipes()}"
+
+
+@pytest.mark.asyncio
+async def test_a_settle_never_outlives_the_deadline():
+    """M5 — the deadline is checked between iterations, so a settle that runs
+    its full 2.5s afterwards is time spent past what the caller was promised.
+
+    Only the uncontrolled path settles, which is idb's. The settle is the one
+    step inside an iteration that takes a timeout, so it is the one that can be
+    told how much time is left.
+    """
+    now, clock = _clock()
+    timeouts: list[float] = []
+
+    class Settling(ListScreen):
+        async def wait_for_settle(self, udid=None, timeout=10.0):
+            timeouts.append(timeout)
+            now[0] += 1.0
+            return await super().wait_for_settle(udid=udid, timeout=timeout)
+
+    screen = Settling(controlled=False)
+    with patch("server.device.controller_ui.time.perf_counter", clock):
+        await _sweep(screen, "row_missing", max_swipes=3, deadline_s=4.0)
+
+    assert timeouts, "the idb path did not settle at all"
+    assert all(t <= 2.5 for t in timeouts), timeouts
+    for t in timeouts:
+        assert t > 0, f"settled with no time left: {timeouts}"
+    assert timeouts[-1] < 2.5, (
+        f"the last settle was given its full timeout past the deadline: {timeouts}"
+    )

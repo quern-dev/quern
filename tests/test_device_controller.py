@@ -1007,6 +1007,30 @@ class TestGetUIElementsWdaDispatch:
         ctrl.wda_client.describe_all.assert_not_called()
 
 
+    async def test_an_unprobed_read_is_not_cached(self):
+        """The sweep reads without probing; the cache key is the udid alone.
+
+        So storing that tree hands a caller that asked for probing a tree with
+        the tab-bar and nav-bar children missing, and nothing in the entry says
+        probing was skipped. tap_element builds screen context right after
+        scroll_to_element returns, inside the 300ms TTL.
+        """
+        ctrl = DeviceController()
+        ctrl._active_udid = "SIM-0001"
+        ctrl._device_type_cache["SIM-0001"] = DeviceType.SIMULATOR
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        await ctrl.get_ui_elements("SIM-0001", probe_containers=False)
+        assert "SIM-0001" not in ctrl._ui_cache, (
+            "a tree read without container probing was stored in the shared cache"
+        )
+
+        await ctrl.get_ui_elements("SIM-0001", probe_containers=True)
+        assert "SIM-0001" in ctrl._ui_cache, (
+            "a probed read should still be cached"
+        )
+
+
 class TestGetScreenSummaryStrategy:
     """Test strategy parameter on get_screen_summary."""
 
