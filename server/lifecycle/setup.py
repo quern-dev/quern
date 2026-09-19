@@ -2016,6 +2016,10 @@ def companion_is_outdated() -> bool:
     """
     if not (CONFIG_DIR / "bin" / "idb_companion").is_file():
         return False
+    # Nothing to offer on Intel: the releases are arm64-only, so reporting an
+    # install as outdated there prompts an update that cannot be installed.
+    if not _is_apple_silicon():
+        return False
     installed = _release_number(_installed_companion_release())
     current = _release_number(_IDB_COMPANION_RELEASE)
     return installed is None or (current is not None and installed < current)
@@ -2038,6 +2042,17 @@ def _install_patched_companion() -> bool:
     import shutil
     import tempfile
     import urllib.request
+
+    # The published tarball is arm64-only, and this is the one place every
+    # caller goes through. On an Intel Mac the install would put a binary that
+    # cannot execute at ~/.quern/bin/idb_companion, which IdbBackend prefers
+    # over the system one -- so it would shadow a working Homebrew companion
+    # with a broken one. Refusing here is the difference between "no patched
+    # build for this Mac" and idb failing to launch with a bad CPU type.
+    if not _is_apple_silicon():
+        print("    The patched idb_companion is arm64-only; skipping on "
+              "this Intel Mac. Use Homebrew's idb-companion instead.")
+        return False
 
     dest = CONFIG_DIR / "bin"
     marker = _companion_release_marker()
@@ -2160,7 +2175,13 @@ def _setup_idb_companion(*, sim_bridge: bool) -> CheckResult:
         )
 
     result = check_idb_companion()
-    if result.status == CheckStatus.MISSING:
+    # The patched build is arm64-only, so on an Intel Mac there is nothing to
+    # offer. Neither prompt is shown there: asking a question whose answer
+    # cannot be honoured, and then reporting the refusal as "download failed",
+    # describes the wrong problem. `companion_is_outdated` answers False on
+    # Intel for the same reason, so the update branch needs no guard.
+    patched_build_exists_for_this_mac = _is_apple_silicon()
+    if result.status == CheckStatus.MISSING and patched_build_exists_for_this_mac:
         if _prompt_yn("    idb_companion not found. Download patched build?"):
             if _install_patched_companion():
                 return check_idb_companion()
@@ -2172,7 +2193,8 @@ def _setup_idb_companion(*, sim_bridge: bool) -> CheckResult:
             )
     elif companion_is_outdated():
         return _offer_companion_update(fallback=False)
-    elif result.message.startswith("installed (system"):
+    elif (result.message.startswith("installed (system")
+          and patched_build_exists_for_this_mac):
         if _prompt_yn(
             "    Patched idb_companion available "
             "(fixes Group element detection). Install?"

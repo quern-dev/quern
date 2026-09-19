@@ -589,6 +589,11 @@ class TestAnOutdatedCompanionIsReplaced:
             marker.write_bytes(marker_bytes)
         monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
         monkeypatch.setattr(s, "_record_install", lambda *a, **k: None)
+        # Pinned, not inherited: the patched build is arm64-only, and these
+        # tests are about the install rather than the machine running them.
+        # CI's Linux runners report x86_64, where every one of them would
+        # otherwise exercise the refusal path instead.
+        monkeypatch.setattr(s, "_is_apple_silicon", lambda: True)
         return s
 
     def _fake_download(self, monkeypatch, tmp_path, *, ok=True, layout=("bin", "Frameworks")):
@@ -783,6 +788,90 @@ class TestAnOutdatedCompanionIsReplaced:
         assert "v2" in (tmp_path / "bin" / "idb_companion").read_text()
 
 
+class TestAnIntelMacIsNotOfferedAnArm64Binary:
+    """The published tarball is arm64-only, and Intel is exactly where setup
+    reaches the idb path: `_sim_bridge_supported()` is False there, so
+    `run_setup` takes the `sim_bridge=False` branch that offers the download.
+
+    Installing it would put a binary that cannot execute at
+    `~/.quern/bin/idb_companion`, which `IdbBackend` prefers over the system
+    one -- shadowing a working Homebrew companion with a broken one.
+    """
+
+    def _intel(self, tmp_path, monkeypatch):
+        from server.lifecycle import setup as s
+
+        monkeypatch.setattr(s, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(s, "_is_apple_silicon", lambda: False)
+        return s
+
+    def test_the_install_refuses_and_downloads_nothing(self, tmp_path, monkeypatch):
+        """Asserted on what was *attempted*, not on the return value.
+
+        A stub that raises proves nothing here: the installer catches a failed
+        download and returns False, so `is False` holds whether it refused up
+        front or tried and fell over -- which is the same test passing against
+        the bug it names. Measured: with the gate removed this assertion on
+        the return value alone still passed, while the captured output read
+        "Downloading patched idb_companion...".
+        """
+        s = self._intel(tmp_path, monkeypatch)
+        attempts = []
+
+        import urllib.request
+        monkeypatch.setattr(
+            urllib.request, "urlretrieve",
+            lambda url, *a, **k: attempts.append(url),
+        )
+
+        assert s._install_patched_companion() is False
+        assert attempts == [], f"an arm64 tarball was downloaded on Intel: {attempts}"
+        assert not (tmp_path / "bin" / "idb_companion").exists()
+
+    def test_an_install_is_not_called_outdated(self, tmp_path, monkeypatch):
+        """There is nothing to update it to, so offering one is a dead end."""
+        s = self._intel(tmp_path, monkeypatch)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "idb_companion").write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "idb_companion.release").write_text("idb-companion-v1\n")
+
+        assert s.companion_is_outdated() is False
+
+    def test_setup_does_not_ask_a_question_it_cannot_honour(self, tmp_path, monkeypatch):
+        """A prompt answered yes, then refused, reported "Download failed",
+        which describes the wrong problem."""
+        s = self._intel(tmp_path, monkeypatch)
+        prompts = []
+        monkeypatch.setattr(s, "_prompt_yn", lambda msg, *a, **k: prompts.append(msg) or True)
+        monkeypatch.setattr(s, "companion_is_outdated", lambda: False)
+        monkeypatch.setattr(s, "check_idb_companion", lambda: s.CheckResult(
+            name="idb_companion", status=s.CheckStatus.MISSING, message="not found",
+        ))
+
+        result = s._setup_idb_companion(sim_bridge=False)
+
+        assert prompts == [], f"Intel was offered the patched build: {prompts}"
+        assert result.status is s.CheckStatus.MISSING
+
+    def test_a_system_companion_is_left_alone(self, tmp_path, monkeypatch):
+        """The 'replace the system one with the patched build' offer is the
+        other way an arm64 binary could land on an Intel Mac."""
+        s = self._intel(tmp_path, monkeypatch)
+        prompts = []
+        monkeypatch.setattr(s, "_prompt_yn", lambda msg, *a, **k: prompts.append(msg) or True)
+        monkeypatch.setattr(s, "companion_is_outdated", lambda: False)
+        monkeypatch.setattr(s, "check_idb_companion", lambda: s.CheckResult(
+            name="idb_companion", status=s.CheckStatus.OK,
+            message="installed (system, /usr/local/bin/idb_companion)",
+        ))
+
+        result = s._setup_idb_companion(sim_bridge=False)
+
+        assert prompts == [], f"Intel was offered the patched build: {prompts}"
+        assert result.status is s.CheckStatus.OK
+
+
 class TestSetupsCompanionStep:
     """`_setup_idb_companion`, which run_setup reports for both of its
     simulator paths. Driven for real: a check of the source text let a result
@@ -816,6 +905,7 @@ class TestSetupsCompanionStep:
             return s.CheckResult(name="idb_companion", status=s.CheckStatus.OK,
                                  message="installed (patched, x)")
 
+        monkeypatch.setattr(s, "_is_apple_silicon", lambda: True)
         monkeypatch.setattr(s, "_prompt_yn", prompt)
         monkeypatch.setattr(s, "_install_patched_companion", install)
         monkeypatch.setattr(s, "check_idb_companion", check)

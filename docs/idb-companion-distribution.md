@@ -92,32 +92,15 @@ Published as a GitHub release asset on the `quern-dev/idb` fork, with the source
 
 ## Installation (quern setup)
 
-During `quern setup`, replace the Homebrew `idb-companion` check with:
+`_install_patched_companion` in `server/lifecycle/setup.py` is the implementation; it is not restated here, because a second copy of an install procedure drifts from the first one silently. What it does, and why, since those are the parts worth knowing before changing it:
 
-```python
-def install_companion():
-    """Download and install the patched idb_companion."""
-    dest = Path.home() / ".quern" / "bin"
-    dest.mkdir(parents=True, exist_ok=True)
+- **Downloaded and unpacked into a staging directory inside `~/.quern/bin/`, then swapped in.** Extracting straight over the install can stop partway — a full disk is enough — and leave a new binary beside half-replaced frameworks, breaking an install that worked on an older Xcode.
+- **`Frameworks/` is replaced wholesale, not merged**, so files the old release had and the new one does not are dropped rather than left behind.
+- **The release marker is cleared before the swap and written only after it.** A swap interrupted by a kill leaves a tree that reads as *outdated*, never as current, so the next setup offers to repair it.
+- **A swap that fails is rolled back** — the retired frameworks are put back, and a failed binary move puts both halves back.
+- **It refuses on Intel.** The published asset is arm64-only, and `~/.quern/bin/idb_companion` takes precedence over the system one, so installing it there would shadow a working Homebrew companion with a binary that cannot execute.
 
-    if (dest / "idb_companion").exists():
-        return  # Already installed
-
-    url = "https://github.com/<org>/quern/releases/download/idb-companion-v1/<idb-companion-arm64.tar.gz>"
-    tarball = dest / "idb-companion.tar.gz"
-
-    # Download
-    urllib.request.urlretrieve(url, tarball)
-
-    # Extract
-    subprocess.run(["tar", "xzf", str(tarball), "-C", str(dest)], check=True)
-    tarball.unlink()
-
-    # Move bin/idb_companion to dest directly
-    (dest / "bin" / "idb_companion").rename(dest / "idb_companion")
-    # Move Frameworks alongside
-    # (already extracted to dest/Frameworks/)
-```
+An install is not skipped merely because a companion is already present: that is how an outdated one gets replaced.
 
 ## Runtime Integration
 
