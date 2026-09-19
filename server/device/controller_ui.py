@@ -1373,6 +1373,7 @@ class DeviceControllerUI:
         # Fast path: for known static elements, tap directly at known coordinates
         if identifier and identifier in self._STATIC_ELEMENT_POSITIONS:
             resolved = await self.resolve_udid(udid)
+            await self._warn_if_input_is_suppressed(resolved)
             dimensions = await self._get_screen_dimensions(resolved)
 
             if dimensions:
@@ -1420,6 +1421,7 @@ class DeviceControllerUI:
         # (exact identifier/label, no type/value/substring filters); anything
         # else falls through to the dump-based path below.
         resolved_fast = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved_fast)
         if (
             self._is_android(resolved_fast)
             and value is None
@@ -2102,6 +2104,7 @@ class DeviceControllerUI:
             )
 
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
 
         if self._is_android(resolved):
@@ -2280,6 +2283,7 @@ class DeviceControllerUI:
         accessibility tree does not report it.
         """
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
 
         elements, _ = await self.get_ui_elements(udid=resolved)
         text_fields = [

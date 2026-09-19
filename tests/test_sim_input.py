@@ -425,3 +425,197 @@ class TestTheWaitIsBoundedAndReported:
 
         restore.assert_not_awaited()
         assert any("never claimed the input services" in r.message for r in caplog.records)
+
+
+class TestEveryInputPathIsCovered:
+    """CodeRabbit on #234: four of the seven input paths carried the check.
+
+    `tap_element`, `scroll_to_element` and `clear_text` resolved a device and
+    then wrote to it -- taps, sweeps, select-all-and-delete -- without ever
+    asking whether the guest would receive any of it. Asserted on the source
+    rather than by driving seven methods, because what matters is that none is
+    forgotten when an eighth arrives.
+    """
+
+    @pytest.mark.parametrize("method", [
+        "tap", "tap_element", "swipe", "type_text", "clear_text",
+        "press_button", "scroll_to_element",
+    ])
+    def test_the_method_asks_before_it_writes(self, method):
+        import inspect
+
+        from server.device.controller_ui import DeviceControllerUI
+
+        source = inspect.getsource(getattr(DeviceControllerUI, method))
+        assert "_warn_if_input_is_suppressed" in source, (
+            f"{method} sends input without checking whether it can land"
+        )
+
+    def test_tap_element_covers_both_of_its_paths(self):
+        """It resolves twice: a fast path for known static coordinates and the
+        ordinary one. Checking only the first leaves the common case bare."""
+        import inspect
+
+        from server.device.controller_ui import DeviceControllerUI
+
+        source = inspect.getsource(DeviceControllerUI.tap_element)
+        assert source.count("_warn_if_input_is_suppressed") >= 2
+
+
+class TestOnlySettledAnswersAreCached:
+    """CodeRabbit on #234: a wait that timed out was recorded as healthy.
+
+    `_warn_if_input_is_suppressed` skips its probe whenever the cache holds
+    anything, so a verdict written after a wait that never got an answer
+    disables the check for the rest of the session.
+    """
+
+    def _controller(self):
+        from server.device.controller import DeviceController
+
+        controller = DeviceController()
+        controller._is_android = lambda udid: False
+        controller._is_physical = lambda udid: False
+        controller.simctl.boot = AsyncMock()
+        controller._require_simulator = lambda udid, what: None
+        controller._input_checked = {}
+        return controller
+
+    async def test_a_wait_that_timed_out_is_not_cached(self):
+        """Device Hub running and no attachment inside the wait: the daemon
+        may attach a moment later, or may have crashed. Either way nothing
+        was settled."""
+        controller = self._controller()
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=True)),
+            patch.object(sim_input, "wait_for_device_hub_to_attach", AsyncMock(return_value=False)),
+        ):
+            await controller.boot(udid="SIM")
+
+        assert controller._input_checked == {}
+
+    async def test_an_unreadable_state_is_not_cached(self):
+        controller = self._controller()
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=False)),
+            patch.object(sim_input, "legacy_input_is_suppressed", AsyncMock(return_value=None)),
+        ):
+            await controller.boot(udid="SIM")
+
+        assert controller._input_checked == {}
+
+    async def test_a_healthy_simulator_with_no_device_hub_is_cached(self):
+        """The one case that is settled: nothing to attach, nothing claimed."""
+        controller = self._controller()
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=False)),
+            patch.object(sim_input, "legacy_input_is_suppressed", AsyncMock(return_value=False)),
+        ):
+            await controller.boot(udid="SIM")
+
+        assert controller._input_checked == {"SIM": True}
+
+    async def test_a_successful_repair_is_cached(self):
+        controller = self._controller()
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=True)),
+            patch.object(sim_input, "wait_for_device_hub_to_attach", AsyncMock(return_value=True)),
+            patch.object(sim_input, "restore_legacy_input", AsyncMock()),
+        ):
+            await controller.boot(udid="SIM")
+
+        assert controller._input_checked == {"SIM": True}
+
+
+class TestAnAmbiguousTimeoutIsNotReadAsNoChange:
+    """CodeRabbit on #234: `notifyutil -s` may write the state and then be
+    killed by the timeout. Treating that as "nothing happened" leaves a
+    cleared state over disconnected services -- undetectable."""
+
+    async def test_a_timed_out_clear_puts_the_state_back(self):
+        spawn, calls = _spawn_returning((sim_input._TIMED_OUT, "timed out after 15s"))
+
+        with (
+            patch.object(sim_input, "_spawn", spawn),
+            patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
+            pytest.raises(DeviceError, match="timed out"),
+        ):
+            await sim_input.restore_legacy_input("SIM")
+
+        assert calls[-1] == ("notifyutil", "-s", sim_input.DTUHID_ACTIVE_KEY, "1")
+
+    async def test_an_ordinary_failure_does_not(self):
+        """A command that refused did not write anything, so putting the state
+        back would be a second write for no reason."""
+        spawn, calls = _spawn_returning((1, "device is not booted"))
+
+        with (
+            patch.object(sim_input, "_spawn", spawn),
+            patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
+            pytest.raises(DeviceError, match="not booted"),
+        ):
+            await sim_input.restore_legacy_input("SIM")
+
+        assert len(calls) == 1
+
+
+class TestRepairsDoNotInterleave:
+    """CodeRabbit on #234: the endpoint and a boot can repair the same
+    simulator at once, and their clear/restart/rollback steps interleave. The
+    sequence that matters ends with the loser's rollback setting the state
+    back to 1 after the winner has reported success."""
+
+    async def test_a_second_repair_waits_for_the_first(self):
+        import asyncio
+
+        order: list[str] = []
+
+        async def spawn(udid, *argv):
+            order.append(f"{argv[0]}:{argv[-1]}")
+            await asyncio.sleep(0.01)       # let the other task run if it can
+            return 0, ""
+
+        sim_input._REPAIR_LOCKS.clear()
+        with (
+            patch.object(sim_input, "_spawn", spawn),
+            patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
+        ):
+            await asyncio.gather(
+                sim_input.restore_legacy_input("SIM"),
+                sim_input.restore_legacy_input("SIM"),
+            )
+
+        # Each repair is a clear then a restart; interleaved they would read
+        # clear, clear, restart, restart.
+        assert order == [
+            "notifyutil:0", "launchctl:system/com.apple.backboardd",
+            "notifyutil:0", "launchctl:system/com.apple.backboardd",
+        ], order
+
+    async def test_two_simulators_are_not_serialised_against_each_other(self):
+        import asyncio
+
+        started: list[str] = []
+
+        async def spawn(udid, *argv):
+            started.append(udid)
+            await asyncio.sleep(0.02)
+            return 0, ""
+
+        sim_input._REPAIR_LOCKS.clear()
+        with (
+            patch.object(sim_input, "_spawn", spawn),
+            patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
+        ):
+            await asyncio.gather(
+                sim_input.restore_legacy_input("SIM-A"),
+                sim_input.restore_legacy_input("SIM-B"),
+            )
+
+        assert started[:2] == ["SIM-A", "SIM-B"], (
+            f"one simulator's repair waited for another's: {started}"
+        )

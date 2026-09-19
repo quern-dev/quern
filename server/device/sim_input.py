@@ -47,6 +47,15 @@ _BACKBOARDD_RESTART_S = 6.0
 
 _SPAWN_TIMEOUT_S = 15.0
 
+#: Returned by `_spawn` when the command had to be killed. Not a plain
+#: non-zero: the command may have taken effect before it was.
+_TIMED_OUT = -1
+
+#: One repair at a time per simulator. Two overlapping repairs interleave
+#: their clear, restart and rollback steps, and can leave the state set by the
+#: loser after the winner has reported success.
+_REPAIR_LOCKS: dict[str, asyncio.Lock] = {}
+
 
 async def _spawn(udid: str, *argv: str) -> tuple[int, str]:
     """Run a command inside the simulator.
@@ -69,7 +78,11 @@ async def _spawn(udid: str, *argv: str) -> tuple[int, str]:
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        return 1, f"timed out after {_SPAWN_TIMEOUT_S:.0f}s"
+        # Distinct from a failure, because a timeout does not say the command
+        # did nothing: `notifyutil -s` may have written the state before the
+        # wait expired, and a caller that treats that as "no change" leaves
+        # the state cleared while the services are still disconnected.
+        return _TIMED_OUT, f"timed out after {_SPAWN_TIMEOUT_S:.0f}s"
     returncode = proc.returncode or 0
     if returncode != 0:
         return returncode, stderr.decode(errors="replace").strip()
@@ -100,6 +113,13 @@ async def legacy_input_is_suppressed(udid: str) -> bool | None:
     return fields[-1] == "1"
 
 
+def _repair_lock(udid: str) -> asyncio.Lock:
+    lock = _REPAIR_LOCKS.get(udid)
+    if lock is None:
+        lock = _REPAIR_LOCKS[udid] = asyncio.Lock()
+    return lock
+
+
 async def restore_legacy_input(udid: str) -> None:
     """Hand the legacy input services back to the guest.
 
@@ -115,34 +135,43 @@ async def restore_legacy_input(udid: str) -> None:
     in use, which is why nothing here calls it behind a caller's back except
     immediately after a boot quern performed itself.
     """
-    returncode, stderr = await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "0")
-    if returncode != 0:
-        raise DeviceError(
-            f"Could not clear {DTUHID_ACTIVE_KEY} on {udid[:8]}: "
-            f"{stderr or 'no output'}. Simulator input cannot be restored "
-            "while Device Hub holds it.",
-            tool="simctl",
+    async with _repair_lock(udid):
+        returncode, stderr = await _spawn(
+            udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "0",
         )
-    returncode, stderr = await _spawn(
-        udid, "launchctl", "kickstart", "-k", "system/com.apple.backboardd",
-    )
-    if returncode != 0:
-        # The state is cleared and the services are still disconnected, which
-        # is the one combination nothing can detect: every later read says
-        # "not suppressed" while no input lands. Put the state back, so the
-        # device goes on reporting what is actually true. Best effort -- if
-        # this fails too, the error below is still raised.
-        await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "1")
-        raise DeviceError(
-            f"Could not restart backboardd on {udid[:8]}: {stderr or 'no output'}. "
-            "Simulator input cannot be restored while Device Hub holds it.",
-            tool="simctl",
+        if returncode != 0:
+            if returncode == _TIMED_OUT:
+                # The write may have landed before the kill. Put the state
+                # back rather than leave a cleared state over disconnected
+                # services, which is the one combination nothing can detect.
+                await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "1")
+            raise DeviceError(
+                f"Could not clear {DTUHID_ACTIVE_KEY} on {udid[:8]}: "
+                f"{stderr or 'no output'}. Simulator input cannot be restored "
+                "while Device Hub holds it.",
+                tool="simctl",
+            )
+        returncode, stderr = await _spawn(
+            udid, "launchctl", "kickstart", "-k", "system/com.apple.backboardd",
         )
-    await asyncio.sleep(_BACKBOARDD_RESTART_S)
-    logger.info(
-        "Restored the legacy input services on %s (SpringBoard was restarted, "
-        "so any running app was killed)", udid[:8],
-    )
+        if returncode != 0:
+            # The state is cleared and the services are still disconnected,
+            # which is the combination nothing can detect: every later read
+            # says "not suppressed" while no input lands. Put the state back,
+            # so the device goes on reporting what is actually true. Best
+            # effort -- if this fails too, the error below is still raised.
+            await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "1")
+            raise DeviceError(
+                f"Could not restart backboardd on {udid[:8]}: "
+                f"{stderr or 'no output'}. Simulator input cannot be restored "
+                "while Device Hub holds it.",
+                tool="simctl",
+            )
+        await asyncio.sleep(_BACKBOARDD_RESTART_S)
+        logger.info(
+            "Restored the legacy input services on %s (SpringBoard was "
+            "restarted, so any running app was killed)", udid[:8],
+        )
 
 
 async def device_hub_is_running() -> bool:

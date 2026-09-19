@@ -343,9 +343,12 @@ async def restore_input(request: Request, body: RestoreInputRequest):
     try:
         udid = await controller.resolve_udid(body.udid)
         if controller._is_android(udid) or controller._is_physical(udid):
-            raise DeviceError(
-                "Only simulators have the legacy input services this restores.",
-                tool="simctl",
+            # A 400, not a DeviceError: the mapper turns an unmatched
+            # DeviceError into a 500, and asking a phone for a thing only
+            # simulators have is the caller's mistake, not a server fault.
+            raise HTTPException(
+                status_code=400,
+                detail="Only simulators have the legacy input services this restores.",
             )
         was_suppressed = await sim_input.legacy_input_is_suppressed(udid)
         await sim_input.restore_legacy_input(udid)

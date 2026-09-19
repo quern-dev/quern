@@ -274,7 +274,28 @@ if [[ -z "${QUERN_RELEASES_URL:-}" ]]; then
      || printf '%s' "$answer" | grep -qF "\"latest_version\": \"$VERSION\""; then
     ok "quern.dev names $VERSION"
   else
-    bad "quern.dev does not name $VERSION: ${answer:-no answer}"
+    # The worker caches GitHub's ref advertisement at the edge for an hour, so
+    # a release verified straight after publishing is named by its
+    # predecessor until that expires. Reported as a window rather than a
+    # failure -- the refs it will read were checked above, and calling this a
+    # failure on every release is how an operator learns to scroll past the
+    # one run where it means something. Still not a pass: it says to come
+    # back, and it says so again if it is still wrong an hour later.
+    published_at="$(curl -fsSL "$API/releases/tags/$TAG" 2>/dev/null \
+      | sed -n 's/.*"published_at": *"\([^"]*\)".*/\1/p' | head -1 || true)"
+    age=""
+    if [[ -n "$published_at" ]]; then
+      age="$(python3 -c '
+import datetime, sys
+published = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+now = datetime.datetime.now(datetime.timezone.utc)
+print(int((now - published).total_seconds()))' "$published_at" 2>/dev/null || true)"
+    fi
+    if [[ -n "$age" && "$age" -lt 3600 ]]; then
+      skip "quern.dev still names the previous version, $((age / 60))m after publishing — its ref cache is an hour; re-run this step after that to confirm it caught up"
+    else
+      bad "quern.dev does not name $VERSION: ${answer:-no answer}"
+    fi
   fi
 else
   skip "quern.dev: QUERN_RELEASES_URL is set, and quern.dev reads the real repo"

@@ -646,7 +646,8 @@ class DeviceController(DeviceControllerUI):
             # repair applied immediately is undone by an attachment that has
             # not happened yet. Wait for it, but only when Device Hub is
             # running -- otherwise there is nothing to wait for.
-            if await sim_input.device_hub_is_running():
+            hub_running = await sim_input.device_hub_is_running()
+            if hub_running:
                 suppressed = await sim_input.wait_for_device_hub_to_attach(udid)
             else:
                 suppressed = await sim_input.legacy_input_is_suppressed(udid)
@@ -661,16 +662,25 @@ class DeviceController(DeviceControllerUI):
                     "Could not read the input-service state on %s; if taps do "
                     "nothing, see POST /api/v1/device/ui/restore-input", udid[:8],
                 )
-            elif await sim_input.device_hub_is_running():
-                # Device Hub is up and never attached. Either this runtime
-                # predates the handover, or the daemon crashed on startup and
-                # every event will be discarded with no error (idb's case,
-                # which nothing here can distinguish).
+            elif hub_running:
+                # Device Hub is up and never attached within the wait. Either
+                # this runtime predates the handover, or the daemon crashed on
+                # startup and every event will be discarded with no error
+                # (idb's case, which nothing here can distinguish) -- or it is
+                # simply slower than the wait today.
                 logger.info(
                     "Device Hub is running but never claimed the input services "
                     "on %s; if taps do nothing, that is where to look", udid[:8],
                 )
-            self._input_checked[udid] = suppressed is False
+
+            # Cached only where the answer is settled: a repair that worked, or
+            # a healthy simulator on a machine with no Device Hub to change its
+            # mind. An unreadable state, or a wait that timed out with Device
+            # Hub running, leaves it unset so the first input call asks again
+            # -- the cache exists to skip a ~0.5s probe, not to stand in for an
+            # answer nobody got.
+            if suppressed is True or (suppressed is False and not hub_running):
+                self._input_checked[udid] = True
         except (DeviceError, OSError) as exc:
             # Left unrecorded on purpose: the next input call re-reads the
             # state, and a repair that failed partway puts it back to

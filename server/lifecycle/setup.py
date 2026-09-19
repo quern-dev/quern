@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -366,7 +367,14 @@ def _can_prompt() -> bool:
     return True
 
 
-def _prompt_yn(question: str, default: bool = True) -> bool:
+#: Set once by `run_setup`, read by `_prompt_yn`. A parameter would have to be
+#: threaded through some twenty call sites and every function between them,
+#: which is how one gets missed and a single prompt goes on blocking an
+#: unattended run.
+_ASSUME_YES = False
+
+
+def _prompt_yn(question: str, default: bool = True, *, deliberate: bool = False) -> bool:
     """Prompt the user for yes/no confirmation.
 
     When stdin is not a TTY (e.g. ``curl | bash``), reopens /dev/tty so
@@ -379,8 +387,24 @@ def _prompt_yn(question: str, default: bool = True) -> bool:
     terminal one, and said so nowhere. The question is printed and kept, so the
     output shows what was asked and `run_setup` can say how many went
     unanswered.
+
+    `-y` answers with the default instead, the way `apt-get -y` does -- except
+    for a prompt marked `deliberate`, which it must not answer at all. Consent
+    that the user has to be told about afterwards is not consent: installing a
+    MITM certificate authority outlives the session that wanted it, and the
+    user has to know it happened in order to undo it. Those keep declining, and
+    are still recorded as unasked.
     """
     suffix = " [Y/n] " if default else " [y/N] "
+    if _ASSUME_YES and not deliberate:
+        # Printed, not silent: the transcript has to show what was asked and
+        # what was answered on the user's behalf.
+        print(f"{question}{suffix}— {'yes' if default else 'no'} (-y)")
+        return default
+    if _ASSUME_YES and deliberate:
+        _UNASKED.append(question)
+        print(f"{question}{suffix}— not answered by -y; this one is yours to make")
+        return False
     if sys.stdin.isatty():
         try:
             answer = input(question + suffix).strip().lower()
@@ -677,9 +701,13 @@ def build_preview_app() -> CheckResult:
             detail="Install with: xcode-select --install",
             fixable=True,
         )
+        # `-y` must not answer this: it opens a macOS dialog that somebody has
+        # to click, and an unattended run has nobody. Saying yes there leaves
+        # a window open on a machine no one is looking at.
         if _prompt_yn(
             "    Xcode Command Line Tools not found (needed for the screen-mirror "
             "app). Open the installer?",
+            deliberate=True,
         ):
             # `xcode-select --install` hands off to a macOS dialog and returns
             # immediately, so there is nothing to wait on and no exit code
@@ -2166,7 +2194,10 @@ def configure_crash_reporter_dialog() -> CheckResult:
         )
 
     desc = f"Currently: '{current}'" if current else "Currently: default (shows dialog)"
-    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})"):
+    # A persistent, user-wide macOS setting that `quern uninstall` does not
+    # revert, so it outlives quern itself. Same test as the CA.
+    if _prompt_yn(f"    Disable macOS crash reporter dialog? ({desc})",
+                  deliberate=True):
         rc, _, stderr = _run([
             "defaults", "write", "com.apple.CrashReporter", "DialogType", "none",
         ])
@@ -2247,6 +2278,30 @@ def _is_cert_installed(udid: str) -> bool:
         return False
 
 
+def _cert_install_decision(
+    standing: bool | None, ask: Callable[[], bool],
+) -> tuple[bool, str | None]:
+    """Whether to install the CA into booted simulators, and what to say.
+
+    A standing answer is an answer. This decision used to ignore
+    `auto_install_cert` entirely: someone who had turned it on was asked
+    anyway -- the prompt they had paid to be rid of -- and someone who had
+    turned it off was asked again, which is how a considered no becomes a
+    tired yes. CONTRIBUTING says the setting means the same thing everywhere,
+    and this was the place it did not.
+
+    Setup reads the setting and never writes it. Turning it on because
+    somebody said yes once at a prompt would convert a single answer into a
+    standing policy they never chose.
+    """
+    if standing is True:
+        return True, "    auto_install_cert is on — installing without asking."
+    if standing is False:
+        return False, ("    auto_install_cert is off — not installing.\n"
+                       "    Turn it on with `quern set-auto-install-cert on`.")
+    return ask(), None
+
+
 def install_cert_simulator(udid: str, name: str) -> CheckResult:
     """Install mitmproxy CA cert into a booted simulator.
 
@@ -2316,7 +2371,13 @@ def install_cert_simulator(udid: str, name: str) -> CheckResult:
 # ── Main setup flow ──────────────────────────────────────────────────────
 
 def _reexec_in_venv(venv_path: Path) -> int:
-    """Re-execute setup inside the venv so all checks run in the right environment."""
+    """Re-execute setup inside the venv so all checks run in the right environment.
+
+    `-y` has to be carried across. Almost every prompt lives *after* this
+    point, so a child started without it answers nothing on the run that most
+    needs it: a fresh install has no venv, which is exactly when the re-exec
+    happens, and `-y` reached one prompt out of a dozen.
+    """
     venv_python = venv_path / "bin" / "python"
     if not venv_python.exists():
         return -1
@@ -2335,8 +2396,11 @@ def _reexec_in_venv(venv_path: Path) -> int:
             stdin_arg = os.open("/dev/tty", os.O_RDONLY)
         except OSError:
             pass
+    argv = [str(venv_python), "-m", "server.main", "setup"]
+    if _ASSUME_YES:
+        argv.append("--yes")
     result = subprocess.run(
-        [str(venv_python), "-m", "server.main", "setup"],
+        argv,
         cwd=str(venv_path.parent),
         stdin=stdin_arg,
         env=env,
@@ -2360,7 +2424,17 @@ def _print_unasked() -> None:
     # Named, not counted. "3 questions were skipped" tells the reader they
     # missed something without telling them what, which is the same dead
     # end as saying nothing.
-    print("  Setup had no terminal, so these were declined without asking:")
+    #
+    # And named for the right reason. Under `-y` these are not questions
+    # nobody could ask -- there may well be a terminal -- they are the ones
+    # the flag deliberately does not answer. Saying "no terminal" there is the
+    # same defect this function exists to fix, reintroduced by a new route,
+    # and the remedy differs too: rerunning `quern setup -y` prints this
+    # again forever, because `-y` is what declined them.
+    if _ASSUME_YES:
+        print("  These need a decision of their own, so -y left them alone:")
+    else:
+        print("  Setup had no terminal, so these were declined without asking:")
     for question in _UNASKED:
         print(f"    • {question}")
     print()
@@ -2369,8 +2443,15 @@ def _print_unasked() -> None:
     print()
 
 
-def run_setup() -> int:
-    """Run the interactive setup. Returns 0 on success, 1 on errors."""
+def run_setup(assume_yes: bool = False) -> int:
+    """Run the interactive setup. Returns 0 on success, 1 on errors.
+
+    `assume_yes` answers every prompt with its default, the way `apt-get -y`
+    does -- except the ones marked `deliberate`, which no flag answers. See
+    `_prompt_yn`.
+    """
+    global _ASSUME_YES
+    _ASSUME_YES = assume_yes
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
     if sys.prefix != sys.base_prefix:
         venv_bin = str(Path(sys.prefix) / "bin")
@@ -2384,7 +2465,12 @@ def run_setup() -> int:
     print()
 
     _UNASKED.clear()
-    if not _can_prompt():
+    if _ASSUME_YES:
+        print("  Running with -y, so each question is answered with its default.")
+        print("  A few need a decision of their own; those are left alone and")
+        print("  listed at the end.")
+        print()
+    elif not _can_prompt():
         print("  No terminal attached, so nothing can be asked. Setup will do")
         print("  what it can and decline the rest rather than answer for you.")
         if invoked_by() == MENUBAR:
@@ -2500,49 +2586,33 @@ def run_setup() -> int:
             print(f"    Re-running setup inside {venv_path}...")
             return _reexec_in_venv(venv_path)
         else:
-            # No venv — create it, then re-exec
-            if _prompt_yn("    No virtual environment found. Create one?"):
-                if create_venv(project_root):
-                    return _reexec_in_venv(venv_path)
-                else:
-                    report.add(CheckResult(
-                        name="Virtual env",
-                        status=CheckStatus.ERROR,
-                        message="Failed to create virtual environment",
-                        detail="Try manually:\n"
-                               f"  python3 -m venv {project_root / '.venv'}\n"
-                               f"  source {project_root / '.venv'}/bin/activate\n"
-                               '  pip install -e ".[dev]"',
-                    ))
-                    report.print_summary()
-                    return 1
-            else:
-                # Declining used to fall through to the block below, which is
-                # commented "we're inside the venv" and reports the check OK.
-                # It is not inside a venv, so the next third-party import ended
-                # setup with `ModuleNotFoundError: No module named 'httpx'` --
-                # several hundred lines from the decision that caused it, and
-                # naming a dependency the user never mentioned.
-                #
-                # This branch is also where an *unaskable* prompt lands: with no
-                # terminal, `_prompt_yn` declines rather than hanging, so a GUI
-                # or piped setup arrives here without anyone having said no.
-                report.add(CheckResult(
-                    name="Virtual env",
-                    status=CheckStatus.ERROR,
-                    message="Declined — nothing further can run",
-                    detail=(
-                        "Quern's dependencies live in the virtualenv, so the "
-                        "checks after this one cannot run without it.\n"
-                        "To create it later:\n"
-                        f"  python3 -m venv {project_root / '.venv'}\n"
-                        f"  source {project_root / '.venv'}/bin/activate\n"
-                        '  pip install -e ".[dev]"'
-                    ),
-                ))
-                report.print_summary()
-                _print_unasked()
-                return 1
+            # No venv — create it, then re-exec. Not asked about: a venv inside
+            # the install directory *is* the install, the way node_modules is
+            # `npm install`. Asking made an unattended run decline it and stop
+            # with a tree it could not run, and there was never a second
+            # answer: every check below this point needs it.
+            #
+            # What used to live here was the *declined* branch, which existed
+            # because declining fell through to the block below -- commented
+            # "we're inside the venv" and reporting the check OK -- and setup
+            # then died several hundred lines later on `ModuleNotFoundError:
+            # No module named 'httpx'`, naming a dependency the user never
+            # mentioned. There is nothing left to decline.
+            print("    No virtual environment found. Creating one...")
+            if create_venv(project_root):
+                return _reexec_in_venv(venv_path)
+            report.add(CheckResult(
+                name="Virtual env",
+                status=CheckStatus.ERROR,
+                message="Failed to create virtual environment",
+                detail="Try manually:\n"
+                       f"  python3 -m venv {project_root / '.venv'}\n"
+                       f"  source {project_root / '.venv'}/bin/activate\n"
+                       '  pip install -e ".[dev]"',
+            ))
+            report.print_summary()
+            _print_unasked()
+            return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(
@@ -2738,7 +2808,11 @@ def run_setup() -> int:
                     )
                 else:
                     prompt = "    pymobiledevice3 not found. Install via pipx?"
-                if _prompt_yn(prompt):
+                # Only the system-wide install is out of reach of `-y`: it
+                # writes outside $HOME under sudo, and the password prompt is
+                # not something a flag can answer. The plain pipx install is
+                # ordinary setup work.
+                if _prompt_yn(prompt, deliberate=wants_global or misplaced):
                     if wants_global:
                         # Inherit stdin so sudo can prompt for the password.
                         cmd = ["sudo", pipx_bin, "install", "--global",
@@ -2807,7 +2881,12 @@ def run_setup() -> int:
                         "    tunneld not installed. Install LaunchDaemon "
                         "now (requires sudo)?"
                     )
-                if _prompt_yn(prompt):
+                # Both branches install a LaunchDaemon that runs as root at
+                # boot and survives reboots, via sudo. Larger than the CA
+                # prompt on CONTRIBUTING's own test, not smaller -- and `-y`
+                # could not answer the password prompt that follows anyway,
+                # so saying yes on the user's behalf buys a hang.
+                if _prompt_yn(prompt, deliberate=True):
                     from server.device.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
@@ -2942,7 +3021,18 @@ def run_setup() -> int:
                     print(f"    Found {len(needs_cert)} booted simulator(s) needing CA cert:")
                     for sim in needs_cert:
                         print(f"      • {sim['name']} ({sim['udid'][:8]}…)")
-                    if _prompt_yn("    Install mitmproxy CA cert into booted simulators?"):
+                    from server.config import auto_install_cert_choice
+
+                    install_it, note = _cert_install_decision(
+                        auto_install_cert_choice(),
+                        lambda: _prompt_yn(
+                            "    Install mitmproxy CA cert into booted simulators?",
+                            deliberate=True,
+                        ),
+                    )
+                    if note:
+                        print(note)
+                    if install_it:
                         for sim in needs_cert:
                             result = install_cert_simulator(sim["udid"], sim["name"])
                             report.add(result)
