@@ -487,7 +487,7 @@ class DeviceControllerUI:
                     return True
                 appeared.remove(twin)
                 in_place += 1
-            return bool(appeared) or in_place * 4 >= len(before)
+            return bool(appeared) or (in_place > 0 and in_place * 4 >= len(before))
 
         async def _read(probe: bool) -> tuple[UIElement | None, dict]:
             """The whole tree: the target if it is there, and the fingerprint.

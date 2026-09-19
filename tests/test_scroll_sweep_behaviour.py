@@ -907,3 +907,28 @@ async def test_a_label_that_changes_and_moves_is_movement():
     assert len(screen.swipes()) > 2, (
         f"the screen moved and the sweep called it an end: {screen.swipes()}"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_screen_with_nothing_on_it_is_not_moving():
+    """V-3 — two empty reads agreed on nothing and were called movement.
+
+    `in_place * 4 >= len(before)` is `0 >= 0` when both fingerprints are
+    empty, which is every read of a tree whose elements carry no frame. The
+    at-rest check then never sees two reads agree, so it pays its five extra
+    reads per swipe and reports the screen never came to rest, and the sweep's
+    "nothing moved" branch never fires -- so it spends its whole budget
+    instead of turning around.
+    """
+    screen = ListScreen()
+    screen.script = [[]] * 12
+    found = await _sweep(screen, "row_missing", max_swipes=2)
+
+    assert found is None
+    for group in screen.after_each_swipe():
+        assert len([e for e in group if e.startswith("read")]) == 2, (
+            f"an empty screen was read as still moving: {group}"
+        )
+    assert screen.swipes() == ["swipe:down", "swipe:up"], (
+        f"the sweep did not stop at a screen that never changes: {screen.swipes()}"
+    )
