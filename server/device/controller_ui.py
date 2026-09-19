@@ -105,6 +105,23 @@ class DeviceControllerUI:
     # treats a target whose top edge is above this inset as not-yet-in-view.
     _TOP_SAFE_INSET = 50  # points
 
+    # Where a sweep swipe may start. The chrome a drag must not begin on is a
+    # fixed number of points on every device, while the endpoints below are
+    # fractions of the screen, so a fraction that clears the chrome on a tall
+    # phone lands on it on a short one.
+    #
+    # Measured: on an 874pt screen the fixture app's header band runs y=62..116,
+    # and 0.13 * 874 = 114 is inside it. Every upward sweep swipe began on the
+    # header, moved nothing, and the sweep reported the list unscrollable and
+    # gave up after two swipes -- from the bottom of a 200-row list, with the
+    # target 180 rows above. A status bar and a large-title navigation bar come
+    # to about 140pt together, which clears it.
+    _TOP_CHROME_CLEARANCE = 140  # points
+    # The same at the other end: a tab bar (49) over a home indicator (34),
+    # with a margin. This one is arithmetic rather than measured -- 0.88 * 667
+    # on an SE-sized screen is 3pt inside a standard tab bar.
+    _BOTTOM_CHROME_CLEARANCE = 100  # points
+
     # Maximum scroll-into-view attempts before giving up
     _MAX_SCROLL_ATTEMPTS = 3
 
@@ -403,6 +420,10 @@ class DeviceControllerUI:
             # sweep still reaches the end of a long list.
             y_far = screen_height * 0.62
             y_near = screen_height * 0.37
+        # Both endpoints are kept off the chrome. A fraction alone is not
+        # enough: see _TOP_CHROME_CLEARANCE.
+        y_near = max(y_near, self._TOP_CHROME_CLEARANCE)
+        y_far = min(y_far, screen_height - self._BOTTOM_CHROME_CLEARANCE)
         step = y_far - y_near
         budget_scale = 1 if controlled else 3
         # WDA's swipe returns only once the app is idle, so the first read

@@ -38,7 +38,12 @@ from server.models import UIElement
 SCREEN = {"width": 393, "height": 852}
 ROW = 44.0
 TOP = 100.0          # where row 0 sits at offset 0, just under the nav bar
-DRAG = 0.75          # the sweep's swipe, as a fraction of the screen
+# The sweep's swipe, as a fraction of the screen. Not 0.75: both endpoints are
+# pulled off the chrome, which is a fixed number of points, so how much of the
+# screen a swipe covers depends on how tall the screen is.
+Y_FAR = min(SCREEN["height"] * 0.88, SCREEN["height"] - 100)
+Y_NEAR = max(SCREEN["height"] * 0.13, 140)
+DRAG = (Y_FAR - Y_NEAR) / SCREEN["height"]
 TRAVEL = 0.9         # a controlled swipe's travel, per unit of drag
 FLING = 2.6          # an unheld swipe's travel, per unit of drag
 
@@ -57,7 +62,8 @@ class ListScreen(DeviceControllerUI):
                  at_rest: bool = False, bounce: float = 0.0,
                  ids: bool = True, ticking: bool = False, lazy: bool = True,
                  pager_items: int = 0, loads_more: int = 0,
-                 fling: float = FLING):
+                 fling: float = FLING, chrome: float = TOP):
+        self.chrome = chrome    # a drag starting above this begins on the chrome
         self.fling = fling
         self.lazy = lazy            # False: a laid-out scroller, all rows in the tree
         self.pager_items = pager_items  # >0: each swipe snaps one page; id-less items
@@ -196,6 +202,13 @@ class ListScreen(DeviceControllerUI):
             self.events.append(f"swipe:{'down' if y1 > y2 else 'up'}")
             self.holds.append(hold)
             self.drags.append(abs(y1 - y2) / SCREEN["height"])
+            if y1 < self.chrome:
+                # A drag that *starts* on the navigation bar or an app's own
+                # header is handled by that chrome: the list never sees it.
+                # Where it ends does not matter, which is why a downward swipe
+                # into the chrome still scrolls.
+                self.events.append("swallowed:chrome")
+                return
             if not self.scrolls:
                 self.bouncing = 3 if self.bounce else 0   # short lists bounce too
                 return
@@ -275,7 +288,7 @@ async def test_every_row_below_is_reached_from_the_top(index):
 
 
 @pytest.mark.asyncio
-async def test_the_sweep_drags_three_quarters_of_the_screen():
+async def test_the_sweep_drags_as_much_as_the_chrome_leaves():
     """M18 — the step is sized to the viewport, not to a guess at a fling."""
     screen = ListScreen()
     await _sweep(screen, "row_60")
@@ -932,3 +945,24 @@ async def test_a_screen_with_nothing_on_it_is_not_moving():
     assert screen.swipes() == ["swipe:down", "swipe:up"], (
         f"the sweep did not stop at a screen that never changes: {screen.swipes()}"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_up_does_not_start_on_the_app_header():
+    """V-4 — the endpoints were fractions of the screen, and the chrome a drag
+    must not start on is a fixed number of points.
+
+    Measured on an 874pt screen: the fixture app's header band runs y=62..116
+    and `0.13 * 874` is 114, so every upward swipe began on the header and
+    moved nothing. From the bottom of a 200-row list the sweep turned around,
+    swiped up once into the header, read no movement, and gave up as though
+    the list did not scroll -- with the target 180 rows above it.
+    """
+    chrome = 113.0   # 116 on 874, to scale for this screen
+    screen = ListScreen(rows=200, chrome=chrome).at_bottom()
+    found = await _sweep(screen, "row_3", max_swipes=25)
+
+    assert "swallowed:chrome" not in screen.events, (
+        f"an upward swipe started on the chrome: {screen.events[:12]}"
+    )
+    assert found is not None, f"row_3 was not reached: {screen.swipes()}"
