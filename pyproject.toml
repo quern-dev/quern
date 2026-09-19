@@ -117,4 +117,5 @@ addopts = "-m 'not integration'"
 markers = [
     "integration: tests that require real devices/simulators and external tools",
     "release_download: exercises download_release_app itself, with its own fake transport",
+    "enumerates_devices: drives the real list_devices aggregation over stubbed backends",
 ]
