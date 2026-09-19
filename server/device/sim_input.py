@@ -49,7 +49,13 @@ _SPAWN_TIMEOUT_S = 15.0
 
 
 async def _spawn(udid: str, *argv: str) -> tuple[int, str]:
-    """Run a command inside the simulator. Returns (returncode, stdout)."""
+    """Run a command inside the simulator.
+
+    Returns (returncode, output) -- stdout when the command worked, stderr when
+    it did not. simctl puts the useful part on stderr: a shut-down device
+    answers "Unable to spawn: device is not booted", and dropping that reported
+    every failure as though Device Hub were holding the services.
+    """
     proc = await asyncio.create_subprocess_exec(
         "xcrun", "simctl", "spawn", udid, *argv,
         stdout=asyncio.subprocess.PIPE,
@@ -57,24 +63,32 @@ async def _spawn(udid: str, *argv: str) -> tuple[int, str]:
         stdin=asyncio.subprocess.DEVNULL,
     )
     try:
-        stdout, _ = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=_SPAWN_TIMEOUT_S,
         )
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        return 1, ""
-    return proc.returncode or 0, stdout.decode(errors="replace").strip()
+        return 1, f"timed out after {_SPAWN_TIMEOUT_S:.0f}s"
+    returncode = proc.returncode or 0
+    if returncode != 0:
+        return returncode, stderr.decode(errors="replace").strip()
+    return returncode, stdout.decode(errors="replace").strip()
 
 
 async def legacy_input_is_suppressed(udid: str) -> bool | None:
     """Has the guest handed its legacy input services to `dtuhidd`?
 
-    None means the question could not be asked -- an older simulator that has
-    never heard of the key answers the same way as one that is not booted, and
-    neither is an answer. A caller must not read that as "fine": it is the
-    difference between asking and getting nothing back, and refusing input on
-    the strength of a check that never ran would be its own bug.
+    None means the question could not be asked: a shut-down device exits
+    non-zero with nothing on stdout. A caller must not read that as "fine" --
+    it is the difference between asking and getting nothing back.
+
+    A runtime that has never heard of the key is *not* in that case: measured,
+    `notifyutil -g <unknown key>` exits 0 and prints the key with 0, which is
+    indistinguishable from a healthy simulator. That is the right answer for
+    an older runtime, which has no Device Hub to worry about, and the wrong
+    one for the daemon crashing at boot (idb's case) -- which this cannot see
+    at all.
     """
     returncode, output = await _spawn(udid, "notifyutil", "-g", DTUHID_ACTIVE_KEY)
     if returncode != 0 or not output:
@@ -101,20 +115,27 @@ async def restore_legacy_input(udid: str) -> None:
     in use, which is why nothing here calls it behind a caller's back except
     immediately after a boot quern performed itself.
     """
-    returncode, _ = await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "0")
+    returncode, stderr = await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "0")
     if returncode != 0:
         raise DeviceError(
-            f"Could not clear {DTUHID_ACTIVE_KEY} on {udid[:8]}; simulator input "
-            "cannot be restored while Device Hub holds it.",
+            f"Could not clear {DTUHID_ACTIVE_KEY} on {udid[:8]}: "
+            f"{stderr or 'no output'}. Simulator input cannot be restored "
+            "while Device Hub holds it.",
             tool="simctl",
         )
-    returncode, _ = await _spawn(
+    returncode, stderr = await _spawn(
         udid, "launchctl", "kickstart", "-k", "system/com.apple.backboardd",
     )
     if returncode != 0:
+        # The state is cleared and the services are still disconnected, which
+        # is the one combination nothing can detect: every later read says
+        # "not suppressed" while no input lands. Put the state back, so the
+        # device goes on reporting what is actually true. Best effort -- if
+        # this fails too, the error below is still raised.
+        await _spawn(udid, "notifyutil", "-s", DTUHID_ACTIVE_KEY, "1")
         raise DeviceError(
-            f"Could not restart backboardd on {udid[:8]}; simulator input "
-            "cannot be restored while Device Hub holds it.",
+            f"Could not restart backboardd on {udid[:8]}: {stderr or 'no output'}. "
+            "Simulator input cannot be restored while Device Hub holds it.",
             tool="simctl",
         )
     await asyncio.sleep(_BACKBOARDD_RESTART_S)
@@ -149,7 +170,7 @@ async def device_hub_is_running() -> bool:
 
 
 async def wait_for_device_hub_to_attach(
-    udid: str, timeout: float = 20.0, interval: float = 2.0,
+    udid: str, timeout: float = 8.0, interval: float = 1.0,
 ) -> bool | None:
     """Wait for the daemon to take the services, and report whether it did.
 
@@ -158,6 +179,13 @@ async def wait_for_device_hub_to_attach(
     has not happened yet -- measured: the repair ran, the state went back to 1,
     and input was dead. Repairing after the attach holds; the daemon
     re-registers alongside the legacy services and both work.
+
+    The timeout is short because the attachment is prompt -- measured within
+    four seconds of boot, twice -- and because waiting is not free: it is
+    spent on every boot where Device Hub is running, including the ones where
+    the daemon crashed on startup and will never attach at all (idb's case,
+    which this cannot detect). A caller that times out is told, rather than
+    left to read the silence as health.
     """
     deadline = asyncio.get_running_loop().time() + timeout
     answer: bool | None = None

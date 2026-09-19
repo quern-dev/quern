@@ -1319,6 +1319,11 @@ class DeviceControllerUI:
         except OSError as exc:
             logger.debug("Could not read the input-service state: %s", exc)
             return
+        if suppressed is None:
+            # Asked and got nothing back. Recording that as healthy would
+            # disable the check for this device for the rest of the session on
+            # the strength of one transient failure.
+            return
         self._input_checked[resolved] = not suppressed
         if suppressed:
             logger.warning(sim_input.suppressed_input_warning(resolved))

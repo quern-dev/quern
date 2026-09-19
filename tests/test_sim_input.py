@@ -325,3 +325,103 @@ class TestWaitingForTheAttachment:
             assert await sim_input.wait_for_device_hub_to_attach(
                 "SIM", timeout=0, interval=0,
             ) is None
+
+
+class TestAHalfAppliedRepairStaysVisible:
+    """F-1 from the review of #234: the one combination nothing can detect.
+
+    The clear lands, the restart fails, and the services are still
+    disconnected -- but the state now says they are not, so every later read
+    reports the device healthy and no tap ever warns again. Quieter than
+    before the repair was attempted.
+    """
+
+    async def test_the_state_goes_back_when_the_restart_fails(self):
+        spawn, calls = _spawn_returning((0, ""), (1, "kickstart: no such service"))
+
+        with (
+            patch.object(sim_input, "_spawn", spawn),
+            patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
+            pytest.raises(DeviceError, match="kickstart"),
+        ):
+            await sim_input.restore_legacy_input("SIM")
+
+        assert calls[-1] == ("notifyutil", "-s", sim_input.DTUHID_ACTIVE_KEY, "1"), (
+            "the state was left clear while the services were still taken, "
+            "which reads as a healthy simulator that ignores every tap"
+        )
+
+    async def test_the_failure_names_what_went_wrong(self):
+        """simctl puts the reason on stderr -- a shut-down device says "device
+        is not booted", which is not "Device Hub holds it"."""
+        spawn, _ = _spawn_returning((1, "Unable to spawn: device is not booted"))
+
+        with (
+            patch.object(sim_input, "_spawn", spawn),
+            patch.object(sim_input, "_BACKBOARDD_RESTART_S", 0),
+            pytest.raises(DeviceError, match="not booted"),
+        ):
+            await sim_input.restore_legacy_input("SIM")
+
+
+class TestATransientFailureDoesNotDisableTheCheck:
+    """F-2: `not None` is True, so one unreadable answer used to record the
+    device as healthy for the rest of the session."""
+
+    async def test_an_unreadable_state_is_not_cached(self):
+        from server.device.controller import DeviceController
+
+        controller = DeviceController()
+        controller._is_android = lambda udid: False
+        controller._is_physical = lambda udid: False
+        controller.resolve_udid = AsyncMock(return_value="SIM")
+        controller._input_checked = {}
+        controller._ui_backend = lambda udid: type("B", (), {"tap": staticmethod(AsyncMock())})()
+        controller._invalidate_ui_cache = lambda udid: None
+
+        answers = [None, True]
+
+        async def state(udid):
+            return answers.pop(0)
+
+        with patch.object(sim_input, "legacy_input_is_suppressed", state):
+            await controller.tap(1.0, 2.0, udid="SIM")
+            assert controller._input_checked == {}, "a failed read was cached"
+            await controller.tap(1.0, 2.0, udid="SIM")
+
+        assert controller._input_checked == {"SIM": False}
+        assert answers == [], "the second call did not re-read the state"
+
+
+class TestTheWaitIsBoundedAndReported:
+    """F-3: with the daemon crashed at boot it never attaches, and the wait was
+    20s of silence followed by a verdict of "healthy"."""
+
+    def test_the_default_wait_is_short(self):
+        import inspect
+
+        signature = inspect.signature(sim_input.wait_for_device_hub_to_attach)
+        assert signature.parameters["timeout"].default <= 10
+
+    async def test_a_boot_where_nothing_attaches_says_so(self, caplog):
+        import logging
+
+        from server.device.controller import DeviceController
+
+        controller = DeviceController()
+        controller._is_android = lambda udid: False
+        controller._is_physical = lambda udid: False
+        controller.simctl.boot = AsyncMock()
+        controller._require_simulator = lambda udid, what: None
+        controller._input_checked = {}
+
+        with (
+            patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=True)),
+            patch.object(sim_input, "wait_for_device_hub_to_attach", AsyncMock(return_value=False)),
+            patch.object(sim_input, "restore_legacy_input", AsyncMock()) as restore,
+            caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        ):
+            await controller.boot(udid="SIM")
+
+        restore.assert_not_awaited()
+        assert any("never claimed the input services" in r.message for r in caplog.records)

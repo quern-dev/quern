@@ -656,8 +656,25 @@ class DeviceController(DeviceControllerUI):
                     "them now, while nothing is running", udid[:8],
                 )
                 await sim_input.restore_legacy_input(udid)
-            self._input_checked[udid] = True
+            elif suppressed is None:
+                logger.warning(
+                    "Could not read the input-service state on %s; if taps do "
+                    "nothing, see POST /api/v1/device/ui/restore-input", udid[:8],
+                )
+            elif await sim_input.device_hub_is_running():
+                # Device Hub is up and never attached. Either this runtime
+                # predates the handover, or the daemon crashed on startup and
+                # every event will be discarded with no error (idb's case,
+                # which nothing here can distinguish).
+                logger.info(
+                    "Device Hub is running but never claimed the input services "
+                    "on %s; if taps do nothing, that is where to look", udid[:8],
+                )
+            self._input_checked[udid] = suppressed is False
         except (DeviceError, OSError) as exc:
+            # Left unrecorded on purpose: the next input call re-reads the
+            # state, and a repair that failed partway puts it back to
+            # suppressed, so the warning still fires.
             logger.warning("Could not restore input services on %s: %s", udid[:8], exc)
             self._input_checked.pop(udid, None)
 
