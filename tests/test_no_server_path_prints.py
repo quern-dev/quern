@@ -113,3 +113,66 @@ def test_the_exemptions_are_still_needed():
         f"these are exempt from the print rule but no longer print: {unused}. "
         "Remove them, so the exemption list stays a description of the code."
     )
+
+
+def _printing_functions(path: pathlib.Path) -> set[str]:
+    """Names of functions in this module that call `print`."""
+    printers: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and getattr(sub.func, "id", "") == "print":
+                    printers.add(node.name)
+                    break
+    return printers
+
+
+def _names_imported_from(module_dotted: str, path: pathlib.Path) -> set[str]:
+    """Which names `path` imports *from* a given module."""
+    taken: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.module == module_dotted:
+            taken.update(a.name for a in node.names)
+    return taken
+
+
+def test_no_printing_function_is_imported_onto_a_request_path():
+    """The caller is the test; the file list is only a proxy for it.
+
+    `tunneld.py` is exempt because `quern tunneld install` is a person at a
+    terminal. But `install_daemon()` is an ordinary function -- the day a
+    request handler imports it, twenty prints become invisible logging on a
+    server path, and a per-file allowlist says nothing at all.
+
+    Checked at *function* granularity, deliberately. Asserting the module is
+    unreachable is the obvious version and it is wrong: `sources/device_log.py`
+    already imports `find_pymobiledevice3_binary` and `resolve_tunnel_udid`
+    from `tunneld`, neither of which prints. The module being reachable is
+    fine; a printing function being reachable is not.
+
+    If this fails, the fix is not to widen the list. It is that the function
+    now has two kinds of caller and should log unconditionally, leaving the
+    CLI to print at its own call site where it knows a terminal is watching.
+    """
+    server_path_modules = _server_path_modules()
+    offenders: list[str] = []
+
+    for exempt in sorted(_TERMINAL_FACING):
+        exempt_path = _SERVER / exempt
+        printers = _printing_functions(exempt_path)
+        if not printers:
+            continue
+        dotted = "server." + exempt[:-3].replace("/", ".")
+        for module in server_path_modules:
+            taken = _names_imported_from(dotted, module)
+            leaked = taken & printers
+            if leaked:
+                offenders.append(
+                    f"{module.relative_to(_SERVER)} imports "
+                    f"{sorted(leaked)} from {exempt}"
+                )
+
+    assert not offenders, (
+        "a printing function is reachable from a server path:\n  "
+        + "\n  ".join(offenders)
+    )
