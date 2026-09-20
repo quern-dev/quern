@@ -1473,6 +1473,26 @@ class DeviceControllerUI:
         if suppressed:
             logger.warning(sim_input.suppressed_input_warning(resolved))
 
+    def input_warning(self, udid: str) -> str | None:
+        """The advisory for a device whose input services were taken, if any.
+
+        `_warn_if_input_is_suppressed` writes this to the server log, which the
+        caller never sees. That is the wrong half of the audience: an agent
+        gets `{"status": "ok"}` back from a tap that was accepted and
+        discarded, which is the exact shape of bug the warning exists to
+        catch. API handlers attach this to the response so the answer travels
+        with the call that is failing.
+
+        Only a recorded state of False qualifies. None means unchecked or
+        unreadable, and inventing an advisory for a device nobody has
+        successfully asked about would warn on every simulator.
+        """
+        if self._input_checked.get(udid) is not False:
+            return None
+        from server.device import sim_input
+
+        return sim_input.suppressed_input_warning(udid)
+
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
         """Tap at coordinates. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)

@@ -810,7 +810,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("set_hardware_keyboard", {
-    description: `Attach or detach the simulated hardware keyboard on an iOS simulator — the same switch as Simulator.app's "Connect Hardware Keyboard" (shift-cmd-K) toggle. enabled=true hides the software keyboard (smaller UI trees, unobstructed screenshots during form filling); enabled=false restores the software keyboard for focused text fields. NOTE: type_text flips the simulator into hardware-keyboard mode as a side effect of sending key events — call this with enabled=false afterward if a later step expects the software keyboard to be visible.`,
+    description: `Attach or detach the simulated hardware keyboard on an iOS simulator — the same switch as the simulator window's "Connect Hardware Keyboard" (shift-cmd-K) toggle — in Device Hub on Xcode 27, which replaced Simulator.app, and in Simulator.app before it. enabled=true hides the software keyboard (smaller UI trees, unobstructed screenshots during form filling); enabled=false restores the software keyboard for focused text fields. NOTE: type_text flips the simulator into hardware-keyboard mode as a side effect of sending key events — call this with enabled=false afterward if a later step expects the software keyboard to be visible.`,
     inputSchema: strictParams({
       enabled: z.boolean().describe("true = attach hardware keyboard (software keyboard hidden), false = detach (software keyboard shows for focused fields)"),
       udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
