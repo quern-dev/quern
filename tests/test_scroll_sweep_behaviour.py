@@ -100,8 +100,6 @@ class ListScreen(DeviceControllerUI):
     def resting_y(self, index: int) -> float:
         return TOP + index * self.row - self.offset
 
-    async def _get_screen_dimensions(self, _udid):
-        return dict(SCREEN)
 
     async def resolve_udid(self, udid=None):
         return udid or "SIM"
@@ -114,7 +112,18 @@ class ListScreen(DeviceControllerUI):
         return {"settled": True, "elapsed_ms": 0.0, "reason": None}
 
     async def get_ui_elements(self, *_a, probe_containers=True,
-                              filter_label=None, filter_identifier=None, **_k):
+                              filter_label=None, filter_identifier=None,
+                              filter_type=None, **_k):
+        if filter_type == "Application":
+            # The sweep asks the device for its viewport this way, once, before
+            # it starts. Answered from SCREEN rather than from the scripted
+            # reads: it is a targeted query for the root element, so it neither
+            # consumes a scripted screen nor counts as a tree read.
+            self.events.append("read:viewport")
+            return ([UIElement(
+                type="Application", identifier="", label="App",
+                frame={"x": 0, "y": 0, **SCREEN},
+            )], "SIM")
         filtered = bool(filter_label or filter_identifier)
         self.events.append(
             f"read:{'probe' if probe_containers else 'plain'}"
@@ -497,7 +506,11 @@ async def test_a_probe_only_target_is_not_hunted_with_plain_reads():
 
     assert found is None
     reads = [e for e in screen.events if e.startswith("read")]
-    assert reads[:2] == ["read:probe:filtered", "read:plain:full"], reads
+    # The viewport query comes first: the sweep asks the device for its
+    # screen size before it computes any geometry.
+    assert reads[:3] == [
+        "read:viewport", "read:probe:filtered", "read:plain:full",
+    ], reads
     sweep_reads = [
         e for group in screen.after_each_swipe() for e in group
         if e.startswith("read")
@@ -519,7 +532,7 @@ async def test_a_visible_target_costs_one_filtered_read_and_no_swipes():
     found = await _sweep(screen, "row_3")
 
     assert found is not None
-    assert screen.events == ["read:probe:filtered"]
+    assert screen.events == ["read:viewport", "read:probe:filtered"]
 
 
 @pytest.mark.asyncio
@@ -546,7 +559,11 @@ async def test_the_deadline_can_end_the_sweep_mid_run(caplog):
 
     class Slow(ListScreen):
         async def get_ui_elements(self, *a, **k):
-            now[0] = 60.0
+            # The viewport query is not the slow tree read being modelled, and
+            # it runs before the deadline clock starts -- advancing time there
+            # would move the start, not eat the budget.
+            if k.get("filter_type") != "Application":
+                now[0] = 60.0
             return await super().get_ui_elements(*a, **k)
 
     screen = Slow()

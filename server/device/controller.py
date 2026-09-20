@@ -114,7 +114,6 @@ class DeviceController(DeviceControllerUI):
         self._cache_hits: int = 0
         self._cache_misses: int = 0
         # Device info cache for screen dimensions
-        self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
         # Simulators whose input services have been checked this boot.

@@ -615,6 +615,95 @@ class TestTap:
         ctrl.idb.tap.assert_called_once_with("AAAA-1111", 100.5, 200.3)
 
 
+class TestNoIdentifierIsTappedFromAConstant:
+    """#239: five identifiers were compiled in with fixed coordinates, and a
+    tap for one of them skipped reading the screen entirely.
+
+    The app they were taken from added two tabs, so the stored position for
+    `_Map button in tab bar` came to land on a different tab -- and the call
+    still answered `status: "ok"` naming the identifier it had been asked for,
+    because nothing had been read that could contradict it.
+    """
+
+    #: The identifiers that used to be in `_STATIC_ELEMENT_POSITIONS`, with the
+    #: coordinate each one produced on an "iPhone 16" (height 844 in the
+    #: screen-size table, itself wrong -- see #210).
+    #: `_Settings button` is the one anchored top-right rather than bottom-left,
+    #: so its coordinate was `width - 28, 78` instead of `x, height - 40`.
+    #: Without it here, reinstating only that row of the table would leave every
+    #: test in this class passing — CodeRabbit caught exactly that on #240.
+    WAS_HARDCODED = {
+        "_Profile button in tab bar": (40, 804),
+        "_Map button in tab bar": (120, 804),
+        "_Activities button in tab bar": (200, 804),
+        "_Trackables button in tab bar": (280, 804),
+        "_Settings button": (374, 78),
+    }
+
+    def _tree(self, identifier: str) -> list[dict]:
+        """One element, at a centre no hardcoded point could produce.
+
+        The old x values were 40/120/200/280 and the old y was always 844-40;
+        a centre of (43, 47) collides with none of them, so the assertions
+        below cannot pass by coincidence. An earlier draft used a frame whose
+        centre was exactly 40 and "proved" the Profile case by accident.
+        """
+        return [{
+            "type": "Button",
+            "AXLabel": "Map",
+            "AXUniqueId": identifier,
+            "frame": {"x": 13, "y": 27, "width": 60, "height": 40},
+            "enabled": True,
+            "role": "AXRadioButton",
+            "role_description": "AXTabButton",
+        }]
+
+    @pytest.mark.parametrize("identifier,old_point", sorted(WAS_HARDCODED.items()))
+    async def test_it_is_read_from_the_screen(self, identifier, old_point):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        # While the removed fast path existed it only fired for devices in a
+        # screen-size table, so proving this test bites meant priming that
+        # table's cache. Both are gone now and there is nothing to prime --
+        # noted because re-running the mutation against an older tree needs
+        # `ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")`.
+        ctrl.idb.describe_all = AsyncMock(return_value=self._tree(identifier))
+        ctrl.idb.tap = AsyncMock()
+
+        result = await ctrl.tap_element(identifier=identifier, scroll_to_find=False)
+
+        assert result["status"] == "ok"
+        # The element's own centre, not the constant.
+        assert (result["tapped"]["x"], result["tapped"]["y"]) == (43.0, 47.0)
+        assert result["tapped"]["x"] != old_point[0], (
+            f"{identifier} was tapped at its old hardcoded coordinate"
+        )
+        ctrl.idb.tap.assert_called_once_with("AAAA-1111", 43.0, 47.0)
+        # Read from the element, not asserted by the caller.
+        assert result["tapped"]["label"] == "Map"
+
+    @pytest.mark.parametrize("identifier", sorted(WAS_HARDCODED))
+    async def test_an_identifier_that_is_absent_is_not_tapped_anyway(self, identifier):
+        """The constant path did not need the element to be present, or the
+        app to be running. A miss must be a miss.
+
+        Parametrised over every former entry, including the top-right one:
+        naming a single identifier here would let the others be reinstated
+        without a test noticing.
+        """
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=[])
+        ctrl.idb.tap = AsyncMock()
+
+        result = await ctrl.tap_element(
+            identifier=identifier, scroll_to_find=False,
+        )
+
+        assert result["status"] != "ok", result
+        ctrl.idb.tap.assert_not_called()
+
+
 class TestTapElement:
     async def test_single_match_taps(self):
         ctrl = DeviceController()
@@ -1372,6 +1461,27 @@ class TestAndroidUIBackendSelection:
         assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)
 
 
+#: The sweep opens by asking the device for its viewport -- a targeted query
+#: for the Application element -- so a harness that feeds reads as a fixed
+#: sequence has to answer that separately or the first read is consumed by it.
+#: It used to come from a per-model dimensions table, which was wrong for every
+#: model it listed (#210) and has been removed.
+def _feed_reads(ctrl, *responses, udid="AAAA-1111", width=402.0, height=852.0):
+    screen = UIElement(
+        type="Application", label="App", identifier="",
+        frame={"x": 0.0, "y": 0.0, "width": width, "height": height},
+    )
+    remaining = list(responses)
+
+    async def _read(*_a, **kw):
+        if kw.get("filter_type") == "Application":
+            return ([screen], udid)
+        return remaining.pop(0)
+
+    ctrl.get_ui_elements = _read
+    return ctrl
+
+
 class TestScrollToElement:
     async def test_requires_label_or_identifier(self):
         ctrl = DeviceController()
@@ -1383,9 +1493,6 @@ class TestScrollToElement:
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
         ctrl._invalidate_ui_cache = MagicMock()
-        ctrl._get_screen_dimensions = AsyncMock(
-            return_value={"width": 402, "height": 852}
-        )
         ctrl._ui_backend = MagicMock(return_value=backend)
         return ctrl
 
@@ -1401,9 +1508,7 @@ class TestScrollToElement:
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
         # On-screen from the first fetch (center 420, within [0, 818]).
-        ctrl.get_ui_elements = AsyncMock(
-            return_value=([self._el(400)], "AAAA-1111")
-        )
+        _feed_reads(ctrl, *[([self._el(400)], "AAAA-1111")] * 4)
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1419,12 +1524,13 @@ class TestScrollToElement:
         # viewport; a plain read finds it too, so it is an ordinary element
         # rather than a probe-only one and the sweep may stop probing; after the
         # swipe it is in view; then the settle re-confirm.
-        ctrl.get_ui_elements = AsyncMock(side_effect=[
+        _feed_reads(
+            ctrl,
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
-        ])
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1443,12 +1549,13 @@ class TestScrollToElement:
         # (top edge 4 < 50 inset); a plain read finds it too, so it is not
         # probe-only; after scrolling up it is in view; then the settle
         # re-confirm.
-        ctrl.get_ui_elements = AsyncMock(side_effect=[
+        _feed_reads(
+            ctrl,
             ([self._el(4)], "AAAA-1111"),
             ([self._el(4)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
-        ])
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1522,9 +1629,6 @@ class TestTapElementIosScroll:
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
         ctrl._invalidate_ui_cache = MagicMock()
-        ctrl._get_screen_dimensions = AsyncMock(
-            return_value={"width": 402, "height": 852}
-        )
         ctrl._ui_backend = MagicMock(return_value=backend)
         return ctrl
 
