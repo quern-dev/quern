@@ -270,8 +270,26 @@ that builds a `LogEntry` today breaks:
 action: str = ""             # "tap_element", "launch_app"
 udid: str = ""               # the resolved target, not the requested one
 duration_ms: int | None = None
-outcome: str = ""            # "ok" | "failed" | "not_found" | "ambiguous"
+outcome: str = ""            # see OUTCOMES in server/logging_ext
 ```
+
+`outcome` is a closed vocabulary, and two of its values carry judgements
+worth stating:
+
+| outcome | level | means |
+|---|---|---|
+| `ok` | INFO | it worked |
+| `failed` | ERROR | the caller did not get what they asked for |
+| `suspect` | **WARNING** | quern did it and the result is not to be trusted |
+| `not_found` | INFO | an answer, not a fault — the element was not there |
+| `ambiguous` | INFO | several matches; also an answer |
+| `started` | DEBUG | a begin entry, carrying no duration |
+
+`suspect` is the level policy's WARNING row made queryable. Typing that
+reports success into a field that is still empty is the case it exists for; a
+tap into a device whose input services Device Hub has taken is the same shape.
+Reporting either as `failed` overstates — the request did happen — and logging
+it at ERROR trains the reader to ignore errors.
 
 `udid` is separate from the existing `device_id` on purpose: `device_id` is
 `"server"` for every server-side entry today, and repurposing it would break
@@ -286,6 +304,45 @@ called from each other and would double-count.
 trace keyed on `None` because the caller omitted a udid is not joinable, and
 "which device did this actually go to" is a question we have had to answer by
 hand more than once.
+
+Reviewing #250 turned that from a logging preference into a correctness rule.
+`tap_element` resolved the udid for its advisory and then passed `body.udid`
+onward to the tap and to both screenshot helpers, each of which resolves the
+active device again. A concurrent request that changes the active device
+between them lets the tap, the screenshots and the advisory describe three
+different devices. **Resolve once per request and thread it through** — the
+action entry is then a record of what happened rather than a fourth
+independent guess at it.
+
+### What counts as an action
+
+Everything quern does that changes device or proxy state, or that a later
+question might be asked about — not just the UI verbs.
+
+A first pass covered `server/api/device_ui.py` only, which left the `proxy`
+category with eighteen tools and no entries at all. Installing a CA
+certificate through `install_proxy_cert` changes the device and takes seconds,
+and produced nothing in the trace; so did booting a simulator, starting the
+proxy, and building an app.
+
+The test is **who invoked it**, not which module it lives in. A thing quern
+did on a caller's behalf is an action. The same function reached from a
+terminal by a person running `quern setup` is not — they are watching it
+happen.
+
+| router | category | emits today |
+|---|---|---|
+| `device_ui.py` | `device.action` / `device.read` | yes |
+| `device.py` | `device.lifecycle` | boot repair only |
+| `proxy.py`, `proxy_certs.py` | `proxy` | **no** |
+| `logs.py` | `logs` | **no** |
+| `landmarks.py` | `knowledge` | **no** |
+| build endpoints | `build` | **no** |
+
+Reads are worth including but are the easy thing to over-log: a sweep issues
+many, and one entry per `get_ui_tree` inside a scroll would bury the action
+that asked for it. They stay `device.read`, which is exactly so they can be
+filtered out of a trace in one clause.
 
 ## 4. Correlation
 
@@ -392,6 +449,28 @@ exemption list honest — it must not name a module that no longer exists, and
 must not exempt one that no longer prints, because a stale exemption silently
 widens the next time a file takes that path.
 
+### The caller is the test, not the file
+
+A per-file exemption is a proxy for the real rule, and the proxy can come
+apart. `tunneld.py` is exempt because `quern tunneld install` is a person at a
+terminal — but `install_daemon()` is an ordinary function. The day something
+calls it from a request handler, every one of its twenty prints becomes
+invisible logging on a server path, and a file-level allowlist says nothing.
+
+The same module can legitimately be both. Installing a CA certificate is the
+clearest case: `quern setup` does it with a person watching, and
+`install_proxy_cert` does it through the API where the only record is whatever
+we log.
+
+So the exemption list carries a second condition: **an exempt module must not
+be reachable from `server/api/`.** Verified today — none of the eight are
+imported there, directly or transitively. The guard asserts it, so the
+exemption cannot quietly widen into a request path.
+
+Where a function genuinely needs both, the answer is not a `print` plus a log
+line. It is to log unconditionally and let the CLI print its own output at the
+call site, where it knows a terminal is watching.
+
 That is the only version of this rule that stays true. The count was never the
 problem; the next one added is.
 
@@ -418,18 +497,30 @@ returns the input-repair entry and nothing else — **verified live**, with a
 filter runs rather than matching everything.
 
 **Step 2 — the action log.** Add the four `LogEntry` fields; emit from the
-`device/ui` handlers; convert the 39 `[PERF]` lines (START → `DEBUG`,
-SUCCESS → the action entry).
+API handlers; convert the `[PERF]` lines (START → `DEBUG`, SUCCESS → the
+action entry).
 *Done when:* one `tap_element` produces exactly one `INFO` entry carrying
 action, resolved udid, outcome and duration, and a test fails if the udid is
 the requested one rather than the resolved one.
+
+**2a — `device/ui`. Done**, and verified live: a tap sent with no udid
+recorded the resolved device, and `QUERN_LOG_LEVEL=debug` restored the pair.
+
+**2b — the rest of the API.** `proxy`, `proxy_certs`, `device` lifecycle,
+`landmarks`, build. Eighteen proxy tools currently emit nothing, including a
+CA certificate install that changes the device.
+*Done when:* every router that changes device or proxy state emits one entry
+per call, and a test enumerates the routers so a new one cannot be added
+silently.
 
 **Step 3 — the `print` guard. Done.** There was nothing to convert: measured
 with `ast` rather than `grep`, zero of the 500 real `print()` calls are on a
 request path. The work was the guard that keeps that true.
 *Done when:* the check fails on a `print()` added to `server/device/` and
 passes for the terminal-facing modules — verified by mutation, including that
-the failure names the offending file and function.
+the failure names the offending file and function. **Plus:** no exempt module
+is reachable from `server/api/`, so the exemption cannot widen into a request
+path without the guard noticing.
 
 **Step 4 — the trace export.** Join action entries with flows and device logs
 on `(udid, interval)`, marking overlaps.
