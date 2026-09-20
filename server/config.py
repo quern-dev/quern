@@ -55,6 +55,23 @@ class ServerConfig:
         if API_KEY_FILE.exists():
             key = API_KEY_FILE.read_text().strip()
             if key:
+                # `.strip()` takes control characters off the ends but not out
+                # of the middle, and `isascii()` calls them ASCII -- so a key
+                # with an embedded CR, LF or NUL passes both. No client can
+                # send one: httpx builds the header and then refuses at the
+                # wire with "Illegal header value", naming the character and
+                # not the file. That is the same failure the check below
+                # exists to prevent, so it is the same refusal.
+                control = next(
+                    (c for c in key if ord(c) < 0x20 or ord(c) == 0x7F), None,
+                )
+                if control is not None:
+                    raise ValueError(
+                        f"The API key in {API_KEY_FILE} contains a control "
+                        f"character (0x{ord(control):02x}), which HTTP headers "
+                        "cannot carry, so no client could authenticate. Edit "
+                        "the file, or delete it to have a new key generated."
+                    )
                 if not key.isascii():
                     # No HTTP client can send it: httpx raises
                     # UnicodeEncodeError and node's Headers a TypeError, both

@@ -821,6 +821,16 @@ def _cmd_start(args: argparse.Namespace) -> None:
         _print_status(existing)
         sys.exit(0)
 
+    # Validated here, before anything is torn down. Everything below this
+    # point has side effects: stale state is removed, ports are reclaimed from
+    # stale quern processes, and the process daemonizes. An api-key file quern
+    # cannot use would otherwise stop the start *after* all of that -- having
+    # killed the previous instance's leftovers -- and, past daemonize(), in a
+    # child whose output goes to the log, so the shell sees `quern start`
+    # succeed and there is no server. The port is not known yet, and does not
+    # need to be: nothing being checked here depends on it.
+    _config_or_exit(host=args.host, ring_buffer_size=args.buffer_size)
+
     if existing:
         # Restore system proxy if stale state has it configured
         if existing.get("system_proxy_configured"):
@@ -878,6 +888,10 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
         threading.Thread(target=_bg_update_check, daemon=True).start()
 
+    # Built again, now that the port is resolved. The first call is the one
+    # that refuses; this one cannot fail for a reason that one would not have
+    # caught, and constructing it twice is cheaper than carrying a half-built
+    # config through the port resolution above.
     config = _config_or_exit(
         host=args.host, port=server_port, ring_buffer_size=args.buffer_size,
     )
