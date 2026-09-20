@@ -328,3 +328,84 @@ class TestTypingThatDidNotTakeIsSuspectNotFailed:
 
         assert "hunter2" not in entry.message
         assert "hunter2" not in entry.raw
+
+
+class TestActionsBeyondTheUiLayer:
+    """A trace that only covers taps is not a trace.
+
+    The first pass wrapped `device/ui` and nothing else, which left the
+    `proxy` category with eighteen tools and no entries at all -- including a
+    CA certificate install that changes the device and takes seconds. What
+    counts as an action is anything quern did on a caller's behalf, judged by
+    who invoked it rather than which module it lives in.
+    """
+
+    async def test_installing_a_cert_logs_one_entry_per_device(self):
+        """Per device, not per call: this can touch several at once, and a
+        trace joins on a single resolved udid."""
+        from server.api import proxy_certs
+
+        controller = _controller()
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(device_controller=controller)),
+        )
+
+        async def fake_install(ctrl, udid, *, force, device_name):
+            return True
+
+        entries = await _capture(
+            lambda: _install(proxy_certs, request, ["SIM-A", "SIM-B"], fake_install),
+        )
+
+        assert sorted(e.udid for e in entries) == ["SIM-A", "SIM-B"], (
+            [e.message for e in entries]
+        )
+        assert {e.category for e in entries} == {"proxy"}
+        assert {e.action for e in entries} == {"install_proxy_cert"}
+
+    async def test_a_device_that_fails_is_recorded_as_failed(self):
+        """The loop swallows the exception so the other devices still get
+        their turn -- so the action entry is the only record that this one
+        did not work."""
+        from server.api import proxy_certs
+
+        controller = _controller()
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(device_controller=controller)),
+        )
+
+        async def fake_install(ctrl, udid, *, force, device_name):
+            if udid == "SIM-B":
+                raise RuntimeError("no trust store")
+            return True
+
+        entries = await _capture(
+            lambda: _install(proxy_certs, request, ["SIM-A", "SIM-B"], fake_install),
+        )
+
+        by_udid = {e.udid: e for e in entries}
+        assert by_udid["SIM-A"].outcome == "ok"
+        assert by_udid["SIM-B"].outcome == "failed"
+        assert by_udid["SIM-B"].level == LogLevel.ERROR
+
+
+async def _install(proxy_certs, request, udids, fake_install):
+    """Drive the real cert-install loop over a stubbed device list."""
+    from unittest.mock import patch
+
+    from server.models import DeviceInfo, DeviceState, DeviceType
+
+    devices = [
+        DeviceInfo(
+            udid=u, name=f"Sim {u}", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version="iOS 18.6",
+        )
+        for u in udids
+    ]
+    controller = request.app.state.device_controller
+    controller.list_devices = AsyncMock(return_value=devices)
+    # No active device, so the handler installs on every booted simulator.
+    controller._active_udid = None  # noqa: SLF001
+
+    with patch.object(proxy_certs.cert_manager, "install_cert", fake_install):
+        return await proxy_certs.install_cert(request=request, body=None)

@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from server.api.actions import action
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,
@@ -443,27 +444,42 @@ async def install_cert(
             ),
         )
 
-    # Install on each device
+    # Install on each device.
+    #
+    # One action entry per device rather than per call: this can touch several
+    # at once, and a trace joins on a single resolved udid. An entry naming
+    # three devices would not join to any of them.
     results = []
     for udid in udids:
-        try:
-            name = device_name_map.get(udid, "Unknown Device")
-            was_installed = await cert_manager.install_cert(
-                controller, udid, force=body.force, device_name=name,
-            )
-            results.append({
-                "udid": udid,
-                "status": "installed" if was_installed else "already_installed",
-                "success": True,
-            })
-        except Exception as e:
-            _logger.error(f"Failed to install cert on {udid}: {e}")
-            results.append({
-                "udid": udid,
-                "status": "failed",
-                "success": False,
-                "error": str(e),
-            })
+        with action("install_proxy_cert", category="proxy") as act:
+            act.udid = udid
+            try:
+                name = device_name_map.get(udid, "Unknown Device")
+                act.detail = name
+                was_installed = await cert_manager.install_cert(
+                    controller, udid, force=body.force, device_name=name,
+                )
+                # Already-installed is a real outcome worth telling apart in a
+                # trace: it is the difference between "this call changed the
+                # device" and "this call did nothing", and both return success.
+                if not was_installed:
+                    act.detail += ", already installed"
+                results.append({
+                    "udid": udid,
+                    "status": "installed" if was_installed else "already_installed",
+                    "success": True,
+                })
+            except Exception as e:
+                # Not re-raised: the other devices still get their turn. The
+                # action entry is what records that this one did not.
+                act.outcome = "failed"
+                act.detail = f"{act.detail}: {e}" if act.detail else str(e)
+                results.append({
+                    "udid": udid,
+                    "status": "failed",
+                    "success": False,
+                    "error": str(e),
+                })
 
     success_count = sum(1 for r in results if r["success"])
     return {

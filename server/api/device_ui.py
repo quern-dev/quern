@@ -17,7 +17,7 @@ from server.api.device import (
     _get_controller,
     _handle_device_error,
 )
-from server import logging_ext
+from server.api.actions import action as _action
 from server.device.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
@@ -34,81 +34,9 @@ from server.models import (
     WebContentRequest,
 )
 
-router = APIRouter(prefix="/api/v1/device", tags=["device"])
-
-
-class _ActionScope:
-    """Collects what an action entry needs while the action is still running.
-
-    The outcome and the resolved udid are not known until the work is done, so
-    the handler fills them in and the context manager emits once, at the end.
-    Exactly once: a START line plus a SUCCESS line makes a trace twice as long
-    as the thing it describes, which is what `[PERF]` did.
-    """
-
-    __slots__ = ("name", "category", "udid", "outcome", "detail", "_start")
-
-    def __init__(self, name: str, category: str) -> None:
-        self.name = name
-        self.category = category
-        self.udid = ""
-        self.outcome = "ok"
-        self.detail = ""
-        self._start = time.perf_counter()
-
-    @property
-    def duration_ms(self) -> int:
-        return int((time.perf_counter() - self._start) * 1000)
-
-
-@contextlib.contextmanager
-def _action(name: str, *, category: str = "device.action"):
-    """Emit one action entry when the block ends, however it ends.
-
-    A failure is still an action that happened, and it is the one most worth
-    having in a trace -- so the entry is emitted from `finally`, not from the
-    success path.
-    """
-    scope = _ActionScope(name, category)
-    # The begin entry exists for one case the completion entry cannot cover:
-    # an action that starts and never finishes. On a hang, a crash, or a
-    # client that disconnects mid-sweep there is no completion entry at all,
-    # and without this the trace simply shows nothing happened.
-    #
-    # It is DEBUG so the default trace stays one line per action -- turn the
-    # level up (QUERN_LOG_LEVEL=debug, or `quern start -v`) and the pairs come
-    # back, categorised, so `category=device.action` returns both halves.
-    logging_ext.debug(
-        logger, "%s started", name, category=category,
-        extra_fields={"quern_action": name, "quern_outcome": "started"},
-    )
-    try:
-        yield scope
-    except HTTPException as exc:
-        # A 404 from a find-style call is an answer, not a fault: the element
-        # genuinely was not there. Anything else is a failure.
-        scope.outcome = "not_found" if exc.status_code == 404 else "failed"
-        raise
-    except Exception:
-        scope.outcome = "failed"
-        raise
-    finally:
-        logging_ext.action(
-            logger,
-            scope.name,
-            category=scope.category,
-            udid=scope.udid,
-            outcome=scope.outcome,
-            duration_ms=scope.duration_ms,
-            detail=scope.detail,
-        )
-
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# UI inspection & interaction
-# ---------------------------------------------------------------------------
+router = APIRouter(prefix="/api/v1/device", tags=["device"])
 
 
 @router.get("/ui")
