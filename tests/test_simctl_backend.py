@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -464,3 +465,182 @@ class TestXcodeGate:
         with patch("asyncio.create_subprocess_exec") as exec_mock:
             assert await backend.list_devices() == []
         assert exec_mock.call_count == 0
+
+
+class TestALaunchThatDidNotSurvive:
+    """`simctl launch` reports the launch it *requested*.
+
+    It exits 0 and prints a pid for an app the system then refuses. On iOS 27
+    that is every app without a scene manifest: quern answered `launched`, the
+    screen stayed on SpringBoard, and every later call failed as "no element
+    found" — a reason with nothing to do with the cause (#235).
+    """
+
+    async def test_launch_reports_the_pid_it_was_given(self):
+        backend = SimctlBackend()
+        proc = _mock_proc(stdout=b"com.example.App: 4242")
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            assert await backend.launch_app("AAAA-1111", "com.example.App") == 4242
+
+    async def test_an_unreadable_pid_is_reported_as_unknown(self):
+        backend = SimctlBackend()
+        with patch("asyncio.create_subprocess_exec", return_value=_mock_proc(stdout=b"ok")):
+            assert await backend.launch_app("AAAA-1111", "com.example.App") is None
+
+    def test_a_pid_that_is_gone_is_not_alive(self):
+        with patch("server.device.simctl.os.kill", side_effect=ProcessLookupError):
+            assert SimctlBackend.process_is_alive(4242) is False
+
+    def test_an_unknown_pid_counts_as_alive(self):
+        """Deliberately fails open: not knowing is not evidence of death, and
+        treating it as one would turn a formatting change in simctl's output
+        into every launch failing."""
+        assert SimctlBackend.process_is_alive(None) is True
+
+    def test_someone_elses_process_counts_as_alive(self):
+        with patch("server.device.simctl.os.kill", side_effect=PermissionError):
+            assert SimctlBackend.process_is_alive(4242) is True
+
+    @staticmethod
+    def _device(os_version: str):
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        return DeviceInfo(
+            udid="AAAA-1111", name="iPhone", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version=os_version,
+        )
+
+    async def test_a_missing_scene_manifest_is_named_on_a_runtime_that_enforces_it(
+        self, tmp_path,
+    ):
+        """The one cause diagnosable without reading the guest's log."""
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices",
+                         AsyncMock(return_value=[self._device("iOS 27.0")])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" in reason
+        assert "iOS 27" in reason
+
+    @pytest.mark.parametrize("os_version", ["iOS 18.6", "iOS 26.5"])
+    async def test_a_missing_manifest_is_not_blamed_on_an_older_runtime(
+        self, tmp_path, os_version,
+    ):
+        """An app with no manifest runs fine on iOS 26 and earlier, so a crash
+        there would be told the wrong cause (CodeRabbit on #247)."""
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices",
+                         AsyncMock(return_value=[self._device(os_version)])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
+        assert "get_latest_crash" in reason
+
+    async def test_an_unreadable_runtime_does_not_get_the_specific_reason(
+        self, tmp_path,
+    ):
+        """Naming a cause on a runtime nobody identified is a guess."""
+        (tmp_path / "Info.plist").write_bytes(plistlib.dumps({}))
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices", AsyncMock(return_value=[])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
+
+    @pytest.mark.parametrize("os_version", ["tvOS 27.0", "watchOS 27.0", "xrOS 27.0"])
+    async def test_a_non_ios_runtime_is_never_blamed_on_the_scene_lifecycle(
+        self, tmp_path, os_version,
+    ):
+        """The scene requirement is an iOS rule, and launch_app runs against
+        every simulator family. Taking the digits alone read "tvOS 27.0" as
+        iOS 27 and told a tvOS app to adopt a lifecycle iOS enforces
+        (CodeRabbit on #247)."""
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices",
+                         AsyncMock(return_value=[self._device(os_version)])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
+        assert "get_latest_crash" in reason
+
+    async def test_unparseable_simctl_output_does_not_replace_the_failure(
+        self, tmp_path,
+    ):
+        """This runs while already reporting a launch failure. list_devices
+        calls json.loads, whose JSONDecodeError is a ValueError -- letting it
+        escape would swap the real diagnosis for a traceback about simctl's
+        output (CodeRabbit on #247)."""
+        import json
+
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(
+                backend, "list_devices",
+                AsyncMock(side_effect=json.JSONDecodeError("bad", "{", 0)),
+            ),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "get_latest_crash" in reason
+        assert "UIApplicationSceneManifest" not in reason
+
+    async def test_an_app_that_has_a_scene_manifest_gets_the_generic_reason(
+        self, tmp_path,
+    ):
+        """Naming the scene lifecycle for an app that already adopts it would
+        send the reader to the wrong place."""
+        (tmp_path / "Info.plist").write_bytes(plistlib.dumps(
+            {"UIApplicationSceneManifest": {"UIApplicationSupportsMultipleScenes": False}}
+        ))
+        backend = SimctlBackend()
+        with patch.object(backend, "_run_simctl",
+                          AsyncMock(return_value=(str(tmp_path), ""))):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
+        assert "get_latest_crash" in reason
+
+    async def test_an_unreadable_container_still_answers(self):
+        backend = SimctlBackend()
+        with patch.object(backend, "_run_simctl",
+                          AsyncMock(side_effect=DeviceError("no container", tool="simctl"))):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "get_latest_crash" in reason
+
+    @pytest.mark.parametrize("keys,expected", [
+        ({"CFBundleDisplayName": "Shown", "CFBundleName": "Short"}, "Shown"),
+        ({"CFBundleName": "Short"}, "Short"),
+        ({}, None),
+    ])
+    async def test_the_display_name_is_what_the_tree_will_show(
+        self, tmp_path, keys, expected,
+    ):
+        (tmp_path / "Info.plist").write_bytes(plistlib.dumps(keys))
+        backend = SimctlBackend()
+        with patch.object(backend, "_run_simctl",
+                          AsyncMock(return_value=(str(tmp_path), ""))):
+            assert await backend.app_display_name("AAAA-1111", "com.example.App") == expected

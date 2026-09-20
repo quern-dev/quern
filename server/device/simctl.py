@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import plistlib
 import re
 import shutil
 import tempfile
@@ -16,6 +17,24 @@ from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
 logger = logging.getLogger("quern-debug-server.simctl")
+
+
+
+
+#: The first iOS major version that refuses to launch an app with no scene
+#: manifest. Below it the same app runs, so the absent manifest says nothing
+#: about why a launch failed.
+_SCENE_REQUIRED_IOS_MAJOR = 27
+
+
+def _launched_pid(stdout: str) -> int | None:
+    """The pid from `simctl launch`'s own output, or None.
+
+    It prints `<bundle id>: <pid>`. None means the line was not in that
+    shape, which is treated as "cannot tell" rather than "failed".
+    """
+    match = re.search(r":\s*(\d+)\s*$", stdout.strip())
+    return int(match.group(1)) if match else None
 
 
 class SimctlBackend:
@@ -176,8 +195,8 @@ class SimctlBackend:
 
     async def launch_app(
         self, udid: str, bundle_id: str, env: dict[str, str] | None = None,
-    ) -> None:
-        """Launch an app on a simulator.
+    ) -> int | None:
+        """Launch an app on a simulator. Returns the pid simctl reported.
 
         If env is provided, the key-value pairs are passed to the app process
         via the SIMCTL_CHILD_ prefix convention.  QUERN_AUTOMATION=YES is
@@ -199,6 +218,122 @@ class SimctlBackend:
                 f"simctl launch failed: {stderr.decode().strip()}",
                 tool="simctl",
             )
+        return _launched_pid(stdout.decode(errors="replace"))
+
+    @staticmethod
+    def process_is_alive(pid: int | None) -> bool:
+        """Is that pid still running?
+
+        A simulator's app processes are host processes, so this is a signal
+        to the pid rather than anything inside the guest. An unparseable pid
+        answers True: not knowing is not evidence of death, and treating it
+        as one would turn a formatting change in simctl's output into every
+        launch failing.
+        """
+        if pid is None:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+
+    async def app_display_name(self, udid: str, bundle_id: str) -> str | None:
+        """How the accessibility tree will name this app, or None.
+
+        `CFBundleDisplayName` when the app sets one, else `CFBundleName`.
+        None when the bundle or its plist cannot be read, which callers must
+        treat as "cannot tell" rather than as an answer.
+        """
+        plist = await self._app_info_plist(udid, bundle_id)
+        if plist is None:
+            return None
+        name = plist.get("CFBundleDisplayName") or plist.get("CFBundleName")
+        return str(name) if name else None
+
+    async def _app_info_plist(self, udid: str, bundle_id: str) -> dict | None:
+        """The installed app's Info.plist, or None if it cannot be read."""
+        try:
+            stdout, _ = await self._run_simctl(
+                "get_app_container", udid, bundle_id, "app",
+            )
+            with (Path(stdout.strip()) / "Info.plist").open("rb") as handle:
+                return plistlib.load(handle)
+        except (OSError, ValueError, DeviceError):
+            # `plistlib` raises ValueError subclasses for a malformed file.
+            return None
+
+    async def why_launch_failed(self, udid: str, bundle_id: str) -> str:
+        """The likeliest reason, as a clause to append, or an empty string.
+
+        Only one cause is named, because only one is diagnosable without
+        reading the guest's log: an app with no scene manifest cannot launch
+        on iOS 27 or later. Anything else gets the generic sentence, which
+        points at the log rather than guessing.
+        """
+        generic = (
+            ". Check `get_latest_crash` and the simulator log for why; the "
+            "launch itself was accepted, so the app started and then stopped."
+        )
+        plist = await self._app_info_plist(udid, bundle_id)
+        if plist is None:
+            # Unreadable container or plist: say the generic thing rather
+            # than claim a cause.
+            return generic
+        if "UIApplicationSceneManifest" in plist:
+            return generic
+        # The manifest being absent is not on its own a diagnosis: an app
+        # without one runs perfectly well on iOS 26 and earlier, so a crash
+        # there would be told the wrong cause. Only a runtime that enforces
+        # the rule earns the specific message.
+        major = await self._runtime_major(udid)
+        if major is None or major < _SCENE_REQUIRED_IOS_MAJOR:
+            return generic
+        return (
+            f". Its Info.plist has no UIApplicationSceneManifest, and iOS "
+            f"{major} refuses to launch an app built against that SDK without "
+            "one -- UIKit logs \"UIScene life cycle is required for apps built "
+            "with this SDK\". Adopt the scene lifecycle, or run it on an "
+            "older runtime."
+        )
+
+    async def _runtime_major(self, udid: str) -> int | None:
+        """The major iOS version this simulator runs, or None.
+
+        None when the device cannot be found or its version cannot be read,
+        which callers must treat as "cannot tell" -- naming a cause on a
+        runtime nobody identified is how a diagnosis becomes a guess.
+
+        **iOS only.** `os_version` reads "iOS 18.6", "tvOS 27.0", "watchOS
+        26.0", and `launch_app` runs against all of them. Taking the digits
+        alone turns tvOS 27 into "iOS 27", and the only caller uses this to
+        decide whether to blame the scene lifecycle -- a diagnosis that is
+        specific to iOS. A non-iOS runtime is "cannot tell", not 27.
+        """
+        try:
+            devices = await self.list_devices()
+        except (DeviceError, OSError, ValueError):
+            # ValueError covers json.JSONDecodeError from list_devices. This
+            # runs while *already* reporting a launch failure, so letting a
+            # parse error escape would replace the real diagnosis with a
+            # traceback about simctl's output.
+            return None
+        for device in devices:
+            if device.udid != udid:
+                continue
+            version = (device.os_version or "").strip()
+            if not version.startswith("iOS "):
+                return None
+            digits = ""
+            for char in version:
+                if char.isdigit():
+                    digits += char
+                elif digits:
+                    break
+            return int(digits) if digits else None
+        return None
 
     async def terminate_app(self, udid: str, bundle_id: str) -> None:
         """Terminate an app on a simulator."""
