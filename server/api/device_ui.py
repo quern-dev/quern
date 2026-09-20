@@ -446,7 +446,11 @@ async def tap_element(request: Request, body: TapElementRequest):
                 label_prefix=body.label_prefix,
                 identifier=body.identifier,
                 element_type=body.element_type,
-                udid=body.udid,
+                # `resolved`, not `body.udid`: each of these calls resolves
+                # the active device independently, so a concurrent request
+                # that changes it between them would let the tap, the
+                # screenshots and the advisory describe different devices.
+                udid=resolved,
                 skip_stability_check=body.skip_stability_check,
                 source_timeout=body.source_timeout,
                 value=body.value,
@@ -464,11 +468,11 @@ async def tap_element(request: Request, body: TapElementRequest):
 
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
-            after = await _capture_action_screenshot(controller, body.udid, "tap_after")
+            after = await _capture_action_screenshot(controller, resolved, "tap_after")
             result["screenshots"] = {"before": before, "after": after}
 
         if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
-            result["screen_context"] = await _capture_screen_context(controller, body.udid)
+            result["screen_context"] = await _capture_screen_context(controller, resolved)
 
         logger.info(f"[PERF] API /ui/tap-element SUCCESS: {(end-start)*1000:.1f}ms")
         return _with_input_warning(controller, resolved, result)
@@ -646,11 +650,15 @@ async def type_text(request: Request, body: TypeTextRequest):
     """Type text into the focused field."""
     controller = _get_controller(request)
     try:
+        # Resolved once, then used for everything. Previously the before
+        # screenshot resolved the active device separately from the typing,
+        # so a concurrent request changing it in between produced a "before"
+        # image of one device and text typed into another.
+        resolved = await controller.resolve_udid(body.udid)
         if body.capture_screenshots:
-            resolved = await controller.resolve_udid(body.udid)
             before = await _capture_action_screenshot(controller, resolved, "type_before")
         typed = await controller.type_text(
-            text=body.text, udid=body.udid,
+            text=body.text, udid=resolved,
             label=body.label, identifier=body.identifier,
         )
         udid = typed["udid"]

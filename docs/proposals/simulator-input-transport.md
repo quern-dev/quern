@@ -240,6 +240,27 @@ error, then switch with a warning that names both transports and the reason.
 Never a per-call silent retry, which would hide a transport that is broken for
 everyone.
 
+**The current write is never replayed.** Input is not idempotent. A transport
+error can arrive after `tap`, `type`, `swipe` or `button` was already handed
+to the guest and may have been delivered, so retrying it on the other
+transport risks applying it twice — a double tap where one was asked for,
+which is worse than the failure it was trying to paper over.
+
+So the rule has three parts, and the middle one is the one that is easy to
+leave out:
+
+1. The failing call **fails**, explicitly, saying the write may or may not
+   have landed. Not "failed", which claims it did not.
+2. The transport selection switches for **subsequent** calls.
+3. The caller decides whether to repeat it, because only the caller knows
+   whether the operation is safe to repeat.
+
+This matches what `restore_legacy_input` already does with a `_spawn` timeout:
+it treats the write as possibly-applied and puts the state back rather than
+assuming it did nothing. `_TIMED_OUT` exists as a value distinct from failure
+for exactly this reason — "the command may have taken effect before it was
+killed" — and the same distinction belongs here.
+
 ## What this unlocks
 
 - **#249 Tier 1**, repairing a simulator quern did not boot, becomes

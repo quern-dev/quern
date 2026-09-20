@@ -556,7 +556,7 @@ class TestTapElement:
             label_prefix=None,
             identifier=None,
             element_type=None,
-            udid=None,
+            udid="AAAA-1111",
             skip_stability_check=False,
             source_timeout=None,
             value=None,
@@ -578,7 +578,7 @@ class TestTapElement:
             label_prefix=None,
             identifier="Settings",
             element_type=None,
-            udid=None,
+            udid="AAAA-1111",
             skip_stability_check=False,
             source_timeout=None,
             value=None,
@@ -600,7 +600,7 @@ class TestTapElement:
             label_prefix=None,
             identifier=None,
             element_type="Button",
-            udid=None,
+            udid="AAAA-1111",
             skip_stability_check=False,
             source_timeout=None,
             value=None,
@@ -776,7 +776,7 @@ class TestTypeText:
         # Untargeted, so the response says so rather than implying it landed.
         assert resp.json()["verified"] is False
         mock_controller.type_text.assert_called_once_with(
-            text="hello world", udid=None, label=None, identifier=None,
+            text="hello world", udid="AAAA-1111", label=None, identifier=None,
         )
 
     async def test_type_text_no_auth(self, app):
