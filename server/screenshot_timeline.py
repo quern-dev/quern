@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
 logger = logging.getLogger("quern-debug-server.timeline")
 
 _TIMELINE_BASE = Path("/tmp/quern/timeline")
@@ -149,10 +151,12 @@ class TimelineMiddleware:
     Short-circuits immediately when no timeline is active.
     """
 
-    def __init__(self, app) -> None:  # noqa: ANN001
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send,
+    ) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -181,7 +185,7 @@ class TimelineMiddleware:
         # motivated the guard in the first place.
         body_delivered = False
 
-        async def cached_receive():  # noqa: ANN202
+        async def cached_receive() -> Message:
             nonlocal body_delivered
             if body_delivered:
                 return await receive()
@@ -202,7 +206,7 @@ class TimelineMiddleware:
         # Capture response status code
         status_code = 200
 
-        async def send_wrapper(message) -> None:  # noqa: ANN001
+        async def send_wrapper(message: Message) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message.get("status", 200)

@@ -772,7 +772,7 @@ def _is_our_process(pid: int) -> bool:
     return _is_quern_process(pid)
 
 
-def _config_or_exit(**kwargs) -> ServerConfig:
+def _config_or_exit(**kwargs: str | int) -> ServerConfig:
     """Build the config, or stop with the reason on one line.
 
     An api-key file quern cannot use is a setup problem with a one-line fix,
