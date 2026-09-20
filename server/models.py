@@ -55,12 +55,42 @@ class LogEntry(BaseModel):
     )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")
-    category: str = Field(default="", description="OSLog category (e.g., 'auth')")
+    category: str = Field(
+        default="",
+        description=(
+            "For device sources, the OSLog category (e.g. 'auth'). For quern's "
+            "own entries, what quern was doing -- see server/logging_ext."
+        ),
+    )
     pid: int | None = Field(default=None, description="Process ID")
     level: LogLevel = LogLevel.INFO
     message: str
     source: LogSource
     raw: str = Field(default="", description="Original unparsed line, preserved for debugging")
+
+    # --- the action log -----------------------------------------------------
+    # One entry per completed quern action, so a trace is a query rather than
+    # a reading exercise. Empty on every other entry, including quern's own
+    # non-action logging. See docs/proposals/logging-spec.md.
+    action: str = Field(
+        default="",
+        description="The operation that completed, e.g. 'tap_element'",
+    )
+    udid: str = Field(
+        default="",
+        description=(
+            "The *resolved* target device. Deliberately separate from "
+            "`device_id`, which is 'server' for every server-side entry and "
+            "routes entries to buffers."
+        ),
+    )
+    duration_ms: int | None = Field(
+        default=None, description="How long the action took, once it is over",
+    )
+    outcome: str = Field(
+        default="",
+        description="'ok' | 'failed' | 'not_found' | 'ambiguous'",
+    )
     repeat_count: int = Field(
         default=1,
         description="Number of occurrences this entry represents. "

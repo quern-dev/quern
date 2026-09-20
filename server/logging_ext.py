@@ -1,9 +1,10 @@
 """Structured fields on quern's own log entries.
 
-`LogEntry` already carries `category`, and the query API already filters on it
-(`server/api/logs.py`). Until now nothing on the server side populated it, so
-every server entry arrived with `category=""` and "show me device actions" was
-not a question anyone could ask.
+`LogEntry` already carried `category` and nothing on the server side populated
+it, so every server entry arrived with `category=""` and "show me device
+actions" was not a question anyone could ask. (The `/logs/query` endpoint could
+not filter on it either -- the predicate existed only on the SSE stream. Both
+halves were fixed together.)
 
 This is the whole mechanism: standard `logging`, an `extra=` dict, and a
 handler that reads it back out. No new transport, no parallel logger.
@@ -42,6 +43,19 @@ CATEGORIES: Final[tuple[str, ...]] = (
 #: of that list as it grows, and makes the call sites greppable.
 _PREFIX: Final[str] = "quern_"
 
+#: What an action can have done. `not_found` and `ambiguous` are answers, not
+#: failures -- an element that is not on screen is a true result for the
+#: question asked, and logging it as an error trains the reader to ignore
+#: errors.
+#: `started` is the odd one out: it marks a *begin* entry, which carries no
+#: duration because the action has not finished. It exists so that an action
+#: that hangs still leaves a trace -- the completion entry never arrives, so
+#: without this the trace shows nothing happened at all. Begin entries are
+#: DEBUG, so the default trace stays one line per action.
+OUTCOMES: Final[tuple[str, ...]] = (
+    "ok", "failed", "not_found", "ambiguous", "started",
+)
+
 
 def log(
     logger: logging.Logger,
@@ -50,6 +64,7 @@ def log(
     *args: object,
     category: str,
     udid: str | None = None,
+    extra_fields: dict[str, object] | None = None,
     **kwargs: object,
 ) -> None:
     """Log with a category attached, so the entry can be filtered on later.
@@ -68,6 +83,8 @@ def log(
     extra: dict[str, object] = {f"{_PREFIX}category": category}
     if udid:
         extra[f"{_PREFIX}udid"] = udid
+    if extra_fields:
+        extra.update(extra_fields)
     logger.log(level, msg, *args, extra=extra, **kwargs)  # type: ignore[arg-type]
 
 
@@ -90,6 +107,69 @@ def error(logger: logging.Logger, msg: str, *args: object, **kwargs: object) -> 
 def debug(logger: logging.Logger, msg: str, *args: object, **kwargs: object) -> None:
     """Only useful when reproducing a specific bug."""
     log(logger, logging.DEBUG, msg, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def action(
+    logger: logging.Logger,
+    action: str,
+    *,
+    category: str,
+    udid: str,
+    outcome: str,
+    duration_ms: int,
+    detail: str = "",
+) -> None:
+    """One entry per completed action -- the spine of the combined trace.
+
+    Emitted from the API handler rather than the controller: the handler is
+    the boundary that knows the outcome, already measures the duration, and
+    is one layer. Controller methods call each other, so emitting there would
+    double-count a single user-visible operation.
+
+    `udid` must be the **resolved** device, not what the caller asked for. A
+    trace keyed on the empty string because the caller omitted a udid does
+    not join to anything, and "which device did this actually go to" is a
+    question we have had to answer by hand more than once.
+    """
+    if outcome not in OUTCOMES:
+        logger.warning(
+            "Unknown action outcome %r -- see server/logging_ext.OUTCOMES", outcome,
+        )
+    message = f"{action} {outcome} in {duration_ms}ms"
+    if udid:
+        message += f" on {udid[:8]}"
+    if detail:
+        message += f" -- {detail}"
+    log(
+        logger,
+        # An action that failed is an ERROR; one that simply found nothing is
+        # not. `not_found` is an answer to the question that was asked.
+        logging.ERROR if outcome == "failed" else logging.INFO,
+        "%s",
+        message,
+        category=category,
+        udid=udid,
+        extra_fields={
+            f"{_PREFIX}action": action,
+            f"{_PREFIX}outcome": outcome,
+            f"{_PREFIX}duration_ms": duration_ms,
+        },
+    )
+
+
+def action_of(record: logging.LogRecord) -> str:
+    """The action name a record carries, or ""."""
+    return getattr(record, f"{_PREFIX}action", "") or ""
+
+
+def outcome_of(record: logging.LogRecord) -> str:
+    """The outcome a record carries, or ""."""
+    return getattr(record, f"{_PREFIX}outcome", "") or ""
+
+
+def duration_ms_of(record: logging.LogRecord) -> int | None:
+    """The duration a record carries, or None."""
+    return getattr(record, f"{_PREFIX}duration_ms", None)
 
 
 def category_of(record: logging.LogRecord) -> str:

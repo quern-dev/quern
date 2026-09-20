@@ -867,8 +867,24 @@ def _cmd_start(args: argparse.Namespace) -> None:
         # daemonize() never returns — it spawns a child process and exits.
 
     # Configure logging
+    # QUERN_LOG_LEVEL turns debug logging on without restarting through a
+    # different command line -- which matters because the thing you most want
+    # it for (an action that hung) is not reproducible on demand. `--verbose`
+    # still wins if it is passed.
+    # A whitelist rather than getattr(logging, name): `logging` has plenty of
+    # uppercase attributes that are not levels, and one of them resolving to a
+    # truthy non-level would configure logging with nonsense.
+    _LEVELS = {
+        "DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR, "CRITICAL": logging.CRITICAL,
+    }
+    _env_level = os.environ.get("QUERN_LOG_LEVEL", "").strip().upper()
+    _level = (
+        logging.DEBUG if args.verbose
+        else _LEVELS.get(_env_level, logging.INFO)
+    )
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 

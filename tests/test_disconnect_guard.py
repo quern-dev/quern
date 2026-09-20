@@ -94,6 +94,10 @@ async def test_tap_element_runs_under_the_guard():
 
     controller = MagicMock()
     controller.tap_element = AsyncMock(return_value={"status": "ok"})
+    # The handler resolves the udid itself now, so the action entry names the
+    # device the tap actually went to. A bare MagicMock attribute is not
+    # awaitable.
+    controller.resolve_udid = AsyncMock(return_value="SIM")
 
     with (
         patch("server.api.device_ui._run_until_client_leaves", spy),

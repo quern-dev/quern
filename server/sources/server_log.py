@@ -11,9 +11,16 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from server.logging_ext import category_of
+from server.logging_ext import (
+    action_of,
+    category_of,
+    duration_ms_of,
+    outcome_of,
+    udid_of,
+)
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
+
 
 def _map_level(levelno: int) -> LogLevel:
     """Map a Python logging level number to a LogLevel enum value.
@@ -62,6 +69,12 @@ class _BufferHandler(logging.Handler):
             message=record.getMessage(),
             source=LogSource.SERVER,
             raw=self.format(record),
+            # Empty on everything that is not an action entry, which is most
+            # of what comes through here.
+            action=action_of(record),
+            udid=udid_of(record),
+            duration_ms=duration_ms_of(record),
+            outcome=outcome_of(record),
         )
 
         # Schedule the async emit on the event loop (thread-safe)

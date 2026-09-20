@@ -124,6 +124,11 @@ class TestTheVocabularyIsClosed:
             "proxy", "logs", "media", "build", "knowledge", "server.lifecycle",
         }
 
+    def test_the_outcomes_are_the_ones_the_spec_publishes(self):
+        assert set(logging_ext.OUTCOMES) == {
+            "ok", "failed", "not_found", "ambiguous", "started",
+        }
+
 
 class TestNoticeIsUnreachableFromPython:
     """The enum has a NOTICE and Python logging cannot produce one. Pinned so
