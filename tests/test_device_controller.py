@@ -440,7 +440,15 @@ class TestAppDelegation:
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.launch_app = AsyncMock()
+        # Stubbing only simctl.launch_app left the confirmation running for
+        # real against a udid that does not exist: it shelled out to
+        # `xcrun simctl get_app_container` and polled the full frontmost
+        # deadline, so this delegation test took 4.56s where its siblings take
+        # 0.06s (CodeRabbit on #247). Confirmation is covered on its own in
+        # TestALaunchThatNeverCameUp.
+        ctrl._confirm_the_app_came_up = AsyncMock()
         udid = await ctrl.launch_app("com.example.App")
+        ctrl._confirm_the_app_came_up.assert_awaited_once()
         ctrl.simctl.launch_app.assert_called_once_with("AAAA-1111", "com.example.App", env=None)
         assert udid == "AAAA-1111"
 

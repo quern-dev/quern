@@ -305,16 +305,29 @@ class SimctlBackend:
         None when the device cannot be found or its version cannot be read,
         which callers must treat as "cannot tell" -- naming a cause on a
         runtime nobody identified is how a diagnosis becomes a guess.
+
+        **iOS only.** `os_version` reads "iOS 18.6", "tvOS 27.0", "watchOS
+        26.0", and `launch_app` runs against all of them. Taking the digits
+        alone turns tvOS 27 into "iOS 27", and the only caller uses this to
+        decide whether to blame the scene lifecycle -- a diagnosis that is
+        specific to iOS. A non-iOS runtime is "cannot tell", not 27.
         """
         try:
             devices = await self.list_devices()
-        except (DeviceError, OSError):
+        except (DeviceError, OSError, ValueError):
+            # ValueError covers json.JSONDecodeError from list_devices. This
+            # runs while *already* reporting a launch failure, so letting a
+            # parse error escape would replace the real diagnosis with a
+            # traceback about simctl's output.
             return None
         for device in devices:
             if device.udid != udid:
                 continue
+            version = (device.os_version or "").strip()
+            if not version.startswith("iOS "):
+                return None
             digits = ""
-            for char in device.os_version or "":
+            for char in version:
                 if char.isdigit():
                     digits += char
                 elif digits:

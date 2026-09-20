@@ -562,6 +562,53 @@ class TestALaunchThatDidNotSurvive:
             reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
         assert "UIApplicationSceneManifest" not in reason
 
+    @pytest.mark.parametrize("os_version", ["tvOS 27.0", "watchOS 27.0", "xrOS 27.0"])
+    async def test_a_non_ios_runtime_is_never_blamed_on_the_scene_lifecycle(
+        self, tmp_path, os_version,
+    ):
+        """The scene requirement is an iOS rule, and launch_app runs against
+        every simulator family. Taking the digits alone read "tvOS 27.0" as
+        iOS 27 and told a tvOS app to adopt a lifecycle iOS enforces
+        (CodeRabbit on #247)."""
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices",
+                         AsyncMock(return_value=[self._device(os_version)])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
+        assert "get_latest_crash" in reason
+
+    async def test_unparseable_simctl_output_does_not_replace_the_failure(
+        self, tmp_path,
+    ):
+        """This runs while already reporting a launch failure. list_devices
+        calls json.loads, whose JSONDecodeError is a ValueError -- letting it
+        escape would swap the real diagnosis for a traceback about simctl's
+        output (CodeRabbit on #247)."""
+        import json
+
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(
+                backend, "list_devices",
+                AsyncMock(side_effect=json.JSONDecodeError("bad", "{", 0)),
+            ),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "get_latest_crash" in reason
+        assert "UIApplicationSceneManifest" not in reason
+
     async def test_an_app_that_has_a_scene_manifest_gets_the_generic_reason(
         self, tmp_path,
     ):
