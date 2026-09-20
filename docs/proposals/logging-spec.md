@@ -92,9 +92,16 @@ policy above has no gap where NOTICE belongs.
 
 ## 2. The category vocabulary
 
-`LogEntry.category` exists, is already filterable
-(`server/api/logs.py:114`), and the server never populates it — every
+`LogEntry.category` exists and the server never populates it — every
 server-side entry has `category=""`.
+
+An earlier draft said it was "already filterable". Half true, and the wrong
+half: the predicate existed only on the SSE `/stream` endpoint. `/logs/query`
+— which is what the `query_logs` tool calls — had **no `category` parameter
+at all**, so FastAPI dropped the query string and returned the whole buffer.
+Every category matched everything, which is worse than no filter because it
+looks like it worked. Found by running it, not by reading it; fixed as part
+of step 1.
 
 **This is the closed list.** Not illustrative — if a call site does not fit,
 the list changes in a PR, rather than a new string being invented.
