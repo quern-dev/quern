@@ -409,3 +409,90 @@ async def _install(proxy_certs, request, udids, fake_install):
 
     with patch.object(proxy_certs.cert_manager, "install_cert", fake_install):
         return await proxy_certs.install_cert(request=request, body=None)
+
+
+class TestTheDecoratorFormActuallyEmits:
+    """The coverage test only sees that a decorator is *present*.
+
+    FastAPI reads the endpoint's signature to build its request model, and a
+    wrapper that hid it would break the route rather than the logging -- but a
+    wrapper that logged nothing would pass the coverage test and the suite
+    both, silently. So this drives the decorated function and reads the entry.
+    """
+
+    async def test_a_decorated_handler_emits_one_entry(self):
+        from server.api.actions import current_action, logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler():
+            current_action().udid = "SIM-FROM-INSIDE"
+            return {"ok": True}
+
+        entries = await _capture(handler)
+
+        assert len(entries) == 1
+        assert entries[0].action == "pretend_action"
+        assert entries[0].category == "proxy"
+        assert entries[0].outcome == "ok"
+
+    async def test_the_handler_can_name_its_device_from_inside(self):
+        """A ContextVar, so a handler deep in a long function does not have to
+        thread a parameter out to the decorator."""
+        from server.api.actions import current_action, logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler():
+            current_action().udid = "SIM-FROM-INSIDE"
+            return {"ok": True}
+
+        entries = await _capture(handler)
+
+        assert entries[0].udid == "SIM-FROM-INSIDE"
+
+    async def test_a_raising_handler_is_recorded_as_failed(self):
+        from server.api.actions import logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler():
+            raise RuntimeError("boom")
+
+        entries = await _capture(handler)
+
+        assert entries[0].outcome == "failed"
+        assert entries[0].level == LogLevel.ERROR
+
+    async def test_concurrent_handlers_do_not_share_a_udid(self):
+        """The reason it is a ContextVar and not a global: requests interleave
+        on one event loop, and two boots would otherwise overwrite each
+        other's device."""
+        from server.api.actions import current_action, logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler(name):
+            current_action().udid = name
+            await asyncio.sleep(0)  # let the other one run in between
+            current_action().udid = name
+            return name
+
+        entries = await _capture(
+            lambda: asyncio.gather(handler("SIM-A"), handler("SIM-B")),
+        )
+
+        assert sorted(e.udid for e in entries) == ["SIM-A", "SIM-B"], (
+            [e.udid for e in entries]
+        )
+
+    def test_the_decorator_preserves_the_signature(self):
+        """FastAPI builds its request model from the signature, so a wrapper
+        that hid it would change what the endpoint accepts."""
+        import inspect
+
+        from server.api.actions import logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler(udid: str, count: int = 3) -> dict:
+            return {}
+
+        params = inspect.signature(handler).parameters
+        assert list(params) == ["udid", "count"]
+        assert params["count"].default == 3
