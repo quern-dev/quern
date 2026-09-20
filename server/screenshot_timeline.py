@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
 logger = logging.getLogger("quern-debug-server.timeline")
 
 _TIMELINE_BASE = Path("/tmp/quern/timeline")
@@ -149,10 +151,12 @@ class TimelineMiddleware:
     Short-circuits immediately when no timeline is active.
     """
 
-    def __init__(self, app) -> None:  # noqa: ANN001
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send,
+    ) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -171,14 +175,38 @@ class TimelineMiddleware:
         body_bytes = await request.body()
         action = format_action(request.url.path, body_bytes)
 
-        # Make body re-readable for the endpoint
-        async def cached_receive():  # noqa: ANN202
-            return {"type": "http.request", "body": body_bytes}
+        # Make body re-readable for the endpoint, then get out of the way.
+        #
+        # Returning the buffered body forever swallowed everything that came
+        # after it -- including `http.disconnect`, which is what tells a
+        # handler its caller has gone. That put the endpoints this middleware
+        # wraps back in the state #208 fixed for everything else, and
+        # `tap_element` is one of them: the endpoint whose unbounded sweep
+        # motivated the guard in the first place.
+        body_delivered = False
+
+        async def cached_receive() -> Message:
+            nonlocal body_delivered
+            if body_delivered:
+                return await receive()
+            # Yield first. `Request.is_disconnected()` reads the channel inside
+            # an already-cancelled scope and throws away anything that is not a
+            # disconnect, so a receive that returns without ever awaiting hands
+            # over the buffered body and watches it be discarded -- and the
+            # endpoint's later `await request.body()` then waits on the real
+            # channel, which does not speak again until the client leaves. The
+            # checkpoint gives that cancellation somewhere to land, so the poll
+            # answers "still connected" and the body survives for its reader.
+            await asyncio.sleep(0)
+            body_delivered = True
+            return {
+                "type": "http.request", "body": body_bytes, "more_body": False,
+            }
 
         # Capture response status code
         status_code = 200
 
-        async def send_wrapper(message) -> None:  # noqa: ANN001
+        async def send_wrapper(message: Message) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message.get("status", 200)

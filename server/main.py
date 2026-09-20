@@ -772,6 +772,20 @@ def _is_our_process(pid: int) -> bool:
     return _is_quern_process(pid)
 
 
+def _config_or_exit(**kwargs: str | int) -> ServerConfig:
+    """Build the config, or stop with the reason on one line.
+
+    An api-key file quern cannot use is a setup problem with a one-line fix,
+    and the sentence saying what to do is the whole value of the check. A
+    traceback buries it under frames from inside a dataclass.
+    """
+    try:
+        return ServerConfig(**kwargs)
+    except ValueError as exc:
+        print(f"\n  {exc}\n")
+        sys.exit(1)
+
+
 def _cmd_start(args: argparse.Namespace) -> None:
     """Start the server (daemon or foreground)."""
     # Reconcile Python deps before anything imports them. Cheap when in sync
@@ -806,6 +820,16 @@ def _cmd_start(args: argparse.Namespace) -> None:
         print("Server already running")
         _print_status(existing)
         sys.exit(0)
+
+    # Validated here, before anything is torn down. Everything below this
+    # point has side effects: stale state is removed, ports are reclaimed from
+    # stale quern processes, and the process daemonizes. An api-key file quern
+    # cannot use would otherwise stop the start *after* all of that -- having
+    # killed the previous instance's leftovers -- and, past daemonize(), in a
+    # child whose output goes to the log, so the shell sees `quern start`
+    # succeed and there is no server. The port is not known yet, and does not
+    # need to be: nothing being checked here depends on it.
+    _config_or_exit(host=args.host, ring_buffer_size=args.buffer_size)
 
     if existing:
         # Restore system proxy if stale state has it configured
@@ -864,10 +888,12 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
         threading.Thread(target=_bg_update_check, daemon=True).start()
 
-    config = ServerConfig(
-        host=args.host,
-        port=server_port,
-        ring_buffer_size=args.buffer_size,
+    # Built again, now that the port is resolved. The first call is the one
+    # that refuses; this one cannot fail for a reason that one would not have
+    # caught, and constructing it twice is cheaper than carrying a half-built
+    # config through the port resolution above.
+    config = _config_or_exit(
+        host=args.host, port=server_port, ring_buffer_size=args.buffer_size,
     )
 
     enable_syslog = args.syslog is True and not args.no_syslog
