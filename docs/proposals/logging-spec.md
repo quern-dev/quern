@@ -12,14 +12,16 @@ Everything measured below was re-measured on `main` at `f3b7414`.
 
 The survey holds up. Re-measured:
 
-| claim | #238 | re-measured |
+| claim | #238 | re-measured, before step 1 |
 |---|---|---|
 | modules with no logger | 28 of 92 | 28 of 92 ✓ |
 | `print()` in `server/` | 511 | 511 ✓ |
 | distinct logger names | 30 | 30 ✓ |
 | `[PERF]` lines | — | 39, across 6 files |
 
-Every number holds. (Counting `__init__.py` too gives 36 of 100, which is the
+Every number held. Two have since changed by design: logger names are now one
+per module via `__name__`, and the "no logger" count is no longer treated as
+a defect at all — see below. (Counting `__init__.py` too gives 36 of 100, which is the
 same tree measured less usefully — package inits have nothing to log.)
 
 What it left undecided: what the levels *mean*, what the category list
@@ -84,11 +86,12 @@ not dead — but no server-side log will ever carry it.
 docstring.** Adding a Python level 25 to reach it would buy nothing; the
 policy above has no gap where NOTICE belongs.
 
-### While here: `_LEVEL_MAP` is dead
+### While here: `_LEVEL_MAP` was dead — removed
 
-`server/sources/server_log.py:18` defines `_LEVEL_MAP`, and nothing reads it —
-`_map_level` does the work with comparisons. Delete it. It is a trap: it maps
-`logging.CRITICAL` to `FAULT` and reads like the authority while being inert.
+`server/sources/server_log.py` defined `_LEVEL_MAP` and nothing read it;
+`_map_level` does the work with comparisons. It was a trap: it mapped
+`logging.CRITICAL` to `FAULT` and read like the authority while being inert.
+Deleted in step 1.
 
 ## 2. The category vocabulary
 
@@ -216,22 +219,32 @@ undiagnosable, not by counting.
 ### How it is set
 
 Standard `logging` `extra=`, read by the existing handler. No new
-infrastructure:
+infrastructure, no parallel logger. As shipped in `server/logging_ext.py`:
 
 ```python
-# server/logging_ext.py  (new, small)
-def action(logger, msg, *args, category, udid=None, duration_ms=None, **kw):
-    """Log one completed action. See docs/proposals/logging-spec.md."""
+def log(logger, level, msg, *args, category, udid=None, **kwargs):
+    if category not in CATEGORIES:
+        logger.warning("Unknown log category %r ...", category)
     extra = {"quern_category": category}
-    if udid: extra["quern_udid"] = udid
-    if duration_ms is not None: extra["quern_duration_ms"] = duration_ms
-    logger.info(msg, *args, extra=extra, **kw)
+    if udid:
+        extra["quern_udid"] = udid
+    logger.log(level, msg, *args, extra=extra, **kwargs)
 ```
 
-and in `_BufferHandler.emit`:
+with `info`/`warning`/`error`/`debug` wrappers named for the level policy, so
+the call site reads as the policy does. `category` is keyword-only and
+**required**: a default would make the uncategorised call the convenient one,
+which is how the field came to be empty everywhere in the first place.
+
+An unknown category **warns and still logs** rather than raising. These calls
+sit on paths that are frequently already reporting a failure, and turning a
+typo into an outage would be a worse bug than the one it guards against.
+
+The handler reads it back with a helper rather than a bare `getattr`, so the
+attribute name lives in one place:
 
 ```python
-category=getattr(record, "quern_category", ""),
+category=category_of(record),
 ```
 
 `quern_`-prefixed as a convention, not a necessity. Measured: `category`,
@@ -365,13 +378,23 @@ from the log handler recurses. Keep it, comment it.
 
 Each step is independently useful and independently mergeable.
 
-**Step 1 — category plumbing.** Add `quern_category` handling to
-`_BufferHandler.emit`, add `server/logging_ext.py`, delete `_LEVEL_MAP`, fix
-the `NOTICE` docstring. Convert one subsystem — `device.lifecycle`, because
-`sim_input.py` is small and already well-logged.
+**Step 1 — category plumbing. Done.** `quern_category` handling in
+`_BufferHandler.emit`, `server/logging_ext.py`, `_LEVEL_MAP` deleted, the
+`NOTICE` docstring fixed, and `device.lifecycle` piloted on `sim_input.py`.
+
+Two things were added to this step once it met contact with a running server:
+
+- **`/logs/query` could not filter on `category` at all** — the predicate
+  existed only on the SSE `/stream` endpoint, so the parameter was silently
+  dropped and every category matched everything. Populating the field would
+  have been useless without this.
+- **Every logger is now `getLogger(__name__)`** (40 modules), so `process`
+  discriminates and is orthogonal to `category`.
+
 *Done when:* `GET /api/v1/logs/query?source=server&category=device.lifecycle`
-returns the boot and input-repair entries and nothing else. A test asserts a
-non-empty category on an entry that went through `logging`.
+returns the input-repair entry and nothing else — **verified live**, with a
+`category=build` control returning zero, which is the half that proves the
+filter runs rather than matching everything.
 
 **Step 2 — the action log.** Add the four `LogEntry` fields; emit from the
 `device/ui` handlers; convert the 39 `[PERF]` lines (START → `DEBUG`,
@@ -394,6 +417,16 @@ Steps 1–3 are worth doing regardless of whether step 4 ever happens.
 
 ## What this does not propose
 
-Renaming the 30 loggers. Category is per call, which makes the logger name a
-cosmetic issue rather than a blocking one — and a rename would break
-`process`-based filtering for anyone using it today.
+**Renaming loggers to match the categories.** The rename to `__name__` is
+done (see "Logger names are `__name__`"), but aligning logger names *with the
+category vocabulary* is explicitly rejected: they are different axes, and
+`controller_ui.py` emits two categories from one module.
+
+**A new query endpoint.** `category` is a parameter on the existing
+`/logs/query`, and `source`, `level`, `process` and `search` already compose
+with it. A trace view is step 4's job, not a new filter surface.
+
+**Structured JSON log output.** Tempting, and orthogonal: the ring buffer is
+already structured, and the file log is for humans reading a terminal. If the
+action log turns out to need more fields than step 2 defines, that is the
+moment to revisit — not before.
