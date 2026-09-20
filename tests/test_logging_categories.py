@@ -202,11 +202,33 @@ class TestTheQueryPathCanActuallyFilterOnIt:
 
         assert len(got) == 3
 
-    def test_the_query_endpoint_accepts_a_category_parameter(self):
-        """FastAPI ignores unknown query params, so a missing parameter is a
-        silent no-op rather than a 422. Assert the signature directly."""
-        import inspect
+    async def test_the_endpoint_forwards_the_category_to_the_buffer(self):
+        """Accepting the parameter is not the same as using it.
+
+        A signature check passes while the handler builds LogQueryParams
+        without it -- which is precisely the bug that shipped: the query
+        string was accepted and dropped. Mutation-checked: deleting
+        `category=category` from the handler must fail this.
+        """
+        from types import SimpleNamespace
 
         from server.api.logs import query_logs
 
-        assert "category" in inspect.signature(query_logs).parameters
+        buf = await self._buffer()
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(server_buffer=buf, ring_buffer=buf)),
+        )
+
+        from server.models import LogSource
+
+        # limit/offset/tail are declared with Query(...) defaults, which
+        # arrive as Query objects rather than ints when the function is
+        # called directly rather than through FastAPI.
+        response = await query_logs(
+            request=request, source=LogSource.SERVER, category="device.lifecycle",
+            limit=100, offset=0, tail=False,
+        )
+
+        assert [e.message for e in response.entries] == ["restored input"], (
+            "the handler accepted `category` and did not pass it on"
+        )
