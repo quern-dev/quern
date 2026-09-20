@@ -52,9 +52,22 @@ _PREFIX: Final[str] = "quern_"
 #: that hangs still leaves a trace -- the completion entry never arrives, so
 #: without this the trace shows nothing happened at all. Begin entries are
 #: DEBUG, so the default trace stays one line per action.
+#: `suspect` is the level policy's WARNING row as an outcome: quern did what
+#: was asked and the result should not be trusted. Typing that reports success
+#: into a field that is still empty is the case it was added for; a tap into a
+#: device whose input services were taken is the same shape. It is distinct
+#: from `failed`, which means the caller did not get what they asked for at
+#: all, and logging it as an error would train the reader to ignore errors.
 OUTCOMES: Final[tuple[str, ...]] = (
-    "ok", "failed", "not_found", "ambiguous", "started",
+    "ok", "failed", "suspect", "not_found", "ambiguous", "started",
 )
+
+
+#: Which level an outcome is reported at. Anything absent is INFO.
+_LEVEL_FOR_OUTCOME: Final[dict[str, int]] = {
+    "failed": logging.ERROR,
+    "suspect": logging.WARNING,
+}
 
 
 def log(
@@ -142,9 +155,10 @@ def action(
         message += f" -- {detail}"
     log(
         logger,
-        # An action that failed is an ERROR; one that simply found nothing is
-        # not. `not_found` is an answer to the question that was asked.
-        logging.ERROR if outcome == "failed" else logging.INFO,
+        # An action that failed is an ERROR; one whose result is not to be
+        # trusted is a WARNING; one that simply found nothing is neither --
+        # `not_found` is an answer to the question that was asked.
+        _LEVEL_FOR_OUTCOME.get(outcome, logging.INFO),
         "%s",
         message,
         category=category,

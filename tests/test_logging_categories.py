@@ -126,7 +126,7 @@ class TestTheVocabularyIsClosed:
 
     def test_the_outcomes_are_the_ones_the_spec_publishes(self):
         assert set(logging_ext.OUTCOMES) == {
-            "ok", "failed", "not_found", "ambiguous", "started",
+            "ok", "failed", "suspect", "not_found", "ambiguous", "started",
         }
 
 
