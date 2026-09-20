@@ -95,14 +95,8 @@ _UNCLASSIFIED: frozenset[str] = frozenset({
     "builds.py:parse_build_file",
     "crashes.py:get_latest_crashes",
     "device.py:list_devices",
-    "device.py:boot_device",
-    "device.py:shutdown_device",
-    "device.py:erase_device",
     "device.py:set_active_device",
-    "device.py:install_app",
     "device.py:launch_app",
-    "device.py:terminate_app",
-    "device.py:uninstall_app",
     "device.py:list_apps",
     "device.py:take_screenshot",
     "device.py:set_location",
@@ -185,7 +179,17 @@ def _routes_in(path: pathlib.Path) -> list[tuple[str, ast.AST]]:
 
 
 def _wraps_an_action(node: ast.AST) -> bool:
-    """Does this handler open an `action(...)` / `_action(...)` block?"""
+    """Does this handler record an action, by block or by decorator?
+
+    Both forms count. A `with action(...)` block is the default; the
+    `@logged_action` decorator exists for handlers too long to wrap without
+    re-indenting the whole body, where a block around only the first step
+    would report a duration that stops before most of the work.
+    """
+    for dec in getattr(node, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if getattr(target, "id", "") == "logged_action":
+            return True
     for sub in ast.walk(node):
         if not isinstance(sub, ast.With | ast.AsyncWith):
             continue

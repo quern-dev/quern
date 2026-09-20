@@ -16,6 +16,8 @@ See docs/proposals/logging-spec.md.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import functools
 import logging
 import time
 
@@ -99,3 +101,58 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+
+
+#: The action currently being recorded on this task, so a handler deep in a
+#: long function can name the device it resolved without threading a parameter
+#: through. A ContextVar rather than a global: requests interleave on one
+#: event loop, and a global would let two boots overwrite each other's udid.
+_CURRENT: contextvars.ContextVar[ActionScope | None] = contextvars.ContextVar(
+    "quern_current_action", default=None,
+)
+
+
+class _NoAction:
+    """Stand-in when nothing is recording, so call sites need no guard.
+
+    Assigning to a field on this is deliberately a no-op rather than an
+    error: a handler that sets `udid` should not break when it is called
+    from a test, or from a path that does not log.
+    """
+
+    __slots__ = ()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        return
+
+
+_NO_ACTION = _NoAction()
+
+
+def current_action() -> ActionScope | _NoAction:
+    """The action being recorded, or a no-op stand-in."""
+    return _CURRENT.get() or _NO_ACTION
+
+
+def logged_action(name: str, *, category: str = "device.action"):
+    """Decorator form, for handlers too long to wrap in a `with` block.
+
+    Deliberately a decorator and not middleware. It wraps the endpoint
+    *function*, so it sees the real exception and the real return value, it is
+    opt-in per route rather than guessing from a status code, and it never
+    touches `send`/`receive` -- which is what streaming endpoints and the
+    disconnect guard depend on.
+
+    The handler names its device with `current_action().udid = resolved`.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            with action(name, category=category) as scope:
+                token = _CURRENT.set(scope)
+                try:
+                    return await fn(*args, **kwargs)
+                finally:
+                    _CURRENT.reset(token)
+        return wrapper
+    return decorate

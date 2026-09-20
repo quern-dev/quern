@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
+from server.api.actions import action, current_action, logged_action
 from server.models import (
     BootDeviceRequest,
     DeviceError,
@@ -281,6 +282,7 @@ async def list_devices(
 
 
 @router.post("/boot")
+@logged_action("boot_device", category="device.lifecycle")
 async def boot_device(request: Request, body: BootDeviceRequest):
     """Boot a simulator by udid or name."""
     from server.config import get_auto_install_cert
@@ -289,6 +291,11 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     controller = _get_controller(request)
     try:
         udid = await controller.boot(udid=body.udid, name=body.name, headless=body.headless)
+        # Decorated rather than wrapped in a `with`: the cert install and
+        # proxy auto-start below are part of what the caller waited for, and
+        # a block around just the boot would report a duration that stops
+        # before most of the work.
+        current_action().udid = udid
     except DeviceError as e:
         raise _handle_device_error(e)
 
@@ -371,11 +378,17 @@ async def boot_device(request: Request, body: BootDeviceRequest):
 async def shutdown_device(request: Request, body: ShutdownDeviceRequest):
     """Shutdown a simulator."""
     controller = _get_controller(request)
-    try:
-        await controller.shutdown(udid=body.udid)
-        return {"status": "shutdown", "udid": body.udid}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("shutdown_device", category="device.lifecycle") as act:
+        try:
+            # Resolved rather than echoed: `body.udid` is None when the caller
+            # leaves the choice to quern, and both the entry and this response
+            # then say None, which joins to nothing.
+            resolved = await controller.resolve_udid(body.udid)
+            act.udid = resolved
+            await controller.shutdown(udid=resolved)
+            return {"status": "shutdown", "udid": resolved}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 def _invalidate_cert_record(udid: str) -> None:
@@ -416,16 +429,19 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
     behind was creating the field report's state itself.
     """
     controller = _get_controller(request)
-    try:
-        await controller.erase(udid=body.udid)
-        # In a thread: the helper does blocking reads, an exclusive flock and a
-        # write, and a contended lock would stall every other request on the
-        # loop. It swallows its own exceptions, so the best-effort contract is
-        # unchanged.
-        await asyncio.to_thread(_invalidate_cert_record, body.udid)
-        return {"status": "erased", "udid": body.udid}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("erase_device", category="device.lifecycle") as act:
+        try:
+            resolved = await controller.resolve_udid(body.udid)
+            act.udid = resolved
+            await controller.erase(udid=resolved)
+            # In a thread: the helper does blocking reads, an exclusive flock
+            # and a write, and a contended lock would stall every other
+            # request on the loop. It swallows its own exceptions, so the
+            # best-effort contract is unchanged.
+            await asyncio.to_thread(_invalidate_cert_record, resolved)
+            return {"status": "erased", "udid": resolved}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/active")
@@ -450,11 +466,14 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
 async def install_app(request: Request, body: InstallAppRequest):
     """Install an app on a simulator."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
-        return {"status": "installed", "udid": udid, "app_path": body.app_path}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("install_app", category="device.lifecycle") as act:
+        act.detail = body.app_path
+        try:
+            udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
+            act.udid = udid
+            return {"status": "installed", "udid": udid, "app_path": body.app_path}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/app/launch")
@@ -486,22 +505,28 @@ async def launch_app(request: Request, body: LaunchAppRequest):
 async def terminate_app(request: Request, body: TerminateAppRequest):
     """Terminate an app on a simulator."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
-        return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("terminate_app", category="device.lifecycle") as act:
+        act.detail = body.bundle_id
+        try:
+            udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
+            act.udid = udid
+            return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/app/uninstall")
 async def uninstall_app(request: Request, body: UninstallAppRequest):
     """Uninstall an app from a simulator or physical device."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
-        return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("uninstall_app", category="device.lifecycle") as act:
+        act.detail = body.bundle_id
+        try:
+            udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
+            act.udid = udid
+            return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 
