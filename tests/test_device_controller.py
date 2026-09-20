@@ -628,11 +628,16 @@ class TestNoIdentifierIsTappedFromAConstant:
     #: The identifiers that used to be in `_STATIC_ELEMENT_POSITIONS`, with the
     #: coordinate each one produced on an "iPhone 16" (height 844 in the
     #: screen-size table, itself wrong -- see #210).
+    #: `_Settings button` is the one anchored top-right rather than bottom-left,
+    #: so its coordinate was `width - 28, 78` instead of `x, height - 40`.
+    #: Without it here, reinstating only that row of the table would leave every
+    #: test in this class passing — CodeRabbit caught exactly that on #240.
     WAS_HARDCODED = {
         "_Profile button in tab bar": (40, 804),
         "_Map button in tab bar": (120, 804),
         "_Activities button in tab bar": (200, 804),
         "_Trackables button in tab bar": (280, 804),
+        "_Settings button": (374, 78),
     }
 
     def _tree(self, identifier: str) -> list[dict]:
@@ -677,16 +682,22 @@ class TestNoIdentifierIsTappedFromAConstant:
         # Read from the element, not asserted by the caller.
         assert result["tapped"]["label"] == "Map"
 
-    async def test_an_identifier_that_is_absent_is_not_tapped_anyway(self):
+    @pytest.mark.parametrize("identifier", sorted(WAS_HARDCODED))
+    async def test_an_identifier_that_is_absent_is_not_tapped_anyway(self, identifier):
         """The constant path did not need the element to be present, or the
-        app to be running. A miss must be a miss."""
+        app to be running. A miss must be a miss.
+
+        Parametrised over every former entry, including the top-right one:
+        naming a single identifier here would let the others be reinstated
+        without a test noticing.
+        """
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.describe_all = AsyncMock(return_value=[])
         ctrl.idb.tap = AsyncMock()
 
         result = await ctrl.tap_element(
-            identifier="_Map button in tab bar", scroll_to_find=False,
+            identifier=identifier, scroll_to_find=False,
         )
 
         assert result["status"] != "ok", result

@@ -26,7 +26,10 @@
 >   sweep rework in #204, which took a conformance scroll from 105s to 19s.
 >
 > Superseded by #197 (knowledge base), #196 (probing cost), #239 (the removal).
-> Original text below, unedited.
+> Original text below, unedited save for one correction: the outer `markdown`
+> fence around the usage example used three backticks, so the `python` block
+> nested inside it closed the outer one and everything after rendered as
+> code. It is four backticks now.
 
 ---
 
@@ -401,7 +404,7 @@ Response: {"status": "ok", "imported": 42}
 
 Add to each affected tool's documentation:
 
-```markdown
+````markdown
 ## tap_element
 
 **Performance Optimization:**
@@ -439,7 +442,7 @@ tap_element(identifier="Submit Button")  # Fast!
 ```
 
 **No special code needed.** Just use identifiers and the system learns automatically.
-```
+````
 
 ## Benefits
 

@@ -492,6 +492,24 @@ class TestEveryInputPathIsCovered:
             f"taking another route would not warn: {warn_lines}"
         )
 
+        # And it precedes the branch itself. Anchored on the condition rather
+        # than the comment above it: the "Android fast path" comment sits
+        # *before* the shared resolve, so ordering against it would pass even
+        # if the warning moved inside the branch.
+        body = source.splitlines()
+        warn_at = next(
+            i for i, line in enumerate(body)
+            if "_warn_if_input_is_suppressed" in line
+            and len(line) - len(line.lstrip()) == 8
+        )
+        branch_at = next(
+            i for i, line in enumerate(body) if "self._is_android(resolved_fast)" in line
+        )
+        assert warn_at < branch_at, (
+            "the warning is issued after the Android branch has been taken, so "
+            "an Android tap would not warn"
+        )
+
 
 class TestOnlySettledAnswersAreCached:
     """CodeRabbit on #234: a wait that timed out was recorded as healthy.
