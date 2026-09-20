@@ -1837,3 +1837,58 @@ class TestActiveDeviceRefreshAtStartup:
             ctrl.refresh_active_device()
             ctrl.refresh_active_device()
         assert writes == 0, "refresh rewrote a sidecar that already agreed"
+
+
+class TestALaunchThatNeverCameUp:
+    """#235: `launch_app` answered `launched` for an app iOS refused.
+
+    On iOS 27 an app without a scene manifest is killed at startup. The
+    process survives 2.3s (measured), so a liveness check that runs before
+    that reports success and one that waits for it costs every launch 2.5s.
+    The signal used instead is the app becoming frontmost.
+    """
+
+    def _ctrl(self, *, frontmost: bool, alive: bool, name="Probe"):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl.simctl.launch_app = AsyncMock(return_value=4242)
+        ctrl.simctl.app_display_name = AsyncMock(return_value=name)
+        ctrl.simctl.process_is_alive = MagicMock(return_value=alive)
+        ctrl.simctl.why_launch_failed = AsyncMock(return_value=". because reasons")
+        on_screen = name if frontmost else "SpringBoard"
+        ctrl.get_ui_elements = AsyncMock(return_value=(
+            [UIElement(type="Application", label=on_screen, identifier="",
+                       frame={"x": 0, "y": 0, "width": 393, "height": 852})],
+            "AAAA-1111",
+        ))
+        ctrl._LAUNCH_FRONTMOST_TIMEOUT_S = 0.05
+        ctrl._LAUNCH_FRONTMOST_INTERVAL_S = 0.01
+        return ctrl
+
+    async def test_an_app_that_comes_up_is_a_success(self):
+        ctrl = self._ctrl(frontmost=True, alive=True)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_app_that_never_appears_and_is_gone_is_a_failure(self):
+        ctrl = self._ctrl(frontmost=False, alive=False)
+        with pytest.raises(DeviceError, match="was launched and is not running"):
+            await ctrl.launch_app("com.example.App")
+
+    async def test_the_reason_is_carried_into_the_error(self):
+        ctrl = self._ctrl(frontmost=False, alive=False)
+        with pytest.raises(DeviceError, match="because reasons"):
+            await ctrl.launch_app("com.example.App")
+
+    async def test_a_slow_app_that_is_still_running_is_not_failed(self):
+        """Refusing here would fail every cold start on a loaded machine; the
+        caller has `wait_for_element` for readiness."""
+        ctrl = self._ctrl(frontmost=False, alive=True)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_app_whose_name_cannot_be_read_is_not_failed(self):
+        """No name means the frontmost comparison cannot be made at all, so
+        the check must not manufacture a verdict from it."""
+        ctrl = self._ctrl(frontmost=False, alive=False, name=None)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"

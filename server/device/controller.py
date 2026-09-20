@@ -778,6 +778,12 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.install_app(resolved, app_path)
         return resolved
 
+    #: How long to wait for a launched app to become the application on
+    #: screen. A healthy launch is frontmost well inside this; a refused one
+    #: never is, and the pid decides once it expires.
+    _LAUNCH_FRONTMOST_TIMEOUT_S = 3.0
+    _LAUNCH_FRONTMOST_INTERVAL_S = 0.25
+
     async def launch_app(
         self,
         bundle_id: str,
@@ -791,9 +797,75 @@ class DeviceController(DeviceControllerUI):
         elif self._is_physical(resolved):
             await self.wda_client.activate_app(resolved, bundle_id)
         else:
-            await self.simctl.launch_app(resolved, bundle_id, env=env)
+            pid = await self.simctl.launch_app(resolved, bundle_id, env=env)
+            self._invalidate_ui_cache(resolved)
+            await self._confirm_the_app_came_up(resolved, bundle_id, pid)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
+
+    async def _confirm_the_app_came_up(
+        self, udid: str, bundle_id: str, pid: int | None,
+    ) -> None:
+        """Fail when the launch was accepted and the app never ran.
+
+        `simctl launch` reports the launch it *requested*. It exits 0 and
+        prints a pid for an app the system then refuses, which on iOS 27 is
+        every app without a scene manifest: UIKit logs "UIScene life cycle is
+        required for apps built with this SDK" and kills it. Quern answered
+        `launched`, the screen stayed on SpringBoard, and every later call
+        failed as "no element found" -- a reason with nothing to do with the
+        cause (#235).
+
+        Waiting on the pid alone cannot be cheap: measured on an iOS 27
+        simulator, the refused process stays alive **2.3s** before the system
+        takes it, so a liveness check that runs before that reports success
+        and one that waits for it costs every launch 2.5s.
+
+        So the signal is the app becoming frontmost, which a healthy launch
+        does in well under a second and a refused one never does. The pid is
+        the tie-breaker for the case that cannot be told apart otherwise: an
+        app still starting looks exactly like one that never will, until you
+        ask whether its process is there.
+        """
+        deadline = time.monotonic() + self._LAUNCH_FRONTMOST_TIMEOUT_S
+        while True:
+            if await self._is_frontmost(udid, bundle_id):
+                return
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(self._LAUNCH_FRONTMOST_INTERVAL_S)
+
+        if self.simctl.process_is_alive(pid):
+            # Slow to draw, not dead. Saying nothing is right: the caller has
+            # `wait_for_element` for readiness, and refusing here would fail
+            # every cold start on a loaded machine.
+            return
+        raise DeviceError(
+            f"{bundle_id} was launched and is not running"
+            f"{await self.simctl.why_launch_failed(udid, bundle_id)}",
+            tool="simctl",
+        )
+
+    async def _is_frontmost(self, udid: str, bundle_id: str) -> bool:
+        """Is that bundle the application on screen?
+
+        Compared on the Application element's label against the app's own
+        `CFBundleName`/`CFBundleDisplayName`, because the accessibility tree
+        names an app the way a person would, not by bundle id. A read that
+        fails answers False; it is retried until the deadline, and the pid
+        decides after that.
+        """
+        name = await self.simctl.app_display_name(udid, bundle_id)
+        if not name:
+            return True          # cannot tell; do not invent a failure
+        try:
+            elements, _ = await self.get_ui_elements(
+                udid, use_cache=False, filter_type="Application",
+                probe_containers=False,
+            )
+        except Exception:        # noqa: BLE001 - a read that fails is not a verdict
+            return False
+        return any((e.label or "") == name for e in elements)
 
     async def terminate_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Terminate an app. Returns the resolved udid."""
