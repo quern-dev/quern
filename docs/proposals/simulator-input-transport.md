@@ -86,9 +86,19 @@ Where the two differ is instructive, because each has what the other lacks:
 
 That last row is the surprise. `wrapAndPatch(event:edgeBit:)` and
 `sendDigitizerEvent(… edgeBit:)` already take an edge, default `0`, and
-**nothing on the wire ever passes one**. Swipe-to-home, the app switcher and
-Control Centre are a parameter away, not a project — and #243 lists edge
-swipes as the Major gap.
+**nothing on the wire ever passes one** — `doSwipe` does not accept an edge,
+so the byte-patching that would make a swipe a system gesture is written and
+unreachable. #243 rates edge swipes as a protocol change; the expensive half
+of it is already done.
+
+The same is true one step further along. `doTap(… hold:)` exists *and* the
+bridge already parses `hold` off the wire (`dict["hold"] as? Double ?? 0.05`).
+The Python client never sends it. So long press — #243's item 1 — is
+implemented in the bridge and simply not exposed.
+
+Neither is verified to *work*, which is the caveat that matters: the offsets
+are written but no test drives them. What changed is the estimate, not the
+evidence.
 
 One thing baguette does that quern does not: it guards **every** input call
 with an `ensureWarm()` that re-establishes the Indigo connection if it has
