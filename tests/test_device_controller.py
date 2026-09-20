@@ -1887,8 +1887,18 @@ class TestALaunchThatNeverCameUp:
         ctrl = self._ctrl(frontmost=False, alive=True)
         assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
 
-    async def test_an_app_whose_name_cannot_be_read_is_not_failed(self):
-        """No name means the frontmost comparison cannot be made at all, so
-        the check must not manufacture a verdict from it."""
-        ctrl = self._ctrl(frontmost=False, alive=False, name=None)
+    async def test_an_app_whose_name_cannot_be_read_falls_back_to_the_process(self):
+        """No name means the screen cannot answer, so the pid must.
+
+        An earlier version returned "frontmost" here, which skipped the
+        liveness check entirely and reported a dead process as a successful
+        launch (CodeRabbit on #247). Not being able to tell from the screen
+        is not the same as nothing being wrong.
+        """
+        ctrl = self._ctrl(frontmost=False, alive=True, name=None)
         assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_unreadable_name_with_a_dead_process_is_still_a_failure(self):
+        ctrl = self._ctrl(frontmost=False, alive=False, name=None)
+        with pytest.raises(DeviceError, match="was launched and is not running"):
+            await ctrl.launch_app("com.example.App")

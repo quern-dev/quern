@@ -21,6 +21,12 @@ logger = logging.getLogger("quern-debug-server.simctl")
 
 
 
+#: The first iOS major version that refuses to launch an app with no scene
+#: manifest. Below it the same app runs, so the absent manifest says nothing
+#: about why a launch failed.
+_SCENE_REQUIRED_IOS_MAJOR = 27
+
+
 def _launched_pid(stdout: str) -> int | None:
     """The pid from `simctl launch`'s own output, or None.
 
@@ -276,15 +282,45 @@ class SimctlBackend:
             # Unreadable container or plist: say the generic thing rather
             # than claim a cause.
             return generic
-        if "UIApplicationSceneManifest" not in plist:
-            return (
-                ". Its Info.plist has no UIApplicationSceneManifest, and iOS 27 "
-                "refuses to launch an app built against that SDK without one "
-                "-- UIKit logs \"UIScene life cycle is required for apps built "
-                "with this SDK\". Adopt the scene lifecycle, or run it on an "
-                "older runtime."
-            )
-        return generic
+        if "UIApplicationSceneManifest" in plist:
+            return generic
+        # The manifest being absent is not on its own a diagnosis: an app
+        # without one runs perfectly well on iOS 26 and earlier, so a crash
+        # there would be told the wrong cause. Only a runtime that enforces
+        # the rule earns the specific message.
+        major = await self._runtime_major(udid)
+        if major is None or major < _SCENE_REQUIRED_IOS_MAJOR:
+            return generic
+        return (
+            f". Its Info.plist has no UIApplicationSceneManifest, and iOS "
+            f"{major} refuses to launch an app built against that SDK without "
+            "one -- UIKit logs \"UIScene life cycle is required for apps built "
+            "with this SDK\". Adopt the scene lifecycle, or run it on an "
+            "older runtime."
+        )
+
+    async def _runtime_major(self, udid: str) -> int | None:
+        """The major iOS version this simulator runs, or None.
+
+        None when the device cannot be found or its version cannot be read,
+        which callers must treat as "cannot tell" -- naming a cause on a
+        runtime nobody identified is how a diagnosis becomes a guess.
+        """
+        try:
+            devices = await self.list_devices()
+        except (DeviceError, OSError):
+            return None
+        for device in devices:
+            if device.udid != udid:
+                continue
+            digits = ""
+            for char in device.os_version or "":
+                if char.isdigit():
+                    digits += char
+                elif digits:
+                    break
+            return int(digits) if digits else None
+        return None
 
     async def terminate_app(self, udid: str, bundle_id: str) -> None:
         """Terminate an app on a simulator."""

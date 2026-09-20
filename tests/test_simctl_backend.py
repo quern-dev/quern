@@ -501,17 +501,66 @@ class TestALaunchThatDidNotSurvive:
         with patch("server.device.simctl.os.kill", side_effect=PermissionError):
             assert SimctlBackend.process_is_alive(4242) is True
 
-    async def test_a_missing_scene_manifest_is_named_as_the_reason(self, tmp_path):
+    @staticmethod
+    def _device(os_version: str):
+        from server.models import DeviceInfo, DeviceState, DeviceType
+
+        return DeviceInfo(
+            udid="AAAA-1111", name="iPhone", state=DeviceState.BOOTED,
+            device_type=DeviceType.SIMULATOR, os_version=os_version,
+        )
+
+    async def test_a_missing_scene_manifest_is_named_on_a_runtime_that_enforces_it(
+        self, tmp_path,
+    ):
         """The one cause diagnosable without reading the guest's log."""
         (tmp_path / "Info.plist").write_bytes(
             plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
         )
         backend = SimctlBackend()
-        with patch.object(backend, "_run_simctl",
-                          AsyncMock(return_value=(str(tmp_path), ""))):
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices",
+                         AsyncMock(return_value=[self._device("iOS 27.0")])),
+        ):
             reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
         assert "UIApplicationSceneManifest" in reason
         assert "iOS 27" in reason
+
+    @pytest.mark.parametrize("os_version", ["iOS 18.6", "iOS 26.5"])
+    async def test_a_missing_manifest_is_not_blamed_on_an_older_runtime(
+        self, tmp_path, os_version,
+    ):
+        """An app with no manifest runs fine on iOS 26 and earlier, so a crash
+        there would be told the wrong cause (CodeRabbit on #247)."""
+        (tmp_path / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleIdentifier": "com.example.App"})
+        )
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices",
+                         AsyncMock(return_value=[self._device(os_version)])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
+        assert "get_latest_crash" in reason
+
+    async def test_an_unreadable_runtime_does_not_get_the_specific_reason(
+        self, tmp_path,
+    ):
+        """Naming a cause on a runtime nobody identified is a guess."""
+        (tmp_path / "Info.plist").write_bytes(plistlib.dumps({}))
+        backend = SimctlBackend()
+        with (
+            patch.object(backend, "_run_simctl",
+                         AsyncMock(return_value=(str(tmp_path), ""))),
+            patch.object(backend, "list_devices", AsyncMock(return_value=[])),
+        ):
+            reason = await backend.why_launch_failed("AAAA-1111", "com.example.App")
+        assert "UIApplicationSceneManifest" not in reason
 
     async def test_an_app_that_has_a_scene_manifest_gets_the_generic_reason(
         self, tmp_path,

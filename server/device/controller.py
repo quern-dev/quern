@@ -857,7 +857,13 @@ class DeviceController(DeviceControllerUI):
         """
         name = await self.simctl.app_display_name(udid, bundle_id)
         if not name:
-            return True          # cannot tell; do not invent a failure
+            # Not frontmost as far as this check can tell -- which lets the
+            # deadline expire and hands the decision to the pid. Answering
+            # True instead would skip that, and a dead process would report a
+            # successful launch: "cannot tell from the screen" is not the
+            # same as "nothing is wrong", and the process is evidence the
+            # screen is not.
+            return False
         try:
             elements, _ = await self.get_ui_elements(
                 udid, use_cache=False, filter_type="Application",
