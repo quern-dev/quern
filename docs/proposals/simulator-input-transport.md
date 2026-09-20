@@ -52,78 +52,109 @@ SimulatorKit, which is consistent.
 
 ## What baguette does, and why it is the better reference
 
-`tddworks/baguette` solves the same problem for the same simulators, and
-**does not use DTUHID at all**. Its entire input layer is two files,
-`IndigoHIDInput.swift` and `IOHIDDigitizerDispatch.swift`, and nothing in the
-tree mentions `dtuhid`, `UniversalHID` or CoreDevice.
+**Correction, same day.** An earlier revision of this section claimed baguette
+"does not use DTUHID at all" and "has no Device Hub reclaim". Both were read
+off a local checkout pinned at v0.1.70 (2026-05-11), 462 commits behind. The
+current tree (v0.1.99, 2026-09-19) has `DeviceHubAttachment.swift`,
+`SimctlInputSurface.swift` and a `docs/features/device-hub.md` devoted to
+exactly this problem. The conclusion below survives; the evidence for it is
+different, and better.
 
-What it does instead is go deeper into Indigo. From its own notes:
+### Where it lands on DTUHID
 
-> `IndigoHIDMessageForMouseNSEvent`'s 7-arg signature is the path every other
-> open-source bridge (`serve-sim`, `kittyfarm`, `opensafari`) targets, but on
-> Xcode 26 it produces messages iOS either ignores or interprets as the Home
-> gesture. The fix is to build a real `IOHIDEvent` digitizer parent + finger
-> child, run it through `IndigoHIDMessageForTrackpadEventFromHIDEventRef` …
-> then *patch two byte slots* the wrapper leaves uninitialised
+Baguette's **input transport is still Indigo**, and it says so deliberately:
 
-**Quern is already on that path.** `tools/sim-bridge.swift` resolves the same
-wrapper over `IOHIDEventCreateDigitizerEvent` + `…FingerEvent`, and
-`wrapAndPatch` writes the same two slots — target `0x32` at `0x6c`/`0x10c`,
-edge bitmask at `0x3a`/`0x3b` and `0xda`/`0xdb`. Two projects reached the same
-recipe independently, which is the strongest evidence available that it is the
-right one.
+> **Not a change to how input is sent.** baguette still speaks the legacy
+> Indigo port. Device Hub itself uses CoreDevice + `UniversalHID.framework`,
+> which reaches dtuhidd's `IndigoHIDServer` over guest XPC
+> (`com.apple.coredevice.feature.remote.hid.digitizer` and siblings).
+> Adopting that transport is the durable fix — Apple is clearly retiring the
+> legacy services — but it is a separate reverse-engineering effort; Xcode
+> 27's SimulatorKit still ships only `SimDeviceLegacyHIDClient`.
 
-Where the two differ is instructive, because each has what the other lacks:
+That is the most informed answer available to #249's question, and it matches
+the one this document reaches: DTUHID is where Apple is going, it is not a
+weekend, and Indigo carries the work until someone does it. It also hands us
+the concrete lead open question 2 was missing — the transport is guest XPC to
+`com.apple.coredevice.feature.remote.hid.*`, not anything in SimulatorKit.
+
+### Where the two projects already agree
+
+Quern's `server/device/sim_input.py` and baguette's `SimctlInputSurface`
+converged, independently, on the same repair:
 
 | | quern | baguette |
 |---|---|---|
-| digitizer via `…FromHIDEventRef` + byte patch | yes | yes |
-| buttons (`IndigoHIDMessageForButton`) | yes | yes |
-| keyboard (`…ForKeyboardArbitrary`) | yes | — |
-| modifier keys (`…ForModifierKeyBit`) | yes | — |
-| scroll wheel (`…ForScrollEvent`) | — | yes |
-| edge gestures | **plumbing present, unreachable** | exposed |
+| detection key `com.apple.coredevice.dtuhidd.active` | yes | yes |
+| clear the notify state, **then** restart `backboardd` | yes | yes |
+| documents that the reverse order re-kills the services | yes | yes |
+| waits for SpringBoard to return | yes | yes |
+| is Device Hub running on the host | yes | yes |
+| advisory when the surface is shadowed | yes | yes |
+| **explicit heal for a device we did not boot** | **—** | `baguette heal --udid` |
 
-That last row is the surprise. `wrapAndPatch(event:edgeBit:)` and
-`sendDigitizerEvent(… edgeBit:)` already take an edge, default `0`, and
-**nothing on the wire ever passes one** — `doSwipe` does not accept an edge,
-so the byte-patching that would make a swipe a system gesture is written and
-unreachable. #243 rates edge swipes as a protocol change; the expensive half
-of it is already done.
+Two independent implementations agreeing on an undocumented ordering
+constraint is the strongest confirmation this repair is right that we are
+going to get.
 
-The same is true one step further along. `doTap(… hold:)` exists *and* the
-bridge already parses `hold` off the wire (`dict["hold"] as? Double ?? 0.05`).
-The Python client never sends it. So long press — #243's item 1 — is
-implemented in the bridge and simply not exposed.
+The last row is #249 Tier 1, and baguette's answer is simply a command: heal
+on demand, for a device booted some other way or one Device Hub was opened on
+later. Worth copying as-is.
 
-Neither is verified to *work*, which is the caveat that matters: the offsets
-are written but no test drives them. What changed is the estimate, not the
-evidence.
+Two of their measurements are worth having:
 
-One thing baguette does that quern does not: it guards **every** input call
-with an `ensureWarm()` that re-establishes the Indigo connection if it has
-gone cold. It has no Device Hub reclaim at all — no notify-state clear, no
-`backboardd` restart. Whether that is sufficient on a host where Device Hub
-has actually claimed the services is untested here, and it is the one place
-worth measuring before treating baguette as complete.
+- **`bootstatus` returns too early to trust.** On a warm boot it returns
+  ~1.3 s after `boot`, while dtuhidd publishes its state ~2 s in. Their boot
+  path blocks on `simctl bootstatus -b`, then — only if Device Hub is running
+  on the host — waits up to ten seconds for the state to appear before
+  concluding there is nothing to heal.
+- **Prevention does not work.** SimulatorHID reacts to state *changes*, so
+  forcing the key to `0` during boot still yields the fatal
+  connect→disconnect once dtuhidd flips it. Heal after the fact.
+
+### Where the input layers differ
+
+Quern already implements baguette's digitizer recipe — the `IOHIDEvent`
+parent + finger child through
+`IndigoHIDMessageForTrackpadEventFromHIDEventRef`, then the same two byte
+slots: target `0x32` at `0x6c`/`0x10c`, edge bitmask at `0x3a`/`0x3b` and
+`0xda`/`0xdb`. Same offsets, reached independently.
+
+Resolved symbols, checked against v0.1.99:
+
+| | quern | baguette |
+|---|---|---|
+| `…ForTrackpadEventFromHIDEventRef` | yes | yes |
+| `…ForButton`, `…ForHIDArbitrary` | yes | yes |
+| `…ForKeyboardArbitrary`, `…ForModifierKeyBit` | yes | — |
+| `…ForScrollEvent` | — | yes |
+| `…ForMouseNSEvent`, CarPlay service, remove-pointer | — | yes |
+| edge exposed on the wire | **—** | `edge:` on tap/touch1 |
+
+That last row is the actionable one. `wrapAndPatch(event:edgeBit:)` and
+`sendDigitizerEvent(… edgeBit:)` already carry an edge, default `0`, and
+`doSwipe` does not accept one — so the byte-patching that turns a swipe into
+a system gesture is written and unreachable. Baguette exposes `edge` as a
+first-class wire field and has since before our pinned commit, which is good
+reason to think the offsets are right.
+
+The same holds one step on: `doTap(… hold:)` exists *and* the bridge already
+parses `hold` off the wire (`dict["hold"] as? Double ?? 0.05`). The Python
+client never sends it. Long press is implemented and unexposed.
+
+Neither is verified to work — the offsets are written and no test drives
+them. What changed is the estimate, not the evidence.
 
 ### What this does to the plan
 
-It removes DTUHID from the critical path for **primitives**. Everything #243
-asks for, except a second transport, appears reachable on Indigo as it stands:
-scroll needs one more `dlsym` (baguette shows the symbol), edge gestures need a
-parameter threaded through, and long press, pinch and pan are compositions of
-events quern can already build.
+It removes DTUHID from the critical path for **primitives**. Scroll needs one
+more `dlsym`; edge gestures and long press need plumbing connected, not
+written; pinch, pan and rotate compose from events quern can already build.
+Baguette reaches all of that over Indigo.
 
-DTUHID's remaining argument is narrower and still real: it is the transport
-Apple is moving to, and on a host where Device Hub holds the legacy services it
-would sidestep the suppression rather than repairing it. But baguette running
-on Xcode 26 and 27 without it, and quern running on Xcode 27 with the reclaim,
-are two working existence proofs that Indigo is viable now.
-
-So the honest order is: **expand Indigo using baguette as the reference**, keep
-the reclaim, and treat DTUHID as a question to answer rather than a migration
-to schedule.
+So the order is: **expand Indigo, using baguette as the reference**, keep the
+reclaim, add the on-demand heal, and treat DTUHID as the durable fix that
+neither project has yet paid for.
 
 ## The proposal
 
@@ -143,6 +174,16 @@ The version answers "could this host have `dtuhidd`". It does not answer "does
 this device have it". A simulator booted before an Xcode switch keeps the
 daemon set it booted with, and `xcode-select` can change under a running
 server.
+
+Worth being clear about what is and is not already solved here: quern
+**already has** exact per-device detection. `legacy_input_is_suppressed`
+reads `com.apple.coredevice.dtuhidd.active` off the guest in one round trip
+(~300 ms), and baguette independently settled on the same key as its whole
+signal. So the "is input suppressed on this device" question needs no version
+number at all. What the CoreSimulator version would add is *transport
+selection* — a different question, and one with no second transport to select
+between yet. That is an argument for recording the version now and deferring
+the selection logic until there is something to select.
 
 So: host version chooses the preferred transport, and the first input call to a
 device confirms it against that device, caching the answer per udid. This is
@@ -206,11 +247,14 @@ everyone.
 1. **Which Xcode first shipped CoreSimulator 1155.4?** idb's threshold is
    inherited, not verified here, and it sizes how long Indigo must be kept.
    Only one Xcode is installed on this machine, so it cannot be measured here.
-2. **What does the host side of DTUHID look like in practice?** The man page
-   says UniversalHID over a DT remote service. idb's implementation is the
-   only reference, since baguette never went there — and that asymmetry is
-   itself worth weighing: the project closest to our approach looked at this
-   problem and chose to stay on Indigo.
+2. **What does the host side of DTUHID look like in practice?** Partly
+   answered: baguette's reverse engineering puts it at guest XPC to
+   `com.apple.coredevice.feature.remote.hid.digitizer` and siblings, reached
+   by Device Hub through CoreDevice + `UniversalHID.framework`, with
+   SimulatorKit still shipping only `SimDeviceLegacyHIDClient`. What remains
+   unknown is the host-side client — idb is the only implementation to read,
+   and baguette, having gone this far, still calls adopting it "a separate
+   reverse-engineering effort".
 3. **Does DTUHID cover buttons and hardware keyboard**, or only the event types
    the daemon imports? Quern's `press_button` and `type_text` both go through
    Indigo services today, and a transport that covers touch but not buttons
