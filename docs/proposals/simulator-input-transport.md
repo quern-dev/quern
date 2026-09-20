@@ -90,16 +90,28 @@ converged, independently, on the same repair:
 | documents that the reverse order re-kills the services | yes | yes |
 | waits for SpringBoard to return | yes | yes |
 | is Device Hub running on the host | yes | yes |
-| advisory when the surface is shadowed | yes | yes |
-| **explicit heal for a device we did not boot** | **—** | `baguette heal --udid` |
+| explicit heal for a device we did not boot | `restore_simulator_input` | `baguette heal --udid` |
+| **the advisory reaches the caller** | **added here** | server log only |
 
 Two independent implementations agreeing on an undocumented ordering
 constraint is the strongest confirmation this repair is right that we are
 going to get.
 
-The last row is #249 Tier 1, and baguette's answer is simply a command: heal
-on demand, for a device booted some other way or one Device Hub was opened on
-later. Worth copying as-is.
+An earlier revision of this table claimed the on-demand heal was #249 Tier 1
+and that we lacked it. Wrong twice over: `restore_simulator_input` and
+`POST /api/v1/device/ui/restore-input` already exist, and the tool description
+already names the case — "a simulator that was already booted, typically one
+booted while Xcode or its Device Hub was open". Having just been caught
+reading a four-month-old copy of baguette, the lesson repeated itself
+immediately in the other direction: read your own tree before recording a gap
+in it.
+
+The real gap was the last row. `_warn_if_input_is_suppressed` wrote the
+advisory to `logger.warning`, which the caller never sees. An agent driving
+quern over MCP got `{"status": "ok"}` back from a tap that was accepted and
+discarded — the exact bug the warning exists to catch, delivered to the one
+audience that could not act on it. The write endpoints now carry it on the
+response.
 
 Two of their measurements are worth having:
 
