@@ -1,0 +1,102 @@
+"""Structured fields on quern's own log entries.
+
+`LogEntry` already carries `category`, and the query API already filters on it
+(`server/api/logs.py`). Until now nothing on the server side populated it, so
+every server entry arrived with `category=""` and "show me device actions" was
+not a question anyone could ask.
+
+This is the whole mechanism: standard `logging`, an `extra=` dict, and a
+handler that reads it back out. No new transport, no parallel logger.
+
+See docs/proposals/logging-spec.md for the category vocabulary and the level
+policy. The short version: `category` is *what quern was doing*, while
+`LogEntry.source` is *who produced the entry*. They collide by name -- there
+is both a `proxy` category and a `LogSource.PROXY` -- and they mean different
+things.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Final
+
+#: The closed category vocabulary. A call site that does not fit one of these
+#: is a reason to change this tuple in review, not to invent a string: a
+#: category nobody else uses cannot be filtered on by anyone who does not
+#: already know it exists.
+CATEGORIES: Final[tuple[str, ...]] = (
+    "device.action",      # any write to a device or an app on it
+    "device.read",        # any read of device or app state
+    "device.lifecycle",   # boot, shutdown, erase, resolve, claim, input repair
+    "proxy",              # proxy control, certs, bypass, intercepts, flows
+    "logs",               # log-stream control, filters, queries, plist watch
+    "media",              # screenshot timeline, live preview, video
+    "build",              # build orchestration and output parsing
+    "knowledge",          # landmarks, screen identification, app knowledge
+    "server.lifecycle",   # startup, shutdown, port reclaim, updates
+)
+
+#: `extra=` keys are copied onto the LogRecord, and `Logger.makeRecord` raises
+#: KeyError for anything that collides with an existing attribute. `process`
+#: collides, and `category` does not -- but prefixing everything keeps us clear
+#: of that list as it grows, and makes the call sites greppable.
+_PREFIX: Final[str] = "quern_"
+
+
+def log(
+    logger: logging.Logger,
+    level: int,
+    msg: str,
+    *args: object,
+    category: str,
+    udid: str | None = None,
+    **kwargs: object,
+) -> None:
+    """Log with a category attached, so the entry can be filtered on later.
+
+    `category` is keyword-only and required. A default would mean the
+    uncategorised call is the convenient one, which is how the field ended up
+    empty everywhere to begin with.
+    """
+    if category not in CATEGORIES:
+        # Raising here would turn a logging mistake into an outage, and this
+        # runs on paths that are already reporting a failure. Recording the
+        # bad value keeps the entry and makes the mistake visible.
+        logger.warning(
+            "Unknown log category %r -- see server/logging_ext.CATEGORIES", category,
+        )
+    extra: dict[str, object] = {f"{_PREFIX}category": category}
+    if udid:
+        extra[f"{_PREFIX}udid"] = udid
+    logger.log(level, msg, *args, extra=extra, **kwargs)  # type: ignore[arg-type]
+
+
+def info(logger: logging.Logger, msg: str, *args: object, **kwargs: object) -> None:
+    """One thing quern did that the user asked for."""
+    log(logger, logging.INFO, msg, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def warning(logger: logging.Logger, msg: str, *args: object, **kwargs: object) -> None:
+    """Quern did what was asked, and the result is probably not what the
+    caller wanted -- a tap accepted by a device that discards it, say."""
+    log(logger, logging.WARNING, msg, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def error(logger: logging.Logger, msg: str, *args: object, **kwargs: object) -> None:
+    """The operation failed; the caller did not get what they asked for."""
+    log(logger, logging.ERROR, msg, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def debug(logger: logging.Logger, msg: str, *args: object, **kwargs: object) -> None:
+    """Only useful when reproducing a specific bug."""
+    log(logger, logging.DEBUG, msg, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def category_of(record: logging.LogRecord) -> str:
+    """The category a record carries, or "" -- the shape the handler needs."""
+    return getattr(record, f"{_PREFIX}category", "") or ""
+
+
+def udid_of(record: logging.LogRecord) -> str:
+    """The resolved udid a record carries, or ""."""
+    return getattr(record, f"{_PREFIX}udid", "") or ""
