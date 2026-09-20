@@ -42,19 +42,10 @@ them from another process. There is no header to stamp and no context to
 inherit.
 
 **But the flows already identify themselves,** which is better than an id we
-would have had to invent. `server/proxy/addon.py` monkey-patches
-`LiveConnectionHandler` to read `pid` and `process_name` off the connection,
-then walks parent PIDs until it finds a `launchd_sim` whose command line
-carries a UDID. Every flow can therefore carry:
-
-```python
-source_process: str | None   # the app: "Geocaching"
-source_pid: int | None
-simulator_udid: str | None   # resolved, not guessed
-```
-
-All three are already fields on the flow models. This is the join key, and it
-is a real one.
+would have had to invent. Depending on how the device reaches the proxy, a
+flow already carries `source_pid`, `source_process`, `simulator_udid` or
+`client_ip` — all existing fields on the flow models. Section 4 works through
+what each regime gives us, including physical devices.
 
 ## 1. Level policy
 
@@ -189,48 +180,68 @@ hand more than once.
 ## 4. Correlation
 
 **What is not achievable:** stamping an id of our own onto proxy flows. The
-proxy is a separate process and the requests are the app's.
+proxy is a separate `mitmdump` process and the requests are the app's. There
+is no header to add and no context to inherit.
 
-**What is achievable:** join on what the flow already knows —
-`(simulator_udid, source_process, time interval)`.
+**What is achievable:** the flows already identify themselves. Every regime we
+care about has a join key that exists today — it just needs using.
 
-The action entry contributes the resolved udid and an interval; the flow
-contributes its own udid and the originating app; device logs contribute a
-process name. That is a three-way join on fields that already exist, and
-`source_process` disambiguates two actions running against *different apps*
-on one device, which a time window alone could not.
+### The three mobile regimes
 
-### The limit, stated precisely
+| regime | flow carries | joins to a device by | identifies the app? |
+|---|---|---|---|
+| **simulator + local capture** | `source_pid`, `source_process`, `simulator_udid` | `simulator_udid`, resolved from the pid | **yes** — `source_process` |
+| **physical device + Wi-Fi proxy** | `client_ip` | `client_ip` → udid, from `wifi_proxy_configs` | no |
+| **simulator + Wi-Fi proxy** | `client_ip` (loopback) | nothing device-distinguishing | no |
 
-`pid` comes from `writer.get_extra_info("pid")`, which is provided by the
-**mitmproxy_rs local redirector**. The addon says so itself: the patch is
-wrapped in `try/except` with the comment "Not available — non-local mode or
-import failure".
+**Simulators under local capture** are the strong case.
+`server/proxy/addon.py` patches `LiveConnectionHandler` to read `pid` and
+`process_name` off the connection, then walks parent PIDs until it finds a
+`launchd_sim` whose command line carries a UDID. That gives device *and* app,
+so two concurrent actions against different apps on one simulator are
+separable — something a time window could never do.
 
-So there are two regimes, and the export must not pretend they are one:
+**Physical devices** join on `client_ip`, and the mapping already exists:
+`record_device_proxy_config(udid, ssid, proxy_host, port, client_ip)` writes
+`client_ip` per SSID into that device's cert state. A flow's `client_ip`
+therefore resolves to a udid without anything new being recorded.
 
-| | `source_pid` / `simulator_udid` | join |
-|---|---|---|
-| **local capture** (`set_local_capture`) | present | udid + process + interval |
-| **HTTP proxy** (physical devices, proxied sims) | absent | interval only, per device |
+Two cautions, because this mapping is weaker than the simulator one:
 
-In proxy mode the trace degrades to the time window, with the ambiguity that
-implies: two concurrent actions on one device cannot be told apart. Quern
-largely serializes per device, so this is rare rather than absent — but the
-export should **mark** an interval it cannot attribute cleanly rather than
-picking one. Marking ambiguity is the point; inventing a join is how a trace
-becomes confidently wrong.
+- **It is recorded once, at proxy setup, and DHCP can reassign.** A stale
+  `client_ip` does not fail — it attributes another device's flows to this
+  one, which is worse. The resolver must treat the mapping as a *hint* and
+  re-record on each `record_device_proxy_config`; a trace should mark a
+  device whose recorded IP was last set long ago rather than asserting it.
+- **It identifies the device, not the app.** Everything the device sends
+  shares one IP, so `source_process` has no equivalent. For physical devices,
+  app attribution has to come from the action log's own `udid` plus the
+  interval, not from the flow.
 
-That asymmetry is also an argument for `set_local_capture` being the
-recommended mode when anyone wants a trace, which is worth saying in the tool
-description rather than leaving to be discovered.
+**Simulators without local capture** are the genuinely weak case: traffic
+arrives from the host, so `client_ip` is loopback and distinguishes nothing.
+Only the interval is left. Given local capture is available for simulators,
+the right answer is to recommend it whenever a trace is wanted, in the
+`set_local_capture` tool description rather than leaving it to be discovered.
+
+### Interval, and marking what cannot be told apart
+
+In every regime the action entry contributes `(udid, start, duration)`. Where
+a flow resolves to a udid, the join is `udid + interval`, narrowed by
+`source_process` when present. Where it does not, only the interval remains.
+
+Two concurrent actions on one device with no app distinction produce
+overlapping intervals that cannot be separated. Quern largely serializes per
+device, so this is rare rather than absent — but the export must **mark** an
+interval it cannot attribute cleanly instead of picking one. Marking
+ambiguity is the point; inventing a join is how a trace becomes confidently
+wrong, which is the recurring failure in this codebase.
 
 ### The in-process id is still worth having
 
 A `contextvars` correlation id ties the nested reads inside one `tap_element`
 to that action, for *server* entries, where it does work. Build it in step 2.
-Just do not name it in a way that implies it reaches the proxy, because it
-cannot.
+Just do not name it in a way that implies it reaches the proxy.
 
 ## 5. The `print()` rule
 
