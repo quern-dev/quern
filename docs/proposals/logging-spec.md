@@ -99,23 +99,75 @@ server-side entry has `category=""`.
 **This is the closed list.** Not illustrative — if a call site does not fit,
 the list changes in a PR, rather than a new string being invented.
 
-| category | covers |
-|---|---|
-| `device.action` | anything that writes to a device: tap, swipe, type, press, launch, install |
-| `device.read` | anything that reads: UI tree, screenshot, element state, logs |
-| `device.lifecycle` | boot, shutdown, erase, resolve, claim, input repair |
-| `proxy` | capture, mocks, intercepts, certificates |
-| `build` | xcodebuild, gradle, parsing build output |
-| `server.lifecycle` | startup, shutdown, port reclaim, updates, daemonization |
-| `knowledge` | landmarks, screen identification, app knowledge base |
+It was validated by classifying all 99 MCP tools against it, which is what
+turned a seven-item guess into this nine-item list. A first draft left **25 of
+99 tools with no category at all** — a quarter of the surface.
 
-Seven. `perf` is deliberately **not** a category — duration is a field on an
-action entry, not a class of event. That is the mistake `[PERF]` made.
+| category | covers | tools |
+|---|---|---|
+| `device.action` | any write to a device or an app on it | 24 |
+| `device.read` | any read of device or app state | 12 |
+| `device.lifecycle` | boot, shutdown, erase, resolve, claim, driver/WDA, input repair | 10 |
+| `proxy` | proxy control, certificates, bypass, intercepts, mocks, flow queries | 18 |
+| `logs` | log-stream control, filters, queries, crashes, plist watch | 19 |
+| `media` | screenshot timeline, live preview, and the timestamped video later | 6 |
+| `build` | build orchestration and output parsing | 3 |
+| `knowledge` | landmarks, screen identification, app knowledge base | 6 |
+| `server.lifecycle` | startup, shutdown, port reclaim, updates, daemonization | 1 |
+
+`perf` is deliberately **not** a category — duration is a field on an action
+entry, not a class of event. That is the mistake `[PERF]` made.
+
+### What the classification exercise found
+
+**`logs` and `media` were missing entirely.** 25 tools — every
+`start_*_logging` / `stop_*_logging`, the oslog and syslog streams, log
+filters, crash reads, the five plist-watch tools, the screenshot timeline and
+the live preview — had nowhere to go. They are not `device.read`: they
+control the *observation plumbing* rather than reading device state, and
+starting a log stream is not the same kind of event as fetching a UI tree.
+
+That the trace machinery itself had no category, in a spec whose purpose is a
+combined trace, is the strongest argument for classifying against a real
+inventory rather than reasoning from memory.
+
+Plist watch belongs in `logs` because it genuinely is one: `LogSource`
+already has a `PLIST_WATCHER` member and its events land in the same ring
+buffer.
+
+**`device.action` had to be broadened.** As first written it covered "tap,
+swipe, type, press, launch, install" — leaving the five device-settings tools
+(`set_locale`, `set_location`, `set_font_scale`, `set_display_density`,
+`set_hardware_keyboard`) and the six app-data ones (`save_app_state`,
+`set_app_plist_value`, …) ambiguous. Both are writes to the device, so the
+definition is now "any write", not "input". Splitting settings and app data
+into their own categories was considered and rejected: it would trade a real
+distinction for two categories nobody would remember the boundary of.
+
+**`server.lifecycle` has one MCP tool and still earns its place**, because
+most of what it covers is not tool-driven at all — startup, port reclaim,
+daemonization and update checks are the things you most want to filter to
+when the server itself is misbehaving.
+
+### The collision worth knowing about
+
+`LogSource` already exists, with `BUILD`, `PROXY`, `CRASH`, `PLIST_WATCHER`
+and `SERVER` among its members. So `source=proxy` and `category=proxy` are
+both valid filters and mean **different things**: the first is "entries the
+mitmdump adapter produced", the second is "quern's own logging about proxy
+control". Same for `build`.
+
+That is genuinely confusing, and the resolution is to be explicit rather than
+to rename: **`category` describes what quern was doing; `source` describes
+who produced the entry.** For server-side entries `source` is always
+`server`, so within the subject of this spec the two never compete. Say this
+in the query API's docs, because someone will otherwise filter `source=proxy`
+expecting quern's proxy actions and get captured HTTP flows.
 
 ### Why the logger name cannot be the category
 
 `quern-debug-server.device` is shared by six modules and `.api` by six more.
-Renaming 30 loggers to match the seven categories would be a large diff that
+Renaming 30 loggers to match these categories would be a large diff that
 breaks anyone filtering on `process`, and it would still conflate
 `device.action` with `device.read` — both live in `controller_ui.py`.
 
