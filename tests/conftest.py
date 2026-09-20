@@ -361,3 +361,112 @@ def _update_finishes_in_process(monkeypatch):
         )
 
     monkeypatch.setattr(updater, "_rebuild_and_restart", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _node_env_is_not_this_machine(monkeypatch):
+    """`node_env.probe` runs the developer's login and non-interactive shells.
+
+    Harmless, but it makes every setup test a report about whoever runs the
+    suite -- and slower, and different on CI. Tests that exercise the probe
+    itself inject `run` and `which` and call it through `node_env.probe`'s
+    original, kept as `_real_probe`.
+    """
+    from server.lifecycle import node_env
+
+    def all_fine(**_kw):
+        return [
+            node_env.NodeSite(place, "test", node_env.OK, "/test/node", "v22.0.0")
+            for place in ("this command", "login shell", "non-interactive shell", "GUI apps")
+        ]
+
+    monkeypatch.setattr(node_env, "_real_probe", node_env.probe, raising=False)
+    monkeypatch.setattr(node_env, "probe", all_fine)
+    # `here` too: every git-update test reaches it, and the real one runs the
+    # developer's `node --version`.
+    monkeypatch.setattr(node_env, "here", lambda **_kw: all_fine()[0])
+
+
+@pytest.fixture(autouse=True)
+def _no_real_release_downloads(monkeypatch, request):
+    """Fail any test that tries to fetch a release asset.
+
+    `quern doctor --fix` installs a missing or stale Quern app, so a test that
+    runs it on a machine without one goes to the network and downloads an app.
+    CI found that the hard way: the doctor exit-contract tests do not stub the
+    section, and every runner is a machine without one.
+
+    Both hops: the release lookup and the asset download. The first version
+    guarded only the second, while promising both.
+
+    Tests that exercise the download itself mark themselves
+    `@pytest.mark.release_download` and inject their own transport; tests that
+    exercise a *caller* replace this with a fake (see
+    `tests/test_menubar_cli.py`).
+    """
+    if request.node.get_closest_marker("release_download"):
+        return
+
+    class ReleaseFetchBlocked(BaseException):
+        """Not an Exception on purpose.
+
+        `updater._fetch_latest_release` and friends catch `Exception` around
+        exactly these calls, so an AssertionError here was swallowed: the test
+        passed with a silently wrong answer and the guard's message went into
+        captured stdout. A BaseException reaches the runner.
+        """
+
+    import urllib.request
+
+    from server.lifecycle import setup as setup_mod
+
+    real_urlopen = urllib.request.urlopen
+
+    def guarded_urlopen(url, *a, **kw):
+        target = getattr(url, "full_url", url)
+        if isinstance(target, str) and "/releases" in target:
+            raise ReleaseFetchBlocked(
+                f"a test tried to fetch {target}. Patch urlopen, or stub the "
+                "section that calls it."
+            )
+        return real_urlopen(url, *a, **kw)
+
+    monkeypatch.setattr(urllib.request, "urlopen", guarded_urlopen)
+
+    def refuse(url, version, work):
+        raise ReleaseFetchBlocked(
+            f"a test tried to download {url}. Patch download_release_app, or "
+            "stub the section that calls it."
+        )
+
+    monkeypatch.setattr(setup_mod, "download_release_app", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_simulator_input_probes(monkeypatch, request):
+    """Keep the input-service probe off the real machine.
+
+    `_warn_if_input_is_suppressed` runs on every tap, swipe, keystroke and
+    button press, and asks the device through `xcrun simctl spawn`. Against
+    the fake udids unit tests use, that is a real subprocess per call -- ~0.11s
+    each, answering nothing. CONTRIBUTING's rule is that tests inject every
+    external lookup; this is the backstop for the ones that do not.
+
+    Healthy, so the check passes silently. A test about suppression patches
+    `legacy_input_is_suppressed` itself, which overrides this.
+    """
+    if request.module.__name__.endswith("test_sim_input"):
+        # The file that tests this machinery drives the real functions with
+        # `_spawn` stubbed, which this fixture would replace out from under it.
+        return
+
+    from server.device import sim_input
+
+    async def not_suppressed(udid):
+        return False
+
+    async def no_device_hub():
+        return False
+
+    monkeypatch.setattr(sim_input, "legacy_input_is_suppressed", not_suppressed)
+    monkeypatch.setattr(sim_input, "device_hub_is_running", no_device_hub)

@@ -1296,11 +1296,88 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
 
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
+    node_complete = _report_node()
+    menubar_checked, menubar_repaired = _report_menubar(fix)
     services_complete = _report_service_health(fix)
 
     if fix:
-        sys.exit(1 if repaired is False else 0)
-    sys.exit(0 if tools is not None and services_complete else 1)
+        # Only repairs. A *diagnostic* that could not be made must not veto a
+        # repair that worked -- that is what this contract exists for, and
+        # folding both halves of the menu-bar section into one bool broke it:
+        # an unreadable Info.plist would have failed `doctor --fix && quern
+        # start` after the venv repair succeeded.
+        sys.exit(0 if repaired is not False and menubar_repaired is not False else 1)
+    sys.exit(0 if tools is not None and services_complete and node_complete
+             and menubar_checked else 1)
+
+
+def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
+    """The Quern app's own version, next to the server's (#201).
+
+    Returns `(checked, repaired)`: whether the section could look, and -- when
+    `--fix` repaired something -- whether that worked. They answer different
+    questions and go to different exit codes.
+
+    `--fix` repairs an app that is *damaged or stale*; it does not install one
+    that was never there. Fetching a release, writing an app into
+    ~/Applications and launching it is a first install, and `doctor` is run
+    non-interactively and unattended. `describe()` already prints the command
+    for that case.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return True, None
+    from server.lifecycle import menubar
+
+    print()
+    print("Quern app:")
+    try:
+        state = menubar.state()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False, None
+    for line in menubar.describe(state):
+        print(f"  {line}")
+    if fix and state.installed and state.needs_install:
+        print("  --fix: reinstalling the Quern app")
+        # The result reaches the exit code: `doctor --fix` printing "failed
+        # verification" and exiting 0 is the shape this whole file argues
+        # against.
+        return True, menubar.cmd_install() == 0
+    return True, None
+
+
+def _report_node() -> bool:
+    """Which `node` each place will run, and what to do where it will fail.
+
+    Returns whether the probe completed. One row per place because the fixes
+    differ: fnm in `.zshenv` repairs the non-interactive row and does nothing
+    for GUI apps (#214). Read-only, like the rest of doctor.
+    """
+    from server.lifecycle import node_env
+
+    print()
+    print(f"Node.js (the MCP wrapper needs {node_env.MIN_NODE_MAJOR}+):")
+    try:
+        sites = node_env.probe()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False
+    marks = {node_env.OK: "\u2713", node_env.UNKNOWN: "?", node_env.SKIPPED: "\u2013"}
+    for site in sites:
+        found = f"{site.version or 'no version'}  {site.path}" if site.path else site.status
+        mark = marks.get(site.status, "\u2717")
+        print(f"  {mark} {site.place} — {found}")
+        print(f"      used by: {site.used_by}")
+        if not site.ok:
+            label = "note" if site.status == node_env.SKIPPED else "fix"
+            print(f"      {label}: {node_env.fix_for(site, sites)}")
+    # A place whose probe failed was not checked, and doctor's exit code says
+    # when a check could not be made. An unsupported shell is not that: it is
+    # a permanent fact about the machine, and failing on it would fail every
+    # doctor run there.
+    return not any(site.status == node_env.UNKNOWN for site in sites)
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}
@@ -1662,6 +1739,7 @@ def cli() -> None:
             "                                Show or set automatic capture-certificate install\n"
             "  set-update-check [on|off]     Show or set the automatic update check\n"
             "  install-precommit-hook        Install the pre-commit checklist hook\n"
+            "  menubar [status|open|install] Show, start, or install the Quern app (menu bar)\n"
             "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1720,7 +1798,14 @@ def cli() -> None:
         "check-updates",
         help="Check for a new release now, ignoring the once-a-day rate limit",
     )
-    subparsers.add_parser("setup", help="Check environment and install dependencies")
+    setup_parser = subparsers.add_parser(
+        "setup", help="Check environment and install dependencies")
+    # `server.__main__` dispatches setup before this parser is reached, and
+    # parses the same flag itself. Declared here too so the two entry points
+    # do not disagree about what `quern setup` accepts.
+    setup_parser.add_argument(
+        "-y", "--yes", action="store_true", dest="assume_yes",
+        help="Answer prompts with their default (unattended)")
 
     # uninstall
     subparsers.add_parser("uninstall", help="Remove Quern and its dependencies")
@@ -1771,6 +1856,13 @@ def cli() -> None:
         start_parser.parse_args(remaining, namespace=args)
         args.command = "start"
         args.foreground = True
+    elif remaining:
+        # A subcommand matched, so whatever is left is a typo. Dropping it
+        # silently meant `quern setup --yse` ran a full setup with the flag
+        # discarded, which is worse than refusing: the caller believes they
+        # opted in. `parse_known_args` is needed only for the no-subcommand
+        # case above, where server flags live on `start_parser`.
+        parser.error("unrecognised arguments: " + " ".join(remaining))
 
     # Fill port defaults
     if hasattr(args, "port"):
@@ -1801,7 +1893,7 @@ def cli() -> None:
         sys.exit(_cmd_check_updates())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
-        sys.exit(run_setup())
+        sys.exit(run_setup(assume_yes=getattr(args, "assume_yes", False)))
     elif args.command == "uninstall":
         from server.lifecycle.setup import run_uninstall
         sys.exit(run_uninstall())

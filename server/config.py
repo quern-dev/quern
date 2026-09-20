@@ -164,6 +164,23 @@ def get_auto_install_cert() -> bool:
     return read_user_config().get("auto_install_cert") is True
 
 
+def auto_install_cert_choice() -> bool | None:
+    """The same setting, but able to say "never answered".
+
+    `get_auto_install_cert` folds unset into False, which is right for its
+    callers: they are asking "may I install this without asking", and silence
+    is not permission. A caller that is deciding *whether to ask* needs the
+    third answer, because re-asking a question the user has already answered
+    -- either way -- is how a considered "no" gets overturned by a tired "yes",
+    and how a considered "yes" costs them the prompt they turned off.
+
+    True or False only for a literal boolean. A typo reads as unset here for
+    the reason it reads as False there: it should mean "ask me", never consent.
+    """
+    value = read_user_config().get("auto_install_cert")
+    return value if isinstance(value, bool) else None
+
+
 @contextmanager
 def _config_lock():
     """Hold an exclusive lock for a whole read-modify-write of the config.

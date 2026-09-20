@@ -1143,6 +1143,11 @@ class TestBetaNeverOffersOlderContentThanStable:
         assert updater._fetch_latest_release("beta") == ("0.18.0", "stable.tgz")
 
 
+class DownloadAttempted(Exception):
+    """Raised in place of the download, so a run that got past the version
+    guard stops at a known point rather than reaching for the network."""
+
+
 class TestAnUpdateNeverMovesBackwards:
     """The guard that makes a wrong answer from the resolver a refusal rather
     than a downgrade -- without blocking the one backwards move that is
@@ -1162,9 +1167,26 @@ class TestAnUpdateNeverMovesBackwards:
 
         monkeypatch.setattr(updater, "_read_local_version", lambda root: current)
         monkeypatch.setattr(
-            updater, "_fetch_latest_release", lambda ch: (offered, "x.tgz"),
+            # A release-shaped URL: the download is refused before it is
+            # attempted when the host is not the release host, and a fixture
+            # that looks nothing like a release would be testing that refusal
+            # rather than the version guard this class is about.
+            updater, "_fetch_latest_release",
+            lambda ch: (offered, f"https://github.com/quern-dev/quern/releases/download/"
+                                 f"v{offered}/quern-{offered}.tar.gz"),
         )
         monkeypatch.setattr("server.config.get_update_channel", lambda: channel)
+
+        # Past the guard the run proceeds to a real download, and this class is
+        # about the version check rather than what GitHub serves. Stopping it
+        # here deliberately, instead of leaving it to fail on the network, is
+        # what makes these tests offline-safe and fast -- and it names the
+        # boundary, so a future change that stops attempting the download is a
+        # failure here rather than a silent pass.
+        def refuse(*a, **kw):
+            raise DownloadAttempted
+
+        monkeypatch.setattr(updater.urllib.request, "urlopen", refuse)
         return updater._update_via_tarball(tmp_path)
 
     def test_an_older_offer_on_the_same_channel_is_refused(
@@ -1191,7 +1213,7 @@ class TestAnUpdateNeverMovesBackwards:
         """The documented flow: `quern set-channel stable && quern update` from
         a beta build. Mid beta cycle the newest stable really is older than what
         is installed, and refusing it strands tarball users on beta."""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(DownloadAttempted):
             self._run(
                 monkeypatch, tmp_path, "0.19.0-beta.1", "0.18.0", channel="stable",
             )
@@ -1225,10 +1247,10 @@ class TestAnUpdateNeverMovesBackwards:
         """Did it reach the update, rather than refuse at the version check?
 
         Asserted on the decision it printed, not on a return code: past the
-        guard the run proceeds to a download that fails on this fixture's fake
-        URL, and a test keyed to that failure would be testing the fixture.
+        guard the run proceeds to a download that `_run` stops, and a test keyed
+        to that stop would be testing the fixture.
         """
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(DownloadAttempted):
             self._run(monkeypatch, tmp_path, current, offered)
         out = capsys.readouterr().out
         assert "Not downgrading" not in out, "a legitimate update was refused"

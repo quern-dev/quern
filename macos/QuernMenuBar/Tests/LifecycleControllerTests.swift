@@ -11,6 +11,7 @@ enum LifecycleControllerTests {
         let clock = TestScheduler()
         var running = false
         var alerts: [(String, String)] = []
+        var recoveries: [Recovery?] = []
         var changes = 0
         var refreshes = 0
         var invoked: [String] = []
@@ -43,7 +44,10 @@ enum LifecycleControllerTests {
 
             controller = LifecycleController(deps)
             controller.onChange = { [unowned self] in self.changes += 1 }
-            controller.onAlert = { [unowned self] in self.alerts.append(($0, $1)) }
+            controller.onAlert = { [unowned self] in
+                self.alerts.append(($0, $1))
+                self.recoveries.append($2)
+            }
         }
     }
 
@@ -170,6 +174,235 @@ enum LifecycleControllerTests {
             Harness.expect(rig.controller.hasFailed, false, "stale failure survived")
             Harness.expect(rig.controller.statusText == nil, "stale status survived")
             Harness.expect(rig.changes >= before + 1, "clearing a stale failure must repaint")
+        }
+
+        Harness.test("a start that never comes up offers the repair recovery") {
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.run(.start, reporting: .alert)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "recovery")
+            Harness.expect(rig.recoveries.count, 1, "one alert")
+            Harness.expect(rig.recoveries.first ?? nil, .repair, "the alert carries it")
+        }
+
+        Harness.test("a login start that fails still offers recovery in the menu") {
+            // Quiet is about the modal, not about leaving the user without a
+            // next step: the menu item is how a login failure is recovered.
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "recovery")
+            Harness.expect(rig.alerts.isEmpty, true, "no modal")
+        }
+
+        Harness.test("a recovery from outside survives for the menu") {
+            // The update path: the alert is dismissed and the menu must still
+            // offer the way out. Clicking OK used to take it with it.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "recorded")
+            Harness.expect(rig.controller.statusText, "Update failed", "status")
+            Harness.expect(rig.changes >= 1, "the menu must repaint")
+        }
+
+        Harness.test("a running server does not erase an update's way out") {
+            // An update can stop partway with the server still up, and the
+            // next poll then says "running" -- which cleared the only route
+            // back. The two failures are tracked apart for this.
+            //
+            // The start recovery is set up first so that "the start one is
+            // cleared" is asserted against a field that actually held
+            // something: against a nil it passes whatever the code does.
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "the start one, before")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerRunning()
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
+            Harness.expect(rig.controller.recovery, nil, "and the start one is cleared")
+        }
+
+        Harness.test("finishing the update retires its way out") {
+            // Nothing else does. It survives noteServerRunning() by design,
+            // and the retry items that clear it are drawn only while an
+            // update is still staged -- so a finished update used to leave a
+            // dead "Finish Update in Terminal…" on a healthy server forever.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.4")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "the same version is not proof of anything")
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, nil, "the update landed")
+        }
+
+        Harness.test("a version that goes unreadable does not retire it") {
+            // state.json is missing or half-written exactly while the install
+            // is being replaced, which is when an update fails. A nil reading
+            // is "could not ask", not "a different version".
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion(nil)
+            rig.controller.noteServerVersion(nil)
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "still offered")
+            rig.controller.noteServerVersion("0.18.4")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "and coming back unchanged is not proof either")
+        }
+
+        Harness.test("a version unknown at the failure is baselined, not guessed") {
+            // A git install can genuinely report no version. Nothing could
+            // then ever retire the item, so the first reading afterwards
+            // becomes the baseline -- it is not a change by itself, and a
+            // later change retires the way out as usual.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "the first reading is not proof of anything")
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "nor is repeating it")
+            rig.controller.noteServerVersion("0.18.6")
+            Harness.expect(rig.controller.updateRecovery, nil, "and now it landed")
+        }
+
+        Harness.test("a version that never becomes readable keeps the way out") {
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            for _ in 0..<5 { rig.controller.noteServerVersion(nil) }
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "could not ask is not an answer")
+        }
+
+        Harness.test("only an update's way out survives a healthy server") {
+            // `Recovery.forUpdateFailure` hands back .repair when the update
+            // failed before the restart, and that lands in updateRecovery --
+            // where the version guard can never retire it, because repairing
+            // the server does not change its version. A server that is up has
+            // answered it.
+            for stale in [Recovery.repair, .setUp] {
+                let rig = Rig(result: (0, ""))
+                rig.controller.noteServerVersion("0.18.4")
+                rig.controller.noteFailure(status: "Update failed", recovery: stale)
+                rig.changes = 0
+                rig.controller.noteServerRunning()
+                Harness.expect(rig.controller.updateRecovery, nil, "\(stale) is retired")
+                Harness.expect(rig.changes >= 1, "and the menu repaints")
+            }
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerRunning()
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "the update's is kept")
+        }
+
+        Harness.test("a retired start recovery takes its baseline with it") {
+            // Otherwise the next update failure is measured against a version
+            // recorded for an unrelated one.
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Start failed", recovery: .repair)
+            rig.controller.noteServerRunning()
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.4")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "0.18.4 is the baseline, not a change")
+        }
+
+        Harness.test("a later update failure is measured from the later version") {
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteServerVersion("0.18.4")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, nil, "the first one landed")
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.noteServerVersion("0.18.5")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate,
+                           "0.18.5 was the baseline this time, not the change")
+            rig.controller.noteServerVersion("0.18.6")
+            Harness.expect(rig.controller.updateRecovery, nil, "and now it landed")
+        }
+
+        Harness.test("a start failure and an update failure do not overwrite each other") {
+            let rig = Rig(result: (1, "health check timed out"))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "the start's")
+            Harness.expect(rig.controller.updateRecovery, .finishUpdate, "the update's")
+        }
+
+        Harness.test("trying the update again drops the stale way out") {
+            let rig = Rig(result: (0, ""))
+            rig.controller.noteFailure(status: "Update failed", recovery: .finishUpdate)
+            rig.changes = 0
+            rig.controller.clearUpdateRecovery()
+            Harness.expect(rig.controller.updateRecovery, nil, "cleared")
+            Harness.expect(rig.changes >= 1, "the menu must repaint")
+            rig.changes = 0
+            rig.controller.clearUpdateRecovery()
+            Harness.expect(rig.changes, 0, "and clearing nothing repaints nothing")
+        }
+
+        Harness.test("a caller can say which recovery a failed start deserves") {
+            // A start that fails right after an update is finished with setup
+            // + restart, not doctor --fix.
+            let rig = Rig(result: (1, "timed out"))
+            rig.controller.run(.start, reporting: .alert, recoveryOnFailure: .finishUpdate)
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .finishUpdate, "the caller's choice")
+            Harness.expect(rig.recoveries.first ?? nil, .finishUpdate, "and in the alert")
+        }
+
+        Harness.test("a new action clears the last failure's recovery") {
+            // Through the retry window the menu offered the previous failure's
+            // recovery beside "Starting…", after Open Server Log had gone.
+            let rig = Rig(result: nil)
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.pending.removeFirst()(1, "timed out")
+            rig.clock.advance(by: 60)
+            Harness.expect(rig.controller.recovery, .repair, "failed")
+            rig.controller.run(.start, reporting: .menuOnly)
+            Harness.expect(rig.controller.recovery == nil, "cleared while retrying")
+            Harness.expect(rig.controller.statusText, "Starting…", "and it is busy")
+        }
+
+        Harness.test("a missing CLI offers set-up, not repair") {
+            let rig = Rig(result: (QuernCLI.notFoundStatus, "no wrapper"))
+            rig.controller.run(.start, reporting: .alert)
+            Harness.expect(rig.controller.recovery, .setUp, "recovery")
+            Harness.expect(rig.recoveries.first ?? nil, .setUp, "the alert carries it")
+        }
+
+        Harness.test("a failed stop offers no recovery") {
+            // The server is still up; there is nothing to repair from Terminal.
+            let rig = Rig(result: (1, "permission denied"))
+            rig.running = true
+            rig.controller.run(.stop, reporting: .alert)
+            Harness.expect(rig.controller.recovery == nil, "no recovery")
+            Harness.expect(rig.recoveries.first ?? nil, nil, "the alert offers none")
+        }
+
+        Harness.test("recovery is cleared by a success, or by the server appearing") {
+            let rig = Rig(result: (1, "timed out"))
+            rig.controller.run(.start, reporting: .menuOnly)
+            rig.clock.advance(by: 60)
+            rig.controller.noteServerRunning()
+            Harness.expect(rig.controller.recovery == nil, "cleared when the daemon appears")
+
+            // The same controller failing, then succeeding: a fresh one
+            // starts clean and would pass whether or not success clears it.
+            let same = Rig(result: nil)
+            same.controller.run(.start, reporting: .menuOnly)
+            same.pending.removeFirst()(1, "timed out")
+            same.clock.advance(by: 60)
+            Harness.expect(same.controller.recovery, .repair, "failed first")
+            same.controller.run(.start, reporting: .alert)
+            same.pending.removeFirst()(0, "")
+            Harness.expect(same.controller.recovery == nil, "cleared by the later success")
         }
     }
 }

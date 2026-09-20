@@ -26,11 +26,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR
+from server.lifecycle import releases
 from server.lifecycle.invocation import run_it_yourself
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
-GITHUB_REPO = "quern-dev/quern"
+GITHUB_REPO = releases.GITHUB_REPO
 
 
 def _find_project_root() -> Path | None:
@@ -171,10 +172,11 @@ def _fetch_latest_release(channel: str = "stable") -> tuple[str, str] | None:
     Returns ``(version, tarball_url)`` or None on failure.
     """
     try:
+        base = releases.api_base()
         if channel == "beta":
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+            url = f"{base}/releases"
         else:
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            url = f"{base}/releases/latest"
         req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
@@ -481,6 +483,16 @@ def _update_via_tarball(project_root: Path) -> int:
                 return 1
         except (InvalidVersion, TypeError):
             pass
+
+    if not releases.asset_url_is_trusted(tarball_url):
+        # The URL comes out of the API response, and what is downloaded here is
+        # extracted over the install. Checked at the download rather than at
+        # resolution: this is the step that runs the bytes. setup's app fetch
+        # has had this check; the path that replaces the whole source tree did
+        # not.
+        print(f"Error: the release points at {tarball_url}, which is not on the "
+              "release host; not updating.")
+        return 1
 
     print(f"Updating v{current_version or 'unknown'} → v{latest_version} (channel '{channel}')...")
 
@@ -886,6 +898,7 @@ def run_update(apply_tools: bool = False) -> int:
         return 1
 
     if _is_git_install(project_root):
+        _warn_if_node_cannot_build()
         rc = _update_via_git(project_root)
     else:
         rc = _update_via_tarball(project_root)
@@ -924,6 +937,29 @@ def _spawn_finish(cmd: list[str], project_root: Path) -> int:
     point at a temporary directory.
     """
     return subprocess.run(cmd, cwd=str(project_root)).returncode  # noqa: S603
+
+
+def _warn_if_node_cannot_build() -> None:
+    """Say up front when a git update will have trouble building the wrapper.
+
+    A warning, not a refusal (#214): the field report's Node 20 built it with
+    only an npm engine warning, and an update that refused over the user's Node
+    arrangement would strand a working install on an old release.
+    """
+    from server.lifecycle import node_env
+
+    try:
+        site = node_env.here()
+    except Exception as exc:  # noqa: BLE001 -- a warning must not stop an update
+        print(f"Warning: could not check which node this command would use: {exc}")
+        return
+    if site.ok:
+        return
+    from server.config import quern_cmd
+
+    print(f"Warning: {node_env.fix_for(site, [site])}")
+    print(f"  The MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+. Continuing; "
+          f"`{quern_cmd()} doctor` shows every place a node is picked.")
 
 
 def _hand_off(project_root: Path, apply_tools: bool) -> int:

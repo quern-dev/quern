@@ -117,6 +117,14 @@ class DeviceController(DeviceControllerUI):
         self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        # Simulators whose input services have been checked this boot.
+        # See server/device/sim_input.py; the check costs a `simctl
+        # spawn` (~0.5s), so it is paid once per device rather than per
+        # tap.
+        self._input_checked: dict[str, bool] = {}
+        # When each device was last asked about an input-service state that
+        # could not be read; see _INPUT_PROBE_COOLDOWN_S.
+        self._input_probe_cooldown: dict[str, float] = {}
         # Device name cache: udid -> human-readable name (populated by
         # list_devices). Only consumer is the active-device sidecar, so that
         # readers outside the server can show a name instead of a UDID.
@@ -596,6 +604,7 @@ class DeviceController(DeviceControllerUI):
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
             self._active_udid = udid
+            await self._restore_input_after_boot(udid)
             return udid
 
         if name:
@@ -616,9 +625,79 @@ class DeviceController(DeviceControllerUI):
             target = matches[0]
             await self.simctl.boot(target.udid)
             self._active_udid = target.udid
+            await self._restore_input_after_boot(target.udid)
             return target.udid
 
         raise DeviceError("Either udid or name is required to boot", tool="simctl")
+
+    async def _restore_input_after_boot(self, udid: str) -> None:
+        """Take the input services back, if Xcode 27's Device Hub has them.
+
+        Done here because a simulator quern has just booted is running
+        nothing, so the SpringBoard restart the repair needs costs the caller
+        nothing. On a device that was already booted the same repair would
+        kill whatever the user has open, so there it is offered rather than
+        taken (see `_require_input_can_land`).
+
+        Never fatal to a boot: a simulator that cannot receive input is worth
+        far more than no simulator, and the next input call says so plainly.
+        """
+        from server.device import sim_input
+
+        # A previous boot of this udid may have left a verdict behind, and it
+        # describes a device that no longer exists. Cleared before the probe,
+        # so a boot that cannot read the state leaves nothing stale: otherwise
+        # an old True survives, the first input call skips its probe, and a
+        # simulator whose services were taken never warns.
+        self._input_checked.pop(udid, None)
+        self._input_probe_cooldown.pop(udid, None)
+
+        try:
+            # Device Hub attaches a few seconds after the boot returns, so a
+            # repair applied immediately is undone by an attachment that has
+            # not happened yet. Wait for it, but only when Device Hub is
+            # running -- otherwise there is nothing to wait for.
+            hub_running = await sim_input.device_hub_is_running()
+            if hub_running:
+                suppressed = await sim_input.wait_for_device_hub_to_attach(udid)
+            else:
+                suppressed = await sim_input.legacy_input_is_suppressed(udid)
+            if suppressed:
+                logger.info(
+                    "Input services on %s are held by Device Hub; restoring "
+                    "them now, while nothing is running", udid[:8],
+                )
+                await sim_input.restore_legacy_input(udid)
+            elif suppressed is None:
+                logger.warning(
+                    "Could not read the input-service state on %s; if taps do "
+                    "nothing, see POST /api/v1/device/ui/restore-input", udid[:8],
+                )
+            elif hub_running:
+                # Device Hub is up and never attached within the wait. Either
+                # this runtime predates the handover, or the daemon crashed on
+                # startup and every event will be discarded with no error
+                # (idb's case, which nothing here can distinguish) -- or it is
+                # simply slower than the wait today.
+                logger.info(
+                    "Device Hub is running but never claimed the input services "
+                    "on %s; if taps do nothing, that is where to look", udid[:8],
+                )
+
+            # Cached only where the answer is settled: a repair that worked, or
+            # a healthy simulator on a machine with no Device Hub to change its
+            # mind. An unreadable state, or a wait that timed out with Device
+            # Hub running, leaves it unset so the first input call asks again
+            # -- the cache exists to skip a ~0.5s probe, not to stand in for an
+            # answer nobody got.
+            if suppressed is True or (suppressed is False and not hub_running):
+                self._input_checked[udid] = True
+        except (DeviceError, OSError) as exc:
+            # Left unrecorded on purpose: the next input call re-reads the
+            # state, and a repair that failed partway puts it back to
+            # suppressed, so the warning still fires.
+            logger.warning("Could not restore input services on %s: %s", udid[:8], exc)
+            self._input_checked.pop(udid, None)
 
     async def shutdown(self, udid: str) -> None:
         """Shutdown a simulator or Android emulator."""

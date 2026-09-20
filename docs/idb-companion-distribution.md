@@ -7,6 +7,10 @@
 > the fallback path for Intel Macs and pre-Xcode-26 setups; the `quern setup`
 > flow skips the companion install entirely when sim-bridge is supported.
 > See [`sim-bridge-spec.md`](sim-bridge-spec.md) for the current backend.
+>
+> An install left over from an older setup is still the fallback when
+> sim-bridge cannot run, so setup offers to replace an outdated one on every
+> host (see *Releases* below).
 
 ## Overview
 
@@ -15,10 +19,58 @@ Quern ships its own `idb_companion` binary instead of depending on the stale Hom
 - **Group children probe** — discovers hidden elements inside childless Group containers (fixes [facebook/idb#767](https://github.com/facebook/idb/issues/767))
 - **xcode-select fallback** — works without `/var/db/xcode_select_link` symlink
 - **Xcode 26 build fixes** — compiles cleanly with current toolchain
+- **Xcode 27 SimulatorKit location** (v2) — Xcode 27 moved SimulatorKit to `Contents/SharedFrameworks`; v1 looks only in `Developer/Library/PrivateFrameworks`, so every HID command fails under Xcode 27 ([#222](https://github.com/quern-dev/quern/issues/222))
+
+## Releases
+
+Published on [quern-dev/idb](https://github.com/quern-dev/idb/releases), asset `idb-companion-patched-arm64.tar.gz`:
+
+| Release | Branch @ commit | Built with | Notes |
+|---|---|---|---|
+| `idb-companion-v1` | `fix/group-children-fallback` @ `ae03179e` | Xcode 26 | HID fails under Xcode 27 |
+| `idb-companion-v2` | `fix/xcode27-simulatorkit` @ `a9daf33d` | Xcode 27.0 | current |
+
+v2 requires macOS 12 (Xcode 27's minimum deployment target; v1 ran on 11). `idb xctest` is likely still broken under Xcode 27 -- XCTestBootstrap hardcodes `Developer/Library/PrivateFrameworks` for XCTAutomationSupport, which also moved -- but quern does not use it.
+
+An install is replaced by extracting into a staging directory under `~/.quern/bin` and swapping `Frameworks/` and the binary in once the payload is complete, so an update interrupted before the swap leaves the previous install untouched. Each half of the swap rolls back if it fails; only a rollback that itself fails leaves the install incomplete, and because the marker is cleared at the swap, the next setup offers the update again and repairs it. The release marker is cleared only at the swap and rewritten after it. A newer marker than setup's own is left alone rather than offered a downgrade.
+
+`_IDB_COMPANION_RELEASE` in `server/lifecycle/setup.py` names the release setup installs. A successful install writes it to `~/.quern/bin/idb_companion.release`; v1 wrote no marker, so an install without one is read as v1. `check_idb_companion` reports an install older than the current release as a warning, and setup offers to replace it.
+
+## Building a release
+
+On the Xcode the release should support, from a checkout of the fork:
+
+```bash
+brew install xcodegen protobuf swift-protobuf
+./build.sh build idb_companion        # products in build/Build/Products/Release
+```
+
+The build is universal; the published asset is arm64 only, and must keep the layout below. Thinning changes the nested frameworks' contents, so re-sign ad hoc afterwards, nested frameworks first:
+
+```bash
+B=build/Build/Products/Release; S=/tmp/idb-stage
+mkdir -p $S/bin $S/Frameworks/PackageFrameworks
+ditto --arch arm64 $B/idb_companion $S/bin/idb_companion
+for f in CompanionLib FBControlCore FBDeviceControl FBSimulatorControl \
+         IDBCompanionUtilities IDBGRPCSwift XCTestBootstrap; do
+  ditto --arch arm64 $B/$f.framework $S/Frameworks/$f.framework
+done
+for f in $B/PackageFrameworks/*.framework; do
+  ditto --arch arm64 "$f" "$S/Frameworks/PackageFrameworks/$(basename "$f")"
+done
+# re-sign Versions/A/Frameworks/*.framework inside each, then each framework:
+#   codesign -f -s - <framework>
+find $S -name .DS_Store -delete
+(cd $S && COPYFILE_DISABLE=1 tar czf /tmp/idb-companion-patched-arm64.tar.gz ./bin ./Frameworks)
+```
+
+The SPM frameworks under `PackageFrameworks` report "code has no resources but signature indicates they must be present" from `codesign -v --deep`. v1 is the same, and the binaries inside are signed, which is what loading needs.
+
+Before publishing, drive a simulator through the staged bundle (tap, swipe, text, describe-all) with `DYLD_FRAMEWORK_PATH` pointing at its `Frameworks` and `Frameworks/PackageFrameworks`. After publishing, bump `_IDB_COMPANION_RELEASE`.
 
 ## Artifact
 
-- **File**: `idb-companion-arm64.tar.gz` (~17MB)
+- **File**: `idb-companion-patched-arm64.tar.gz` (~17MB)
 - **Architecture**: arm64 (Apple Silicon only for now)
 - **Contents**:
   ```
@@ -36,36 +88,19 @@ Quern ships its own `idb_companion` binary instead of depending on the stale Hom
 
 ## Hosting
 
-Publish the tarball as a GitHub release asset on the Quern repo (or a dedicated `quern-idb` repo). Tag it with the idb commit hash for traceability.
+Published as a GitHub release asset on the `quern-dev/idb` fork, with the source commit named in the release notes. See *Releases* above.
 
 ## Installation (quern setup)
 
-During `quern setup`, replace the Homebrew `idb-companion` check with:
+`_install_patched_companion` in `server/lifecycle/setup.py` is the implementation; it is not restated here, because a second copy of an install procedure drifts from the first one silently. What it does, and why, since those are the parts worth knowing before changing it:
 
-```python
-def install_companion():
-    """Download and install the patched idb_companion."""
-    dest = Path.home() / ".quern" / "bin"
-    dest.mkdir(parents=True, exist_ok=True)
+- **Downloaded and unpacked into a staging directory inside `~/.quern/bin/`, then swapped in.** Extracting straight over the install can stop partway — a full disk is enough — and leave a new binary beside half-replaced frameworks, breaking an install that worked on an older Xcode.
+- **`Frameworks/` is replaced wholesale, not merged**, so files the old release had and the new one does not are dropped rather than left behind.
+- **The release marker is cleared before the swap and written only after it.** A swap interrupted by a kill leaves a tree that reads as *outdated*, never as current, so the next setup offers to repair it.
+- **A swap that fails is rolled back** — the retired frameworks are put back, and a failed binary move puts both halves back.
+- **It refuses on Intel.** The published asset is arm64-only, and `~/.quern/bin/idb_companion` takes precedence over the system one, so installing it there would shadow a working Homebrew companion with a binary that cannot execute.
 
-    if (dest / "idb_companion").exists():
-        return  # Already installed
-
-    url = "https://github.com/<org>/quern/releases/download/idb-companion-v1/<idb-companion-arm64.tar.gz>"
-    tarball = dest / "idb-companion.tar.gz"
-
-    # Download
-    urllib.request.urlretrieve(url, tarball)
-
-    # Extract
-    subprocess.run(["tar", "xzf", str(tarball), "-C", str(dest)], check=True)
-    tarball.unlink()
-
-    # Move bin/idb_companion to dest directly
-    (dest / "bin" / "idb_companion").rename(dest / "idb_companion")
-    # Move Frameworks alongside
-    # (already extracted to dest/Frameworks/)
-```
+An install is not skipped merely because a companion is already present: that is how an outdated one gets replaced.
 
 ## Runtime Integration
 

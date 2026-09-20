@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from server.lifecycle.stale_modules import refresh_if_stale
@@ -719,6 +720,62 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _check_args(
+    command: str,
+    rest: list[str],
+    *,
+    allowed: tuple[str, ...] = (),
+    operands: int = 0,
+    usage: Callable[[], None] | None = None,
+) -> list[str]:
+    """Answer `-h`, refuse anything else unrecognised, return the operands.
+
+    These commands are dispatched before argparse (see the comment at the top
+    of `main`), and each one used to drop `sys.argv[2:]` wholesale. So
+    `quern mcp-install --help` rewrote every MCP client config, `quern update
+    --help` ran a real update, and a mistyped flag did whatever the command
+    does with no flag at all -- silently, while the caller believed they had
+    asked for something else. `capture-env` was fixed for this first; doing it
+    once here is what stops the next command being added without it.
+    """
+    def default_usage() -> None:
+        flags = "".join(f" [{flag}]" for flag in allowed)
+        args = "".join(" <value>" for _ in range(operands))
+        print(f"Usage: quern {command}{flags}{args}")
+
+    show = usage or default_usage
+    if any(arg in ("-h", "--help") for arg in rest):
+        show()
+        sys.exit(0)
+    unknown = [arg for arg in rest if arg.startswith("-") and arg not in allowed]
+    if unknown:
+        show()
+        print(f"unrecognised option: {unknown[0]}", file=sys.stderr)
+        sys.exit(2)
+    # Operands too, not just flags. Returning them and leaving each caller to
+    # ignore them is the same silent drop one level down: `quern update typo`
+    # ran a real update, and `quern set-channel stable typo` persisted stable
+    # while saying nothing about the word it did not understand. A command
+    # that takes no operands says so; one that takes a value says how many.
+    ops = [arg for arg in rest if not arg.startswith("-")]
+    if len(ops) > operands:
+        show()
+        print(f"unexpected argument: {ops[operands]}", file=sys.stderr)
+        sys.exit(2)
+    return ops
+
+
+def _setup_usage() -> None:
+    print("Usage: quern setup [-y|--yes]")
+    print()
+    print("Checks the environment and installs what is missing.")
+    print()
+    print("  -y, --yes   Answer prompts with their default, for an unattended")
+    print("              run. Prompts that must be made deliberately -- ")
+    print("              installing a certificate authority -- are still")
+    print("              declined and listed at the end.")
+
+
 def _capture_env_usage() -> None:
     print("Usage: quern capture-env [FILE]")
     print()
@@ -769,24 +826,45 @@ def main() -> None:
 
     # Lightweight commands — handle without heavy imports
     if len(sys.argv) >= 2 and sys.argv[1] == "setup":
+        # Parsed rather than ignored, for the reason `capture-env` above states
+        # about its own arguments: everything after the subcommand used to be
+        # dropped, so `setup --help` ran a full setup instead of printing help,
+        # and a mistyped flag did the same. A flag that is silently ignored is
+        # worse than one that does not exist -- the caller believes they opted
+        # in. This is dispatched before argparse (see the comment at the top of
+        # `main`), so the parsing has to be here.
+        rest = sys.argv[2:]
+        _check_args("setup", rest, allowed=("-y", "--yes"), usage=_setup_usage)
         from server.lifecycle.setup import run_setup
-        sys.exit(run_setup())
+        sys.exit(run_setup(assume_yes=bool({"-y", "--yes"} & set(rest))))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
+        _check_args("uninstall", sys.argv[2:])
         from server.lifecycle.setup import run_uninstall
         sys.exit(run_uninstall())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
+        _check_args("mcp-install", sys.argv[2:])
         sys.exit(_cmd_mcp_install())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
+        _check_args("grant-full-perms", sys.argv[2:])
         sys.exit(_cmd_grant_full_perms())
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "menubar":
+        from server.lifecycle.menubar import main as menubar_main
+        # Read here, like --tools, so tests/test_readme_sync.py sees the flag.
+        force = "--force" in sys.argv[2:]
+        rest = [a for a in sys.argv[2:] if a != "--force"]
+        sys.exit(menubar_main(rest, force=force))
+
     if len(sys.argv) >= 2 and sys.argv[1] == "install-precommit-hook":
+        _check_args("install-precommit-hook", sys.argv[2:])
         sys.exit(_cmd_install_precommit_hook())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import FINISH_FLAG, finish_update, run_update
+        _check_args("update", sys.argv[2:], allowed=("--tools", FINISH_FLAG))
         apply_tools = "--tools" in sys.argv[2:]
         if FINISH_FLAG in sys.argv[2:]:
             sys.exit(finish_update(apply_tools=apply_tools))
@@ -801,14 +879,18 @@ def main() -> None:
         cli()
         return
 
+    # One operand each -- the value being set. Each helper reads only its
+    # first argument, so without this a second word was persisted-and-ignored.
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
-        sys.exit(_cmd_set_channel(sys.argv[2:]))
+        sys.exit(_cmd_set_channel(_check_args("set-channel", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-auto-install-cert":
-        sys.exit(_cmd_set_auto_install_cert(sys.argv[2:]))
+        sys.exit(_cmd_set_auto_install_cert(
+            _check_args("set-auto-install-cert", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-update-check":
-        sys.exit(_cmd_set_update_check(sys.argv[2:]))
+        sys.exit(_cmd_set_update_check(
+            _check_args("set-update-check", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
         from server.device.tunneld import cli_tunneld
