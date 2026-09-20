@@ -37,7 +37,23 @@ from typing import Any
 
 logger = logging.getLogger("quern-debug-server.webinspector")
 
-SIM_SOCKET_GLOB = "/private/tmp/com.apple.launchd.*/com.apple.webinspectord_sim.socket"
+#: Where launchd publishes a booted simulator's Web Inspector socket. Both are
+#: searched because the directory moved: Xcode 27 creates them under
+#: `/private/var/tmp`, and every one under `/private/tmp` on this machine
+#: predates that upgrade (#184). Neither path is documented, so the old one is
+#: kept rather than swapped -- a machine with an older Xcode still has live
+#: sockets there, and a stale directory costs one refused connection.
+#:
+#: The authority is launchd itself, which names the path per device:
+#:
+#:     xcrun simctl spawn <udid> launchctl print system/com.apple.webinspectord
+#:
+#: That is how the move was found, and it would also settle which socket
+#: belongs to which simulator -- see `find_simulator_sockets`.
+SIM_SOCKET_GLOBS = (
+    "/private/var/tmp/com.apple.launchd.*/com.apple.webinspectord_sim.socket",
+    "/private/tmp/com.apple.launchd.*/com.apple.webinspectord_sim.socket",
+)
 
 # Selectors we send. The listening side sends many more; we only handle the ones
 # we act on and log the rest at debug level.
@@ -209,8 +225,12 @@ def find_simulator_sockets() -> list[str]:
     must disambiguate by connecting and reading the reported application list.
 
     Newest first, since the live one is usually the most recently created.
+
+    Both known directories are searched; see `SIM_SOCKET_GLOBS` for why there
+    are two. Ordering by mtime across them keeps the newest first regardless
+    of which Xcode created it, which matters on a machine that has both.
     """
-    paths = glob.glob(SIM_SOCKET_GLOB)
+    paths = {path for pattern in SIM_SOCKET_GLOBS for path in glob.glob(pattern)}
     return sorted(paths, key=lambda p: _mtime(p), reverse=True)
 
 
