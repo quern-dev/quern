@@ -15,11 +15,16 @@ The survey holds up. Re-measured:
 | claim | #238 | re-measured, before step 1 |
 |---|---|---|
 | modules with no logger | 28 of 92 | 28 of 92 ✓ |
-| `print()` in `server/` | 511 | 511 ✓ |
+| `print()` in `server/` | 511 | 511 by `grep`, **500 real** |
+| — of those on a request path | "others are in server paths" | **0** |
 | distinct logger names | 30 | 30 ✓ |
 | `[PERF]` lines | — | 39, across 6 files |
 
-Every number held. Two have since changed by design: logger names are now one
+The counts held; one *characterisation* did not. #238's claim that some of the
+prints "are in server paths", with four modules named, is wrong in all four
+cases — see section 5. `grep` counting `fingerprint(` as `print(` is how that
+happened, and it is worth noting as a method: every number in this document
+that could be checked with `ast` now was. Two have since changed by design: logger names are now one
 per module via `__name__`, and the "no logger" count is no longer treated as
 a defect at all — see below. (Counting `__init__.py` too gives 36 of 100, which is the
 same tree measured less usefully — package inits have nothing to log.)
@@ -350,29 +355,45 @@ Just do not name it in a way that implies it reaches the proxy.
 
 ## 5. The `print()` rule
 
-511 calls. The split is not judgment — it is a location rule:
+A `print` never reaches `logging`, so it never reaches the ring buffer. In
+daemon mode it lands in the log file with no level, no timestamp and no
+category, and `query_logs` cannot see it at all.
 
-- **`print()` is correct** where the caller is a terminal: `server/main.py`
-  (122), `server/__main__.py` (62), `server/lifecycle/setup.py` (134),
-  `updater.py` (53), `menubar.py` (24), `daemon.py` (18). A user running
-  `quern setup` wants stdout, not a ring buffer entry. That is **413 of the
-  511**, and none of it is in scope.
-- **`print()` is a bug** anywhere reachable from a request:
-  `server/device/` (81 — `tunneld.py` alone has 79), `server/proxy/` (7),
-  `server/api/` (2), `server/sources/` (1). In daemon mode these land in the
-  log file with no level, no timestamp and no category, and `query_logs`
-  cannot see them at all.
+**There is nothing to clean up.** An earlier draft of this section, following
+#238, said the real work was "~91 calls, 79 of them in `device/tunneld.py`".
+That was wrong, and so was #238's version. Measured properly with an AST walk
+rather than `grep`:
 
-So the real job is **~91 calls**, not 511, and `device/tunneld.py` is most of
-it. That is a morning, not a project — which is the main thing #238's headline
-number obscured.
+| | |
+|---|---|
+| `grep 'print('` across `server/` | 511 |
+| actual `print()` calls | **500** |
+| of those, on a request path | **0** |
 
-A lint check enforcing exactly this is in scope for step 3, and is the only
-thing that will stop the count drifting back.
+The 11 missing are `fingerprint(`, matched as a substring. #238 named
+`device/controller_ui.py`, `proxy/cert_manager.py` and `api/proxy_certs.py` as
+server-path offenders; all three are that false positive. It also named
+`device/tunneld.py`, which is the `quern tunneld install|status|restart` CLI —
+every one of its 79 prints is in a subcommand implementation.
 
-The one legitimate exception, already in the tree: `_task_done` in
-`server/sources/server_log.py` prints to stderr deliberately, because logging
-from the log handler recurses. Keep it, comment it.
+All 500 are in terminal-facing modules: `setup.py` (134), `main.py` (122),
+`tunneld.py` (79), `__main__.py` (62), `updater.py` (53), `menubar.py` (24),
+`daemon.py` (18), `capture_env.py` (7). A user running `quern setup` wants
+stdout, not a ring-buffer entry.
+
+The single exception on a server path is deliberate and stays: `_task_done` in
+`server/sources/server_log.py` prints to stderr because logging from inside
+the log handler recurses.
+
+**So the rule is a guard, not a migration.** `tests/test_no_server_path_prints.py`
+walks `server/` with `ast` and fails on a `print()` outside an explicit
+terminal-facing list, naming the file and function. Two further tests keep the
+exemption list honest — it must not name a module that no longer exists, and
+must not exempt one that no longer prints, because a stale exemption silently
+widens the next time a file takes that path.
+
+That is the only version of this rule that stays true. The count was never the
+problem; the next one added is.
 
 ## 6. Order, with acceptance criteria
 
@@ -403,10 +424,12 @@ SUCCESS → the action entry).
 action, resolved udid, outcome and duration, and a test fails if the udid is
 the requested one rather than the resolved one.
 
-**Step 3 — close the `print` gap.** Convert server-path prints; add the lint
-check.
-*Done when:* the check fails on a `print()` added to `server/device/`, and
-passes for `server/cli/`.
+**Step 3 — the `print` guard. Done.** There was nothing to convert: measured
+with `ast` rather than `grep`, zero of the 500 real `print()` calls are on a
+request path. The work was the guard that keeps that true.
+*Done when:* the check fails on a `print()` added to `server/device/` and
+passes for the terminal-facing modules — verified by mutation, including that
+the failure names the offending file and function.
 
 **Step 4 — the trace export.** Join action entries with flows and device logs
 on `(udid, interval)`, marking overlaps.
