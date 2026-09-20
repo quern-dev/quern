@@ -50,6 +50,71 @@ UniversalHID events", so the host side is CoreDevice/RemoteXPC rather than
 anything in SimulatorKit — `nm` finds no DTUHID symbols in CoreSimulator or
 SimulatorKit, which is consistent.
 
+## What baguette does, and why it is the better reference
+
+`tddworks/baguette` solves the same problem for the same simulators, and
+**does not use DTUHID at all**. Its entire input layer is two files,
+`IndigoHIDInput.swift` and `IOHIDDigitizerDispatch.swift`, and nothing in the
+tree mentions `dtuhid`, `UniversalHID` or CoreDevice.
+
+What it does instead is go deeper into Indigo. From its own notes:
+
+> `IndigoHIDMessageForMouseNSEvent`'s 7-arg signature is the path every other
+> open-source bridge (`serve-sim`, `kittyfarm`, `opensafari`) targets, but on
+> Xcode 26 it produces messages iOS either ignores or interprets as the Home
+> gesture. The fix is to build a real `IOHIDEvent` digitizer parent + finger
+> child, run it through `IndigoHIDMessageForTrackpadEventFromHIDEventRef` …
+> then *patch two byte slots* the wrapper leaves uninitialised
+
+**Quern is already on that path.** `tools/sim-bridge.swift` resolves the same
+wrapper over `IOHIDEventCreateDigitizerEvent` + `…FingerEvent`, and
+`wrapAndPatch` writes the same two slots — target `0x32` at `0x6c`/`0x10c`,
+edge bitmask at `0x3a`/`0x3b` and `0xda`/`0xdb`. Two projects reached the same
+recipe independently, which is the strongest evidence available that it is the
+right one.
+
+Where the two differ is instructive, because each has what the other lacks:
+
+| | quern | baguette |
+|---|---|---|
+| digitizer via `…FromHIDEventRef` + byte patch | yes | yes |
+| buttons (`IndigoHIDMessageForButton`) | yes | yes |
+| keyboard (`…ForKeyboardArbitrary`) | yes | — |
+| modifier keys (`…ForModifierKeyBit`) | yes | — |
+| scroll wheel (`…ForScrollEvent`) | — | yes |
+| edge gestures | **plumbing present, unreachable** | exposed |
+
+That last row is the surprise. `wrapAndPatch(event:edgeBit:)` and
+`sendDigitizerEvent(… edgeBit:)` already take an edge, default `0`, and
+**nothing on the wire ever passes one**. Swipe-to-home, the app switcher and
+Control Centre are a parameter away, not a project — and #243 lists edge
+swipes as the Major gap.
+
+One thing baguette does that quern does not: it guards **every** input call
+with an `ensureWarm()` that re-establishes the Indigo connection if it has
+gone cold. It has no Device Hub reclaim at all — no notify-state clear, no
+`backboardd` restart. Whether that is sufficient on a host where Device Hub
+has actually claimed the services is untested here, and it is the one place
+worth measuring before treating baguette as complete.
+
+### What this does to the plan
+
+It removes DTUHID from the critical path for **primitives**. Everything #243
+asks for, except a second transport, appears reachable on Indigo as it stands:
+scroll needs one more `dlsym` (baguette shows the symbol), edge gestures need a
+parameter threaded through, and long press, pinch and pan are compositions of
+events quern can already build.
+
+DTUHID's remaining argument is narrower and still real: it is the transport
+Apple is moving to, and on a host where Device Hub holds the legacy services it
+would sidestep the suppression rather than repairing it. But baguette running
+on Xcode 26 and 27 without it, and quern running on Xcode 27 with the reclaim,
+are two working existence proofs that Indigo is viable now.
+
+So the honest order is: **expand Indigo using baguette as the reference**, keep
+the reclaim, and treat DTUHID as a question to answer rather than a migration
+to schedule.
+
 ## The proposal
 
 Read the host's CoreSimulator version once at server start, record it in
@@ -117,10 +182,11 @@ everyone.
 - **#249 Tier 1**, repairing a simulator quern did not boot, becomes
   transport-aware: on a DTUHID host the repair is not needed at all, because
   the suppression only matters to Indigo.
-- **#243's primitives** land once per transport rather than being blocked on
-  choosing one. Note that they must land on *both* while Indigo is supported —
-  a long press or a scroll-wheel event that exists only on new hosts is a
-  worse outcome than not having it.
+- **#243's primitives** are no longer blocked on this at all — see the
+  baguette section: they are reachable on Indigo today. What the selection
+  buys them is that if DTUHID is ever added, a primitive has one place to be
+  implemented twice rather than two call sites to discover. A primitive that
+  exists only on new hosts would be a worse outcome than not having it.
 - **Diagnostics** gain the number that explains behaviour. `quern doctor` can
   say which transport a device is using and why, which is the question nobody
   can currently answer without reading source.
@@ -132,7 +198,9 @@ everyone.
    Only one Xcode is installed on this machine, so it cannot be measured here.
 2. **What does the host side of DTUHID look like in practice?** The man page
    says UniversalHID over a DT remote service. idb's implementation is the
-   reference; until someone reads it, the effort is unestimated.
+   only reference, since baguette never went there — and that asymmetry is
+   itself worth weighing: the project closest to our approach looked at this
+   problem and chose to stay on Indigo.
 3. **Does DTUHID cover buttons and hardware keyboard**, or only the event types
    the daemon imports? Quern's `press_button` and `type_text` both go through
    Indigo services today, and a transport that covers touch but not buttons
