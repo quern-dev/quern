@@ -32,12 +32,13 @@ you.
 
 ## What is here
 
-| scenario | ground truth | check says |
+| scenario | ground truth | expected |
 |---|---|---|
-| `false-clean-from-thread-resolution` | #224 at `51f8cc3`: no review had read the head. CodeRabbit answered "Review rate limited" when asked | **`ok — reviewed, clean`**, wrongly |
-| `merged-after-genuine-review` | #204 at `bb59530`: a real review landed 65 minutes after the head commit | `ok — reviewed, clean`, rightly |
-| `merged-stale-threads-outdated` | #234: four unresolved threads, all `isOutdated` | `ok`, rightly — outdated threads are not findings |
-| `never-reviewed-opened-while-rate-limited` | #228: opened during a rate limit, never reviewed at all | `pending`, rightly |
+| `false-clean-from-thread-resolution` | #224 at `51f8cc3`: no review had read the head; asked, CodeRabbit said "Review rate limited" | `pending` — read `ok` before the empty-body filter |
+| `merged-after-genuine-review` | #204 at `bb59530`: a real review landed 65 minutes after the head | `ok` |
+| `clean-pass-proved-by-coverage-marker` | #234: head newer than any bodied review, but the summary comment's coverage marker names it; four unresolved-but-outdated threads | `ok` |
+| `clean-pass-leaves-no-review-body` | #228 at `308286b`: genuinely reviewed clean at 03:56Z, no review object posted; "Already reviewed the last commit" when asked | `pending` — unknowable without asking, so it fails closed |
+| `never-reviewed-opened-while-rate-limited` | #228 earlier: opened during a rate limit, never reviewed | `pending` |
 
 The first two are a matched pair and the reason this directory exists: same
 verdict, opposite truth. A check that fixed the bug by answering `pending` more
@@ -56,11 +57,20 @@ What separates them, in the recorded payloads:
 ```
 
 The empty ones are review events GitHub creates when CodeRabbit *resolves
-threads*. The check takes the newest review by CodeRabbit's user id, so
-resolving threads after a push marks that push as reviewed. It is worth being
-clear that this is the check's own doing: replying to findings and resolving
-them is the normal way to answer a review, and doing it is what makes the next
-reading lie.
+threads*. The check took the newest review by CodeRabbit's user id, so
+resolving threads after a push marked that push as reviewed. It is worth being
+clear that this was the check's own doing: replying to findings and resolving
+them is the normal way to answer a review, and doing it is what made the next
+reading lie. **Fixed** by counting only reviews with a non-empty body.
+
+Dropping the empty ones does not make a clean pass look unreviewed, because a
+clean pass posts no review object at all. Two other signals cover that, and
+both are exercised here: the summary comment's
+`final_review_risk_coverage.coveredCommitId`, which is the one trace a clean
+review leaves (`clean-pass-proved-by-coverage-marker`), and asking CodeRabbit
+directly, which is what `--ask` and `merge-pr.sh` do
+(`clean-pass-leaves-no-review-body`, where the answer was "Already reviewed the
+last commit").
 
 ## Known gap
 

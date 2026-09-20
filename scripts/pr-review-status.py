@@ -420,8 +420,20 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
     review_pages = json.loads(gh("api", "--paginate", "--slurp",
                                  f"repos/{REPO}/pulls/{number}/reviews"))
     reviews = [r for page in review_pages for r in page]
+    # Only reviews that said something count. GitHub records a *review* when
+    # CodeRabbit resolves a thread, and that review has an empty body -- so
+    # replying to findings and resolving them, which is how you answer a
+    # review, stamped the push that followed as reviewed. Measured on
+    # 2026-09-19: three PRs read "reviewed, clean" on commits no review had
+    # touched, each satisfied by resolution events landing seconds after the
+    # push. `tests/fixtures/review-state/` holds those states.
+    #
+    # Dropping them does not make a clean pass look unreviewed, because a
+    # clean pass posts no review object at all -- the check has never been
+    # able to see one, and that is what the asking path below is for.
     reviewed = max((ts(r.get("submitted_at")) for r in reviews
-                    if (r.get("user") or {}).get("id") == CODERABBIT_ID), default=0.0)
+                    if (r.get("user") or {}).get("id") == CODERABBIT_ID
+                    and (r.get("body") or "").strip()), default=0.0)
 
     # Whether the newest commit has been reviewed is not inferable from the
     # API, and every proxy tried here was wrong in one direction or the other:
