@@ -136,3 +136,77 @@ class TestNoticeIsUnreachableFromPython:
     )
     def test_no_python_level_maps_to_notice(self, levelno):
         assert _map_level(levelno) != LogLevel.NOTICE
+
+
+class TestTheQueryPathCanActuallyFilterOnIt:
+    """Populating `category` is useless if the query endpoint ignores it.
+
+    It did. `/logs/query` had no `category` parameter, so FastAPI dropped the
+    unknown query string silently and returned *everything* -- a filter that
+    looks like it works and does not is worse than one that is absent. Caught
+    live, not by a test, which is why these exist.
+    """
+
+    @staticmethod
+    def _entry(category: str, message: str):
+        import uuid
+        from datetime import UTC, datetime
+
+        from server.models import LogEntry, LogSource
+
+        return LogEntry(
+            id=uuid.uuid4().hex,
+            timestamp=datetime.now(UTC),
+            device_id="server",
+            process="quern-debug-server.test",
+            category=category,
+            level=LogLevel.INFO,
+            message=message,
+            source=LogSource.SERVER,
+        )
+
+    async def _buffer(self):
+        from server.storage.ring_buffer import RingBuffer
+
+        buf = RingBuffer(max_size=100)
+        await buf.append(self._entry("device.lifecycle", "restored input"))
+        await buf.append(self._entry("device.action", "tapped something"))
+        await buf.append(self._entry("", "an uncategorised legacy line"))
+        return buf
+
+    async def test_a_category_selects_only_its_own_entries(self):
+        from server.models import LogQueryParams
+
+        buf = await self._buffer()
+        got = await buf.filter_entries(LogQueryParams(category="device.lifecycle"))
+
+        assert [e.message for e in got] == ["restored input"], (
+            "the category filter let other categories through"
+        )
+
+    async def test_a_category_with_no_entries_returns_none(self):
+        """The half that proves the filter runs at all: before the fix every
+        category returned the whole buffer."""
+        from server.models import LogQueryParams
+
+        buf = await self._buffer()
+        got = await buf.filter_entries(LogQueryParams(category="build"))
+
+        assert got == []
+
+    async def test_no_category_still_returns_everything(self):
+        from server.models import LogQueryParams
+
+        buf = await self._buffer()
+        got = await buf.filter_entries(LogQueryParams())
+
+        assert len(got) == 3
+
+    def test_the_query_endpoint_accepts_a_category_parameter(self):
+        """FastAPI ignores unknown query params, so a missing parameter is a
+        silent no-op rather than a 422. Assert the signature directly."""
+        import inspect
+
+        from server.api.logs import query_logs
+
+        assert "category" in inspect.signature(query_logs).parameters

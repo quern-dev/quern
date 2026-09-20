@@ -75,6 +75,7 @@ class LogQueryParams(BaseModel):
     until: datetime | None = None
     level: LogLevel | None = None
     process: str | None = None
+    category: str | None = None
     source: LogSource | None = None
     search: str | None = None
     device_id: str | None = None

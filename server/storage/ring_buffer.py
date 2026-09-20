@@ -135,6 +135,8 @@ class RingBuffer:
                 continue
             if params.process and entry.process != params.process:
                 continue
+            if params.category and entry.category != params.category:
+                continue
             if params.source and entry.source != params.source:
                 continue
             if params.search and params.search.lower() not in entry.message.lower():
