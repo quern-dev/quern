@@ -85,7 +85,6 @@ class DeviceControllerUI:
     - self._cache_ttl: float
     - self._cache_hits: int
     - self._cache_misses: int
-    - self._device_info_cache: dict[str, DeviceInfo]
     - self._device_type_cache: dict[str, DeviceType]
     - self._input_checked: dict[str, bool]
     - self._input_probe_cooldown: dict[str, float]
@@ -130,18 +129,6 @@ class DeviceControllerUI:
     #: costs a `simctl spawn` on every single input call.
     _INPUT_PROBE_COOLDOWN_S = 60.0
 
-    # Known screen dimensions by device model (portrait orientation)
-    _SCREEN_DIMENSIONS = {
-        "iPhone 16": {"width": 402, "height": 844},
-        "iPhone 16 Plus": {"width": 440, "height": 926},
-        "iPhone 16 Pro": {"width": 402, "height": 852},
-        "iPhone 16 Pro Max": {"width": 440, "height": 926},
-        "iPhone 15": {"width": 402, "height": 844},
-        "iPhone 15 Plus": {"width": 440, "height": 926},
-        "iPhone 15 Pro": {"width": 402, "height": 852},
-        "iPhone 15 Pro Max": {"width": 440, "height": 926},
-    }
-
     def _ui_backend(self, udid: str):
         """Return the appropriate UI automation backend for a device.
 
@@ -155,25 +142,6 @@ class DeviceControllerUI:
         if self._sim_bridge_ok:
             return self.sim_bridge
         return self.idb
-
-    async def _get_screen_dimensions(self, udid: str) -> dict | None:
-        """Get screen dimensions for a device. Returns {"width": int, "height": int} or None."""
-        # Check cache first
-        if udid in self._device_info_cache:
-            device_info = self._device_info_cache[udid]
-            return self._SCREEN_DIMENSIONS.get(device_info.name)
-
-        # Fetch device info
-        try:
-            devices = await self.simctl.list_devices()
-            for device in devices:
-                if device.udid == udid:
-                    self._device_info_cache[udid] = device
-                    return self._SCREEN_DIMENSIONS.get(device.name)
-        except Exception:
-            pass
-
-        return None
 
     def _is_obscured_by_home_indicator(
         self,
@@ -358,22 +326,29 @@ class DeviceControllerUI:
 
         Returns the on-screen UIElement, or None if it never became visible.
         """
-        dims = await self._get_screen_dimensions(resolved)
-        screen_height = dims["height"] if dims else None
-        screen_width = dims["width"] if dims else None
-        if not screen_height or not screen_width:
-            # Physical devices aren't in the dimensions table. Recover the
-            # viewport from the Application element via a *targeted* query
-            # (filter_type) — on physical this routes to a WDA predicate query
-            # for the root element, avoiding the full /source read that can time
-            # out and restart WDA on dense screens.
-            app_els, _ = await self.get_ui_elements(
-                resolved, use_cache=False, filter_type="Application",
-            )
-            app_frame = next((e.frame for e in app_els if e.frame), None)
-            if app_frame:
-                screen_height = screen_height or app_frame["height"]
-                screen_width = screen_width or app_frame["width"]
+        # The viewport comes from the Application element, which is the
+        # device's own answer. A *targeted* query (filter_type) -- on physical
+        # this routes to a WDA predicate query for the root element, avoiding
+        # the full /source read that can time out and restart WDA on dense
+        # screens.
+        #
+        # This used to prefer a table of hardcoded per-model dimensions and
+        # fall back to asking. The table was wrong for every model in it
+        # (#210): it put an iPhone 16 at 402x844, where the device reports
+        # 393x852 -- so the geometry below, which is entirely derived from the
+        # screen, was computed from numbers off by 9pt and 8pt on exactly the
+        # devices the table claimed to know. It has been removed.
+        app_els, _ = await self.get_ui_elements(
+            resolved, use_cache=False, filter_type="Application",
+            # Nothing container probing can reveal is the root element, and
+            # probing is 92% of a simulator tree read (#196). The old table
+            # lookup cost nothing, so this query has to stay cheap to replace
+            # it.
+            probe_containers=False,
+        )
+        app_frame = next((e.frame for e in app_els if e.frame), None)
+        screen_height = app_frame["height"] if app_frame else None
+        screen_width = app_frame["width"] if app_frame else None
         screen_height = screen_height or 852
         screen_width = screen_width or 393
 
@@ -1710,13 +1685,11 @@ class DeviceControllerUI:
             # scroll it into view before tapping.
             screen_height = self._get_screen_height_from_elements(elements)
             screen_width = self._get_screen_width_from_elements(elements)
-            if not screen_height or not screen_width:
-                # Filtered element list may not include the Application element;
-                # fall back to the device dimensions lookup table.
-                dims = await self._get_screen_dimensions(resolved)
-                if dims:
-                    screen_height = screen_height or dims["height"]
-                    screen_width = screen_width or dims["width"]
+            # A filtered element list may not include the Application
+            # element, in which case the height is unknown and the
+            # home-indicator check below is skipped rather than guessed. The
+            # per-model table that used to answer here was wrong for every
+            # model it listed (#210) and has been removed.
             screen_width = screen_width or 393
             if screen_height and self._is_obscured_by_home_indicator(el, screen_height):
                 logger.info(

@@ -61,6 +61,13 @@ def controller(monkeypatch):
             return {"settled": True, "elapsed_ms": 0.0, "reason": None}
 
         async def get_ui_elements(self, *_a, **_k):
+            if _k.get("filter_type") == "Application":
+                # How the sweep asks for the viewport; see test_scroll_sweep.
+                from server.models import UIElement as _UIElement
+                return ([_UIElement(
+                    type="Application", identifier="", label="App",
+                    frame={"x": 0, "y": 0, "width": 393, "height": 852},
+                )], "SIM")
             return _screen(self.offset), "SIM"
 
         def _invalidate_ui_cache(self, _udid):
@@ -284,7 +291,10 @@ async def test_the_first_lookup_probes_even_though_the_sweep_does_not(controller
     seen: list[bool] = []
 
     async def _spy(*_a, **kw):
-        seen.append(kw.get("probe_containers", True))
+        # The viewport query that opens the sweep is not a lookup: it asks for
+        # the root element to size the screen, and deliberately does not probe.
+        if kw.get("filter_type") != "Application":
+            seen.append(kw.get("probe_containers", True))
         return ([], "SIM")
 
     controller.get_ui_elements = _spy  # type: ignore[method-assign]

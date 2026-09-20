@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from types import SimpleNamespace
-
 import pytest
 
 from server.device.controller import DeviceController
@@ -659,11 +657,11 @@ class TestNoIdentifierIsTappedFromAConstant:
     async def test_it_is_read_from_the_screen(self, identifier, old_point):
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
-        # The device has to be one the old screen-size table knew, or the
-        # removed fast path would have been skipped anyway and this test would
-        # pass against the bug. Verified by mutation: without this line it
-        # passes with the fast path restored.
-        ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")
+        # While the removed fast path existed it only fired for devices in a
+        # screen-size table, so proving this test bites meant priming that
+        # table's cache. Both are gone now and there is nothing to prime --
+        # noted because re-running the mutation against an older tree needs
+        # `ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")`.
         ctrl.idb.describe_all = AsyncMock(return_value=self._tree(identifier))
         ctrl.idb.tap = AsyncMock()
 
@@ -684,7 +682,6 @@ class TestNoIdentifierIsTappedFromAConstant:
         app to be running. A miss must be a miss."""
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
-        ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")
         ctrl.idb.describe_all = AsyncMock(return_value=[])
         ctrl.idb.tap = AsyncMock()
 
@@ -1453,6 +1450,27 @@ class TestAndroidUIBackendSelection:
         assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)
 
 
+#: The sweep opens by asking the device for its viewport -- a targeted query
+#: for the Application element -- so a harness that feeds reads as a fixed
+#: sequence has to answer that separately or the first read is consumed by it.
+#: It used to come from a per-model dimensions table, which was wrong for every
+#: model it listed (#210) and has been removed.
+def _feed_reads(ctrl, *responses, udid="AAAA-1111", width=402.0, height=852.0):
+    screen = UIElement(
+        type="Application", label="App", identifier="",
+        frame={"x": 0.0, "y": 0.0, "width": width, "height": height},
+    )
+    remaining = list(responses)
+
+    async def _read(*_a, **kw):
+        if kw.get("filter_type") == "Application":
+            return ([screen], udid)
+        return remaining.pop(0)
+
+    ctrl.get_ui_elements = _read
+    return ctrl
+
+
 class TestScrollToElement:
     async def test_requires_label_or_identifier(self):
         ctrl = DeviceController()
@@ -1464,9 +1482,6 @@ class TestScrollToElement:
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
         ctrl._invalidate_ui_cache = MagicMock()
-        ctrl._get_screen_dimensions = AsyncMock(
-            return_value={"width": 402, "height": 852}
-        )
         ctrl._ui_backend = MagicMock(return_value=backend)
         return ctrl
 
@@ -1482,9 +1497,7 @@ class TestScrollToElement:
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
         # On-screen from the first fetch (center 420, within [0, 818]).
-        ctrl.get_ui_elements = AsyncMock(
-            return_value=([self._el(400)], "AAAA-1111")
-        )
+        _feed_reads(ctrl, *[([self._el(400)], "AAAA-1111")] * 4)
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1500,12 +1513,13 @@ class TestScrollToElement:
         # viewport; a plain read finds it too, so it is an ordinary element
         # rather than a probe-only one and the sweep may stop probing; after the
         # swipe it is in view; then the settle re-confirm.
-        ctrl.get_ui_elements = AsyncMock(side_effect=[
+        _feed_reads(
+            ctrl,
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
-        ])
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1524,12 +1538,13 @@ class TestScrollToElement:
         # (top edge 4 < 50 inset); a plain read finds it too, so it is not
         # probe-only; after scrolling up it is in view; then the settle
         # re-confirm.
-        ctrl.get_ui_elements = AsyncMock(side_effect=[
+        _feed_reads(
+            ctrl,
             ([self._el(4)], "AAAA-1111"),
             ([self._el(4)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
-        ])
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1603,9 +1618,6 @@ class TestTapElementIosScroll:
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
         ctrl._invalidate_ui_cache = MagicMock()
-        ctrl._get_screen_dimensions = AsyncMock(
-            return_value={"width": 402, "height": 852}
-        )
         ctrl._ui_backend = MagicMock(return_value=backend)
         return ctrl
 
