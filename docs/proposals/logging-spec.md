@@ -330,6 +330,49 @@ did on a caller's behalf is an action. The same function reached from a
 terminal by a person running `quern setup` is not — they are watching it
 happen.
 
+And the second line, once you are inside the API: **what the route touches**,
+not whether it reads. A read *of the device* is an action — `get_ui_tree`
+talks to the device and takes time, which is exactly why `device.read` exists
+as its own category, so reads can be dropped from a trace in one clause. A
+read of quern's own state is not: querying the trace is not part of the
+trace, and a liveness probe is not a thing that happened to anyone.
+
+### Not middleware, and why
+
+Wrapping every request uniformly is the obvious way to get coverage without
+touching 122 handlers. It was tried and rejected, for reasons worth recording
+so it is not re-proposed:
+
+- **It guesses the outcome.** All a middleware has is the status code, which
+  cannot express `suspect`, `ambiguous` or `not_found` — the three outcomes
+  that exist precisely because they are not failures. Flattening them to
+  200/404 discards the judgement the vocabulary was built to carry.
+- **It cannot know the resolved udid**, which is the join key. That has to
+  come from the handler either way.
+- **Streaming breaks it.** Three endpoints stream — video, logs SSE, proxy
+  SSE. A middleware must wrap `send` to see them finish, which is where
+  hand-rolled ASGI goes wrong, and the "duration" it would record is how long
+  somebody watched a stream.
+- **The existing pure-ASGI middlewares earn it.** `APIKeyMiddleware` must run
+  before everything and must not break `is_disconnected()`; that is a real
+  requirement. Action logging has no such need, and adding an ASGI layer
+  without one is cost for nothing.
+
+Deciding which routes are actions is the work, not an obstacle to it.
+
+### Keeping coverage from rotting
+
+`tests/test_action_coverage.py` walks every route with `ast` and requires each
+to be either wrapped in `action(...)` or named in an explicit non-action list.
+A route in neither fails.
+
+It landed with **84 of 122 routes unclassified**, recorded as a backlog rather
+than as 84 failing tests, so the guard is live immediately: a route added
+tomorrow is in neither list and fails. Two further tests keep both lists
+honest — neither may name a route that no longer exists, nor one that has
+since been wrapped, because a stale entry exempts nothing and hides the next
+route to take that name.
+
 | router | category | emits today |
 |---|---|---|
 | `device_ui.py` | `device.action` / `device.read` | yes |
@@ -506,12 +549,13 @@ the requested one rather than the resolved one.
 **2a — `device/ui`. Done**, and verified live: a tap sent with no udid
 recorded the resolved device, and `QUERN_LOG_LEVEL=debug` restored the pair.
 
-**2b — the rest of the API.** `proxy`, `proxy_certs`, `device` lifecycle,
-`landmarks`, build. Eighteen proxy tools currently emit nothing, including a
-CA certificate install that changes the device.
-*Done when:* every router that changes device or proxy state emits one entry
-per call, and a test enumerates the routers so a new one cannot be added
-silently.
+**2b — the rest of the API.** The enumeration test is **done** and the
+backlog is explicit; `install_proxy_cert` is wired as the first of them.
+What remains is working the list down, highest value first: `device.lifecycle`
+(boot, shutdown, erase, install, launch, terminate, uninstall) and `proxy`
+control, which are what a trace is mostly made of.
+*Done when:* `_UNCLASSIFIED` in `tests/test_action_coverage.py` is empty. It
+may only shrink.
 
 **Step 3 — the `print` guard. Done.** There was nothing to convert: measured
 with `ast` rather than `grep`, zero of the 500 real `print()` calls are on a
