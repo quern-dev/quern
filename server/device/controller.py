@@ -21,7 +21,7 @@ from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 
 def _display_name(name: str | None, kind: str | None) -> str | None:

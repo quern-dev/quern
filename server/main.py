@@ -79,7 +79,7 @@ from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
 
-logger = logging.getLogger("quern-debug-server")
+logger = logging.getLogger(__name__)
 
 
 def _fix_developer_dir() -> str | None:
@@ -1153,7 +1153,7 @@ def _update_check_logged_to_file() -> Iterator[bool]:
     that exists to replace it, and would make "the full error is in
     server.log" a false promise in the same breath.
     """
-    log = logging.getLogger("quern-debug-server.update-check")
+    log = logging.getLogger(__name__)
     from server.lifecycle.daemon import LOG_FILE
 
     handler = None

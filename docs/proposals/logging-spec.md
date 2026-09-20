@@ -171,14 +171,47 @@ who produced the entry.** For server-side entries `source` is always
 in the query API's docs, because someone will otherwise filter `source=proxy`
 expecting quern's proxy actions and get captured HTTP flows.
 
-### Why the logger name cannot be the category
+### Logger names are `__name__`, and that is a different axis
 
-`quern-debug-server.device` is shared by six modules and `.api` by six more.
-Renaming 30 loggers to match these categories would be a large diff that
-breaks anyone filtering on `process`, and it would still conflate
-`device.action` with `device.read` — both live in `controller_ui.py`.
+An earlier draft declined to rename the 30 loggers on the grounds that it
+would break anyone filtering on `process`. That reasoning was wrong and is
+withdrawn: logger names are not exposed anywhere user-facing, nothing
+configures levels by prefix, and the `quern-debug-server` strings in `mcp/`
+are the *binary* name, not loggers. There was no one to break.
 
-So category is set **per call**, not per module.
+The conclusion stands for a better reason. Renaming loggers **to match the
+categories** would be a mistake, because the two answer different questions:
+
+- the **logger name** says *where in the code* a line came from
+- the **category** says *what quern was doing*
+
+`controller_ui.py` legitimately emits both `device.action` and `device.read`,
+so no single logger name can carry its category. Making them match collapses
+two useful axes into one and leaves two taxonomies to drift apart.
+
+So: **every logger is `logging.getLogger(__name__)`.** It is the Python
+convention, it costs nothing to maintain, new modules get it free, and it
+makes `process` discriminating — `server.device.sim_input` rather than
+`quern-debug-server.device` shared across six modules, which could not
+distinguish anything. Category stays orthogonal, and the trace gets two real
+axes instead of one.
+
+Done: 40 modules renamed, and the ten `caplog.at_level(logger=...)` call sites
+in the suite now use the `server.device` parent. Verified by mutation that
+capture still works, since a rename that quietly broke `caplog` would leave
+the two absence-asserting tests passing for the wrong reason.
+
+### What "28 modules have no logger" is not
+
+#238 counts modules with no logger as a defect. Adding `logger =
+logging.getLogger(__name__)` to a module with nothing to say is an unused
+variable pretending to be coverage, and `models.py` does not need one.
+
+The rule is **"a module that logs uses `__name__`"**, which is lint-checkable
+and true today. The useful part of that count is the modules that *should* be
+logging and are silent -- `auth.py`, `proxy/flow_store.py`,
+`processing/classifier.py` -- and those are found by asking what is
+undiagnosable, not by counting.
 
 ### How it is set
 

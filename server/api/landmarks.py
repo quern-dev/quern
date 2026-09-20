@@ -30,7 +30,7 @@ def _serialize_skipped(skipped: list[SkippedFile]) -> list[dict]:
     ]
 
 router = APIRouter(prefix="/api/v1/landmarks", tags=["landmarks"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 def _get_registry(request: Request) -> LandmarkRegistry:

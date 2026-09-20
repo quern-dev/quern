@@ -13,7 +13,7 @@ from server.config import CONFIG_DIR
 from server.models import BuildResult, DeviceError, DeviceType
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 BUILD_TIMEOUT = 600  # seconds
 

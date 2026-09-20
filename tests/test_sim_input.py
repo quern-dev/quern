@@ -264,7 +264,7 @@ class TestWhereTheRepairIsAutomaticAndWhereItIsNot:
 
         with (
             patch.object(sim_input, "legacy_input_is_suppressed", AsyncMock(return_value=True)),
-            caplog.at_level(logging.WARNING, logger="quern-debug-server.device"),
+            caplog.at_level(logging.WARNING, logger="server.device"),
         ):
             await controller.tap(1.0, 2.0, udid="SIM")
 
@@ -428,7 +428,7 @@ class TestTheWaitIsBoundedAndReported:
             patch.object(sim_input, "device_hub_is_running", AsyncMock(return_value=True)),
             patch.object(sim_input, "wait_for_device_hub_to_attach", AsyncMock(return_value=False)),
             patch.object(sim_input, "restore_legacy_input", AsyncMock()) as restore,
-            caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+            caplog.at_level(logging.INFO, logger="server.device"),
         ):
             await controller.boot(udid="SIM")
 

@@ -27,7 +27,7 @@ from server.device import ax_recovery, probing
 from server.device.tool_probe import probe_stdout
 from server.models import SimBridgeSaturatedError
 
-logger = logging.getLogger("quern-debug-server.sim-bridge")
+logger = logging.getLogger(__name__)
 
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "sim-bridge"

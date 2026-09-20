@@ -15,7 +15,7 @@ from server.device import probing
 from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.idb")
+logger = logging.getLogger(__name__)
 
 
 class IdbBackend:

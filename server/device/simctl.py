@@ -15,7 +15,7 @@ from server.device._xcode import xcode_available
 from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
-logger = logging.getLogger("quern-debug-server.simctl")
+logger = logging.getLogger(__name__)
 
 
 class SimctlBackend:

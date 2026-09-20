@@ -37,7 +37,7 @@ import logging
 from server import logging_ext
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.sim-input")
+logger = logging.getLogger(__name__)
 
 #: The guest notify state Device Hub's daemon publishes when it holds the
 #: input services.

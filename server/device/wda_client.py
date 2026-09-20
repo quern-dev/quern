@@ -30,7 +30,7 @@ from server.models import (
     WdaStaleElementError,
 )
 
-logger = logging.getLogger("quern-debug-server.wda-client")
+logger = logging.getLogger(__name__)
 
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests

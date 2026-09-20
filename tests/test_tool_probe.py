@@ -275,7 +275,7 @@ class TestTheBackendIsNotLatchedAtStartup:
         means something.
         """
         ctrl = self._controller()
-        with caplog.at_level("WARNING", logger="quern-debug-server.device"):
+        with caplog.at_level("WARNING", logger="server.device"):
             await self._check(ctrl, sim_bridge=True)
         assert not [r for r in caplog.records if "sim-bridge backend became" in r.message], (
             "startup logged a backend-change warning for the initial answer"
@@ -285,7 +285,7 @@ class TestTheBackendIsNotLatchedAtStartup:
         """The case it exists for: the toolchain moved and routing follows."""
         ctrl = self._controller()
         await self._check(ctrl, sim_bridge=True)
-        with caplog.at_level("WARNING", logger="quern-debug-server.device"):
+        with caplog.at_level("WARNING", logger="server.device"):
             await self._check(ctrl, sim_bridge=False)
         assert [r for r in caplog.records if "sim-bridge backend became" in r.message], (
             "the backend flipped under a running server and said nothing"

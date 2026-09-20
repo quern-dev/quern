@@ -34,7 +34,7 @@ from server.models import (
 )
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

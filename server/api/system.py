@@ -25,7 +25,7 @@ from server.config import (
 )
 from server.lifecycle.update_check import read_update_info, switch_channel
 
-logger = logging.getLogger("quern-debug-server.system")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
 

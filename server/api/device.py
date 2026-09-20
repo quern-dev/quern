@@ -49,7 +49,7 @@ from server.models import (
 TOOLS_IN_LIST_MAX_AGE = 5.0
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from typing import Any
 from server.config import CONFIG_DIR
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.u2")
+logger = logging.getLogger(__name__)
 
 # Path to our forked Quern Driver APK (AdbKeyboard IME only, no launcher icon)
 _QUERN_DRIVER_APK = CONFIG_DIR / "bin" / "quern-driver.apk"

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger("quern-debug-server.config")
+logger = logging.getLogger(__name__)
 
 # Honours QUERN_STATE_DIR, so redirecting it redirects *everything* under
 # ~/.quern -- the api key, config.json, the device pool, crash reports, the
