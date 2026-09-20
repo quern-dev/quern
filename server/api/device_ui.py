@@ -17,6 +17,7 @@ from server.api.device import (
     _get_controller,
     _handle_device_error,
 )
+from server.device.controller import DeviceController
 from server.device.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
@@ -36,7 +37,9 @@ from server.models import (
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 
 
-def _with_input_warning(controller, udid: str | None, payload: dict) -> dict:
+def _with_input_warning(
+    controller: DeviceController, udid: str | None, payload: dict,
+) -> dict:
     """Attach the Device Hub advisory to a write that may have gone nowhere.
 
     Suppressed input is accepted and discarded, so every one of these handlers
