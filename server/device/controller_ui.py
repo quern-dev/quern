@@ -142,17 +142,6 @@ class DeviceControllerUI:
         "iPhone 15 Pro Max": {"width": 440, "height": 926},
     }
 
-    # Known positions for static UI elements
-    # Format: (x_offset, y_offset, anchor)
-    # anchor: "bottom-left" = tab bar, "top-right" = nav bar button
-    _STATIC_ELEMENT_POSITIONS = {
-        "_Profile button in tab bar": (40, 40, "bottom-left"),
-        "_Map button in tab bar": (120, 40, "bottom-left"),
-        "_Activities button in tab bar": (200, 40, "bottom-left"),
-        "_Trackables button in tab bar": (280, 40, "bottom-left"),
-        "_Settings button": (28, 78, "top-right"),  # 28px from right edge, 78px from top
-    }
-
     def _ui_backend(self, udid: str):
         """Return the appropriate UI automation backend for a device.
 
@@ -815,77 +804,6 @@ class DeviceControllerUI:
             _give_up(f"stopped by {type(exc).__name__}: {exc!r}")
             raise
 
-    async def _try_fast_path_element_check(
-        self,
-        udid: str,
-        identifier: str | None,
-        condition: WaitCondition
-    ) -> tuple[bool, dict | None]:
-        """Try to check element using describe-point instead of describe-all.
-
-        Returns (success: bool, element: dict | None)
-        - (True, element) if fast path succeeded and element matches condition
-        - (False, None) if fast path not applicable or failed
-        """
-        # Only support 'exists' condition for now
-        if condition != WaitCondition.EXISTS:
-            return (False, None)
-
-        # Only works for identifiers, not labels
-        if not identifier:
-            return (False, None)
-
-        # Check if this is a known static element
-        if identifier not in self._STATIC_ELEMENT_POSITIONS:
-            return (False, None)
-
-        # Get screen dimensions
-        dimensions = await self._get_screen_dimensions(udid)
-        if not dimensions:
-            logger.debug(
-                "[FAST PATH] Unknown screen dimensions for device, "
-                "falling back to describe-all"
-            )
-            return (False, None)
-
-        # Calculate coordinates based on anchor
-        x_offset, y_offset, anchor = self._STATIC_ELEMENT_POSITIONS[identifier]
-
-        if anchor == "bottom-left":
-            x = x_offset
-            y = dimensions["height"] - y_offset
-        elif anchor == "top-right":
-            x = dimensions["width"] - x_offset
-            y = y_offset
-        else:
-            logger.warning(f"[FAST PATH] Unknown anchor '{anchor}' for {identifier}")
-            return (False, None)
-
-        logger.info(f"[FAST PATH] Probing {identifier} at ({x}, {y}) instead of describe-all")
-
-        # Probe the point
-        try:
-            element = await self._ui_backend(udid).describe_point(udid, x, y)
-            if not element:
-                logger.debug(f"[FAST PATH] No element at ({x}, {y})")
-                return (True, None)  # Fast path succeeded, but element not found
-
-            # Check if identifier matches
-            found_identifier = element.get("AXUniqueId") or element.get("identifier")
-            if found_identifier == identifier:
-                logger.info(f"[FAST PATH] ✓ Found {identifier} at ({x}, {y})")
-                return (True, element)
-            else:
-                logger.debug(
-                    f"[FAST PATH] Element at ({x}, {y}) is "
-                    f"'{found_identifier}', not '{identifier}'"
-                )
-                return (True, None)  # Fast path succeeded, wrong element
-
-        except Exception as e:
-            logger.debug(f"[FAST PATH] describe-point failed: {e}, falling back")
-            return (False, None)
-
     async def _wda_direct_query(
         self,
         udid: str,
@@ -1447,64 +1365,6 @@ class DeviceControllerUI:
             polls += 1
             elapsed = time.time() - start_time
 
-            # Try fast path first (describe-point for known static elements)
-            fast_path_success, fast_path_element = await self._try_fast_path_element_check(
-                resolved, identifier, condition
-            )
-
-            if fast_path_success:
-                # Fast path worked - use the result
-                # Convert raw dict to UIElement if we got one
-                if fast_path_element:
-                    parsed = parse_elements([fast_path_element])
-                    current_element = parsed[0] if parsed else None
-                else:
-                    current_element = None
-
-                last_element = current_element
-
-                # Check condition
-                if checker(current_element):
-                    return (
-                        {
-                            "matched": True,
-                            "elapsed_seconds": round(elapsed, 2),
-                            "polls": polls,
-                            "element": current_element.model_dump() if current_element else None,
-                        },
-                        resolved,
-                    )
-
-                # Condition not met yet, but fast path worked - check timeout
-                if elapsed >= timeout:
-                    # Best-effort screen context + screenshot for fast-path timeout
-                    try:
-                        ctx_elements, _ = await self.get_ui_elements(
-                            resolved, mode=mode,
-                        )
-                        screen_context = _build_screen_context(ctx_elements)
-                    except Exception:
-                        screen_context = {}
-                    screenshot = await _capture_screenshot(
-                        self, resolved, "wait_timeout",
-                    )
-                    if screenshot:
-                        screen_context["screenshot"] = screenshot
-                    return (
-                        {
-                            "matched": False,
-                            "elapsed_seconds": round(elapsed, 2),
-                            "polls": polls,
-                            "last_state": last_element.model_dump() if last_element else None,
-                            "screen_context": screen_context,
-                        },
-                        resolved,
-                    )
-
-                # Wait before next poll
-                await asyncio.sleep(interval)
-                continue
-
             # Fast path not applicable or failed - use traditional describe-all
             # Fetch UI elements with filtering for performance
             filter_label = _effective_filter_label(label, label_contains, label_prefix)
@@ -1679,48 +1539,6 @@ class DeviceControllerUI:
                 "is required for tap-element",
                 tool="idb",
             )
-
-        # Fast path: for known static elements, tap directly at known coordinates
-        if identifier and identifier in self._STATIC_ELEMENT_POSITIONS:
-            resolved = await self.resolve_udid(udid)
-            await self._warn_if_input_is_suppressed(resolved)
-            dimensions = await self._get_screen_dimensions(resolved)
-
-            if dimensions:
-                x_offset, y_offset, anchor = self._STATIC_ELEMENT_POSITIONS[identifier]
-
-                if anchor == "bottom-left":
-                    x = x_offset
-                    y = dimensions["height"] - y_offset
-                elif anchor == "top-right":
-                    x = dimensions["width"] - x_offset
-                    y = y_offset
-                else:
-                    logger.warning(
-                        f"[FAST PATH TAP] Unknown anchor '{anchor}' "
-                        f"for {identifier}, falling back"
-                    )
-                    # Fall through to traditional path
-
-                if anchor in ("bottom-left", "top-right"):
-                    logger.info(
-                        f"[FAST PATH TAP] Tapping {identifier} at "
-                        f"calculated coordinates ({x}, {y}) "
-                        f"[anchor={anchor}]"
-                    )
-
-                    # Tap directly without fetching UI tree
-                    await self._ui_backend(resolved).tap(resolved, x, y)
-
-                    return {
-                        "status": "ok",
-                        "tapped": {
-                            "identifier": identifier,
-                            "type": "Button",
-                            "x": x,
-                            "y": y,
-                        },
-                    }
 
         # Android fast path: tap by native selector, skipping the full UI-tree
         # dump. dump_hierarchy() scrolls CoordinatorLayout/RecyclerView content

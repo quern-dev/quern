@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+from types import SimpleNamespace
+
 import pytest
 
 from server.device.controller import DeviceController
@@ -613,6 +615,85 @@ class TestTap:
         udid = await ctrl.tap(100.5, 200.3)
         assert udid == "AAAA-1111"
         ctrl.idb.tap.assert_called_once_with("AAAA-1111", 100.5, 200.3)
+
+
+class TestNoIdentifierIsTappedFromAConstant:
+    """#239: five identifiers were compiled in with fixed coordinates, and a
+    tap for one of them skipped reading the screen entirely.
+
+    The app they were taken from added two tabs, so the stored position for
+    `_Map button in tab bar` came to land on a different tab -- and the call
+    still answered `status: "ok"` naming the identifier it had been asked for,
+    because nothing had been read that could contradict it.
+    """
+
+    #: The identifiers that used to be in `_STATIC_ELEMENT_POSITIONS`, with the
+    #: coordinate each one produced on an "iPhone 16" (height 844 in the
+    #: screen-size table, itself wrong -- see #210).
+    WAS_HARDCODED = {
+        "_Profile button in tab bar": (40, 804),
+        "_Map button in tab bar": (120, 804),
+        "_Activities button in tab bar": (200, 804),
+        "_Trackables button in tab bar": (280, 804),
+    }
+
+    def _tree(self, identifier: str) -> list[dict]:
+        """One element, at a centre no hardcoded point could produce.
+
+        The old x values were 40/120/200/280 and the old y was always 844-40;
+        a centre of (43, 47) collides with none of them, so the assertions
+        below cannot pass by coincidence. An earlier draft used a frame whose
+        centre was exactly 40 and "proved" the Profile case by accident.
+        """
+        return [{
+            "type": "Button",
+            "AXLabel": "Map",
+            "AXUniqueId": identifier,
+            "frame": {"x": 13, "y": 27, "width": 60, "height": 40},
+            "enabled": True,
+            "role": "AXRadioButton",
+            "role_description": "AXTabButton",
+        }]
+
+    @pytest.mark.parametrize("identifier,old_point", sorted(WAS_HARDCODED.items()))
+    async def test_it_is_read_from_the_screen(self, identifier, old_point):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        # The device has to be one the old screen-size table knew, or the
+        # removed fast path would have been skipped anyway and this test would
+        # pass against the bug. Verified by mutation: without this line it
+        # passes with the fast path restored.
+        ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")
+        ctrl.idb.describe_all = AsyncMock(return_value=self._tree(identifier))
+        ctrl.idb.tap = AsyncMock()
+
+        result = await ctrl.tap_element(identifier=identifier, scroll_to_find=False)
+
+        assert result["status"] == "ok"
+        # The element's own centre, not the constant.
+        assert (result["tapped"]["x"], result["tapped"]["y"]) == (43.0, 47.0)
+        assert result["tapped"]["x"] != old_point[0], (
+            f"{identifier} was tapped at its old hardcoded coordinate"
+        )
+        ctrl.idb.tap.assert_called_once_with("AAAA-1111", 43.0, 47.0)
+        # Read from the element, not asserted by the caller.
+        assert result["tapped"]["label"] == "Map"
+
+    async def test_an_identifier_that_is_absent_is_not_tapped_anyway(self):
+        """The constant path did not need the element to be present, or the
+        app to be running. A miss must be a miss."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")
+        ctrl.idb.describe_all = AsyncMock(return_value=[])
+        ctrl.idb.tap = AsyncMock()
+
+        result = await ctrl.tap_element(
+            identifier="_Map button in tab bar", scroll_to_find=False,
+        )
+
+        assert result["status"] != "ok", result
+        ctrl.idb.tap.assert_not_called()
 
 
 class TestTapElement:

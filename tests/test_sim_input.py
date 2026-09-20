@@ -460,15 +460,37 @@ class TestEveryInputPathIsCovered:
             f"{method} sends input without checking whether it can land"
         )
 
-    def test_tap_element_covers_both_of_its_paths(self):
-        """It resolves twice: a fast path for known static coordinates and the
-        ordinary one. Checking only the first leaves the common case bare."""
+    def test_tap_element_warns_before_it_branches(self):
+        """The warning sits on the shared path, so every route is covered.
+
+        It used to need two calls, because `tap_element` had a second
+        resolution path that tapped hardcoded coordinates for a handful of
+        identifiers without reading anything. That path is gone (#239), and
+        what remains warns once, before the Android branch -- which covers the
+        Android fast path and the ordinary path alike. Asserting a count of
+        two would now pass only by putting the warning somewhere it is not
+        needed.
+        """
         import inspect
 
         from server.device.controller_ui import DeviceControllerUI
 
         source = inspect.getsource(DeviceControllerUI.tap_element)
-        assert source.count("_warn_if_input_is_suppressed") >= 2
+        assert "_warn_if_input_is_suppressed" in source
+
+        # Unconditional means at the method body's own indentation. Comparing
+        # positions instead would compare against the comment above the Android
+        # branch, which sits *before* the shared resolve.
+        warn_lines = [
+            line for line in source.splitlines()
+            if "_warn_if_input_is_suppressed" in line
+        ]
+        assert any(
+            len(line) - len(line.lstrip()) == 8 for line in warn_lines
+        ), (
+            "every call is nested, so the warning is inside a branch and a tap "
+            f"taking another route would not warn: {warn_lines}"
+        )
 
 
 class TestOnlySettledAnswersAreCached:
