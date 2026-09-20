@@ -109,9 +109,9 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_screen_summary` | GET | `/api/v1/device/screen-summary` | LLM-optimized screen description |
 | `tap` | POST | `/api/v1/device/ui/tap` | Tap at coordinates |
 | `restore_simulator_input` | POST | `/api/v1/device/ui/restore-input` | Take a simulator's touch, button and keyboard services back from Xcode 27's Device Hub. Restarts SpringBoard, so running apps are killed |
-| `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier |
+| `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier. With `scroll_to_find` (the default) this can sweep for a long time; a client that disconnects abandons it rather than leaving it running. The request is closed **499** server-side, which a caller that has hung up does not receive — the observable effect is that the device stops being driven |
 | `swipe` | POST | `/api/v1/device/ui/swipe` | Swipe gesture |
-| `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it. On iOS, bounded by a wall-clock deadline as well as `max_swipes` |
+| `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it. On iOS, bounded by a wall-clock deadline as well as `max_swipes`. A client that disconnects abandons the sweep instead of leaving it driving the device. The request is closed **499** server-side; a caller that has hung up does not receive it, so the observable effect is that the device is released |
 | `get_web_content` | POST | `/api/v1/device/ui/web-content` | Read WKWebView content the accessibility tree cannot see (iOS simulator only) |
 | `wait_for_settle` | POST | `/api/v1/device/ui/wait-settled` | Wait until the screen stops changing, by comparing successive screenshots |
 | `type_text` | POST | `/api/v1/device/ui/type` | Type text |
