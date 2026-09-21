@@ -549,13 +549,22 @@ the requested one rather than the resolved one.
 **2a — `device/ui`. Done**, and verified live: a tap sent with no udid
 recorded the resolved device, and `QUERN_LOG_LEVEL=debug` restored the pair.
 
-**2b — the rest of the API.** The enumeration test is **done** and the
-backlog is explicit; `install_proxy_cert` is wired as the first of them.
-What remains is working the list down, highest value first: `device.lifecycle`
-(boot, shutdown, erase, install, launch, terminate, uninstall) and `proxy`
-control, which are what a trace is mostly made of.
-*Done when:* `_UNCLASSIFIED` in `tests/test_action_coverage.py` is empty. It
-may only shrink.
+**2b — the rest of the API. Done.** All 122 routes are classified:
+`_UNCLASSIFIED` is empty, and a route added tomorrow is in neither list and
+fails.
+
+Two forms, and the choice between them is about handler shape rather than
+taste. A `with action(...)` block is the default and reads best. The
+`@logged_action` decorator exists for handlers too long to wrap without
+re-indenting the body — `boot_device` is ~90 lines, and a block around only
+the boot would stop the clock before the cert install and proxy auto-start
+that the caller is still waiting on. Attempting that re-indent broke the
+file once, which is the argument.
+
+*Verified live*, not only in tests: a workflow against an iOS 27 simulator
+produced entries across `device.action` and `device.read`, including a
+genuine failure — `get_screen_summary` against SpringBoard with no frontmost
+app, recorded as `failed` at ERROR with its duration.
 
 **Step 3 — the `print` guard. Done.** There was nothing to convert: measured
 with `ast` rather than `grep`, zero of the 500 real `print()` calls are on a
