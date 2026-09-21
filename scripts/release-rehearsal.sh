@@ -823,6 +823,13 @@ case_fresh_install() {
         PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
         "$installed/quern" setup ) > "$sb/setup.log" 2>&1 || true
+    # The second half of the documented install. `install.sh` runs this as
+    # its own step, and it is the only thing that points MCP clients at the
+    # new install -- setup does not.
+    ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+        PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        npm_config_cache="$npm_config_cache" \
+        "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1 || true
   fi
 
   # The MCP registration the installer writes, checked for *where it points*.
