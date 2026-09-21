@@ -96,7 +96,49 @@ each other.
       hours. Measurements are on the issue.
 - [ ] **Recorder and stream through one capture.** `StreamPipeline` already
       fans out to sinks; the preview path uses only the HTTP one.
-- [ ] Android on-device encoder, and the video-anchored timeline.
+- [ ] **The video-anchored timeline.** The consumer now exists: the
+      tracefile on `feat/logging-trace-export` (stacked on #253), joining
+      quern actions, proxy flows, device logs and screenshots.
+      `server/trace.py` is the join, `server/api/trace.py` the endpoint.
+      Established with its author 2026-09-21:
+
+      - **Clocks already agree.** Our frames are stamped
+        `CMClockGetHostTimeClock()`, which is mach absolute time — measured
+        identical to Python's `time.monotonic()` on this host (612668.5505 vs
+        612668.5969, the delta being two process starts). Trace entries are
+        wall clock, so joining needs one `(time.time(), time.monotonic())`
+        anchor and a subtraction. They are adding the anchor.
+      - **Re-record that anchor per session, not once at server start.** The
+        monotonic base does not advance while the machine sleeps; `wall -
+        monotonic` on this host already sits ~4s from `kern.boottime`. Drift
+        with no upper bound and nothing to detect it.
+      - **`finished_at` is when an action ENDED.** Markers placed there are
+        late by the action's own duration — measured 2369ms cold and 129ms
+        warm for a tap on one simulator, so not a constant to subtract. The
+        interval is `[finished_at - duration_ms, finished_at]`. They are
+        adding `started_at` per action rather than making us re-derive it.
+      - **A discrete begin event already exists** (`outcome="started"`, no
+        duration, emitted before the work runs) but is DEBUG-only and
+        currently filtered out of the trace endpoint. That is the anchor for
+        action-aligned keyframes, which is what fixes seek granularity
+        drifting with activity.
+      - **Reference video as path + offset, never a stored keyframe index.**
+        An index is a property of one encode and goes silently wrong on
+        re-encode. We publish the first frame's PTS in the recording summary
+        so an offset can be computed; "nearest keyframe to offset" stays on
+        our side, where the encoder parameters are.
+      - **The .mp4 timeline is not zero-based** — `startSession` uses the
+        first frame's real PTS, so it runs in host-monotonic seconds since
+        boot. Anything assuming 0.0 is wrong.
+      - **Their device-log attribution compares a device clock against a host
+        interval with no offset.** Harmless for simulators, wrong for
+        physical devices. Our sub-millisecond lockdown alignment is better
+        than anything in the trace today but is *not* exposed as an API, and
+        only holds while the connection is held — a live measurement, not a
+        cacheable constant. Surfacing it is a possible task, not a promise.
+      - **Flow attribution is untested** — zero flows in every live run they
+        have done. Do not lean on it without exercising it.
+- [ ] Android on-device encoder.
 
 ### Known defects, deferred with reasons
 
