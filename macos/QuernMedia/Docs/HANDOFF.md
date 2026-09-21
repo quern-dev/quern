@@ -102,16 +102,26 @@ each other.
       `server/trace.py` is the join, `server/api/trace.py` the endpoint.
       Established with its author 2026-09-21:
 
-      - **Clocks already agree.** Our frames are stamped
-        `CMClockGetHostTimeClock()`, which is mach absolute time — measured
-        identical to Python's `time.monotonic()` on this host (612668.5505 vs
-        612668.5969, the delta being two process starts). Trace entries are
-        wall clock, so joining needs one `(time.time(), time.monotonic())`
-        anchor and a subtraction. They are adding the anchor.
-      - **Re-record that anchor per session, not once at server start.** The
-        monotonic base does not advance while the machine sleeps; `wall -
-        monotonic` on this host already sits ~4s from `kern.boottime`. Drift
-        with no upper bound and nothing to detect it.
+      - **Clocks already agree, and the join needs no conversion at all.**
+        Our frames are stamped `CMClockGetHostTimeClock()`, which is mach
+        absolute time — measured identical to Python's `time.monotonic()` on
+        this host (612668.5505 vs 612668.5969, the delta being two process
+        starts). Every trace action now carries `started_monotonic` on that
+        same clock, so a frame PTS compares against it directly. The action's
+        end is `started_monotonic + duration_ms / 1000`.
+      - **The `clock_anchor` is for labels, not for the join.** A
+        `(wall, monotonic)` pair is written per export, so wall-clock times
+        can be rendered; nothing in the video join depends on it.
+      - **`wall - monotonic` is not constant, and the cause is not settled.**
+        Measured +4.078s, then +4.298s ten minutes later, against
+        `kern.boottime` on this host. An earlier version of this note blamed
+        sleep — the monotonic base genuinely does not tick while asleep — but
+        the figure *moves* between readings, and `kern.boottime` is itself
+        adjusted when the wall clock steps, so the comparison conflates at
+        least two effects. Do not build on the direction or the cause. The
+        only load-bearing conclusion is that one anchor captured at server
+        start decays with nothing to detect it, which is why it is per
+        export.
       - **`finished_at` is when an action ENDED.** Markers placed there are
         late by the action's own duration — measured 2369ms cold and 129ms
         warm for a tap on one simulator, so not a constant to subtract. The
@@ -124,9 +134,14 @@ each other.
         drifting with activity.
       - **Reference video as path + offset, never a stored keyframe index.**
         An index is a property of one encode and goes silently wrong on
-        re-encode. We publish the first frame's PTS in the recording summary
-        so an offset can be computed; "nearest keyframe to offset" stays on
-        our side, where the encoder parameters are.
+        re-encode. "Nearest keyframe to offset" stays on our side, where the
+        encoder parameters are.
+      - [ ] **Not built yet: publish the first frame's PTS in
+        `Recorder.Summary`.** It is our half of the agreed interface and the
+        only thing the trace side needs from us to convert an absolute host
+        time into a movie-relative offset. `Summary` currently carries
+        `framesWritten`, `framesDropped`, `duration`, `url` — the first PTS
+        is captured in `firstPTS` already and simply is not exposed.
       - **The .mp4 timeline is not zero-based** — `startSession` uses the
         first frame's real PTS, so it runs in host-monotonic seconds since
         boot. Anything assuming 0.0 is wrong.
@@ -138,6 +153,9 @@ each other.
         cacheable constant. Surfacing it is a possible task, not a promise.
       - **Flow attribution is untested** — zero flows in every live run they
         have done. Do not lean on it without exercising it.
+      - **The trace branch is unmerged**, stacked on PR #253 and awaiting a
+        review window. The fields above are real and testable now, but the
+        shape can still move if review pushes back.
 - [ ] Android on-device encoder.
 
 ### Known defects, deferred with reasons
