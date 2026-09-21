@@ -12,7 +12,7 @@ from collections import Counter
 
 from server.models import UIElement
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 
 def parse_elements(raw: list[dict], filter_label: str | None = None,

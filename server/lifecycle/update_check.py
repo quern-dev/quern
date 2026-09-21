@@ -33,7 +33,7 @@ from typing import NamedTuple
 
 from server.config import CONFIG_DIR, get_update_check
 
-logger = logging.getLogger("quern-debug-server.update-check")
+logger = logging.getLogger(__name__)
 
 LAST_CHECK_FILE = CONFIG_DIR / "last-update-check"
 # Serialises "commit a check result" against "switch channel and invalidate".

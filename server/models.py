@@ -55,12 +55,50 @@ class LogEntry(BaseModel):
     )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")
-    category: str = Field(default="", description="OSLog category (e.g., 'auth')")
+    category: str = Field(
+        default="",
+        description=(
+            "For device sources, the OSLog category (e.g. 'auth'). For quern's "
+            "own entries, what quern was doing -- see server/logging_ext."
+        ),
+    )
     pid: int | None = Field(default=None, description="Process ID")
     level: LogLevel = LogLevel.INFO
     message: str
     source: LogSource
     raw: str = Field(default="", description="Original unparsed line, preserved for debugging")
+
+    # --- the action log -----------------------------------------------------
+    # One entry per completed quern action, so a trace is a query rather than
+    # a reading exercise. Empty on every other entry, including quern's own
+    # non-action logging. See docs/proposals/logging-spec.md.
+    action: str = Field(
+        default="",
+        description="The operation that completed, e.g. 'tap_element'",
+    )
+    udid: str = Field(
+        default="",
+        description=(
+            "The *resolved* target device. Deliberately separate from "
+            "`device_id`, which is 'server' for every server-side entry and "
+            "routes entries to buffers."
+        ),
+    )
+    duration_ms: int | None = Field(
+        default=None, description="How long the action took, once it is over",
+    )
+    outcome: str = Field(
+        default="",
+        description=(
+            "How the action ended. 'ok' worked; 'failed' means the caller did "
+            "not get what they asked for; 'suspect' means quern did it and the "
+            "result should not be trusted, such as typing that reported "
+            "success into a field still empty; 'cancelled' means the caller "
+            "disconnected part-way; 'not_found' and 'ambiguous' are answers "
+            "rather than faults; 'started' marks a begin entry, which carries "
+            "no duration. The list lives in server/logging_ext.OUTCOMES."
+        ),
+    )
     repeat_count: int = Field(
         default=1,
         description="Number of occurrences this entry represents. "
@@ -75,6 +113,7 @@ class LogQueryParams(BaseModel):
     until: datetime | None = None
     level: LogLevel | None = None
     process: str | None = None
+    category: str | None = None
     source: LogSource | None = None
     search: str | None = None
     device_id: str | None = None

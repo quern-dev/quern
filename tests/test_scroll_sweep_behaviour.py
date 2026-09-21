@@ -568,7 +568,7 @@ async def test_the_deadline_can_end_the_sweep_mid_run(caplog):
 
     screen = Slow()
     with (
-        caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        caplog.at_level(logging.INFO, logger="server.device"),
         patch("server.device.controller_ui.time.perf_counter", clock),
     ):
         found = await _sweep(screen, "row_150", deadline_s=50.0)
@@ -590,7 +590,7 @@ async def test_a_slow_success_is_traced(caplog):
 
     screen = Slow()
     with (
-        caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        caplog.at_level(logging.INFO, logger="server.device"),
         patch("server.device.controller_ui.time.perf_counter", clock),
     ):
         found = await _sweep(screen, "row_150", deadline_s=100.0)
@@ -602,7 +602,7 @@ async def test_a_slow_success_is_traced(caplog):
 @pytest.mark.asyncio
 async def test_a_fast_success_is_not_traced(caplog):
     screen = ListScreen()
-    with caplog.at_level(logging.INFO, logger="quern-debug-server.device"):
+    with caplog.at_level(logging.INFO, logger="server.device"):
         found = await _sweep(screen, "row_150")
 
     assert found is not None
@@ -749,7 +749,7 @@ async def test_a_failure_mid_sweep_still_logs_the_steps_before_it(caplog):
 
     screen = Breaks()
     with (
-        caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        caplog.at_level(logging.INFO, logger="server.device"),
         pytest.raises(RuntimeError),
     ):
         await _sweep(screen, "row_150")

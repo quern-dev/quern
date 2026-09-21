@@ -94,9 +94,10 @@ async def test_tap_element_runs_under_the_guard():
 
     controller = MagicMock()
     controller.tap_element = AsyncMock(return_value={"status": "ok"})
-    # The handler resolves the udid itself now, so it can attach the
-    # suppressed-input advisory to the response. A bare MagicMock attribute is
-    # not awaitable.
+    # The handler resolves the udid itself now, for two reasons that arrived
+    # separately: so the action entry names the device the tap actually went
+    # to, and so the suppressed-input advisory can be attached to the
+    # response. A bare MagicMock attribute is not awaitable.
     controller.resolve_udid = AsyncMock(return_value="SIM")
     controller.input_warning = MagicMock(return_value=None)
 

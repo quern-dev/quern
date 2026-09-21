@@ -8,7 +8,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-logger = logging.getLogger("quern-debug-server.scrcpy-preview")
+logger = logging.getLogger(__name__)
 
 
 @dataclass

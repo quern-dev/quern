@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 
+from server import logging_ext
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.devicectl import DevicectlBackend
@@ -20,7 +21,7 @@ from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 
 def _display_name(name: str | None, kind: str | None) -> str | None:
@@ -662,15 +663,19 @@ class DeviceController(DeviceControllerUI):
             else:
                 suppressed = await sim_input.legacy_input_is_suppressed(udid)
             if suppressed:
-                logger.info(
+                logging_ext.info(
+                    logger,
                     "Input services on %s are held by Device Hub; restoring "
                     "them now, while nothing is running", udid[:8],
+                    category="device.lifecycle", udid=udid,
                 )
                 await sim_input.restore_legacy_input(udid)
             elif suppressed is None:
-                logger.warning(
+                logging_ext.warning(
+                    logger,
                     "Could not read the input-service state on %s; if taps do "
                     "nothing, see POST /api/v1/device/ui/restore-input", udid[:8],
+                    category="device.lifecycle", udid=udid,
                 )
             elif hub_running:
                 # Device Hub is up and never attached within the wait. Either

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 
-logger = logging.getLogger("quern-debug-server.preview")
+logger = logging.getLogger(__name__)
 
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "ios-preview"

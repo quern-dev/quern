@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query, Request
 
+from server.api.actions import logged_action
 from server.models import CrashLatestResponse
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/api/v1/crashes", tags=["crashes"])
 
 
 @router.get("/latest", response_model=CrashLatestResponse)
+@logged_action("get_latest_crashes", category="logs")
 async def get_latest_crashes(
     request: Request,
     limit: int = Query(default=10, ge=1, le=100),

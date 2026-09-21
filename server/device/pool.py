@@ -15,7 +15,7 @@ from server.config import CONFIG_DIR, get_default_device_family
 from server.device.controller import DeviceController
 from server.models import DeviceError, DevicePoolEntry, DevicePoolState, DeviceState, DeviceType
 
-logger = logging.getLogger("quern-debug-server.device-pool")
+logger = logging.getLogger(__name__)
 
 POOL_FILE = CONFIG_DIR / "device-pool.json"
 REFRESH_CACHE_TTL_SECONDS = 2  # Avoid redundant simctl calls

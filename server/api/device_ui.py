@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server.api.actions import action as _action
+from server.api.actions import logged_action
 from server.api.device import (
     _capture_action_screenshot,
     _capture_screen_context,
@@ -34,8 +35,7 @@ from server.models import (
     WebContentRequest,
 )
 
-router = APIRouter(prefix="/api/v1/device", tags=["device"])
-
+logger = logging.getLogger(__name__)
 
 def _with_input_warning(
     controller: DeviceController, udid: str | None, payload: dict,
@@ -58,12 +58,9 @@ def _with_input_warning(
         payload["warning"] = warning
     return payload
 
-logger = logging.getLogger("quern-debug-server.api")
 
 
-# ---------------------------------------------------------------------------
-# UI inspection & interaction
-# ---------------------------------------------------------------------------
+router = APIRouter(prefix="/api/v1/device", tags=["device"])
 
 
 @router.get("/ui")
@@ -112,47 +109,45 @@ async def get_ui_elements(
 
     Optionally scope to children of a specific element using the `children_of` parameter.
     """
-    start = time.perf_counter()
-    logger.info(f"[PERF] API /ui START (children_of={children_of}, mode={mode})")
-
     controller = _get_controller(request)
-    try:
-        if strategy == "skeleton":
-            resolved_udid = await controller.resolve_udid(udid)
-            if controller._is_physical(resolved_udid):
-                raw = await controller.wda_client.build_screen_skeleton(resolved_udid)
-                from server.device.ui_elements import parse_elements
-                elements = parse_elements(raw)
+    with _action("get_ui_tree", category="device.read") as act:
+        act.detail = f"mode={mode}" + (f" children_of={children_of}" if children_of else "")
+        try:
+            if strategy == "skeleton":
+                resolved_udid = await controller.resolve_udid(udid)
+                if controller._is_physical(resolved_udid):
+                    raw = await controller.wda_client.build_screen_skeleton(resolved_udid)
+                    from server.device.ui_elements import parse_elements
+                    elements = parse_elements(raw)
+                else:
+                    elements, resolved_udid = await controller.get_ui_elements(
+                        udid=udid, snapshot_depth=snapshot_depth,
+                        source_timeout=source_timeout, mode=mode,
+                    )
+            elif children_of:
+                elements, resolved_udid = await controller.get_ui_elements_children_of(
+                    children_of=children_of, udid=udid, snapshot_depth=snapshot_depth,
+                )
             else:
                 elements, resolved_udid = await controller.get_ui_elements(
                     udid=udid, snapshot_depth=snapshot_depth,
                     source_timeout=source_timeout, mode=mode,
                 )
-        elif children_of:
-            elements, resolved_udid = await controller.get_ui_elements_children_of(
-                children_of=children_of, udid=udid, snapshot_depth=snapshot_depth,
-            )
-        else:
-            elements, resolved_udid = await controller.get_ui_elements(
-                udid=udid, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout, mode=mode,
-            )
 
-        end = time.perf_counter()
-        logger.info(f"[PERF] API /ui SUCCESS: {(end-start)*1000:.1f}ms, elements={len(elements)}")
-        dump_kwargs = {} if include_raw else {"exclude": {"extra_attrs"}}
-        return {
-            "elements": [e.model_dump(**dump_kwargs) for e in elements],
-            "element_count": len(elements),
-            "udid": resolved_udid,
-        }
-    except DeviceError as e:
-        end = time.perf_counter()
-        logger.error(f"[PERF] API /ui ERROR: {(end-start)*1000:.1f}ms, error={e}")
-        raise _handle_device_error(e)
+            act.udid = resolved_udid
+            act.detail += f", {len(elements)} elements"
+            dump_kwargs = {} if include_raw else {"exclude": {"extra_attrs"}}
+            return {
+                "elements": [e.model_dump(**dump_kwargs) for e in elements],
+                "element_count": len(elements),
+                "udid": resolved_udid,
+            }
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.get("/ui/element")
+@logged_action("get_element", category="device.read")
 async def get_element(
     request: Request,
     label: str | None = Query(default=None),
@@ -223,12 +218,6 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
     - elapsed_seconds: float - time spent polling
     - polls: int - number of polls performed
     """
-    start = time.perf_counter()
-    logger.info(
-        f"[PERF] API /ui/wait-for-element START: "
-        f"condition={body.condition}, timeout={body.timeout}s"
-    )
-
     controller = _get_controller(request)
 
     # Validation
@@ -241,38 +230,36 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
             detail=f"Condition '{body.condition}' requires a value parameter",
         )
 
-    try:
-        result, resolved_udid = await controller.wait_for_element(
-            condition=body.condition,
-            label=body.label,
-            label_contains=body.label_contains,
-            label_prefix=body.label_prefix,
-            identifier=body.identifier,
-            element_type=body.element_type,
-            value=body.value,
-            timeout=body.timeout,
-            interval=body.interval,
-            udid=body.udid,
-            mode=body.mode,
-        )
-        result["udid"] = resolved_udid
-
-        end = time.perf_counter()
-        logger.info(
-            f"[PERF] API /ui/wait-for-element SUCCESS: "
-            f"{(end-start)*1000:.1f}ms, matched={result.get('matched')}"
-        )
-        return result
-    except DeviceError as e:
-        end = time.perf_counter()
-        logger.error(
-            f"[PERF] API /ui/wait-for-element ERROR: "
-            f"{(end-start)*1000:.1f}ms, error={e}"
-        )
-        raise _handle_device_error(e)
+    with _action("wait_for_element", category="device.read") as act:
+        act.detail = f"{body.condition} timeout={body.timeout}s"
+        try:
+            result, resolved_udid = await controller.wait_for_element(
+                condition=body.condition,
+                label=body.label,
+                label_contains=body.label_contains,
+                label_prefix=body.label_prefix,
+                identifier=body.identifier,
+                element_type=body.element_type,
+                value=body.value,
+                timeout=body.timeout,
+                interval=body.interval,
+                udid=body.udid,
+                mode=body.mode,
+            )
+            result["udid"] = resolved_udid
+            act.udid = resolved_udid
+            # A wait that timed out is not a failure -- the caller asked
+            # whether the condition held within a window, and "no" is an
+            # answer. But it is the answer worth finding in a trace.
+            if not result.get("matched"):
+                act.outcome = "not_found"
+            return result
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.get("/screen-summary")
+@logged_action("get_screen_summary", category="device.read")
 async def get_screen_summary(
     request: Request,
     max_elements: int = Query(default=20, ge=0, le=500),
@@ -351,6 +338,7 @@ async def get_screen_summary(
 
 
 @router.post("/ui/restore-input")
+@logged_action("restore_input", category="device.lifecycle")
 async def restore_input(request: Request, body: RestoreInputRequest):
     """Take a simulator's input services back from Xcode 27's Device Hub.
 
@@ -397,23 +385,18 @@ async def restore_input(request: Request, body: RestoreInputRequest):
 @router.post("/ui/tap")
 async def tap(request: Request, body: TapRequest):
     """Tap at specific coordinates."""
-    start = time.perf_counter()
-    logger.info(f"[PERF] API /ui/tap START: ({body.x}, {body.y})")
-
     controller = _get_controller(request)
-    try:
-        udid = await controller.tap(x=body.x, y=body.y, udid=body.udid)
-
-        end = time.perf_counter()
-        logger.info(f"[PERF] API /ui/tap SUCCESS: {(end-start)*1000:.1f}ms")
-        return _with_input_warning(
-            controller, udid,
-            {"status": "ok", "udid": udid, "x": body.x, "y": body.y},
-        )
-    except DeviceError as e:
-        end = time.perf_counter()
-        logger.error(f"[PERF] API /ui/tap ERROR: {(end-start)*1000:.1f}ms, error={e}")
-        raise _handle_device_error(e)
+    with _action("tap") as act:
+        act.detail = f"({body.x}, {body.y})"
+        try:
+            udid = await controller.tap(x=body.x, y=body.y, udid=body.udid)
+            act.udid = udid
+            return _with_input_warning(
+                controller, udid,
+                {"status": "ok", "udid": udid, "x": body.x, "y": body.y},
+            )
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/ui/tap-element")
@@ -425,64 +408,65 @@ async def tap_element(request: Request, body: TapElementRequest):
     - 200 with status "ambiguous" and match list for multiple matches
     - 404 when no element matches
     """
-    start = time.perf_counter()
-    logger.info(f"[PERF] API /ui/tap-element START: label={body.label}, id={body.identifier}")
-
     controller = _get_controller(request)
-    try:
-        # Resolved up front rather than at the return: the advisory has to be
-        # attached to a *successful* tap, and resolving after the fact would
-        # let a late failure turn a tap that landed into an error.
-        resolved = await controller.resolve_udid(body.udid)
-        if body.capture_screenshots:
-            before = await _capture_action_screenshot(controller, resolved, "tap_before")
+    with _action("tap_element") as act:
+        act.detail = body.label or body.identifier or body.label_contains or ""
+        try:
+            # Resolved up front so the action entry names the device the tap
+            # actually went to, not the one the caller may have omitted.
+            act.udid = await controller.resolve_udid(body.udid)
+            resolved = act.udid
+            if body.capture_screenshots:
+                before = await _capture_action_screenshot(controller, resolved, "tap_before")
 
-        # Guarded like scroll_to_element, and for the same reason: with
-        # `scroll_to_find` on -- the default -- an off-screen target runs the
-        # same sweep, and this is the path most callers reach it by. Guarding
-        # only the dedicated scroll endpoint left the common one unbounded.
-        result = await _run_until_client_leaves(
-            request,
-            controller.tap_element(
-                label=body.label,
-                label_contains=body.label_contains,
-                label_prefix=body.label_prefix,
-                identifier=body.identifier,
-                element_type=body.element_type,
-                # `resolved`, not `body.udid`: each of these calls resolves
-                # the active device independently, so a concurrent request
-                # that changes it between them would let the tap, the
-                # screenshots and the advisory describe different devices.
-                udid=resolved,
-                skip_stability_check=body.skip_stability_check,
-                source_timeout=body.source_timeout,
-                value=body.value,
-                scroll_to_find=body.scroll_to_find,
-            ),
-            what="tap_element",
-        )
+            # Guarded like scroll_to_element, and for the same reason: with
+            # `scroll_to_find` on -- the default -- an off-screen target runs
+            # the same sweep, and this is the path most callers reach it by.
+            # Guarding only the dedicated scroll endpoint left the common one
+            # unbounded.
+            result = await _run_until_client_leaves(
+                request,
+                controller.tap_element(
+                    label=body.label,
+                    label_contains=body.label_contains,
+                    label_prefix=body.label_prefix,
+                    identifier=body.identifier,
+                    element_type=body.element_type,
+                    # `resolved`, not `body.udid`: each of these calls
+                    # resolves the active device independently, so a
+                    # concurrent request that changes it between them would
+                    # let the tap, the screenshots and the advisory describe
+                    # different devices (CodeRabbit, #250).
+                    udid=resolved,
+                    skip_stability_check=body.skip_stability_check,
+                    source_timeout=body.source_timeout,
+                    value=body.value,
+                    scroll_to_find=body.scroll_to_find,
+                ),
+                what="tap_element",
+            )
 
-        end = time.perf_counter()
+            # Element not found — return 404 with screen context. The 404 is
+            # what tells _action this was `not_found` rather than a failure.
+            if result.get("status") == "not_found":
+                raise HTTPException(status_code=404, detail=result)
 
-        # Element not found — return 404 with screen context
-        if result.get("status") == "not_found":
-            logger.info(f"[PERF] API /ui/tap-element NOT_FOUND: {(end-start)*1000:.1f}ms")
-            raise HTTPException(status_code=404, detail=result)
+            if result.get("status") == "ambiguous":
+                act.outcome = "ambiguous"
 
-        if body.capture_screenshots:
-            await asyncio.sleep(body.settle_delay)
-            after = await _capture_action_screenshot(controller, resolved, "tap_after")
-            result["screenshots"] = {"before": before, "after": after}
+            if body.capture_screenshots:
+                await asyncio.sleep(body.settle_delay)
+                after = await _capture_action_screenshot(controller, resolved, "tap_after")
+                result["screenshots"] = {"before": before, "after": after}
 
-        if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
-            result["screen_context"] = await _capture_screen_context(controller, resolved)
+            if body.include_screen_context and result.get("status") not in (
+                "not_found", "ambiguous",
+            ):
+                result["screen_context"] = await _capture_screen_context(controller, resolved)
 
-        logger.info(f"[PERF] API /ui/tap-element SUCCESS: {(end-start)*1000:.1f}ms")
-        return _with_input_warning(controller, resolved, result)
-    except DeviceError as e:
-        end = time.perf_counter()
-        logger.error(f"[PERF] API /ui/tap-element ERROR: {(end-start)*1000:.1f}ms, error={e}")
-        raise _handle_device_error(e)
+            return _with_input_warning(controller, resolved, result)
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/ui/web-content")
@@ -494,30 +478,29 @@ async def get_web_content(request: Request, body: WebContentRequest) -> dict:
     the page through the simulator's Web Inspector and returns its elements with
     real screen frames, so they can be tapped like any other element.
     """
-    start = time.perf_counter()
-    logger.info(f"[PERF] API /ui/web-content START: bundle_id={body.bundle_id}")
-
     controller = _get_controller(request)
-    try:
-        # Matching is by page URL, so every loaded app's hints are equally
-        # usable and the knowledge-base app name does not need to be known here.
-        registry = getattr(request.app.state, "landmark_registry", None)
-        hints = registry.web_content() if registry is not None else None
-        result = await controller.get_web_content(
-            udid=body.udid, bundle_id=body.bundle_id, hints=hints,
-        )
-        elapsed = (time.perf_counter() - start) * 1000
-        logger.info(
-            f"[PERF] API /ui/web-content SUCCESS: {elapsed:.1f}ms, "
-            f"anchored={result.get('anchored')}, elements={len(result.get('elements', []))}, "
-            f"probes={result.get('probes')}"
-        )
-        return {"status": "ok", "elapsed_ms": round(elapsed, 1), **result}
-    except DeviceError as e:
-        logger.error(
-            f"[PERF] API /ui/web-content ERROR: {(time.perf_counter()-start)*1000:.1f}ms, error={e}"
-        )
-        raise _handle_device_error(e)
+    with _action("get_web_content", category="device.read") as act:
+        act.detail = body.bundle_id or ""
+        try:
+            # Matching is by page URL, so every loaded app's hints are equally
+            # usable and the knowledge-base app name does not need to be known
+            # here.
+            registry = getattr(request.app.state, "landmark_registry", None)
+            hints = registry.web_content() if registry is not None else None
+            result = await controller.get_web_content(
+                udid=body.udid, bundle_id=body.bundle_id, hints=hints,
+            )
+            act.detail += (
+                f", anchored={result.get('anchored')}"
+                f", {len(result.get('elements', []))} elements"
+                f", probes={result.get('probes')}"
+            )
+            # `elapsed_ms` is part of this endpoint's response contract, so it
+            # is read off the same clock the action entry uses rather than a
+            # second one that could disagree with it.
+            return {"status": "ok", "elapsed_ms": act.duration_ms, **result}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/ui/wait-settled")
@@ -531,35 +514,42 @@ async def wait_settled(request: Request, body: WaitSettledRequest) -> dict:
     Returns `settled: false` with a reason when the timeout expires, which means
     something is animating rather than loading — a spinner, a video, a carousel.
     """
-    start = time.perf_counter()
     controller = _get_controller(request)
-    try:
-        result = await controller.wait_for_settle(udid=body.udid, timeout=body.timeout)
-        logger.info(
-            f"[PERF] API /ui/wait-settled: {(time.perf_counter()-start)*1000:.1f}ms, "
-            f"settled={result['settled']}, frames={result['frames']}"
-        )
-        return {"status": "ok", **result}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with _action("wait_for_settle", category="device.read") as act:
+        try:
+            result = await controller.wait_for_settle(udid=body.udid, timeout=body.timeout)
+            act.detail = f"settled={result['settled']}, frames={result['frames']}"
+            # Not settling is an answer, not a failure: something is animating.
+            if not result["settled"]:
+                act.outcome = "not_found"
+            return {"status": "ok", **result}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/ui/swipe")
 async def swipe(request: Request, body: SwipeRequest):
     """Perform a swipe gesture."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.swipe(
-            start_x=body.start_x,
-            start_y=body.start_y,
-            end_x=body.end_x,
-            end_y=body.end_y,
-            duration=body.duration,
-            udid=body.udid,
+    with _action("swipe") as act:
+        act.detail = (
+            f"({body.start_x}, {body.start_y}) -> ({body.end_x}, {body.end_y})"
         )
-        return _with_input_warning(controller, udid, {"status": "ok", "udid": udid})
-    except DeviceError as e:
-        raise _handle_device_error(e)
+        try:
+            udid = await controller.swipe(
+                start_x=body.start_x,
+                start_y=body.start_y,
+                end_x=body.end_x,
+                end_y=body.end_y,
+                duration=body.duration,
+                udid=body.udid,
+            )
+            act.udid = udid
+            return _with_input_warning(
+                controller, udid, {"status": "ok", "udid": udid},
+            )
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 
@@ -623,6 +613,7 @@ async def _run_until_client_leaves(
             task.cancel()
 
 @router.post("/ui/scroll-to-element")
+@logged_action("scroll_to_element", category="device.action")
 async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """Scroll a scrollable container until the target element is in view.
 
@@ -652,29 +643,39 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
 async def type_text(request: Request, body: TypeTextRequest):
     """Type text into the focused field."""
     controller = _get_controller(request)
-    try:
-        # Resolved once, then used for everything. Previously the before
-        # screenshot resolved the active device separately from the typing,
-        # so a concurrent request changing it in between produced a "before"
-        # image of one device and text typed into another.
-        resolved = await controller.resolve_udid(body.udid)
-        if body.capture_screenshots:
-            before = await _capture_action_screenshot(controller, resolved, "type_before")
-        typed = await controller.type_text(
-            text=body.text, udid=resolved,
-            label=body.label, identifier=body.identifier,
-        )
-        udid = typed["udid"]
-        result: dict = {"status": "ok", "udid": udid, "verified": typed["verified"]}
-        if body.capture_screenshots:
-            await asyncio.sleep(body.settle_delay)
-            after = await _capture_action_screenshot(controller, udid, "type_after")
-            result["screenshots"] = {"before": before, "after": after}
-        if body.include_screen_context:
-            result["screen_context"] = await _capture_screen_context(controller, udid)
-        return _with_input_warning(controller, udid, result)
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with _action("type_text") as act:
+        # The text itself is deliberately not recorded: this is how passwords
+        # get typed, and a trace is a thing people paste into bug reports.
+        act.detail = f"{len(body.text)} chars"
+        try:
+            # Resolved once, then used for everything: the before screenshot
+            # used to resolve separately from the typing, so a concurrent
+            # request changing the active device produced a "before" image of
+            # one device and text typed into another.
+            resolved = await controller.resolve_udid(body.udid)
+            if body.capture_screenshots:
+                before = await _capture_action_screenshot(controller, resolved, "type_before")
+            typed = await controller.type_text(
+                text=body.text, udid=resolved,
+                label=body.label, identifier=body.identifier,
+            )
+            udid = typed["udid"]
+            act.udid = udid
+            # Typing that did not take is the bug this field exists to make
+            # visible -- the call succeeded and the field is still empty.
+            if not typed["verified"]:
+                act.outcome = "suspect"
+                act.detail += ", unverified"
+            result: dict = {"status": "ok", "udid": udid, "verified": typed["verified"]}
+            if body.capture_screenshots:
+                await asyncio.sleep(body.settle_delay)
+                after = await _capture_action_screenshot(controller, udid, "type_after")
+                result["screenshots"] = {"before": before, "after": after}
+            if body.include_screen_context:
+                result["screen_context"] = await _capture_screen_context(controller, udid)
+            return _with_input_warning(controller, udid, result)
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/ui/clear")
@@ -687,23 +688,31 @@ async def clear_text(request: Request, body: ClearTextRequest):
     Focus cannot be detected — the accessibility tree does not report it.
     """
     controller = _get_controller(request)
-    try:
-        resolved = await controller.clear_text(
-            udid=body.udid, label=body.label, identifier=body.identifier,
-        )
-        return _with_input_warning(
-            controller, resolved, {"status": "ok", "udid": resolved},
-        )
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with _action("clear_text") as act:
+        act.detail = body.label or body.identifier or ""
+        try:
+            resolved = await controller.clear_text(
+                udid=body.udid, label=body.label, identifier=body.identifier,
+            )
+            act.udid = resolved
+            return _with_input_warning(
+                controller, resolved, {"status": "ok", "udid": resolved},
+            )
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/ui/press")
 async def press_button(request: Request, body: PressButtonRequest):
     """Press a hardware button."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.press_button(button=body.button, udid=body.udid)
-        return _with_input_warning(controller, udid, {"status": "ok", "udid": udid})
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with _action("press_button") as act:
+        act.detail = body.button
+        try:
+            udid = await controller.press_button(button=body.button, udid=body.udid)
+            act.udid = udid
+            return _with_input_warning(
+                controller, udid, {"status": "ok", "udid": udid},
+            )
+        except DeviceError as e:
+            raise _handle_device_error(e)

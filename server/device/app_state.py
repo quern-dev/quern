@@ -34,7 +34,7 @@ from pathlib import Path
 from server.config import CONFIG_DIR
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.app_state")
+logger = logging.getLogger(__name__)
 
 APP_STATES_DIR = CONFIG_DIR / "app-states"
 

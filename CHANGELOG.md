@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Quern's own actions are queryable alongside everything else.** Every API call that does something on a caller's behalf now writes one log entry when it finishes, carrying what it did, the device it actually went to, how long it took and how it ended — `tap_element`, `boot_device`, `install_proxy_cert`, 94 routes in all. `LogEntry` gained `action`, `udid`, `duration_ms` and `outcome` as real fields, so "everything slower than two seconds" or "every failure on this simulator" is a query rather than reading the log. `category` is populated too and `/api/v1/logs/query` can filter on it, which it could not before: the predicate existed only on the SSE stream, so the parameter was silently dropped and every category matched everything. The vocabulary is nine categories — `device.action`, `device.read`, `device.lifecycle`, `proxy`, `logs`, `media`, `build`, `knowledge`, `server.lifecycle` — and a test fails if a route is added that is neither classified nor explicitly exempt.
+- **`QUERN_LOG_LEVEL`.** Debug logging without a different command line, which matters because the thing it is most wanted for — an action that hung — is not reproducible on demand. At `debug` each action also logs when it *starts*, which is the only record left behind by a call that never finishes.
+
+### Changed
+- **An operation whose result should not be trusted is now a warning rather than a success.** Typing that reports success into a field that is still empty is recorded as `suspect` and logged at WARNING; it is not `failed`, because the request did happen, and logging it as an error would train the reader to ignore errors. An element that was not found stays at INFO for the same reason: it is an answer to the question that was asked.
+- **Every logger is named for its module.** `quern-debug-server.device` was shared by six modules and `.api` by six more, so the `process` field on a log entry could not tell them apart. It now reads `server.device.sim_input` and the like, which is orthogonal to `category` — the name says where in the code, the category says what quern was doing.
+
 ## [0.20.0] - 2026-09-21
 
 ### Added

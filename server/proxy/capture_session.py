@@ -14,7 +14,7 @@ from server.models import (
 )
 from server.proxy.flow_store import FlowStore
 
-logger = logging.getLogger("quern-debug-server.capture-session")
+logger = logging.getLogger(__name__)
 
 
 class CaptureSession:

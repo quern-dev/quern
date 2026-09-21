@@ -35,7 +35,7 @@ import socket
 import uuid
 from typing import Any
 
-logger = logging.getLogger("quern-debug-server.webinspector")
+logger = logging.getLogger(__name__)
 
 #: Where launchd publishes a booted simulator's Web Inspector socket. Both are
 #: searched because the directory moved: Xcode 27 creates them under

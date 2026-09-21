@@ -34,9 +34,10 @@ import asyncio
 import contextlib
 import logging
 
+from server import logging_ext
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.sim-input")
+logger = logging.getLogger(__name__)
 
 #: The guest notify state Device Hub's daemon publishes when it holds the
 #: input services.
@@ -180,9 +181,11 @@ async def restore_legacy_input(udid: str) -> None:
                 tool="simctl",
             )
         await asyncio.sleep(_BACKBOARDD_RESTART_S)
-        logger.info(
+        logging_ext.info(
+            logger,
             "Restored the legacy input services on %s (SpringBoard was "
             "restarted, so any running app was killed)", udid[:8],
+            category="device.lifecycle", udid=udid,
         )
 
 

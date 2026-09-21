@@ -71,7 +71,7 @@ def _effective_filter_label(
     """
     return label
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 
 class DeviceControllerUI:

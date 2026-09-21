@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
+from server.api.actions import logged_action
 from server.lifecycle.state import (
     detect_current_ssid,
     detect_host_ip_for_subnet,
@@ -320,6 +321,7 @@ async def proxy_status(
 
 
 @router.post("/start", response_model=ProxyStatusResponse)
+@logged_action("start_proxy", category="proxy")
 async def start_proxy(
     request: Request, body: StartProxyRequest | None = None,
 ) -> ProxyStatusResponse:
@@ -387,6 +389,7 @@ async def start_proxy(
 
 
 @router.post("/stop")
+@logged_action("stop_proxy", category="proxy")
 async def stop_proxy(request: Request) -> dict:
     """Stop the mitmproxy network capture and restore system proxy if configured."""
     import asyncio
@@ -494,6 +497,7 @@ async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None
 
 
 @router.post("/configure-system", response_model=SystemProxyInfo)
+@logged_action("configure_system", category="proxy")
 async def configure_system(
     request: Request, body: ConfigureSystemProxyRequest | None = None,
 ) -> SystemProxyInfo:
@@ -548,6 +552,7 @@ async def configure_system(
 
 
 @router.post("/unconfigure-system", response_model=SystemProxyRestoreInfo)
+@logged_action("unconfigure_system", category="proxy")
 async def unconfigure_system(request: Request) -> SystemProxyRestoreInfo:
     """Restore macOS system proxy to its pre-Quern state."""
     import asyncio
@@ -763,6 +768,7 @@ async def stream_flows(
 
 
 @router.post("/flows/wait", response_model=WaitForFlowResponse)
+@logged_action("wait_for_flow", category="proxy")
 async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFlowResponse:
     """Block until a flow matching the filters appears, or timeout."""
     import asyncio
@@ -813,6 +819,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
 
 
 @router.post("/capture/start", response_model=CaptureStartResponse)
+@logged_action("start_capture", category="proxy")
 async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureStartResponse:
     """Start a capture session to bracket a UI action and isolate its flows."""
     manager = request.app.state.capture_sessions
@@ -824,6 +831,7 @@ async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureS
 
 
 @router.post("/capture/stop", response_model=CaptureStopResponse)
+@logged_action("stop_capture", category="proxy")
 async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureStopResponse:
     """Stop a capture session and return the flows captured during that window."""
     manager = request.app.state.capture_sessions
@@ -857,6 +865,7 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
 
 
 @router.post("/filter")
+@logged_action("set_proxy_filter", category="proxy")
 async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
     """Set a host filter on the proxy addon."""
     proxy_adapter = request.app.state.proxy_adapter
@@ -878,6 +887,7 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
 
 
 @router.post("/local-capture", response_model=ProxyStatusResponse)
+@logged_action("set_local_capture", category="proxy")
 async def set_local_capture(
     request: Request, body: LocalCaptureRequest,
 ) -> ProxyStatusResponse:

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 
 _unavailable_logged = False

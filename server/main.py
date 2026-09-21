@@ -79,7 +79,7 @@ from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
 from server.storage.ring_buffer import RingBuffer
 
-logger = logging.getLogger("quern-debug-server")
+logger = logging.getLogger(__name__)
 
 
 def _fix_developer_dir() -> str | None:
@@ -867,8 +867,24 @@ def _cmd_start(args: argparse.Namespace) -> None:
         # daemonize() never returns — it spawns a child process and exits.
 
     # Configure logging
+    # QUERN_LOG_LEVEL turns debug logging on without restarting through a
+    # different command line -- which matters because the thing you most want
+    # it for (an action that hung) is not reproducible on demand. `--verbose`
+    # still wins if it is passed.
+    # A whitelist rather than getattr(logging, name): `logging` has plenty of
+    # uppercase attributes that are not levels, and one of them resolving to a
+    # truthy non-level would configure logging with nonsense.
+    _LEVELS = {
+        "DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR, "CRITICAL": logging.CRITICAL,
+    }
+    _env_level = os.environ.get("QUERN_LOG_LEVEL", "").strip().upper()
+    _level = (
+        logging.DEBUG if args.verbose
+        else _LEVELS.get(_env_level, logging.INFO)
+    )
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
@@ -1153,7 +1169,7 @@ def _update_check_logged_to_file() -> Iterator[bool]:
     that exists to replace it, and would make "the full error is in
     server.log" a false promise in the same breath.
     """
-    log = logging.getLogger("quern-debug-server.update-check")
+    log = logging.getLogger(__name__)
     from server.lifecycle.daemon import LOG_FILE
 
     handler = None
