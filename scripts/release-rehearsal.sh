@@ -826,9 +826,10 @@ case_fresh_install() {
     # The second half of the documented install. `install.sh` runs this as
     # its own step, and it is the only thing that points MCP clients at the
     # new install -- setup does not.
+    # The caller's PATH: `quern mcp-install` is run from the user's shell,
+    # and it may rebuild the wrapper, which needs their node.
     ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
-        PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-        npm_config_cache="$npm_config_cache" \
+        PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
         "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1 || true
   fi
 
@@ -859,7 +860,8 @@ for name, spec in servers.items():
       bad "the MCP registration points somewhere else: $entry"
     fi
   else
-    skip "MCP registration: the installer wrote no .claude.json to check"
+    bad "no .claude.json after mcp-install — the clients were never pointed anywhere"
+    tail -n 6 "$sb/mcp-install.log" 2>/dev/null | sed 's/^/      /' || true
   fi
 
   # From another directory, because the wrapper resolves its own location and
