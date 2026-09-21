@@ -269,8 +269,9 @@ The cases, each against the tree the update produced:
 - **A fresh install** through the site repo's `install.sh` against a candidate
   served locally, then the wrapper run from another directory. Skipped when
   `quern.dev` is not checked out beside this repo, which is the case in CI.
-- **A tarball update**, declared and skipped until the previous release
-  honours `QUERN_RELEASES_URL`.
+- **A tarball update** from the previous release's published asset, driven by
+  that release's updater, fetching the candidate from a local server. Runs
+  from 0.19.0 onward, which is the first release that can be pointed at one.
 
 Unattended, `install.sh` cannot ask whether to create a venv, so it declines,
 exits non-zero and names the step. The rehearsal asserts that rather than

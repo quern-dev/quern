@@ -832,3 +832,98 @@ class TestCancellationDoesNotOutliveTheChild:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+
+
+class TestTheAdvisoryReachesTheCaller:
+    """The warning is useless in a log the caller is not reading.
+
+    `_warn_if_input_is_suppressed` logs server-side. An agent driving quern
+    over MCP sees only the JSON body, so a tap that was accepted and discarded
+    came back as a plain `{"status": "ok"}` -- the exact shape of bug the
+    warning exists to catch. These pin that the advisory travels on the
+    response of the call that is failing.
+    """
+
+    def _controller(self):
+        from server.device.controller import DeviceController
+
+        controller = DeviceController.__new__(DeviceController)
+        controller._input_checked = {}
+        return controller
+
+    def test_a_suppressed_device_has_a_warning_to_give(self):
+        controller = self._controller()
+        controller._input_checked["SIM"] = False
+
+        warning = controller.input_warning("SIM")
+
+        assert warning is not None
+        assert "restore-input" in warning
+
+    def test_a_healthy_device_has_none(self):
+        controller = self._controller()
+        controller._input_checked["SIM"] = True
+
+        assert controller.input_warning("SIM") is None
+
+    def test_an_unread_device_has_none(self):
+        """None is "not asked", not "suppressed". Warning on it would fire on
+        every simulator before the first probe returns."""
+        assert self._controller().input_warning("SIM") is None
+
+    async def test_a_tap_carries_the_advisory_to_the_client(self):
+        """The one that matters: the handler, not the helper."""
+        from server.api import device_ui
+        from server.models import TapRequest
+
+        controller = self._controller()
+        controller.tap = AsyncMock(return_value="SIM")
+        controller._input_checked["SIM"] = False
+
+        with patch.object(device_ui, "_get_controller", lambda request: controller):
+            result = await device_ui.tap(
+                request=object(), body=TapRequest(x=1.0, y=2.0, udid="SIM"),
+            )
+
+        assert result["status"] == "ok"
+        assert "warning" in result, (
+            "a tap into a suppressed device reported plain success"
+        )
+        assert "restore-input" in result["warning"]
+
+    async def test_a_healthy_tap_says_nothing(self):
+        """An advisory on every tap trains the caller to ignore it."""
+        from server.api import device_ui
+        from server.models import TapRequest
+
+        controller = self._controller()
+        controller.tap = AsyncMock(return_value="SIM")
+        controller._input_checked["SIM"] = True
+
+        with patch.object(device_ui, "_get_controller", lambda request: controller):
+            result = await device_ui.tap(
+                request=object(), body=TapRequest(x=1.0, y=2.0, udid="SIM"),
+            )
+
+        assert "warning" not in result
+
+    async def test_tap_element_carries_it_too(self):
+        """The tool agents actually call."""
+        from server.api import device_ui
+        from server.models import TapElementRequest
+
+        controller = self._controller()
+        controller._input_checked["SIM"] = False
+        controller.resolve_udid = AsyncMock(return_value="SIM")
+        controller.tap_element = AsyncMock(
+            return_value={"status": "ok", "tapped": {"label": "Map"}},
+        )
+
+        with patch.object(device_ui, "_get_controller", lambda request: controller):
+            result = await device_ui.tap_element(
+                request=object(), body=TapElementRequest(label="Map", udid="SIM"),
+            )
+
+        assert "warning" in result, (
+            "tap_element reported success into a device that discards taps"
+        )

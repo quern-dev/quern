@@ -18,6 +18,7 @@ from server.api.device import (
     _handle_device_error,
 )
 from server.api.actions import action as _action, logged_action
+from server.device.controller import DeviceController
 from server.device.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
@@ -35,6 +36,29 @@ from server.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _with_input_warning(
+    controller: DeviceController, udid: str | None, payload: dict,
+) -> dict:
+    """Attach the Device Hub advisory to a write that may have gone nowhere.
+
+    Suppressed input is accepted and discarded, so every one of these handlers
+    returns `{"status": "ok"}` for a tap the device never saw. The controller
+    already knows -- it just logs it server-side, where the caller is not
+    looking. Carrying it on the response puts the explanation on the call that
+    is failing.
+
+    Never overwrites an existing `warning`: a handler that already has
+    something to say about this call is more specific than this is.
+    """
+    if not udid:
+        return payload
+    warning = controller.input_warning(udid)
+    if warning and "warning" not in payload:
+        payload["warning"] = warning
+    return payload
+
+
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 
@@ -367,7 +391,10 @@ async def tap(request: Request, body: TapRequest):
         try:
             udid = await controller.tap(x=body.x, y=body.y, udid=body.udid)
             act.udid = udid
-            return {"status": "ok", "udid": udid, "x": body.x, "y": body.y}
+            return _with_input_warning(
+                controller, udid,
+                {"status": "ok", "udid": udid, "x": body.x, "y": body.y},
+            )
         except DeviceError as e:
             raise _handle_device_error(e)
 
@@ -405,7 +432,12 @@ async def tap_element(request: Request, body: TapElementRequest):
                     label_prefix=body.label_prefix,
                     identifier=body.identifier,
                     element_type=body.element_type,
-                    udid=body.udid,
+                    # `resolved`, not `body.udid`: each of these calls
+                    # resolves the active device independently, so a
+                    # concurrent request that changes it between them would
+                    # let the tap, the screenshots and the advisory describe
+                    # different devices (CodeRabbit, #250).
+                    udid=resolved,
                     skip_stability_check=body.skip_stability_check,
                     source_timeout=body.source_timeout,
                     value=body.value,
@@ -424,13 +456,13 @@ async def tap_element(request: Request, body: TapElementRequest):
 
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
-                after = await _capture_action_screenshot(controller, body.udid, "tap_after")
+                after = await _capture_action_screenshot(controller, resolved, "tap_after")
                 result["screenshots"] = {"before": before, "after": after}
 
             if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
-                result["screen_context"] = await _capture_screen_context(controller, body.udid)
+                result["screen_context"] = await _capture_screen_context(controller, resolved)
 
-            return result
+            return _with_input_warning(controller, resolved, result)
         except DeviceError as e:
             raise _handle_device_error(e)
 
@@ -511,7 +543,9 @@ async def swipe(request: Request, body: SwipeRequest):
                 udid=body.udid,
             )
             act.udid = udid
-            return {"status": "ok", "udid": udid}
+            return _with_input_warning(
+                controller, udid, {"status": "ok", "udid": udid},
+            )
         except DeviceError as e:
             raise _handle_device_error(e)
 
@@ -612,11 +646,15 @@ async def type_text(request: Request, body: TypeTextRequest):
         # get typed, and a trace is a thing people paste into bug reports.
         act.detail = f"{len(body.text)} chars"
         try:
+            # Resolved once, then used for everything: the before screenshot
+            # used to resolve separately from the typing, so a concurrent
+            # request changing the active device produced a "before" image of
+            # one device and text typed into another.
+            resolved = await controller.resolve_udid(body.udid)
             if body.capture_screenshots:
-                resolved = await controller.resolve_udid(body.udid)
                 before = await _capture_action_screenshot(controller, resolved, "type_before")
             typed = await controller.type_text(
-                text=body.text, udid=body.udid,
+                text=body.text, udid=resolved,
                 label=body.label, identifier=body.identifier,
             )
             udid = typed["udid"]
@@ -633,7 +671,7 @@ async def type_text(request: Request, body: TypeTextRequest):
                 result["screenshots"] = {"before": before, "after": after}
             if body.include_screen_context:
                 result["screen_context"] = await _capture_screen_context(controller, udid)
-            return result
+            return _with_input_warning(controller, udid, result)
         except DeviceError as e:
             raise _handle_device_error(e)
 
@@ -655,7 +693,9 @@ async def clear_text(request: Request, body: ClearTextRequest):
                 udid=body.udid, label=body.label, identifier=body.identifier,
             )
             act.udid = resolved
-            return {"status": "ok", "udid": resolved}
+            return _with_input_warning(
+                controller, resolved, {"status": "ok", "udid": resolved},
+            )
         except DeviceError as e:
             raise _handle_device_error(e)
 
@@ -669,6 +709,8 @@ async def press_button(request: Request, body: PressButtonRequest):
         try:
             udid = await controller.press_button(button=body.button, udid=body.udid)
             act.udid = udid
-            return {"status": "ok", "udid": udid}
+            return _with_input_warning(
+                controller, udid, {"status": "ok", "udid": udid},
+            )
         except DeviceError as e:
             raise _handle_device_error(e)

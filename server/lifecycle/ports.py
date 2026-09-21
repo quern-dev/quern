@@ -55,12 +55,27 @@ def _is_quern_process(pid: int) -> bool:
         if result.returncode != 0:
             return False
         args = result.stdout.strip()
-        return (
-            "server.main" in args
-            or "uvicorn" in args
-            or "-m server" in args
-            or "proxy/addon.py" in args  # orphaned mitmdump
-        )
+        if not args:
+            return False
+        # `uvicorn` alone used to be enough, and it is not evidence of
+        # anything: it is the most widely used ASGI server in Python, so any
+        # unrelated app holding the port was identified as a stale quern and
+        # SIGKILLed by `quern start`. Quern's own daemon does not even match
+        # it -- the argv is `<python> -m server` -- so the pattern protected
+        # nothing while endangering every uvicorn process on the machine.
+        # That matters most on 9100, which is also Prometheus node_exporter's
+        # default and the JetDirect printing port.
+        #
+        # `-m server` is matched at a word boundary so `-m serverfoo` is not
+        # us, and the mitmdump addon has to be *our* addon rather than any
+        # file that happens to be called proxy/addon.py.
+        if "-m server" in args:
+            after = args.split("-m server", 1)[1]
+            if after == "" or after[0] in " \t":
+                return True
+        if "server.main" in args:
+            return True
+        return "proxy/addon.py" in args and "quern" in args
     except Exception:
         return False
 

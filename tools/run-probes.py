@@ -13,11 +13,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+
+#: The first iOS major version that refuses to launch an app with no scene
+#: manifest, so the app-delegate probe cannot run there at all.
+SCENE_REQUIRED_IOS_MAJOR = 27
 
 
 def booted_simulator() -> str | None:
@@ -32,6 +38,32 @@ def booted_simulator() -> str | None:
     for line in out.splitlines():
         if "(Booted)" in line and "(" in line:
             return line.split("(")[1].split(")")[0]
+    return None
+
+
+def runtime_major(udid: str) -> int | None:
+    """The booted simulator's iOS major version, or None if it cannot be read.
+
+    None means "run both probes", which is what this did before there was a
+    reason not to: guessing a runtime is worse than attempting a probe that
+    might fail with a message saying why.
+    """
+    try:
+        out = subprocess.run(["xcrun", "simctl", "list", "devices", "-j"],
+                             capture_output=True, text=True, timeout=30).stdout
+        data = json.loads(out)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    for runtime, devices in (data.get("devices") or {}).items():
+        if not any(d.get("udid") == udid for d in devices):
+            continue
+        digits = ""
+        for char in runtime.split("iOS-")[-1] if "iOS-" in runtime else "":
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        return int(digits) if digits else None
     return None
 
 
@@ -70,7 +102,21 @@ def main() -> int:
         udid = booted_simulator()
         if udid:
             ios = HERE / "probe-app" / "selftest.py"
-            results.append(run("iOS — app-delegate lifecycle", ios, ["--udid", udid]))
+            major = runtime_major(udid)
+            # iOS 27 refuses to launch an app with no scene manifest, so the
+            # app-delegate bundle cannot run there and the probe would fail at
+            # the launch rather than tell anyone anything. Skipping it is not a
+            # loss of coverage: the lifecycle it exercises is one iOS 27 no
+            # longer permits.
+            if major is not None and major >= SCENE_REQUIRED_IOS_MAJOR:
+                skipped.append(
+                    f"iOS app-delegate lifecycle (iOS {major} requires a scene "
+                    "manifest)"
+                )
+            else:
+                results.append(
+                    run("iOS — app-delegate lifecycle", ios, ["--udid", udid])
+                )
             # The same suite against the scene bundle. Which delegate callbacks
             # fire is decided at build time, so one binary cannot cover both,
             # and the guidance we publish about scene delivery is only verified

@@ -440,7 +440,15 @@ class TestAppDelegation:
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.launch_app = AsyncMock()
+        # Stubbing only simctl.launch_app left the confirmation running for
+        # real against a udid that does not exist: it shelled out to
+        # `xcrun simctl get_app_container` and polled the full frontmost
+        # deadline, so this delegation test took 4.56s where its siblings take
+        # 0.06s (CodeRabbit on #247). Confirmation is covered on its own in
+        # TestALaunchThatNeverCameUp.
+        ctrl._confirm_the_app_came_up = AsyncMock()
         udid = await ctrl.launch_app("com.example.App")
+        ctrl._confirm_the_app_came_up.assert_awaited_once()
         ctrl.simctl.launch_app.assert_called_once_with("AAAA-1111", "com.example.App", env=None)
         assert udid == "AAAA-1111"
 
@@ -1837,3 +1845,68 @@ class TestActiveDeviceRefreshAtStartup:
             ctrl.refresh_active_device()
             ctrl.refresh_active_device()
         assert writes == 0, "refresh rewrote a sidecar that already agreed"
+
+
+class TestALaunchThatNeverCameUp:
+    """#235: `launch_app` answered `launched` for an app iOS refused.
+
+    On iOS 27 an app without a scene manifest is killed at startup. The
+    process survives 2.3s (measured), so a liveness check that runs before
+    that reports success and one that waits for it costs every launch 2.5s.
+    The signal used instead is the app becoming frontmost.
+    """
+
+    def _ctrl(self, *, frontmost: bool, alive: bool, name="Probe"):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl.simctl.launch_app = AsyncMock(return_value=4242)
+        ctrl.simctl.app_display_name = AsyncMock(return_value=name)
+        ctrl.simctl.process_is_alive = MagicMock(return_value=alive)
+        ctrl.simctl.why_launch_failed = AsyncMock(return_value=". because reasons")
+        on_screen = name if frontmost else "SpringBoard"
+        ctrl.get_ui_elements = AsyncMock(return_value=(
+            [UIElement(type="Application", label=on_screen, identifier="",
+                       frame={"x": 0, "y": 0, "width": 393, "height": 852})],
+            "AAAA-1111",
+        ))
+        ctrl._LAUNCH_FRONTMOST_TIMEOUT_S = 0.05
+        ctrl._LAUNCH_FRONTMOST_INTERVAL_S = 0.01
+        return ctrl
+
+    async def test_an_app_that_comes_up_is_a_success(self):
+        ctrl = self._ctrl(frontmost=True, alive=True)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_app_that_never_appears_and_is_gone_is_a_failure(self):
+        ctrl = self._ctrl(frontmost=False, alive=False)
+        with pytest.raises(DeviceError, match="was launched and is not running"):
+            await ctrl.launch_app("com.example.App")
+
+    async def test_the_reason_is_carried_into_the_error(self):
+        ctrl = self._ctrl(frontmost=False, alive=False)
+        with pytest.raises(DeviceError, match="because reasons"):
+            await ctrl.launch_app("com.example.App")
+
+    async def test_a_slow_app_that_is_still_running_is_not_failed(self):
+        """Refusing here would fail every cold start on a loaded machine; the
+        caller has `wait_for_element` for readiness."""
+        ctrl = self._ctrl(frontmost=False, alive=True)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_app_whose_name_cannot_be_read_falls_back_to_the_process(self):
+        """No name means the screen cannot answer, so the pid must.
+
+        An earlier version returned "frontmost" here, which skipped the
+        liveness check entirely and reported a dead process as a successful
+        launch (CodeRabbit on #247). Not being able to tell from the screen
+        is not the same as nothing being wrong.
+        """
+        ctrl = self._ctrl(frontmost=False, alive=True, name=None)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_unreadable_name_with_a_dead_process_is_still_a_failure(self):
+        ctrl = self._ctrl(frontmost=False, alive=False, name=None)
+        with pytest.raises(DeviceError, match="was launched and is not running"):
+            await ctrl.launch_app("com.example.App")

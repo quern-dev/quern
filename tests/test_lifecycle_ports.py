@@ -51,3 +51,60 @@ def test_find_available_raises_when_exhausted():
     # Use max_attempts=1 with the port excluded
     with pytest.raises(RuntimeError, match="No available port found"):
         find_available_port(59131, max_attempts=1, exclude={59131})
+
+
+class TestWhatCountsAsAQuernProcess:
+    """`reclaim_port` SIGTERMs and then SIGKILLs whatever this says yes to,
+    so a loose answer here is a loose answer to "may I kill that process".
+
+    It used to say yes to any argv containing `uvicorn`. That is the most
+    widely used ASGI server in Python, so an unrelated app holding the port
+    was identified as a stale quern and killed by `quern start` — on 9100,
+    which is also Prometheus node_exporter's default and the JetDirect
+    printing port, so sharing it is ordinary rather than unlucky. Quern's own
+    daemon never matched that pattern anyway: its argv is `<python> -m
+    server`.
+    """
+
+    @staticmethod
+    def _argv(argv: str) -> bool:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from server.lifecycle.ports import _is_quern_process
+
+        with patch(
+            "server.lifecycle.ports.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout=argv),
+        ):
+            return _is_quern_process(1234)
+
+    @pytest.mark.parametrize("argv", [
+        "/opt/homebrew/bin/python3.12 -m server",
+        "/Users/x/.local/share/quern/.venv/bin/python -m server --port 9100",
+        "/usr/bin/python3 -m server.main",
+    ])
+    def test_ours_is_recognised(self, argv):
+        assert self._argv(argv) is True, "a stale quern would never be reclaimed"
+
+    @pytest.mark.parametrize("argv", [
+        # The regression. Someone else's ASGI app, which quern would have
+        # killed to take the port.
+        "/usr/local/bin/uvicorn myapp:api --host 0.0.0.0 --port 9100",
+        "/usr/bin/python3 -m uvicorn myapp:app",
+        # A module whose name merely starts the same way.
+        "/usr/bin/python3 -m serverfoo --port 9100",
+        # node_exporter, which owns 9100 by convention.
+        "/usr/local/bin/node_exporter --web.listen-address=:9100",
+        "",
+    ])
+    def test_somebody_else_is_not_killed(self, argv):
+        assert self._argv(argv) is False, f"quern would have killed: {argv}"
+
+    def test_the_mitmdump_addon_has_to_be_ours(self):
+        """An orphaned mitmdump running *our* addon is ours to clean up. A
+        file that merely shares the path tail is not."""
+        assert self._argv(
+            "mitmdump -s /Users/x/.local/share/quern/server/proxy/addon.py"
+        ) is True
+        assert self._argv("mitmdump -s /Users/x/vendor/proxy/addon.py") is False

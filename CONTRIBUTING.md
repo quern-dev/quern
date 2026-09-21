@@ -172,6 +172,22 @@ the copy to trust, and the one to update.
 - **State file is the contract.** All consumers discover the server via `~/.quern/state.json`. Never hardcode ports.
 - **Cursor-based summaries.** `/logs/summary` and `/proxy/flows/summary` return a `cursor` for delta updates. Critical for token-efficient AI workflows.
 - **Template-based summaries, not LLM-generated.** No external API calls needed.
+- **A warning only the server log carries has not been delivered.** The caller
+  driving quern over MCP sees the JSON body and nothing else, so a condition
+  that changes what a result *means* belongs on the response. Quern detected
+  Xcode 27's Device Hub taking a simulator's input services, and logged it —
+  while returning `{"status": "ok"}` for taps that were accepted and
+  discarded, to the one audience that could act on it and could not see it.
+  The log line is for the person reading afterwards; the response field is for
+  the agent deciding what to do next. A check worth making is worth
+  delivering.
+- **Report the outcome, not the request.** `simctl launch` reports the launch
+  it was *asked* for and hands back a pid, so `launch_app` reported success
+  for apps that never started -- on iOS 27, any app that has not adopted the
+  UIScene lifecycle. The failure then surfaced several calls later as
+  `tap_element` finding no element, which sends the reader somewhere unrelated
+  to the cause. Where a tool can confirm the state it claims to have produced,
+  confirm it.
 - **Hybrid proxy storage.** Summary log entries go in the ring buffer (so log queries include network events). Full flow records go in a separate FlowStore.
 - **Mock/intercept patterns use mitmproxy filter syntax.** Valid operators: `~d` (domain), `~u` (URL), `~m` (method), `~c` (status code), `~b` (body), etc. Note: `~p` (path) does NOT exist — use `~u` for path matching.
 - **Server-side filter validation.** Invalid mitmproxy filter patterns are rejected with 400 before reaching the addon.
