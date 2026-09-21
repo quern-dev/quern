@@ -1,0 +1,195 @@
+"""Joining quern's actions to the traffic and logs they caused.
+
+The action log says what quern did and when. The flow store says what the app
+sent. The device log says what the app printed. A trace is those three on one
+timeline, with each flow and log line attributed to the action that caused it.
+
+**There is no correlation id, and there cannot be one.** The proxy is a
+separate `mitmdump` process and the requests are the app's, so nothing quern
+controls travels with them. What saves this is that the flows already identify
+themselves -- see `server/proxy/addon.py`, which reads the client's pid off
+the connection and walks its parents to a `launchd_sim` carrying a UDID.
+
+So the join is on what is already there, and how well it works depends on how
+the device reaches the proxy:
+
+| regime | joins by | tells apps apart? |
+|---|---|---|
+| simulator + local capture | `simulator_udid`, resolved from the pid | yes, `source_process` |
+| physical device + Wi-Fi proxy | `client_ip`, via recorded proxy config | no |
+| simulator + Wi-Fi proxy | nothing; interval only | no |
+
+The last row is why `set_local_capture` is worth recommending to anyone who
+wants a trace.
+
+**Ambiguity is marked, never guessed.** Two actions running against one device
+with no app to tell them apart produce overlapping intervals, and a flow
+inside both genuinely cannot be attributed. Picking one would make the trace
+confidently wrong, which is the failure this codebase keeps finding. See
+docs/proposals/logging-spec.md.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+from server.models import FlowRecord, LogEntry
+
+#: How long after a recorded `client_ip` we still believe it identifies a
+#: device. It is written once, at proxy setup, and DHCP reassigns: a stale
+#: mapping does not fail, it attributes another device's traffic to this one,
+#: which is worse than not attributing it at all.
+IP_MAPPING_TRUSTED_FOR = timedelta(days=7)
+
+
+@dataclass
+class Attribution:
+    """One action and everything that happened inside it."""
+
+    action: LogEntry
+    flows: list[FlowRecord] = field(default_factory=list)
+    logs: list[LogEntry] = field(default_factory=list)
+    #: Other actions whose interval overlaps this one on the same device.
+    #: Non-empty means the flows below may belong to any of them.
+    overlaps: list[str] = field(default_factory=list)
+    #: Why attribution is weaker than it looks, in words a reader can act on.
+    caveats: list[str] = field(default_factory=list)
+
+    @property
+    def ambiguous(self) -> bool:
+        return bool(self.overlaps)
+
+
+def _interval(action: LogEntry) -> tuple[datetime, datetime]:
+    """When an action ran.
+
+    `timestamp` is when the entry was *written*, which is when the action
+    finished -- so the interval runs backwards from it by the duration. Taking
+    it as the start would attribute the next action's traffic to this one.
+    """
+    end = action.timestamp
+    start = end - timedelta(milliseconds=action.duration_ms or 0)
+    return start, end
+
+
+def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tuple[str, bool]]:
+    """`client_ip` -> (udid, still_trusted), from recorded Wi-Fi proxy config.
+
+    Physical devices have no pid for the addon to walk, so their traffic is
+    identified by the address it came from. `record_device_proxy_config` has
+    been writing that per SSID all along; this is the reverse view.
+
+    The flag is the honest part. The mapping is recorded once and never
+    revisited, so an address reassigned by DHCP since then points at the wrong
+    device. Callers surface it rather than dropping the attribution, because
+    "probably this device, recorded three weeks ago" is more useful than
+    silence -- as long as it says so.
+    """
+    now = now or datetime.now(tz=_tz_of(cert_state))
+    mapping: dict[str, tuple[str, bool]] = {}
+    for udid, record in (cert_state or {}).items():
+        for config in (record.get("wifi_proxy_configs") or {}).values():
+            ip = config.get("client_ip")
+            if not ip:
+                continue
+            fresh = True
+            set_at = config.get("set_at")
+            if set_at:
+                try:
+                    recorded = datetime.fromisoformat(set_at)
+                except ValueError:
+                    recorded = None
+                if recorded is not None:
+                    fresh = (now - recorded) <= IP_MAPPING_TRUSTED_FOR
+            mapping[ip] = (udid, fresh)
+    return mapping
+
+
+def _tz_of(_: dict):
+    from datetime import UTC
+
+    return UTC
+
+
+def device_of(flow: FlowRecord, ip_map: dict[str, tuple[str, bool]]) -> tuple[str | None, bool]:
+    """Which device a flow came from, and whether that is firmly known.
+
+    `simulator_udid` is resolved from the client's pid and is exact. Falling
+    back to `client_ip` is how physical devices are identified at all, and it
+    carries whatever staleness the recorded mapping has.
+    """
+    if flow.simulator_udid:
+        return flow.simulator_udid, True
+    if flow.client_ip and flow.client_ip in ip_map:
+        udid, fresh = ip_map[flow.client_ip]
+        return udid, fresh
+    return None, False
+
+
+def build_trace(
+    actions: list[LogEntry],
+    flows: list[FlowRecord],
+    device_logs: list[LogEntry],
+    *,
+    ip_map: dict[str, tuple[str, bool]] | None = None,
+) -> list[Attribution]:
+    """Attribute each flow and log line to the action whose interval holds it.
+
+    Attribution requires the device to match as well as the time. A flow from
+    another simulator that happens to land mid-tap is not part of that tap,
+    and time alone would say it was.
+    """
+    ip_map = ip_map or {}
+    ordered = sorted(actions, key=lambda a: a.timestamp)
+    result = [Attribution(action=a) for a in ordered]
+    intervals = [_interval(a.action) for a in result]
+
+    # Overlaps first: an attribution that is ambiguous should say so even if
+    # nothing lands inside it.
+    for i, attribution in enumerate(result):
+        start, end = intervals[i]
+        for j, other in enumerate(result):
+            if i == j or other.action.udid != attribution.action.udid:
+                continue
+            o_start, o_end = intervals[j]
+            if o_start < end and start < o_end:
+                attribution.overlaps.append(other.action.action or "(unnamed)")
+        if attribution.overlaps:
+            attribution.caveats.append(
+                "overlaps another action on this device; anything below may "
+                "belong to either",
+            )
+
+    for flow in flows:
+        udid, firm = device_of(flow, ip_map)
+        for i, attribution in enumerate(result):
+            start, end = intervals[i]
+            if not (start <= flow.timestamp <= end):
+                continue
+            if udid and attribution.action.udid and udid != attribution.action.udid:
+                continue
+            # With no device on either side, time is all there is. Say so
+            # rather than presenting it as a firm attribution.
+            if not udid:
+                _note(attribution, "some flows matched on time alone")
+            elif not firm:
+                _note(
+                    attribution,
+                    "device identified from a client_ip recorded over "
+                    f"{IP_MAPPING_TRUSTED_FOR.days} days ago; it may have moved",
+                )
+            attribution.flows.append(flow)
+
+    for entry in device_logs:
+        for i, attribution in enumerate(result):
+            start, end = intervals[i]
+            if start <= entry.timestamp <= end:
+                attribution.logs.append(entry)
+
+    return result
+
+
+def _note(attribution: Attribution, text: str) -> None:
+    if text not in attribution.caveats:
+        attribution.caveats.append(text)
