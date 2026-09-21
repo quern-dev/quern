@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import inspect
 import logging
 import time
 
@@ -146,13 +147,29 @@ def logged_action(name: str, *, category: str = "device.action"):
     The handler names its device with `current_action().udid = resolved`.
     """
     def decorate(fn):
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def wrapper(*args, **kwargs):
+                with action(name, category=category) as scope:
+                    token = _CURRENT.set(scope)
+                    try:
+                        return await fn(*args, **kwargs)
+                    finally:
+                        _CURRENT.reset(token)
+            return wrapper
+
+        # A sync handler is rarer here but FastAPI accepts them, and
+        # `await`ing one raises. Every route decorated today is async, so this
+        # branch is a guard against the next one rather than a fix for a
+        # current bug -- a silent TypeError at request time is a bad way to
+        # find out.
         @functools.wraps(fn)
-        async def wrapper(*args, **kwargs):
+        def sync_wrapper(*args, **kwargs):
             with action(name, category=category) as scope:
                 token = _CURRENT.set(scope)
                 try:
-                    return await fn(*args, **kwargs)
+                    return fn(*args, **kwargs)
                 finally:
                     _CURRENT.reset(token)
-        return wrapper
+        return sync_wrapper
     return decorate

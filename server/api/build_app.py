@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from server.api.actions import logged_action
 from server.config import CONFIG_DIR
 from server.models import BuildResult, DeviceError, DeviceType
 
@@ -187,6 +188,7 @@ def _check_minimum_os(app_path: Path, device_os_version: str) -> str | None:
 
 
 @router.post("/build-and-install", response_model=BuildAndInstallResponse)
+@logged_action("build_and_install", category="build")
 async def build_and_install(request: Request, body: BuildAndInstallRequest):
     """Build an Xcode scheme and install the app on one or more devices/simulators.
 

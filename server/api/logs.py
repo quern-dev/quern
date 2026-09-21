@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from server.api.actions import logged_action
 from server.models import (
     LogEntry,
     LogErrorsResponse,
@@ -440,6 +441,7 @@ async def get_filter(request: Request) -> dict:
 
 
 @router.post("/oslog/start")
+@logged_action("start_oslog_streaming", category="logs")
 async def start_oslog_streaming(request: Request, body: StartOslogRequest):
     """Start streaming logs from the host Mac's unified logging system.
 
@@ -482,6 +484,7 @@ async def start_oslog_streaming(request: Request, body: StartOslogRequest):
 
 
 @router.post("/oslog/stop")
+@logged_action("stop_oslog_streaming", category="logs")
 async def stop_oslog_streaming(request: Request):
     """Stop the on-demand host oslog streaming adapter."""
     from fastapi import HTTPException

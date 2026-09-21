@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from server.api.actions import action
+from server.api.actions import action, logged_action
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,
@@ -108,6 +108,7 @@ async def cert_status(request: Request) -> CertStatusResponse:
 
 
 @router.post("/cert/verify", response_model=CertVerifyResponse)
+@logged_action("verify_cert", category="proxy")
 async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyResponse:
     """Verify certificate installation on simulators and physical devices.
 
@@ -502,6 +503,7 @@ class RecordDeviceProxyRequest(BaseModel):
 
 
 @router.post("/device-proxy-config")
+@logged_action("record_device_proxy_config_endpoint", category="proxy")
 async def record_device_proxy_config_endpoint(
     body: RecordDeviceProxyRequest,
     request: Request,

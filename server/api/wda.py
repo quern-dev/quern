@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from server.api.actions import logged_action
 from server.models import (
     DeviceError,
     DeviceType,
@@ -27,6 +28,7 @@ def _get_controller(request: Request):
 
 
 @router.post("/setup")
+@logged_action("setup_wda", category="device.lifecycle")
 async def setup_wda(request: Request, body: SetupWdaRequest):
     """Set up WebDriverAgent on a physical device.
 
@@ -104,6 +106,7 @@ async def _validate_physical_device(controller, udid: str):
 
 
 @router.post("/start")
+@logged_action("start_wda_driver", category="device.lifecycle")
 async def start_wda_driver(request: Request, body: StartDriverRequest):
     """Start WDA driver (xcodebuild test-without-building) on a physical device."""
     controller = _get_controller(request)
@@ -126,6 +129,7 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
 
 
 @router.post("/stop")
+@logged_action("stop_wda_driver", category="device.lifecycle")
 async def stop_wda_driver(request: Request, body: StopDriverRequest):
     """Stop WDA driver on a physical device."""
     controller = _get_controller(request)

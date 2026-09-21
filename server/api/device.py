@@ -152,6 +152,7 @@ async def tool_sites(request: Request) -> ToolSitesResponse:
 
 
 @router.get("/list")
+@logged_action("list_devices", category="device.read")
 async def list_devices(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
@@ -445,6 +446,7 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
 
 
 @router.post("/active")
+@logged_action("set_active_device", category="device.lifecycle")
 async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     """Set the active device by UDID."""
     controller = _get_controller(request)
@@ -477,6 +479,7 @@ async def install_app(request: Request, body: InstallAppRequest):
 
 
 @router.post("/app/launch")
+@logged_action("launch_app", category="device.action")
 async def launch_app(request: Request, body: LaunchAppRequest):
     """Launch an app on a simulator."""
     controller = _get_controller(request)
@@ -531,6 +534,7 @@ async def uninstall_app(request: Request, body: UninstallAppRequest):
 
 
 @router.get("/app/list")
+@logged_action("list_apps", category="device.read")
 async def list_apps(request: Request, udid: str | None = Query(default=None)):
     """List installed apps on a simulator."""
     controller = _get_controller(request)
@@ -550,6 +554,7 @@ async def list_apps(request: Request, udid: str | None = Query(default=None)):
 
 
 @router.get("/screenshot")
+@logged_action("take_screenshot", category="device.read")
 async def take_screenshot(
     request: Request,
     udid: str | None = Query(default=None),
@@ -622,6 +627,7 @@ async def video_stream(
 
 
 @router.post("/location")
+@logged_action("set_location", category="device.action")
 async def set_location(request: Request, body: SetLocationRequest):
     """Set the simulated GPS location."""
     controller = _get_controller(request)
@@ -640,6 +646,7 @@ async def set_location(request: Request, body: SetLocationRequest):
 
 
 @router.post("/open-url")
+@logged_action("open_url", category="device.action")
 async def open_url(request: Request, body: OpenUrlRequest):
     """Open a URL on a simulator or emulator."""
     controller = _get_controller(request)
@@ -663,6 +670,7 @@ async def open_url(request: Request, body: OpenUrlRequest):
 
 
 @router.post("/permission")
+@logged_action("grant_permission", category="device.action")
 async def grant_permission(request: Request, body: GrantPermissionRequest):
     """Grant an app permission."""
     controller = _get_controller(request)
@@ -681,6 +689,7 @@ async def grant_permission(request: Request, body: GrantPermissionRequest):
 
 
 @router.post("/locale")
+@logged_action("set_locale", category="device.action")
 async def set_locale(request: Request, body: SetLocaleRequest):
     """Set the system locale (Android only)."""
     controller = _get_controller(request)
@@ -695,6 +704,7 @@ async def set_locale(request: Request, body: SetLocaleRequest):
 
 
 @router.post("/keyboard")
+@logged_action("set_hardware_keyboard", category="device.action")
 async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardRequest):
     """Attach or detach the simulated hardware keyboard (iOS simulators only)."""
     controller = _get_controller(request)
@@ -708,6 +718,7 @@ async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardReque
 
 
 @router.post("/font-scale")
+@logged_action("set_font_scale", category="device.action")
 async def set_font_scale(request: Request, body: SetFontScaleRequest):
     """Set the font scale (Android only). 1.0 = default."""
     controller = _get_controller(request)
@@ -719,6 +730,7 @@ async def set_font_scale(request: Request, body: SetFontScaleRequest):
 
 
 @router.post("/display-density")
+@logged_action("set_display_density", category="device.action")
 async def set_display_density(request: Request, body: SetDisplayDensityRequest):
     """Set display density override (Android only). Omit dpi to reset."""
     controller = _get_controller(request)
@@ -745,6 +757,7 @@ async def set_display_density(request: Request, body: SetDisplayDensityRequest):
 
 
 @router.post("/logging/start")
+@logged_action("start_simulator_logging", category="logs")
 async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     """Start capturing logs from a simulator app via unified logging."""
     from server.sources.simulator_log import SimulatorLogAdapter
@@ -858,6 +871,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
 
 @router.post("/logging/stop")
+@logged_action("stop_simulator_logging", category="logs")
 async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     """Stop capturing logs from a simulator."""
     controller = _get_controller(request)
@@ -901,6 +915,7 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
 
 
 @router.post("/logging/device/start")
+@logged_action("start_device_logging", category="logs")
 async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     """Start capturing logs from a physical device.
 
@@ -991,6 +1006,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 
 
 @router.post("/logging/device/stop")
+@logged_action("stop_device_logging", category="logs")
 async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     """Stop capturing logs from a physical device."""
     controller = _get_controller(request)
@@ -1037,6 +1053,7 @@ def _get_scrcpy_preview(request: Request):
 
 
 @router.post("/preview/start")
+@logged_action("preview_start", category="media")
 async def preview_start(request: Request, body: PreviewStartRequest):
     """Start a live preview window for a device.
 
@@ -1149,6 +1166,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
 
 
 @router.post("/preview/stop")
+@logged_action("preview_stop", category="media")
 async def preview_stop(request: Request, body: PreviewStopRequest):
     """Stop live preview.
 
@@ -1225,6 +1243,7 @@ async def preview_devices(request: Request):
 
 
 @router.get("/screenshot/annotated")
+@logged_action("screenshot_annotated", category="device.read")
 async def screenshot_annotated(
     request: Request,
     udid: str | None = Query(default=None),
@@ -1252,6 +1271,7 @@ async def screenshot_annotated(
 
 
 @router.post("/screenshot/timeline/start")
+@logged_action("start_timeline", category="media")
 async def start_timeline(
     request: Request,
     body: dict | None = None,
@@ -1285,6 +1305,7 @@ async def start_timeline(
 
 
 @router.post("/screenshot/timeline/stop")
+@logged_action("stop_timeline", category="media")
 async def stop_timeline(request: Request):
     """Stop the active screenshot timeline and return its manifest."""
     timeline = getattr(request.app.state, "active_timeline", None)

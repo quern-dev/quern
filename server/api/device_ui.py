@@ -17,7 +17,7 @@ from server.api.device import (
     _get_controller,
     _handle_device_error,
 )
-from server.api.actions import action as _action
+from server.api.actions import action as _action, logged_action
 from server.device.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
@@ -123,6 +123,7 @@ async def get_ui_elements(
 
 
 @router.get("/ui/element")
+@logged_action("get_element", category="device.read")
 async def get_element(
     request: Request,
     label: str | None = Query(default=None),
@@ -234,6 +235,7 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
 
 
 @router.get("/screen-summary")
+@logged_action("get_screen_summary", category="device.read")
 async def get_screen_summary(
     request: Request,
     max_elements: int = Query(default=20, ge=0, le=500),
@@ -312,6 +314,7 @@ async def get_screen_summary(
 
 
 @router.post("/ui/restore-input")
+@logged_action("restore_input", category="device.lifecycle")
 async def restore_input(request: Request, body: RestoreInputRequest):
     """Take a simulator's input services back from Xcode 27's Device Hub.
 
@@ -574,6 +577,7 @@ async def _run_until_client_leaves(
             task.cancel()
 
 @router.post("/ui/scroll-to-element")
+@logged_action("scroll_to_element", category="device.action")
 async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     """Scroll a scrollable container until the target element is in view.
 

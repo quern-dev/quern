@@ -496,3 +496,18 @@ class TestTheDecoratorFormActuallyEmits:
         params = inspect.signature(handler).parameters
         assert list(params) == ["udid", "count"]
         assert params["count"].default == 3
+
+    def test_a_sync_handler_is_wrapped_without_awaiting_it(self):
+        """FastAPI accepts sync endpoints, and `await`ing one raises.
+
+        Every route decorated today is async, so this guards the next one
+        rather than fixing a current bug -- a TypeError at request time is a
+        bad way to discover it.
+        """
+        from server.api.actions import logged_action
+
+        @logged_action("pretend_sync", category="proxy")
+        def handler():
+            return {"ok": True}
+
+        assert handler() == {"ok": True}

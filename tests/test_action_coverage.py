@@ -76,66 +76,13 @@ watched it.
 #: active *now*: a route added tomorrow is neither wrapped nor listed here, so
 #: it fails. Working through these is ordinary follow-up work; letting a new
 #: one join them silently is the thing worth preventing.
-_UNCLASSIFIED: frozenset[str] = frozenset({
-    "app_state.py:save_app_state",
-    "app_state.py:restore_app_state",
-    "app_state.py:list_app_states",
-    "app_state.py:delete_app_state",
-    "app_state.py:read_app_plist",
-    "app_state.py:set_app_plist_value",
-    "app_state.py:set_app_plist_values",
-    "app_state.py:diff_app_plist",
-    "app_state.py:delete_app_plist_key",
-    "app_state.py:start_plist_watch",
-    "app_state.py:stop_plist_watch",
-    "app_state.py:configure_plist_watch",
-    "app_state.py:clear_plist_watch_config_endpoint",
-    "build_app.py:build_and_install",
-    "builds.py:parse_build",
-    "builds.py:parse_build_file",
-    "crashes.py:get_latest_crashes",
-    "device.py:list_devices",
-    "device.py:set_active_device",
-    "device.py:launch_app",
-    "device.py:list_apps",
-    "device.py:take_screenshot",
-    "device.py:set_location",
-    "device.py:open_url",
-    "device.py:grant_permission",
-    "device.py:set_locale",
-    "device.py:set_hardware_keyboard",
-    "device.py:set_font_scale",
-    "device.py:set_display_density",
-    "device.py:start_simulator_logging",
-    "device.py:stop_simulator_logging",
-    "device.py:start_device_logging",
-    "device.py:stop_device_logging",
-    "device.py:preview_start",
-    "device.py:preview_stop",
-    "device.py:screenshot_annotated",
-    "device.py:start_timeline",
-    "device.py:stop_timeline",
-    "device_pool.py:refresh_pool",
-    "device_pool.py:resolve_device",
-    "device_pool.py:ensure_devices",
-    "device_ui.py:get_element",
-    "device_ui.py:get_screen_summary",
-    "device_ui.py:restore_input",
-    "device_ui.py:scroll_to_element",
-    "landmarks.py:load_landmarks",
-    "landmarks.py:identify_screen",
-    "landmarks.py:unload_landmarks",
-    "landmarks.py:validate_landmarks",
-    "logs.py:start_oslog_streaming",
-    "logs.py:stop_oslog_streaming",
-    "proxy_certs.py:verify_cert",
-    "proxy_certs.py:record_device_proxy_config_endpoint",
-    "system.py:put_channel",
-    "system.py:trigger_update",
-    "wda.py:setup_wda",
-    "wda.py:start_wda_driver",
-    "wda.py:stop_wda_driver",
-})
+_UNCLASSIFIED: frozenset[str] = frozenset()
+"""Empty, and it may only grow smaller.
+
+It held 84 routes when the guard landed. A route added tomorrow is in neither
+list and fails, which was always the point -- the backlog was a way to make
+the guard live immediately rather than a place to leave work.
+"""
 
 
 def _routes_in(path: pathlib.Path) -> list[tuple[str, ast.AST]]:
