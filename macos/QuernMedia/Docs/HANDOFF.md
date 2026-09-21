@@ -151,12 +151,12 @@ each other.
         An index is a property of one encode and goes silently wrong on
         re-encode. "Nearest keyframe to offset" stays on our side, where the
         encoder parameters are.
-      - [ ] **Not built yet: publish the first frame's PTS in
-        `Recorder.Summary`.** It is our half of the agreed interface and the
-        only thing the trace side needs from us to convert an absolute host
-        time into a movie-relative offset. `Summary` currently carries
-        `framesWritten`, `framesDropped`, `duration`, `url` — the first PTS
-        is captured in `firstPTS` already and simply is not exposed.
+      - **Done: `Recorder.Summary.startHostTime`** carries the first
+        written frame's PTS in seconds on the host clock, and `quern-media`
+        logs it (`[record] N frames over Xs from host 612668.550550, ...`).
+        That is our half of the interface: subtract it from an absolute host
+        time to get a movie-relative offset.
+
       - **The .mp4 timeline is not zero-based** — `startSession` uses the
         first frame's real PTS, so it runs in host-monotonic seconds since
         boot. Anything assuming 0.0 is wrong.

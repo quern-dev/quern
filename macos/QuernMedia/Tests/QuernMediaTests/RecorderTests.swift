@@ -191,3 +191,34 @@ func successLeavesNoFailure() throws {
     #expect(recorder.finish() == nil)
     #expect(recorder.failure == nil, "a repeat finish overwrote a clean result")
 }
+
+@Test("the summary reports the first frame's host time, so offsets can be computed")
+func summaryPublishesStartHostTime() throws {
+    // The movie timeline is not zero-based -- startSession begins at the
+    // first frame's PTS -- so a consumer holding an absolute host time (a
+    // trace entry stamped on the same clock) cannot convert it to a
+    // movie-relative offset without this value. It was captured internally
+    // and not exposed, and the handoff doc claimed otherwise.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    // A deliberately non-zero, non-small start: a real host clock reads
+    // hundreds of thousands of seconds since boot, and a summary reporting 0
+    // or the duration would pass a laxer assertion.
+    let start = 612_668.5
+    let first = try #require(encoder.encode(captured(surface, at: start)))
+    #expect(recorder.append(first.frame))
+    let second = try #require(encoder.encode(captured(surface, at: start + 1.0)))
+    recorder.append(second.frame)
+
+    let summary = try #require(
+        recorder.finish(), "finish reported: \(String(describing: recorder.failure))"
+    )
+    #expect(abs(summary.startHostTime - start) < 0.01,
+            "expected the first frame's PTS, got \(summary.startHostTime)")
+    #expect(summary.startHostTime != summary.duration)
+}

@@ -133,8 +133,9 @@ let shutdownOnce = ShutdownGuard { () -> Int32 in
     if let recording {
         if let summary = recording.finish() {
             MediaLog.log(String(
-                format: "[record] %d frames over %.2fs, %d dropped -> %@",
-                summary.framesWritten, summary.duration,
+                format: "[record] %d frames over %.2fs from host %.6f, "
+                    + "%d dropped -> %@",
+                summary.framesWritten, summary.duration, summary.startHostTime,
                 summary.framesDropped, summary.url.path
             ))
         } else if case .neverStarted? = recording.failure {

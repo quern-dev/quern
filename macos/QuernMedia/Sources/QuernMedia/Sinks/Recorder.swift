@@ -35,6 +35,18 @@ public final class Recorder {
         public let framesDropped: Int
         /// Span between the first and last written frame, in seconds.
         public let duration: Double
+        /// Presentation time of the first written frame, in seconds on the
+        /// host clock — `CMClockGetHostTimeClock`, i.e. mach absolute time,
+        /// the same base as `time.monotonic()` on this platform.
+        ///
+        /// The movie's timeline is deliberately not zero-based: `startSession`
+        /// begins at this value, so the recording's internal times are host
+        /// times rather than offsets from its own start. A consumer holding an
+        /// absolute host time — a trace entry, say — converts it to a
+        /// movie-relative offset by subtracting this, and cannot do that
+        /// without it. That is why it is on the summary rather than left
+        /// inside the recorder.
+        public let startHostTime: Double
         public let url: URL
     }
 
@@ -157,6 +169,10 @@ public final class Recorder {
         let written = framesWritten
         let dropped = framesDropped
         let duration = CMTimeGetSeconds(CMTimeSubtract(lastPTS, firstPTS))
+        // Captured under the lock with everything else it is reported
+        // alongside. `append` writes firstPTS, so reading it after the unlock
+        // is a race for no reason.
+        let start = CMTimeGetSeconds(firstPTS)
         let localInput = input
         lock.unlock()
 
@@ -183,7 +199,9 @@ public final class Recorder {
 
         return Summary(
             framesWritten: written, framesDropped: dropped,
-            duration: duration.isFinite ? duration : 0, url: url
+            duration: duration.isFinite ? duration : 0,
+            startHostTime: start.isFinite ? start : 0,
+            url: url
         )
     }
 
