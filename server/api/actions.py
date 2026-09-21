@@ -15,12 +15,15 @@ See docs/proposals/logging-spec.md.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import functools
 import inspect
 import logging
 import time
+from collections.abc import Callable, Iterator
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -53,7 +56,9 @@ class ActionScope:
 
 
 @contextlib.contextmanager
-def action(name: str, *, category: str = "device.action"):
+def action(
+    name: str, *, category: str = "device.action",
+) -> Iterator[ActionScope]:
     """Emit one action entry when the block ends, however it ends.
 
     A failure is still an action that happened, and it is the one most worth
@@ -79,6 +84,15 @@ def action(name: str, *, category: str = "device.action"):
         # A 404 from a find-style call is an answer, not a fault: the element
         # genuinely was not there. Anything else is a failure.
         scope.outcome = "not_found" if exc.status_code == 404 else "failed"
+        raise
+    except asyncio.CancelledError:
+        # CancelledError is a BaseException, so `except Exception` misses it
+        # and the entry would be written as `ok` for work that was abandoned
+        # part-way. That is not hypothetical here: `_run_until_client_leaves`
+        # cancels deliberately when the caller disconnects, which is the
+        # common case, and reporting it as success is the exact bug the
+        # action log exists to expose (CodeRabbit, #253).
+        scope.outcome = "cancelled"
         raise
     except Exception:
         scope.outcome = "failed"
@@ -135,7 +149,9 @@ def current_action() -> ActionScope | _NoAction:
     return _CURRENT.get() or _NO_ACTION
 
 
-def logged_action(name: str, *, category: str = "device.action"):
+def logged_action(
+    name: str, *, category: str = "device.action",
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator form, for handlers too long to wrap in a `with` block.
 
     Deliberately a decorator and not middleware. It wraps the endpoint
@@ -146,10 +162,10 @@ def logged_action(name: str, *, category: str = "device.action"):
 
     The handler names its device with `current_action().udid = resolved`.
     """
-    def decorate(fn):
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
-            async def wrapper(*args, **kwargs):
+            async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 with action(name, category=category) as scope:
                     token = _CURRENT.set(scope)
                     try:
@@ -164,7 +180,7 @@ def logged_action(name: str, *, category: str = "device.action"):
         # current bug -- a silent TypeError at request time is a bad way to
         # find out.
         @functools.wraps(fn)
-        def sync_wrapper(*args, **kwargs):
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             with action(name, category=category) as scope:
                 token = _CURRENT.set(scope)
                 try:

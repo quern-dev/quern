@@ -89,7 +89,15 @@ class LogEntry(BaseModel):
     )
     outcome: str = Field(
         default="",
-        description="'ok' | 'failed' | 'not_found' | 'ambiguous'",
+        description=(
+            "How the action ended. 'ok' worked; 'failed' means the caller did "
+            "not get what they asked for; 'suspect' means quern did it and the "
+            "result should not be trusted, such as typing that reported "
+            "success into a field still empty; 'cancelled' means the caller "
+            "disconnected part-way; 'not_found' and 'ambiguous' are answers "
+            "rather than faults; 'started' marks a begin entry, which carries "
+            "no duration. The list lives in server/logging_ext.OUTCOMES."
+        ),
     )
     repeat_count: int = Field(
         default=1,
