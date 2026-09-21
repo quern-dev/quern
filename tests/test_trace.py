@@ -216,3 +216,60 @@ class TestDeviceLogsJoinOnTheIntervalToo:
         [attribution] = build_trace([action], [], [line])
 
         assert attribution.logs == [line]
+
+
+class TestTwoCallersOnOneServer:
+    """One quern, two agents, a simulator each, at the same time.
+
+    The only thing separating them is the device: quern has no notion of who
+    is asking. So every join has to be device-aware, and a trace that mixes
+    them is worse than no trace at all -- it reads as evidence about a run it
+    has nothing to do with.
+    """
+
+    def test_neither_actions_nor_flows_cross_over(self):
+        a = _action("tap", at_s=10, duration_ms=2000, udid="SIM-A")
+        b = _action("tap", at_s=10, duration_ms=2000, udid="SIM-B")
+        flow_a = _flow(at_s=9, udid="SIM-A", host="a.example")
+        flow_b = _flow(at_s=9, udid="SIM-B", host="b.example")
+
+        a_attr, b_attr = build_trace([a, b], [flow_a, flow_b], [])
+
+        assert a_attr.flows == [flow_a]
+        assert b_attr.flows == [flow_b]
+
+    def test_simultaneous_actions_on_different_devices_are_not_ambiguous(self):
+        """Concurrency across devices is the normal case here, not a race.
+        Marking it ambiguous would make every multi-agent trace unreadable."""
+        a = _action("tap", at_s=10, duration_ms=4000, udid="SIM-A")
+        b = _action("swipe", at_s=10, duration_ms=4000, udid="SIM-B")
+
+        a_attr, b_attr = build_trace([a, b], [], [])
+
+        assert not a_attr.ambiguous
+        assert not b_attr.ambiguous
+
+    def test_device_logs_do_not_cross_over(self):
+        """The bug this class was written to catch: log attribution matched on
+        the interval and nothing else, so each caller collected the other's
+        device log lines."""
+        a = _action("tap", at_s=10, duration_ms=2000, udid="SIM-A")
+        b = _action("tap", at_s=10, duration_ms=2000, udid="SIM-B")
+
+        def line(device, text):
+            return LogEntry(
+                id=uuid.uuid4().hex,
+                timestamp=BASE + timedelta(seconds=9),
+                device_id=device,
+                process="MyApp",
+                level=LogLevel.INFO,
+                message=text,
+                source=LogSource.SIMULATOR,
+            )
+
+        log_a, log_b = line("SIM-A", "from A"), line("SIM-B", "from B")
+
+        a_attr, b_attr = build_trace([a, b], [], [log_a, log_b])
+
+        assert [e.message for e in a_attr.logs] == ["from A"]
+        assert [e.message for e in b_attr.logs] == ["from B"]

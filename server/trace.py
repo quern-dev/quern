@@ -184,8 +184,20 @@ def build_trace(
     for entry in device_logs:
         for i, attribution in enumerate(result):
             start, end = intervals[i]
-            if start <= entry.timestamp <= end:
-                attribution.logs.append(entry)
+            if not (start <= entry.timestamp <= end):
+                continue
+            # Device logs carry the udid they came from in `device_id`, and
+            # one server can be driving several devices for several callers at
+            # once. Matching on time alone hands one caller another's log
+            # lines -- which is worse than no trace, because it reads as
+            # evidence about their own run.
+            if (
+                entry.device_id
+                and attribution.action.udid
+                and entry.device_id != attribution.action.udid
+            ):
+                continue
+            attribution.logs.append(entry)
 
     return result
 
