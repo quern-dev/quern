@@ -55,6 +55,14 @@ IP_MAPPING_TRUSTED_FOR = timedelta(days=7)
 #: too short and causation is missed, too long and unrelated traffic is
 #: swept in. Anything attributed this way is marked, so a reader can tell
 #: inference from observation.
+#:
+#: Deliberately not a parameter. The media-engine work (PR #164) is the one
+#: consumer that might have wanted a hard interval, and asked for the causal
+#: default instead: a keyframe is a seek point rather than a claim about what
+#: is visible, so a late flow needs no second anchor. What the grace forbids
+#: is rendering `[started_at, finished_at]` as though the visible result were
+#: inside it -- which is a rendering rule, not a reason to make the window
+#: configurable. A knob nobody needs is one that eventually gets set wrong.
 CAUSAL_GRACE = timedelta(seconds=3)
 
 #: Sources whose timestamps come from a physical device's clock rather than
