@@ -826,12 +826,19 @@ case_fresh_install() {
     # The second half of the documented install. `install.sh` runs this as
     # its own step, and it is the only thing that points MCP clients at the
     # new install -- setup does not.
-    # The caller's PATH: `quern mcp-install` is run from the user's shell,
-    # and it may rebuild the wrapper, which needs their node.
-    ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
-        PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
-        "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1 || true
   fi
+
+  # Unconditional, and it was not: this sat inside the "setup did not finish"
+  # branch above, which stopped being taken once setup created the venv
+  # without asking. The registration step then never ran, and the check for
+  # it reported the absence of a file nobody had tried to write. The
+  # documented install runs this every time.
+  #
+  # The caller's PATH, since `quern mcp-install` is run from the user's shell
+  # and may rebuild the wrapper, which needs their node.
+  ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+      PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
+      "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1 || true
 
   # The MCP registration the installer writes, checked for *where it points*.
   # This project has twice written a path into another tool's config that was
