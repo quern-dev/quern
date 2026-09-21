@@ -128,12 +128,22 @@ async def get_trace(
     return {
         "since": window_start.isoformat(),
         "udid": udid,
-        # Read now, per export, rather than once at server start. The two
-        # clocks do not stay a fixed distance apart -- measured 4.078s of
-        # divergence on one machine -- so a single anchor recorded at startup
-        # silently decays, with nothing to detect it. Reading it per export
-        # costs two syscalls and removes the failure mode where a laptop lid
-        # ruins an overnight alignment.
+        # Read now, per export, rather than once at server start.
+        #
+        # Be careful what this claims. Wall and monotonic sit about 4.3s apart
+        # on this machine and that gap was *stable* across every reading taken
+        # -- no drift was observed, and an earlier note here asserting some
+        # was wrong. It came from comparing two measurements that parsed
+        # `kern.boottime` differently, one dropping its usec field: the
+        # 0.218s "movement" was exactly that fraction. A sleep/wake
+        # explanation was offered for it and is also unsupported.
+        #
+        # So this is not here because divergence was measured. It is here
+        # because a recorded anchor is wrong the moment the wall clock is
+        # stepped -- NTP correction, a manual change -- and a long-running
+        # server has no way to notice. That failure is unbounded and silent,
+        # and avoiding it costs two syscalls per export. A stable offset is
+        # served correctly by reading it per export as well.
         "clock_anchor": {
             "wall": datetime.now(UTC).isoformat(),
             "monotonic": time.monotonic(),
