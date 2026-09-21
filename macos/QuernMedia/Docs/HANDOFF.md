@@ -54,14 +54,27 @@ each other.
 
 ### Blocking the merge of #164
 
-- [ ] **`075602f` has never had a CodeRabbit full pass.** Three attempts:
-      one refused on the OSS review limit, two accepted and silently never
-      ran. Two review agents covered `a00eeb2` instead and found nine real
-      problems, so the gap is partly filled, but `075602f` itself is
+- [ ] **The head has never had a CodeRabbit full pass.** Three attempts:
+      one refused on the review limit, two accepted and silently never ran.
+      Two review agents covered `a00eeb2` instead and found nine real
+      problems, so the gap is partly filled, but everything since is
       unreviewed. Confirm a review actually *started* before waiting on one —
       the acknowledgement body says `Reviews are available now` when it did
       and carries an `Action not completed` block when it did not, and the
       walkthrough's "Review limit reached" banner is a stale edit that lies.
+
+      **Coordinate before asking.** The limit is one review per *hour*, and
+      the window is repo-wide — shared across PRs and across agents, six
+      reviews over four PRs in one measured evening. A request on this branch
+      can take the slot from someone actively trying to land something, so
+      check `gh pr list` and ask the sessions working those PRs first. This
+      branch is parked; almost anything else in flight has a better claim on
+      the hour.
+
+      That also explains a stall recorded here as unexplained: an
+      acknowledgement can say `Reviews are available now` and still produce
+      nothing if another PR takes the window before it runs. Plausible rather
+      than proven — the grant times for those two were never captured.
 
 ### Product work
 
