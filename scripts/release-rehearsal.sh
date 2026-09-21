@@ -846,6 +846,151 @@ failures=$((failures + $?))
 set -e
 
 # --------------------------------------------------------------------------
+step "A git install updating while its server is running"
+# --------------------------------------------------------------------------
+# Every case above updates with the daemon stopped. Users do not: they run
+# `quern update` with quern running, and the updater restarts it. That restart
+# is where "the server did not come back" lives -- the condition the menu
+# bar's recovery items (#225, #226) exist for -- and nothing exercised it.
+#
+# Safety first, because this one can reach outside the sandbox. `quern start`
+# reclaims its port by SIGKILLing whatever quern-looking process holds it, and
+# it does not consult QUERN_STATE_DIR. The restart inside an update asks for
+# the *default* port -- `restart` takes no port and `_resolve_args` falls back
+# to 9100 -- whatever port the server was actually on. So a rehearsal that let
+# the restart run unimpeded would kill the developer's own server.
+#
+# The fix is a decoy: hold 9100 and 9101 with plain listeners that are not
+# quern. `reclaim_port` then reports them busy rather than killing them, and
+# the restarted server scans upward, exactly as it would beside any other
+# application. If the ports cannot be held -- because a real quern already has
+# them -- the case refuses to run rather than taking that server down.
+hold_default_ports() {
+  local sb="$1"
+  python3 - "$sb/decoy.pid" <<'PY' > "$sb/decoy.log" 2>&1 &
+import socket, sys, time
+held = []
+for port in (9100, 9101):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        print(f"could not hold {port}", flush=True)
+        raise SystemExit(1)
+    s.listen(16)
+    held.append(s)
+print("held", flush=True)
+time.sleep(900)
+PY
+  DECOY_PID=$!
+  local waited=0
+  until grep -q "held" "$sb/decoy.log" 2>/dev/null; do
+    if ! kill -0 "$DECOY_PID" 2>/dev/null; then return 1; fi
+    waited=$((waited + 1))
+    (( waited > 20 )) && return 1
+    sleep 0.25
+  done
+  return 0
+}
+
+release_default_ports() {
+  [[ -n "${DECOY_PID:-}" ]] || return 0
+  { kill "$DECOY_PID" && wait "$DECOY_PID"; } 2>/dev/null || true
+  DECOY_PID=""
+}
+
+case_running_server_update() {
+  failures=0   # a subshell copy: a case reports only its own
+  local sb="$WORK/running-update"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+
+  if ! hold_default_ports "$sb"; then
+    skip "running-server update: 9100/9101 are already taken, most likely by your own quern — this case would restart onto them and kill it. Stop your server and re-run to exercise it."
+    return 0
+  fi
+
+  build_origin "$sb/origin.git" "$sb/build"
+  git clone -q -b release/stable "$sb/origin.git" "$sb/install"
+  git -C "$sb/install" reset -q --hard HEAD~1
+
+  export HOME="$sb/home" QUERN_STATE_DIR="$sb/state" PATH="$sb/bin:$PATH"
+
+  python3 -m venv "$sb/install/.venv" > "$sb/venv.log" 2>&1 || true
+  "$sb/install/.venv/bin/pip" install -q -e "$sb/install" > "$sb/pip.log" 2>&1 || true
+
+  # The previous release, running, on ports of its own.
+  set +e
+  ( cd "$sb/install" && "$sb/install/quern" start --port 9190 --proxy-port 9191 ) \
+    > "$sb/start.log" 2>&1
+  local started=$?
+  set -e
+  if [[ $started -ne 0 ]]; then
+    bad "running-server update: $PREV would not start, so there was nothing to update under"
+    tail -n 12 "$sb/start.log" | sed 's/^/      /'
+    release_default_ports
+    return "$failures"
+  fi
+  ok "$PREV's server is up before the update"
+
+  set +e
+  ( cd "$sb/install" && "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    ok "the update exits 0 with the server running"
+  else
+    bad "the update exited $rc — see $sb/update.log"
+    tail -n 20 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  if grep -q "Traceback (most recent call last)" "$sb/update.log"; then
+    bad "the update printed a traceback"
+  else
+    ok "no traceback"
+  fi
+
+  # The point of the case. A server that does not come back is the state the
+  # menu bar grew a recovery item for, and it is silent from the CLI.
+  local port
+  port="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("server_port", ""))
+except Exception:
+    print("")' "$sb/state/state.json" 2>/dev/null || true)"
+  if [[ -z "$port" ]]; then
+    bad "no server_port in state.json — the server did not come back from the update"
+  elif curl -fsS --max-time 15 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+    ok "the server came back after the update, on port $port"
+  else
+    bad "nothing answers /health on port $port — the server did not come back"
+  fi
+
+  # It has to come back as the *candidate*, not the version it was.
+  local running
+  running="$(curl -fsS --max-time 15 "http://127.0.0.1:${port:-0}/health" 2>/dev/null \
+    | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' | head -1 || true)"
+  if [[ -z "$running" ]]; then
+    skip "running-server update: /health did not report a version to compare"
+  elif [[ "$running" == "$candidate_version" ]]; then
+    ok "it is serving $candidate_version"
+  else
+    bad "it came back on $running, expected $candidate_version — the restart picked up the old tree"
+  fi
+
+  ( cd "$sb/install" && "$sb/install/quern" stop ) >/dev/null 2>&1 || true
+  release_default_ports
+  return "$failures"
+}
+
+set +e
+( case_running_server_update )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
 step "A tarball install updating from $PREV to $candidate_version"
 # --------------------------------------------------------------------------
 # The other half of the #212 case, and the one that went untested longest:
