@@ -239,6 +239,81 @@ build_origin() {
   git -C "$build" push -q "$origin" release/stable
 }
 
+# The candidate, staged as the asset a release would carry and served on a
+# free port. Two cases want this -- a fresh install and a tarball update --
+# and a second copy of the staging is how the two end up testing different
+# bytes while claiming to test the candidate.
+#
+# Built from the tree the git-update case produced: source, mcp/dist and its
+# node_modules. Not a `git archive`, which is the generated source tarball --
+# the one whose missing dependencies broke 0.18.3.
+#
+# Sets CANDIDATE_PORT and CANDIDATE_SRV_PID. Returns non-zero if it never
+# came up, because a case that silently tests nothing is the thing this whole
+# script exists to stop.
+CANDIDATE_PORT=""
+CANDIDATE_SRV_PID=""
+
+serve_candidate() {
+  local sb="$1" srv="$1/srv"
+  local built="$WORK/git-update/install"
+  mkdir -p "$srv/releases/download/v$candidate_version" "$sb/pkg"
+
+  local staged="$sb/pkg/quern-$candidate_version"
+  mkdir -p "$staged"
+  ( cd "$built" && /usr/bin/tar --exclude .git --exclude .venv -cf - . ) \
+    | ( cd "$staged" && /usr/bin/tar -xf - )
+  ( cd "$sb/pkg" && /usr/bin/tar -czf \
+      "$srv/releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
+      "quern-$candidate_version" )
+
+  # A port nobody else is on, so two rehearsals can run at once.
+  CANDIDATE_PORT="$(python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8907)"
+
+  cat > "$srv/releases/latest" <<EOF
+{"tag_name": "v$candidate_version", "prerelease": false,
+ "assets": [{"name": "quern-$candidate_version.tar.gz",
+             "browser_download_url": "http://127.0.0.1:$CANDIDATE_PORT/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}],
+ "tarball_url": "http://127.0.0.1:$CANDIDATE_PORT/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}
+EOF
+  python3 -m http.server "$CANDIDATE_PORT" --directory "$srv" >"$sb/srv.log" 2>&1 &
+  CANDIDATE_SRV_PID=$!
+
+  local waited=0
+  until curl -fsS --max-time 2 \
+      "http://127.0.0.1:$CANDIDATE_PORT/releases/latest" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if (( waited > 20 )); then
+      stop_candidate
+      return 1
+    fi
+    sleep 0.5
+  done
+  return 0
+}
+
+stop_candidate() {
+  [[ -n "$CANDIDATE_SRV_PID" ]] || return 0
+  # `wait` inside the same redirect, or bash reports "Terminated" on its own
+  # line in the middle of the results.
+  { kill "$CANDIDATE_SRV_PID" && wait "$CANDIDATE_SRV_PID"; } 2>/dev/null || true
+  CANDIDATE_SRV_PID=""
+}
+
+# Did the local server actually serve the asset? Without this a case passes
+# while the fetcher quietly went to GitHub and installed the published
+# release -- the substitution QUERN_RELEASES_URL exists to make visible.
+served_the_candidate() {
+  local log="$1" line
+  line="$(grep -F \
+    "releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
+    "$log" 2>/dev/null | tail -1 || true)"
+  [[ -n "$line" && "$line" == *'" 200 '* ]]
+}
+
 # --------------------------------------------------------------------------
 step "A git install updating from $PREV to $candidate_version"
 # --------------------------------------------------------------------------
@@ -656,46 +731,14 @@ case_fresh_install() {
   # and Homebrew's python is how most machines have a 3.11+. Giving it the
   # four-entry GUI PATH tested nothing but Apple's system python.
   local sb="$WORK/fresh"
-  mkdir -p "$sb/home" "$sb/srv/releases/download/v$candidate_version" "$sb/bin"
+  mkdir -p "$sb/home" "$sb/bin"
   make_stubs "$sb/bin"
 
-  # The asset a release would carry, built from the tree the update case
-  # produced: source, mcp/dist and its node_modules. Not a `git archive` --
-  # that is the generated source tarball, which is exactly the thing whose
-  # absence of dependencies broke 0.18.3.
-  local staged="$sb/pkg/quern-$candidate_version"
-  mkdir -p "$staged"
-  ( cd "$install" && /usr/bin/tar --exclude .git --exclude .venv -cf - . ) \
-    | ( cd "$staged" && /usr/bin/tar -xf - )
-  ( cd "$sb/pkg" && /usr/bin/tar -czf \
-      "$sb/srv/releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
-      "quern-$candidate_version" )
-
-  # A port nobody else is on, so two rehearsals can run at once.
-  local port
-  port="$(python3 -c "
-import socket
-s = socket.socket(); s.bind(('127.0.0.1', 0))
-print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8907)"
-  cat > "$sb/srv/releases/latest" <<EOF
-{"tag_name": "v$candidate_version", "prerelease": false,
- "assets": [{"name": "quern-$candidate_version.tar.gz",
-             "browser_download_url": "http://127.0.0.1:$port/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}]}
-EOF
-  python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
-  local srv_pid=$!
-  # Serve or fail loudly: a case that silently tests nothing is the thing this
-  # whole script exists to stop.
-  local waited=0
-  until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
-    waited=$((waited + 1))
-    if (( waited > 20 )); then
-      { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
-      bad "fresh install: the local release server never came up on $port"
-      return "$failures"
-    fi
-    sleep 0.5
-  done
+  if ! serve_candidate "$sb"; then
+    bad "fresh install: the local release server never came up"
+    return "$failures"
+  fi
+  local port="$CANDIDATE_PORT"
 
   # Unattended. A rehearsal has no terminal to offer, and `script` cannot make
   # one where there is no controlling tty to begin with. So this is the
@@ -713,9 +756,7 @@ EOF
     bash "$install_sh" > "$sb/install.log" 2>&1
   local rc=$?
   set -e
-  # `wait` inside the same redirect, or bash reports "Terminated" on its own
-  # line in the middle of the results.
-  { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+  stop_candidate
 
   if [[ $rc -eq 0 ]]; then
     ok "install.sh exits 0 against a locally served candidate"
@@ -736,19 +777,11 @@ EOF
   # It must have fetched *ours*. The override exists so a rehearsal tests the
   # candidate; an installer that quietly went to GitHub would pass every check
   # below while installing the published release.
-  # The status code, not just the path. `python -m http.server` logs a 404
-  # exactly as it logs a 200, so an asset staged under the wrong name still
-  # read as "the installer fetched the candidate". The version goes through
-  # `grep -F` too: unescaped, its dots match any character.
-  local asset_line
-  asset_line="$(grep -F "releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
-    "$sb/srv.log" | tail -1 || true)"
-  if [[ -z "$asset_line" ]]; then
-    bad "the local server was never asked for the asset — the installer went somewhere else"
-  elif [[ "$asset_line" == *'" 200 '* ]]; then
+  if served_the_candidate "$sb/srv.log"; then
     ok "it downloaded the candidate from the local server"
   else
-    bad "the local server was asked but did not serve it: ${asset_line##*\" }"
+    bad "the local server did not serve the asset — the installer went somewhere else"
+    tail -n 3 "$sb/srv.log" 2>/dev/null | sed 's/^/      /' || true
   fi
 
   local installed="$sb/home/.local/share/quern"
@@ -815,17 +848,126 @@ set -e
 # --------------------------------------------------------------------------
 step "A tarball install updating from $PREV to $candidate_version"
 # --------------------------------------------------------------------------
-# Needs the *previous* release to honour QUERN_RELEASES_URL, since that is the
-# code doing the fetching, and only 0.18.5 and later do. Until then the old
-# updater would resolve against GitHub and download the published release --
-# rehearsing nothing, while printing the same lines as a real run.
-prev_has_override=0
-git -C "$ROOT" cat-file -e "$PREV:server/lifecycle/releases.py" 2>/dev/null && prev_has_override=1
-if (( prev_has_override )); then
-  skip "tarball update: not implemented yet (the previous release can host it now)"
-else
-  skip "tarball update: $PREV predates QUERN_RELEASES_URL, so its updater would fetch the published release instead of the candidate"
-fi
+# The other half of the #212 case, and the one that went untested longest:
+# a release install fetching the candidate and swapping itself for it, driven
+# by the *previous release's* updater. It needs that release to honour
+# QUERN_RELEASES_URL, since it is the code doing the fetching -- only 0.19.0
+# and later do, so before that this could only have pointed the old updater
+# at GitHub and rehearsed nothing while printing the lines of a real run.
+case_tarball_update() {
+  failures=0   # a subshell copy: a case reports only its own
+  if ! git -C "$ROOT" cat-file -e "$PREV:server/lifecycle/releases.py" 2>/dev/null; then
+    skip "tarball update: $PREV predates QUERN_RELEASES_URL, so its updater would fetch the published release instead of the candidate"
+    return 0
+  fi
+  if [[ ! -d "$WORK/git-update/install/mcp/dist" ]]; then
+    skip "tarball update: the update case left no built tree to package"
+    return 0
+  fi
+
+  local sb="$WORK/tarball-update"
+  mkdir -p "$sb/home/.local/share" "$sb/bin" "$sb/state"
+  make_stubs "$sb/bin"
+
+  # The previous release as a user actually has it: the published asset,
+  # unpacked where install.sh puts it. Not a `git archive` of the tag -- that
+  # has no mcp/dist and no node_modules, so the update would be starting from
+  # a tree no user is running.
+  local prev_version="${PREV#v}"
+  local installed="$sb/home/.local/share/quern"
+  if ! curl -fsSL --max-time 300 -o "$sb/prev.tar.gz" \
+      "https://github.com/quern-dev/quern/releases/download/$PREV/quern-$prev_version.tar.gz"
+  then
+    bad "tarball update: could not download $PREV's asset to update from"
+    return "$failures"
+  fi
+  /usr/bin/tar -xzf "$sb/prev.tar.gz" -C "$sb"
+  mv "$sb/quern-$prev_version" "$installed"
+
+  python3 -m venv "$installed/.venv" > "$sb/venv.log" 2>&1 || true
+  "$installed/.venv/bin/pip" install -q -e "$installed" > "$sb/pip.log" 2>&1 \
+    || bad "tarball update: could not prepare $PREV's venv: $(tail -n 2 "$sb/pip.log" 2>/dev/null | tr '\n' ' ' || true)"
+
+  if ! serve_candidate "$sb"; then
+    bad "tarball update: the local release server never came up"
+    return "$failures"
+  fi
+
+  # The caller's PATH, as the git-update case uses: `quern update` on a
+  # release install is run from the user's shell, so their node is there. The
+  # narrow terminal PATH borrowed from the fresh-install case has no node on a
+  # machine whose node comes from a version manager, and setup then fails for
+  # a reason that is about the sandbox rather than the update. Whether an
+  # update survives a missing node is the Node matrix's question, and it asks
+  # it properly.
+  set +e
+  ( cd "$installed" && env -i \
+      HOME="$sb/home" \
+      QUERN_STATE_DIR="$sb/state" \
+      QUERN_RELEASES_URL="http://127.0.0.1:$CANDIDATE_PORT" \
+      PATH="$sb/bin:$PATH" \
+      PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
+      "$installed/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+  stop_candidate
+
+  if [[ $rc -eq 0 ]]; then
+    ok "$PREV's updater exits 0 on a tarball install"
+  else
+    bad "$PREV's updater exited $rc — see $sb/update.log"
+    tail -n 25 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  # It has to have fetched *ours*. Without this the case passes while the
+  # updater quietly resolves against GitHub and installs the published
+  # release, which is the whole reason the override exists.
+  if served_the_candidate "$sb/srv.log"; then
+    ok "it fetched the candidate from the local server, not GitHub"
+  else
+    bad "the local server did not serve the asset — the updater went somewhere else"
+    tail -n 3 "$sb/srv.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  if grep -q "Traceback (most recent call last)" "$sb/update.log"; then
+    # #212 was exactly this: a traceback after the source had been replaced.
+    bad "the update printed a traceback"
+    grep -A 6 "Traceback (most recent call last)" "$sb/update.log" | sed 's/^/      /'
+  else
+    ok "no traceback"
+  fi
+
+  local landed
+  landed="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$landed" == "$candidate_version" ]] \
+    && ok "the install is $candidate_version" \
+    || bad "the install is ${landed:-nothing}, expected $candidate_version"
+
+  # A release install must not need npm at start: the asset ships mcp/dist
+  # already built, and the swap has to preserve that (#193).
+  [[ -f "$installed/mcp/dist/launcher.cjs" ]] \
+    && ok "the swapped tree still has mcp/dist built" \
+    || bad "mcp/dist/launcher.cjs is missing after the swap — the wrapper would need npm"
+
+  local result="$sb/state/last-update.json"
+  if [[ -f "$result" ]]; then
+    if grep -q '"outcome" *: *"updated"' "$result" \
+       && grep -q "\"version\" *: *\"$candidate_version\"" "$result"; then
+      ok "last-update.json records updated → $candidate_version"
+    else
+      bad "last-update.json says $(tr -d '\n' < "$result")"
+    fi
+  else
+    bad "no last-update.json was written"
+  fi
+
+  return "$failures"
+}
+
+set +e
+( case_tarball_update )
+failures=$((failures + $?))
+set -e
 
 # --------------------------------------------------------------------------
 step "Nothing outside the sandbox was touched"
