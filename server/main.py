@@ -41,6 +41,7 @@ from server.api.device_pool import router as device_pool_router
 from server.api.device_ui import router as device_ui_router
 from server.api.landmarks import router as landmarks_router
 from server.api.logs import router as logs_router
+from server.api.trace import router as trace_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
@@ -580,6 +581,7 @@ def create_app(
 
     # Routes
     app.include_router(logs_router)
+    app.include_router(trace_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)

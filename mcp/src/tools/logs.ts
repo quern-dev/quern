@@ -673,6 +673,57 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
     }
   );
 
+  server.registerTool("get_trace", {
+    description: `One timeline: what quern did, the network flows each action caused, and the app log lines that arrived while it ran.
+
+Use this when something went wrong and you want the sequence rather than three separate queries — "what happened when I tapped Submit" is one call instead of correlating query_logs and query_flows by eye.
+
+Each action carries its resolved device, outcome and duration. Flows and log lines are attributed to the action whose interval contains them, on the same device.
+
+Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is by device and time, because the proxy is a separate process and nothing quern controls travels with the app's requests. Two actions overlapping on one device cannot be told apart, and that is reported rather than guessed. Simulators under local capture (see set_local_capture) attribute most precisely, because flows carry a UDID resolved from the client process.
+
+With several agents on one server, pass \`udid\` to get only your own device's actions.`,
+    inputSchema: strictParams({
+      since: z
+        .string()
+        .optional()
+        .describe("Start time (ISO 8601). Defaults to the last 5 minutes."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Only actions against this device"),
+      limit: z
+        .number()
+        .optional()
+        .describe("Maximum actions to return (default 100)"),
+    }),
+  }, async ({ since, udid, limit }) => {
+      try {
+        const params: Record<string, unknown> = {};
+        if (since) params.since = since;
+        if (udid) params.udid = udid;
+        if (limit) params.limit = limit;
+
+        const data = await apiRequest("GET", "/api/v1/trace", params);
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+  });
+
   server.registerTool("list_log_sources", {
     description: `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
     inputSchema: strictParams({}),
