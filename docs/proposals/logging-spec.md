@@ -580,6 +580,22 @@ on `(udid, interval)`, marking overlaps.
 *Done when:* a scripted API test yields one timeline, and an export with two
 overlapping actions on one device marks them rather than guessing.
 
+**Verified so far**, against a live iOS 27 and iOS 18.6 simulator:
+
+- Actions, their resolved device, outcome and duration appear on one timeline,
+  including genuine failures rather than only the happy path.
+- Device log lines attribute to the action whose interval contains them, and
+  only from the device that action ran against.
+- A flow driven through the proxy inside an action's interval is attributed to
+  that action, and carries the caveat *"some flows matched on time alone"* --
+  correctly, because it had no `simulator_udid`.
+
+**Not yet verified:** the strong attribution regime. A flow carrying a
+`simulator_udid` resolved from the client's pid requires local capture, which
+needs a privileged one-time `quern enable-local-capture`. Everything the trace
+does with that field is unit-tested and none of it has run against a real
+redirected flow. That is the gap to close before calling step 4 done.
+
 Steps 1–3 are worth doing regardless of whether step 4 ever happens.
 
 ## What this does not propose
