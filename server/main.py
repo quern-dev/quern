@@ -893,7 +893,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
     # Daemonize if not foreground mode
     if not args.foreground:
-        daemonize(server_port)
+        daemonize(server_port, proxy_port if enable_proxy else None)
         # daemonize() never returns — it spawns a child process and exits.
 
     # Configure logging
