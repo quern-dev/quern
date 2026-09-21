@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-21
+
+### Added
+- **`restore_simulator_input`** (`POST /api/v1/device/ui/restore-input`) — takes a booted simulator's touch, button and keyboard services back from Xcode 27's Device Hub. Booting through quern now handles this before anything is running; this is the repair for a simulator that was already booted when the guest daemon attached. It restarts SpringBoard, so running apps are killed, which is why it is asked for rather than done silently. The full mechanism is described under *Simulator taps and keystrokes could be accepted and silently discarded* below.
+
 ### Fixed
 - **A tap into a simulator whose input services Device Hub had taken reported plain success.** Quern already detects the suppression and already offers the repair (`restore_simulator_input`), but the advisory went to the server log — and the caller driving quern over MCP only ever sees the JSON body. So a tap that was accepted and discarded came back as `{"status": "ok"}`, which is the exact failure the warning exists to catch, delivered to the one audience that could not act on it. `tap`, `tap_element`, `swipe`, `type`, `clear` and `press` now carry the advisory on their response when the device has been read as suppressed. Nothing is said for a healthy device, or for one whose state has not been read.
 
@@ -557,7 +562,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.19.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.20.0...main
+[0.20.0]: https://github.com/quern-dev/quern/releases/tag/v0.20.0
 [0.19.0]: https://github.com/quern-dev/quern/releases/tag/v0.19.0
 [0.18.4]: https://github.com/quern-dev/quern/releases/tag/v0.18.4
 [0.18.3]: https://github.com/quern-dev/quern/releases/tag/v0.18.3
