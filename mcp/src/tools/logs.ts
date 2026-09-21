@@ -680,6 +680,8 @@ Use this when something went wrong and you want the sequence rather than three s
 
 Each action carries its resolved device, outcome and duration. Flows and log lines are attributed to the action whose interval contains them, on the same device.
 
+Flows are attributed to an action if they happen during it, or within a few seconds after it returns — most actions hand work to the device and return before the request goes out. Anything attributed that way is marked in \`caveats\`, because timing is not observed causation.
+
 Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is by device and time, because the proxy is a separate process and nothing quern controls travels with the app's requests. Two actions overlapping on one device cannot be told apart, and that is reported rather than guessed. Simulators under local capture (see set_local_capture) attribute most precisely, because flows carry a UDID resolved from the client process.
 
 With several agents on one server, pass \`udid\` to get only your own device's actions.`,
@@ -694,12 +696,15 @@ With several agents on one server, pass \`udid\` to get only your own device's a
         .describe("Only actions against this device"),
       limit: z
         .number()
+        .int()
+        .min(1)
+        .max(1000)
         .optional()
-        .describe("Maximum actions to return (default 100)"),
+        .describe("Maximum actions to return (1-1000, default 100)"),
     }),
   }, async ({ since, udid, limit }) => {
       try {
-        const params: Record<string, unknown> = {};
+        const params: Record<string, string | number | boolean | undefined> = {};
         if (since) params.since = since;
         if (udid) params.udid = udid;
         if (limit) params.limit = limit;

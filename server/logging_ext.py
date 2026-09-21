@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
-from typing import Final
+from typing import Any, Final
 
 #: The closed category vocabulary. A call site that does not fit one of these
 #: is a reason to change this tuple in review, not to invent a string: a
@@ -236,15 +236,21 @@ class _NoAction:
 _NO_ACTION = _NoAction()
 
 
-def current_action():
-    """The action being recorded, or a no-op stand-in."""
+def current_action() -> Any:
+    """The action being recorded, or a no-op stand-in.
+
+    Typed loosely on purpose: the scope is an API-layer object and this module
+    must not import from there, since the controller imports *this* to record
+    a device it resolved. Callers only ever assign fields on the result.
+    """
     return _CURRENT.get() or _NO_ACTION
 
 
-def set_current_action(scope: object):
+def set_current_action(scope: object) -> contextvars.Token[object | None]:
     """Record the action for this task. Returns the token to reset with."""
     return _CURRENT.set(scope)
 
 
-def reset_current_action(token) -> None:
+def reset_current_action(token: contextvars.Token[object | None]) -> None:
+    """Restore whatever was current before, so nesting cannot leak."""
     _CURRENT.reset(token)

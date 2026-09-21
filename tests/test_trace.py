@@ -435,3 +435,46 @@ class TestTrafficCausedAfterAnActionReturns:
 
         assert first_a.flows == []
         assert second_a.flows == [flow]
+
+
+class TestDeviceMatchingComesBeforeTimeWindowChoice:
+    """Choosing `during` over `after` before checking the device dropped
+    flows entirely.
+
+    A flow landing inside *another* device's action made `during` non-empty,
+    so the grace window was never consulted; the device check then rejected
+    the only candidate and the flow was attributed to nothing — though it
+    belonged to an action on its own device (CodeRabbit, #259).
+    """
+
+    def test_a_flow_reaches_its_own_device_past_another_devices_action(self):
+        # B's action contains the flow in time, but the flow is A's.
+        # A's action ended just before it, so the grace window is its home.
+        a = _action("open_url", at_s=10, duration_ms=150, udid="SIM-A")
+        b = _action("tap", at_s=13, duration_ms=4000, udid="SIM-B")
+        flow = _flow(at_s=11, udid="SIM-A")
+
+        a_attr, b_attr = build_trace([a, b], [flow], [])
+
+        assert a_attr.flows == [flow], "the flow never reached its own device"
+        assert b_attr.flows == []
+
+
+class TestADuplicateAddressResolvesToTheLatestDevice:
+    def test_the_most_recently_recorded_device_wins(self):
+        """DHCP reuses addresses. Whichever the dict reached last is an
+        arbitrary answer; the most recent recording is a defensible one."""
+        state = {
+            "PHONE-OLD": {"wifi_proxy_configs": {"home": {
+                "client_ip": "192.168.1.50",
+                "set_at": (BASE - timedelta(days=30)).isoformat(),
+            }}},
+            "PHONE-NEW": {"wifi_proxy_configs": {"home": {
+                "client_ip": "192.168.1.50",
+                "set_at": (BASE - timedelta(hours=1)).isoformat(),
+            }}},
+        }
+
+        ip_map = ip_to_udid(state, now=BASE)
+
+        assert ip_map["192.168.1.50"][0] == "PHONE-NEW"

@@ -56,6 +56,7 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "proxy_intercept.py:list_mocks",
     "proxy_intercept.py:get_bypass",
     "system.py:update_status",
+    "trace.py:get_trace",
     "system.py:get_channel",
 })
 """Routes that deliberately emit nothing.

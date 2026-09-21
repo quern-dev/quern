@@ -137,6 +137,7 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
     """
     now = now or datetime.now(tz=_tz_of(cert_state))
     mapping: dict[str, tuple[str, bool]] = {}
+    recorded_at: dict[str, datetime | None] = {}
     for udid, record in (cert_state or {}).items():
         for config in (record.get("wifi_proxy_configs") or {}).values():
             ip = config.get("client_ip")
@@ -151,6 +152,16 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
                     recorded = None
                 if recorded is not None:
                     fresh = (now - recorded) <= IP_MAPPING_TRUSTED_FOR
+            # Two devices can hold the same address over time -- DHCP
+            # reuses them. Keeping whichever the dict happened to reach last
+            # would attribute a flow to an arbitrary one of them, so the most
+            # recently recorded wins.
+            previous = recorded_at.get(ip)
+            if previous is not None and recorded is not None and recorded < previous:
+                continue
+            if previous is not None and recorded is None:
+                continue
+            recorded_at[ip] = recorded
             mapping[ip] = (udid, fresh)
     return mapping
 
@@ -218,21 +229,30 @@ def build_trace(
         # those it arrived shortly after. Preferring the first means a flow
         # landing inside one action is not also blamed on the previous one
         # merely for being close to it.
+        # Device first, then time. Choosing `during` over `after` before
+        # checking the device dropped flows entirely: a flow landing inside
+        # another device's action made `during` non-empty, so the grace
+        # window was never consulted, and the device check then rejected the
+        # only candidate. The flow belonged to an action on its own device
+        # and was attributed to nothing.
+        def _matches(i: int) -> bool:
+            owner = result[i].action.udid
+            return not (udid and owner and udid != owner)
+
         during = [
             i for i in range(len(result))
-            if intervals[i][0] <= flow.timestamp <= intervals[i][1]
+            if _matches(i) and intervals[i][0] <= flow.timestamp <= intervals[i][1]
         ]
         after = [
             i for i in range(len(result))
-            if intervals[i][1] < flow.timestamp <= intervals[i][1] + grace
+            if _matches(i)
+            and intervals[i][1] < flow.timestamp <= intervals[i][1] + grace
         ]
         candidates = during or after
         inferred = not during
 
         for i in candidates:
             attribution = result[i]
-            if udid and attribution.action.udid and udid != attribution.action.udid:
-                continue
             if inferred:
                 _note(
                     attribution,

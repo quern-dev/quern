@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Query, Request
 
-from server.api.actions import logged_action
 from server.models import LogQueryParams, LogSource
 from server.trace import Attribution, build_trace, ip_to_udid
 
@@ -28,6 +27,10 @@ router = APIRouter(prefix="/api/v1", tags=["trace"])
 #: How far back a trace reaches when the caller does not say. Long enough to
 #: cover the thing that just went wrong, short enough not to return a session.
 DEFAULT_WINDOW = timedelta(minutes=5)
+
+#: `LogQueryParams.limit` refuses anything larger, and asking for more raises
+#: inside the handler rather than returning a 4xx.
+_MAX_QUERY_LIMIT = 1000
 
 
 def _serialise(attribution: Attribution) -> dict:
@@ -82,7 +85,6 @@ def _serialise(attribution: Attribution) -> dict:
 
 
 @router.get("/trace")
-@logged_action("get_trace", category="logs")
 async def get_trace(
     request: Request,
     since: datetime | None = None,
@@ -115,9 +117,24 @@ async def get_trace(
         if e.action and e.outcome != "started"
         and (not udid or e.udid == udid)
     ]
+    # `limit` bounds what the caller gets back. Applying it only to the buffer
+    # query bounded the wrong thing: the udid filter runs afterwards, so a
+    # busy server could return far fewer actions than asked for, or -- with no
+    # udid filter -- more work than the caller sized for. Newest first, since
+    # a trace is read backwards from the thing that just went wrong.
+    if len(actions) > limit:
+        actions = actions[-limit:]
 
+    # Clamped, not multiplied blindly: LogQueryParams caps `limit` at 1000, so
+    # `limit * 10` raised a ValidationError inside the handler -- an uncaught
+    # HTTP 500 for any caller passing limit > 100.
+    #
+    # The multiplier exists because one action can produce many log lines, so
+    # asking for only `limit` entries would starve the attribution. Hitting the
+    # ceiling is itself worth reporting rather than silently returning less.
+    log_limit = min(limit * 10, _MAX_QUERY_LIMIT)
     device_logs = await ring_buffer.filter_entries(
-        LogQueryParams(since=window_start, limit=limit * 10),
+        LogQueryParams(since=window_start, limit=log_limit),
     )
 
     # Did the window outlive the buffer?
@@ -171,10 +188,11 @@ async def get_trace(
         # complete is worse than one that admits it: the reader concludes the
         # app logged nothing, when the entries were evicted.
         "log_window_truncated": truncated,
-        # Said plainly rather than left to be inferred from empty lists: a
-        # trace with no flows because the proxy was off looks identical to one
-        # where nothing was requested.
-        "proxy_running": flow_store is not None,
+        # The adapter's own view, not "a flow store exists". The store is
+        # created at startup and outlives a stopped proxy, so the previous
+        # check reported True with capture off -- which is exactly the
+        # "empty and broken look alike" failure this field exists to prevent.
+        "proxy_running": _proxy_is_running(request),
     }
 
 
@@ -191,3 +209,22 @@ def _ip_map() -> dict[str, tuple[str, bool]]:
     except Exception:
         logger.debug("Could not read cert state for ip attribution", exc_info=True)
         return {}
+
+
+def _proxy_is_running(request: Request) -> bool:
+    """Is capture actually on, rather than merely configured?
+
+    The flow store is created at startup and survives the proxy stopping, so
+    its existence says nothing. Asking the adapter is the difference between
+    "no flows because nothing was requested" and "no flows because nothing was
+    listening".
+    """
+    adapter = getattr(request.app.state, "proxy_adapter", None)
+    if adapter is None:
+        return False
+    running = getattr(adapter, "is_running", None)
+    if callable(running):
+        return bool(running())
+    if running is not None:
+        return bool(running)
+    return getattr(adapter, "_running", False) is True

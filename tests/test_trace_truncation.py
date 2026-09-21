@@ -5,6 +5,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from server.api.trace import get_trace
 from server.models import LogEntry, LogLevel, LogSource
 from server.storage.ring_buffer import RingBuffer
@@ -22,7 +24,8 @@ def _entry(at_s):
 
 async def _call(ring, since):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        server_buffer=RingBuffer(max_size=10), ring_buffer=ring, flow_store=None,
+        server_buffer=RingBuffer(max_size=10), ring_buffer=ring,
+        flow_store=None, proxy_adapter=None,
     )))
     return await get_trace(request=request, since=since, udid=None, limit=100)
 
@@ -59,3 +62,52 @@ class TestSilentEvictionIsReported:
         result = await _call(ring, BASE)
 
         assert result["log_window_truncated"] is False
+
+
+class TestTheLimitDoesNotCrashTheEndpoint:
+    """`limit` is documented up to 1000, and the handler multiplied it by ten
+    to size the device-log query. `LogQueryParams` caps at 1000, so anything
+    above 100 raised inside the handler -- an uncaught HTTP 500 on a
+    documented input."""
+
+    @pytest.mark.parametrize("limit", [101, 500, 1000])
+    async def test_a_large_limit_is_served_not_crashed(self, limit):
+        ring = RingBuffer(max_size=10)
+        await ring.append(_entry(10))
+
+        result = await _call_with_limit(ring, BASE, limit)
+
+        assert "actions" in result
+
+    async def test_the_limit_bounds_what_comes_back(self):
+        """Applying it only to the buffer query bounded the wrong thing: the
+        udid filter runs afterwards."""
+        server = RingBuffer(max_size=100)
+        for i in range(10):
+            await server.append(_action_entry(i))
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            server_buffer=server, ring_buffer=RingBuffer(max_size=10),
+            flow_store=None, proxy_adapter=None,
+        )))
+        result = await get_trace(
+            request=request, since=BASE, udid=None, limit=3,
+        )
+
+        assert len(result["actions"]) == 3
+
+
+def _action_entry(i):
+    return LogEntry(
+        id=uuid.uuid4().hex, timestamp=BASE + timedelta(seconds=i),
+        device_id="server", process="server.api.actions", category="device.action",
+        level=LogLevel.INFO, message="x", source=LogSource.SERVER,
+        action="tap", udid="SIM-A", duration_ms=10, outcome="ok",
+    )
+
+
+async def _call_with_limit(ring, since, limit):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        server_buffer=RingBuffer(max_size=10), ring_buffer=ring,
+        flow_store=None, proxy_adapter=None,
+    )))
+    return await get_trace(request=request, since=since, udid=None, limit=limit)
