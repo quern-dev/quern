@@ -14,6 +14,12 @@
 # The old code is the point. The candidate's own updater is not exercised here
 # at all: users run the one they already have.
 #
+# IT REHEARSES COMMITTED WORK. Both trees come from `git archive`, so anything
+# still in the working directory is not in the candidate -- and the failure
+# looks exactly like the fix not working, twice over: a result that disagrees
+# with the unit tests you just watched pass is this, until proved otherwise.
+# Commit, then rehearse.
+#
 # Each case runs in its own sandbox -- its own HOME and QUERN_STATE_DIR, with
 # osascript/open/sudo/launchctl/pkill/killall stubbed ahead of the real ones on
 # PATH. Nothing outside the sandbox is written. That is not a nicety: this
@@ -1111,6 +1117,106 @@ case_tarball_update() {
 
 set +e
 ( case_tarball_update )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "A channel offering an older release is refused"
+# --------------------------------------------------------------------------
+# 0.18.1's defect: the beta channel resolved to a release three minor
+# versions old and every tarball user was offered it, then pinned there. The
+# guard exists so a wrong answer from the resolver is refused rather than
+# acted on -- and refusing has to be distinguishable from having nothing to
+# do, because rc 2 means "already up to date" and maps to exit 0, which would
+# tell every surface that nothing needed doing.
+#
+# Driven against the *candidate's* updater, unlike the cases above: this is a
+# question about the code that is going out, not the code users are leaving.
+case_downgrade_refused() {
+  failures=0   # a subshell copy: a case reports only its own
+  local installed="$WORK/tarball-update/home/.local/share/quern"
+  if [[ ! -x "$installed/quern" ]]; then
+    skip "downgrade refusal: the tarball-update case left no install to offer a downgrade to"
+    return 0
+  fi
+  local at
+  at="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  if [[ "$at" != "$candidate_version" ]]; then
+    skip "downgrade refusal: that install is ${at:-nothing}, not the candidate"
+    return 0
+  fi
+
+  local sb="$WORK/downgrade"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin" "$sb/srv/releases"
+  make_stubs "$sb/bin"
+  # The state and home of the install being updated, so the run is the same
+  # one the tarball case left behind rather than a fresh machine.
+  cp -R "$WORK/tarball-update/home/." "$sb/home/" 2>/dev/null || true
+
+  # No asset is staged on purpose. The refusal happens at the version
+  # comparison, before anything is downloaded, so a served tarball here would
+  # only be able to hide a guard that had stopped working.
+  local port
+  port="$(python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8908)"
+  cat > "$sb/srv/releases/latest" <<EOF
+{"tag_name": "$PREV", "prerelease": false,
+ "assets": [{"name": "quern-$prev_version.tar.gz",
+             "browser_download_url": "http://127.0.0.1:$port/releases/download/$PREV/quern-$prev_version.tar.gz"}]}
+EOF
+  python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
+  local srv_pid=$!
+  local waited=0
+  until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if (( waited > 20 )); then
+      { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+      bad "downgrade refusal: the local release server never came up"
+      return "$failures"
+    fi
+    sleep 0.5
+  done
+
+  set +e
+  ( cd "$installed" && env -i \
+      HOME="$sb/home" \
+      QUERN_STATE_DIR="$sb/state" \
+      QUERN_RELEASES_URL="http://127.0.0.1:$port" \
+      PATH="$sb/bin:$PATH" \
+      "$installed/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+  { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+
+  if grep -q "Not downgrading" "$sb/update.log"; then
+    ok "it refuses the older release, and says why"
+  else
+    bad "nothing refused $prev_version being offered to $candidate_version"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  # Not rc 2. That is NO_OP -- "already up to date" -- and it reaches the
+  # CLI, the menu bar's isNoOp and the result file alike. A refusal is the
+  # opposite: an update was wanted and did not happen.
+  if [[ $rc -eq 0 || $rc -eq 2 ]]; then
+    bad "the refusal exited $rc, which reads as success or as nothing-to-do"
+  else
+    ok "the refusal reaches the exit code (rc $rc)"
+  fi
+
+  local still
+  still="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$still" == "$candidate_version" ]] \
+    && ok "the install is untouched at $candidate_version" \
+    || bad "the install is now ${still:-nothing} — it downgraded anyway"
+
+  return "$failures"
+}
+
+set +e
+( case_downgrade_refused )
 failures=$((failures + $?))
 set -e
 
