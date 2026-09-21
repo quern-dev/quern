@@ -825,6 +825,36 @@ case_fresh_install() {
         "$installed/quern" setup ) > "$sb/setup.log" 2>&1 || true
   fi
 
+  # The MCP registration the installer writes, checked for *where it points*.
+  # This project has twice written a path into another tool's config that was
+  # wrong -- once a temporary directory -- and nothing notices, because the
+  # client keeps launching whatever the entry says until someone wonders why
+  # their tools are stale. `install.sh` runs `quern mcp-install` as its own
+  # step; setup does not do this, which is why it is checked here.
+  local claude_json="$sb/home/.claude.json"
+  if [[ -f "$claude_json" ]]; then
+    local entry
+    entry="$(python3 -c '
+import json, sys
+try:
+    servers = json.load(open(sys.argv[1])).get("mcpServers") or {}
+except Exception:
+    print(""); raise SystemExit
+for name, spec in servers.items():
+    if "quern" in name.lower():
+        print(" ".join([spec.get("command", "")] + list(spec.get("args") or [])))
+        break' "$claude_json" 2>/dev/null || true)"
+    if [[ -z "$entry" ]]; then
+      bad "install.sh wrote no quern entry into .claude.json"
+    elif [[ "$entry" == *"$installed/mcp/dist/launcher.cjs"* ]]; then
+      ok "the MCP registration points into the install it just made"
+    else
+      bad "the MCP registration points somewhere else: $entry"
+    fi
+  else
+    skip "MCP registration: the installer wrote no .claude.json to check"
+  fi
+
   # From another directory, because the wrapper resolves its own location and
   # a cwd-dependent one works inside the tree and nowhere else.
   if [[ -x "$sb/home/.local/bin/quern" ]]; then
