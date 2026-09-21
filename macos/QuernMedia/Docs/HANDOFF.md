@@ -166,8 +166,14 @@ each other.
         than anything in the trace today but is *not* exposed as an API, and
         only holds while the connection is held — a live measurement, not a
         cacheable constant. Surfacing it is a possible task, not a promise.
-      - **Flow attribution is untested** — zero flows in every live run they
-        have done. Do not lean on it without exercising it.
+      - **Two parts of the trace are unverified** (their words, 2026-09-21,
+        and neither touches `started_monotonic` or the interval fields):
+        flow attribution has never run with the proxy actually capturing —
+        zero flows in every live run — and device-log attribution reads the
+        shared ring buffer without a confirmed source filter, so a trace's
+        `logs` could carry a line that is not an app log at all. Verified:
+        the action side and the device-log side against a real iOS 27
+        simulator.
       - **The trace branch is unmerged**, stacked on PR #253 and awaiting a
         review window. The fields above are real and testable now, but the
         shape can still move if review pushes back.
