@@ -323,3 +323,54 @@ class TestClocksAreDeclaredNotAssumed:
 
         assert attribution.logs == [line]
         assert not any("own clock" in c for c in attribution.caveats)
+
+
+class TestOnlyAppLogsAppearAsLogs:
+    """The ring buffer is shared: syslog, oslog, crash, build and proxy
+    entries all land in it. A trace showing build output inside a tap, or
+    proxy entries beside the same requests already listed under `flows`, reads
+    as two things having happened.
+    """
+
+    @staticmethod
+    def _line(source):
+        return LogEntry(
+            id=uuid.uuid4().hex,
+            timestamp=BASE + timedelta(seconds=9),
+            device_id="SIM-A",
+            process="x",
+            level=LogLevel.INFO,
+            message=source.value,
+            source=source,
+        )
+
+    def test_build_output_is_not_an_app_log(self):
+        action = _action("tap", at_s=10, duration_ms=2000)
+
+        [attribution] = build_trace([action], [], [self._line(LogSource.BUILD)])
+
+        assert attribution.logs == []
+
+    def test_proxy_entries_are_not_repeated_as_logs(self):
+        """They are already under `flows`, with more detail."""
+        action = _action("tap", at_s=10, duration_ms=2000)
+
+        [attribution] = build_trace([action], [], [self._line(LogSource.PROXY)])
+
+        assert attribution.logs == []
+
+    def test_a_crash_during_an_action_is_kept(self):
+        """The single most useful thing a trace can show, and genuinely
+        something the app did."""
+        action = _action("tap", at_s=10, duration_ms=2000)
+
+        [attribution] = build_trace([action], [], [self._line(LogSource.CRASH)])
+
+        assert [e.source for e in attribution.logs] == [LogSource.CRASH]
+
+    def test_ordinary_device_output_is_kept(self):
+        action = _action("tap", at_s=10, duration_ms=2000)
+
+        [attribution] = build_trace([action], [], [self._line(LogSource.SIMULATOR)])
+
+        assert len(attribution.logs) == 1

@@ -48,6 +48,26 @@ IP_MAPPING_TRUSTED_FOR = timedelta(days=7)
 #: make the caveat noise.
 _DEVICE_CLOCK_SOURCES = frozenset({LogSource.DEVICE, LogSource.LOGCAT})
 
+#: What counts as "the app said this while the action ran".
+#:
+#: The ring buffer is shared -- syslog, oslog, crash, build and proxy entries
+#: all land in it. Taking everything in the interval would put build output
+#: inside a tap, and proxy entries beside the same requests already listed
+#: under `flows`, which reads as two things having happened.
+#:
+#: Crash reports are in deliberately. A crash during an action is the single
+#: most useful thing a trace can show, and it is genuinely something the app
+#: did rather than something quern did to it.
+APP_LOG_SOURCES = frozenset({
+    LogSource.SYSLOG,
+    LogSource.OSLOG,
+    LogSource.SIMULATOR,
+    LogSource.DEVICE,
+    LogSource.LOGCAT,
+    LogSource.APP_DRAIN,
+    LogSource.CRASH,
+})
+
 
 @dataclass
 class Attribution:
@@ -188,6 +208,8 @@ def build_trace(
             attribution.flows.append(flow)
 
     for entry in device_logs:
+        if entry.source not in APP_LOG_SOURCES:
+            continue
         for i, attribution in enumerate(result):
             start, end = intervals[i]
             if not (start <= entry.timestamp <= end):
