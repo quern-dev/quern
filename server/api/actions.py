@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import functools
 import inspect
 import logging
@@ -29,7 +28,6 @@ from fastapi import HTTPException
 
 from server import logging_ext
 from server.logging_ext import (
-    current_action,
     reset_current_action,
     set_current_action,
 )

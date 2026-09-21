@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
-from server.api.actions import action, current_action, logged_action
+from server.api.actions import action, logged_action
+from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
     DeviceError,

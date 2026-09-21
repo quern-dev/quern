@@ -7,7 +7,6 @@ import logging
 import time
 
 from server import logging_ext
-from server.logging_ext import current_action
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.devicectl import DevicectlBackend
@@ -20,6 +19,7 @@ from server.device.u2_client import U2Backend
 from server.device.usbmux import UsbmuxBackend
 from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
+from server.logging_ext import current_action
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 logger = logging.getLogger(__name__)

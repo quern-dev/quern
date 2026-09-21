@@ -424,7 +424,8 @@ class TestTheDecoratorFormActuallyEmits:
     """
 
     async def test_a_decorated_handler_emits_one_entry(self):
-        from server.api.actions import current_action, logged_action
+        from server.api.actions import logged_action
+        from server.logging_ext import current_action
 
         @logged_action("pretend_action", category="proxy")
         async def handler():
@@ -441,7 +442,8 @@ class TestTheDecoratorFormActuallyEmits:
     async def test_the_handler_can_name_its_device_from_inside(self):
         """A ContextVar, so a handler deep in a long function does not have to
         thread a parameter out to the decorator."""
-        from server.api.actions import current_action, logged_action
+        from server.api.actions import logged_action
+        from server.logging_ext import current_action
 
         @logged_action("pretend_action", category="proxy")
         async def handler():
@@ -468,7 +470,8 @@ class TestTheDecoratorFormActuallyEmits:
         """The reason it is a ContextVar and not a global: requests interleave
         on one event loop, and two boots would otherwise overwrite each
         other's device."""
-        from server.api.actions import current_action, logged_action
+        from server.api.actions import logged_action
+        from server.logging_ext import current_action
 
         @logged_action("pretend_action", category="proxy")
         async def handler(name):

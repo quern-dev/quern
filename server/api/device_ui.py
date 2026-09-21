@@ -5,19 +5,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server.api.actions import action as _action
+from server.api.actions import logged_action
 from server.api.device import (
     _capture_action_screenshot,
     _capture_screen_context,
     _get_controller,
     _handle_device_error,
 )
-from server.api.actions import action as _action, logged_action
 from server.device.controller import DeviceController
 from server.device.landmarks import needs_page_urls
 from server.models import (
@@ -459,7 +459,9 @@ async def tap_element(request: Request, body: TapElementRequest):
                 after = await _capture_action_screenshot(controller, resolved, "tap_after")
                 result["screenshots"] = {"before": before, "after": after}
 
-            if body.include_screen_context and result.get("status") not in ("not_found", "ambiguous"):
+            if body.include_screen_context and result.get("status") not in (
+                "not_found", "ambiguous",
+            ):
                 result["screen_context"] = await _capture_screen_context(controller, resolved)
 
             return _with_input_warning(controller, resolved, result)
