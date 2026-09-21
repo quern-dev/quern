@@ -603,10 +603,14 @@ class TestTeardownFailureReporting:
         # proxy-assertion trap this test exists to escape. "Background task"
         # appears only in our message.
         #
-        # Deliberately not matched on the logger name: CI on 3.13 reported
-        # these records as `server.device.preview` while the source names the
-        # logger `quern-debug-server.preview`, and that is unexplained. The
-        # message is the thing under test either way.
+        # Deliberately not matched on the logger name. CI failed this while
+        # it passed locally, reporting the records as `server.device.preview`
+        # against a source that named the logger `quern-debug-server.preview`.
+        # The cause: Actions checks out the PR *merged with its base*, and
+        # main had renamed the logger to `getLogger(__name__)` as part of
+        # retiring the "debug server" name. So CI was running main's rename
+        # with this branch's test. Matching on the message survives a rename;
+        # matching on the name would break again at the next one.
         reported = [
             r for r in caplog.records
             if "Background task" in r.getMessage()

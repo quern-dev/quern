@@ -22,7 +22,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 
-logger = logging.getLogger("quern-debug-server.media-engine")
+logger = logging.getLogger(__name__)
 
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "quern-media"
