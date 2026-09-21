@@ -2767,3 +2767,80 @@ class TestTheEntryPointsParseTheirArguments:
             main_mod.cli()
         assert exc.value.code == 2
         assert "--yse" in capsys.readouterr().err
+
+
+class TestUrlAndEnv:
+    """`quern url` and `quern env` exist so a script never writes 9100 down.
+
+    The shipped example did exactly that -- `os.getenv("QUERN_SERVER_URL",
+    "http://127.0.0.1:9100")` -- which is the habit CONTRIBUTING forbids in
+    the sentence "All consumers discover the server via ~/.quern/state.json.
+    Never hardcode ports."
+    """
+
+    def _run(self, monkeypatch, argv, state=None, key=None):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: state,
+        )
+        if key is not None:
+            import tempfile
+            from pathlib import Path
+            tmp = Path(tempfile.mkdtemp()) / "api-key"
+            tmp.write_text(key)
+            monkeypatch.setattr("server.config.API_KEY_FILE", tmp)
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        return exc.value.code
+
+    def test_url_reports_the_port_the_server_actually_took(self, monkeypatch, capsys):
+        """Not the default. A server that found 9100 busy is on another port,
+        and that is precisely when a hardcoded URL fails."""
+        code = self._run(monkeypatch, ["url"], state={"server_port": 9137})
+        assert code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_url_says_so_when_nothing_is_running(self, monkeypatch, capsys):
+        code = self._run(monkeypatch, ["url"], state=None)
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "a script would have eval'd or curl'd this"
+        assert "quern start" in err
+
+    def test_env_is_evalable(self, monkeypatch, capsys):
+        code = self._run(
+            monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret",
+        )
+        assert code == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert lines == [
+            "export QUERN_SERVER_URL=http://127.0.0.1:9137",
+            "export QUERN_API_KEY=s3cret",
+        ]
+
+    def test_env_quotes_what_it_exports(self, monkeypatch, capsys):
+        """An API key is opaque; a shell-special character in one must not
+        become shell syntax when the caller evals it."""
+        code = self._run(
+            monkeypatch, ["env"], state={"server_port": 9137}, key="a b;rm -rf /",
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "export QUERN_API_KEY='a b;rm -rf /'" in out
+
+    def test_env_prints_nothing_when_there_is_no_server(self, monkeypatch, capsys):
+        """A partial environment is worse than none: `eval` would set half of
+        it and the script would fail later, somewhere unrelated."""
+        code = self._run(monkeypatch, ["env"], state=None, key="s3cret")
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert "quern start" in err
+
+    def test_env_does_not_emit_the_prototype_name(self, monkeypatch, capsys):
+        """QUERN_DEBUG_SERVER_URL is the old name. The wrapper still honours
+        it with a deprecation warning; nothing should be teaching it."""
+        self._run(monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret")
+        assert "QUERN_DEBUG_SERVER_URL" not in capsys.readouterr().out

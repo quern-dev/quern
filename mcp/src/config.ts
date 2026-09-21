@@ -29,12 +29,21 @@ export function readStateFile(): ServerState | null {
 }
 
 export function discoverServer(): { url: string; apiKey: string } {
-  // Priority 1: Environment variable
-  if (process.env.QUERN_DEBUG_SERVER_URL) {
-    return {
-      url: process.env.QUERN_DEBUG_SERVER_URL,
-      apiKey: loadApiKey(),
-    };
+  // Priority 1: Environment variable.
+  //
+  // QUERN_DEBUG_SERVER_URL is the prototype's name and is deprecated. It is
+  // still honoured, because someone has it exported in a shell profile and a
+  // silent change of meaning is worse than a rename, but it warns -- and the
+  // warning goes to stderr, because stdout is the JSON-RPC channel.
+  const url = process.env.QUERN_SERVER_URL ?? process.env.QUERN_DEBUG_SERVER_URL;
+  if (url) {
+    if (!process.env.QUERN_SERVER_URL) {
+      console.error(
+        "QUERN_DEBUG_SERVER_URL is deprecated; use QUERN_SERVER_URL. " +
+          "`eval \"$(quern env)\"` sets it for you.",
+      );
+    }
+    return { url, apiKey: loadApiKey() };
   }
 
   // Priority 2: State file

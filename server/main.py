@@ -1812,6 +1812,14 @@ def cli() -> None:
         "check-updates",
         help="Check for a new release now, ignoring the once-a-day rate limit",
     )
+    # Dispatched early in `server.__main__`, like setup. Declared here so
+    # `quern --help` lists them and the two entry points agree about what
+    # exists.
+    subparsers.add_parser(
+        "url", help="Print the running server's base URL")
+    subparsers.add_parser(
+        "env", help="Print shell exports for the running server")
+
     setup_parser = subparsers.add_parser(
         "setup", help="Check environment and install dependencies")
     # `server.__main__` dispatches setup before this parser is reached, and
@@ -1905,6 +1913,12 @@ def cli() -> None:
         sys.exit(run(getattr(args, "output", None)))
     elif args.command == "check-updates":
         sys.exit(_cmd_check_updates())
+    elif args.command == "url":
+        from server.__main__ import _cmd_url
+        sys.exit(_cmd_url())
+    elif args.command == "env":
+        from server.__main__ import _cmd_env
+        sys.exit(_cmd_env())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup(assume_yes=getattr(args, "assume_yes", False)))

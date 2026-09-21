@@ -8,6 +8,7 @@ The coordinator passes device info via environment variables:
 """
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,12 +16,37 @@ from pathlib import Path
 import httpx
 
 
+def _discover_server_url() -> str:
+    """The running server's base URL, from the state file it publishes.
+
+    `~/.quern/state.json` is the contract every consumer shares -- the MCP
+    wrapper reads the same field. Loopback rather than the recorded bind
+    host, which is 0.0.0.0 by default.
+    """
+    state_path = Path.home() / ".quern" / "state.json"
+    try:
+        port = json.loads(state_path.read_text())["server_port"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise SystemExit(
+            f"No running server found via {state_path} ({exc}).\n"
+            "Start it with `quern start`, or set QUERN_SERVER_URL."
+        ) from exc
+    return f"http://127.0.0.1:{port}"
+
+
 async def run_test(device_udid: str, device_name: str, device_index: int):
     """Your UI automation test logic goes here."""
 
-    # Read server config
-    api_key = (Path.home() / ".quern" / "api-key").read_text().strip()
-    server_url = os.getenv("QUERN_SERVER_URL", "http://127.0.0.1:9100")
+    # Where the server is. Read, never assumed: the port is whatever the
+    # server settled on, which is not 9100 when something else already had
+    # it. This example used to default to 9100 and would have quietly talked
+    # to the wrong thing -- or nothing -- the first time that happened.
+    #
+    # From the shell, `eval "$(quern env)"` sets both of these for you.
+    api_key = os.getenv("QUERN_API_KEY") or (
+        Path.home() / ".quern" / "api-key"
+    ).read_text().strip()
+    server_url = os.getenv("QUERN_SERVER_URL") or _discover_server_url()
 
     print(f"[{device_index}] Running test on {device_name} ({device_udid[:8]}...)")
 

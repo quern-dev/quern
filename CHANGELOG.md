@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`quern url` and `quern env`, so a script never writes a port down.** `quern url` prints the running server's base URL; `eval "$(quern env)"` exports `QUERN_SERVER_URL` and `QUERN_API_KEY`, the way `fnm env` and `docker-machine env` do. Computed when asked for, so they cannot go stale the way a file written at start-up would once the server moved to another port. Neither prints anything to stdout when no server is running — a partial environment is worse than none, since `eval` would set half of it and the script would fail later, somewhere unrelated. `~/.quern/state.json` remains the contract for anything that would rather read it directly.
+
+### Changed
+- **`QUERN_DEBUG_SERVER_URL` is deprecated in favour of `QUERN_SERVER_URL`.** The old name is the prototype's. The MCP wrapper still honours it — someone has it exported in a shell profile, and silently changing what it means is worse than renaming it — but it now warns, on stderr, since stdout is the JSON-RPC channel. Two names for one value was not academic: the wrapper read one and `examples/example-ui-test.py` read the other, so setting either left the other consumer on its hardcoded default.
+
+### Fixed
+- **`quern start` could kill any process running uvicorn.** `reclaim_port` SIGTERMs and then SIGKILLs whatever it identifies as a stale quern, and that test said yes to any command line containing `uvicorn` — the most widely used ASGI server in Python. So an unrelated app holding the port was killed to take it. Quern's own daemon never matched that pattern anyway (`<python> -m server` does), so it protected nothing. It matters most on 9100, which is also Prometheus node_exporter's default and the JetDirect printing port, so sharing it is ordinary rather than unlucky. `-m server` is now matched at a word boundary, and the orphaned-mitmdump clause has to be quern's own addon.
+- **The example script hardcoded port 9100.** `examples/example-ui-test.py` defaulted to `http://127.0.0.1:9100`, which is the habit CONTRIBUTING forbids in as many words. It reads `~/.quern/state.json` now, and honours `QUERN_SERVER_URL`/`QUERN_API_KEY` when they are set.
+
 ## [0.20.0] - 2026-09-21
 
 ### Added
