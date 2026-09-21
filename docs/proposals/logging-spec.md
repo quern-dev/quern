@@ -590,11 +590,21 @@ overlapping actions on one device marks them rather than guessing.
   that action, and carries the caveat *"some flows matched on time alone"* --
   correctly, because it had no `simulator_udid`.
 
-**Not yet verified:** the strong attribution regime. A flow carrying a
-`simulator_udid` resolved from the client's pid requires local capture, which
-needs a privileged one-time `quern enable-local-capture`. Everything the trace
-does with that field is unit-tested and none of it has run against a real
-redirected flow. That is the gap to close before calling step 4 done.
+- **The strong regime works.** Under local capture a flow arrives carrying
+  `simulator_udid` resolved from the client's pid, and the trace joins on it:
+
+      open_url ok 139ms udid=2B272789
+        FLOW GET https://neverssl.com/?fin=... proc=com.apple.WebKit.Networking
+        caveat: some flows arrived after the action returned ...
+
+Getting there found the thing that matters most about this design. **Most
+actions return before the work they cause happens.** `open_url` finished in
+143ms and the request it caused arrived 174ms later; a tap that triggers a
+fetch and a launch that makes startup requests are the same shape. Attributing
+only what happens *during* an action therefore answers almost nothing, so a
+bounded grace window after the action closes is part of the model rather than
+a refinement of it -- and anything attributed that way is marked, because
+inferring causation from timing is not the same as observing it.
 
 Steps 1–3 are worth doing regardless of whether step 4 ever happens.
 

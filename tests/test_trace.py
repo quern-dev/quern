@@ -374,3 +374,64 @@ class TestOnlyAppLogsAppearAsLogs:
         [attribution] = build_trace([action], [], [self._line(LogSource.SIMULATOR)])
 
         assert len(attribution.logs) == 1
+
+
+class TestTrafficCausedAfterAnActionReturns:
+    """Most actions hand work to the device and return before it happens.
+
+    Measured: `open_url` finished in 143ms and the HTTP request it caused
+    arrived 174ms later. Attributing only what happens *during* an action
+    misses the traffic that action caused -- which is the question a trace
+    exists to answer.
+    """
+
+    def test_a_flow_just_after_the_action_is_attributed(self):
+        action = _action("open_url", at_s=10, duration_ms=150)   # 9.85 -> 10
+        flow = _flow(at_s=11, udid="SIM-A")                      # 1s later
+
+        [attribution] = build_trace([action], [flow], [])
+
+        assert attribution.flows == [flow]
+
+    def test_it_is_marked_as_inferred_not_observed(self):
+        """A reader must be able to tell causation we saw from causation we
+        guessed at from timing."""
+        action = _action("open_url", at_s=10, duration_ms=150)
+        flow = _flow(at_s=11, udid="SIM-A")
+
+        [attribution] = build_trace([action], [flow], [])
+
+        assert any("after the action returned" in c for c in attribution.caveats)
+
+    def test_a_flow_during_the_action_is_not_marked(self):
+        """Observed is not inferred, and conflating them would make the
+        caveat meaningless."""
+        action = _action("tap", at_s=10, duration_ms=2000)       # 8 -> 10
+        flow = _flow(at_s=9, udid="SIM-A")
+
+        [attribution] = build_trace([action], [flow], [])
+
+        assert attribution.flows == [flow]
+        assert not any("after the action returned" in c for c in attribution.caveats)
+
+    def test_a_flow_beyond_the_grace_window_is_not_attributed(self):
+        """The window is a trade. Without an upper bound every later request
+        would be blamed on the last action that ran."""
+        action = _action("open_url", at_s=10, duration_ms=150)
+        flow = _flow(at_s=60, udid="SIM-A")
+
+        [attribution] = build_trace([action], [flow], [])
+
+        assert attribution.flows == []
+
+    def test_a_flow_inside_one_action_is_not_also_blamed_on_the_previous(self):
+        """Preferring the containing action over a preceding one's grace
+        window: otherwise every flow is attributed twice."""
+        first = _action("open_url", at_s=10, duration_ms=150)     # 9.85 -> 10
+        second = _action("tap", at_s=12, duration_ms=2000)        # 10   -> 12
+        flow = _flow(at_s=11, udid="SIM-A")   # inside `tap`, inside first's grace
+
+        first_a, second_a = build_trace([first, second], [flow], [])
+
+        assert first_a.flows == []
+        assert second_a.flows == [flow]

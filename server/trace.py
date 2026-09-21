@@ -42,6 +42,21 @@ from server.models import FlowRecord, LogEntry, LogSource
 #: which is worse than not attributing it at all.
 IP_MAPPING_TRUSTED_FOR = timedelta(days=7)
 
+#: How long after an action ends a flow may still be attributed to it.
+#:
+#: Without this the trace answers almost nothing. Most actions hand work to
+#: the device and return: `open_url` was measured finishing in 143ms with the
+#: HTTP request it caused arriving 174ms *later*. A tap that triggers a fetch
+#: and a launch that makes startup requests behave the same way. Attributing
+#: only what happens *during* an action therefore misses the traffic that
+#: action caused, which is the question a trace exists to answer.
+#:
+#: Three seconds is a guess informed by one measurement, and it is a trade:
+#: too short and causation is missed, too long and unrelated traffic is
+#: swept in. Anything attributed this way is marked, so a reader can tell
+#: inference from observation.
+CAUSAL_GRACE = timedelta(seconds=3)
+
 #: Sources whose timestamps come from a physical device's clock rather than
 #: the host's. Simulator sources are deliberately absent: a simulator runs on
 #: the host clock, so there is no skew to declare and saying otherwise would
@@ -159,6 +174,7 @@ def build_trace(
     device_logs: list[LogEntry],
     *,
     ip_map: dict[str, tuple[str, bool]] | None = None,
+    grace: timedelta = CAUSAL_GRACE,
 ) -> list[Attribution]:
     """Attribute each flow and log line to the action whose interval holds it.
 
@@ -189,12 +205,32 @@ def build_trace(
 
     for flow in flows:
         udid, firm = device_of(flow, ip_map)
-        for i, attribution in enumerate(result):
-            start, end = intervals[i]
-            if not (start <= flow.timestamp <= end):
-                continue
+
+        # Which actions could own this flow: those it happened inside, and
+        # those it arrived shortly after. Preferring the first means a flow
+        # landing inside one action is not also blamed on the previous one
+        # merely for being close to it.
+        during = [
+            i for i in range(len(result))
+            if intervals[i][0] <= flow.timestamp <= intervals[i][1]
+        ]
+        after = [
+            i for i in range(len(result))
+            if intervals[i][1] < flow.timestamp <= intervals[i][1] + grace
+        ]
+        candidates = during or after
+        inferred = not during
+
+        for i in candidates:
+            attribution = result[i]
             if udid and attribution.action.udid and udid != attribution.action.udid:
                 continue
+            if inferred:
+                _note(
+                    attribution,
+                    "some flows arrived after the action returned and are "
+                    "attributed by timing rather than observed causation",
+                )
             # With no device on either side, time is all there is. Say so
             # rather than presenting it as a firm attribution.
             if not udid:
