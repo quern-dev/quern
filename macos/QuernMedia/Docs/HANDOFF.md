@@ -179,14 +179,34 @@ each other.
         than anything in the trace today but is *not* exposed as an API, and
         only holds while the connection is held — a live measurement, not a
         cacheable constant. Surfacing it is a possible task, not a promise.
-      - **Two parts of the trace are unverified** (their words, 2026-09-21,
-        and neither touches `started_monotonic` or the interval fields):
-        flow attribution has never run with the proxy actually capturing —
-        zero flows in every live run — and device-log attribution reads the
-        shared ring buffer without a confirmed source filter, so a trace's
-        `logs` could carry a line that is not an app log at all. Verified:
-        the action side and the device-log side against a real iOS 27
-        simulator.
+      - **An action's visible effect can land after its interval ends.**
+        Most actions hand work to the device and return before anything
+        happens — measured, `open_url` ran 143ms and the flow it caused
+        arrived 174ms *after* it closed. The trace attributes flows landing
+        within a 3s grace window to the preceding action and marks them
+        "attributed by timing rather than observed causation".
+
+        For keyframes this is a rendering constraint, not a placement one. A
+        keyframe still belongs at the action's start: it is a seek point, and
+        the consequence is seen by playing forward from it, which needs no
+        second anchor. What it forbids is drawing a video region for
+        `[started_at, finished_at]` and implying the visible result is inside
+        it — the causal span is wider than the interval by up to the grace.
+        Same discipline as `.arrival` vs `.reported` on our side: inferred
+        and observed must not render identically.
+      - **Flow attribution is verified** (2026-09-22), including HTTPS under
+        local capture, with `simulator_udid` resolved from the client pid.
+        The earlier "zero flows in every live run" caveat is withdrawn: it
+        was a misconfiguration — `processes: ["MobileSafari"]` *replaces* the
+        default list and so dropped `com.apple.WebKit.Networking`, which is
+        the process that actually makes the requests. No error, no flows, and
+        a correct config indistinguishable from a broken one. Third time this
+        shape has cost time on this work: an empty result and a broken one
+        look the same.
+      - **Still unconfirmed:** device-log attribution reads the shared ring
+        buffer without a verified source filter, so a trace's `logs` could
+        carry a line that is not an app log. Does not touch
+        `started_monotonic` or the interval fields.
       - **The trace branch is unmerged**, stacked on PR #253 and awaiting a
         review window. The fields above are real and testable now, but the
         shape can still move if review pushes back.
