@@ -1121,6 +1121,119 @@ failures=$((failures + $?))
 set -e
 
 # --------------------------------------------------------------------------
+step "A clone that cannot be fast-forwarded"
+# --------------------------------------------------------------------------
+# Two states a real clone is often in, and in both the update must decline
+# and say what to do -- not pull, not half-pull, and above all not discard
+# work. They share the origin the first case built.
+#
+# `git pull --ff-only` is what runs, so the interesting part is the message:
+# a raw git error tells the user nothing they can act on.
+prepare_clone() {
+  local into="$1"
+  git clone -q -b release/stable "$WORK/git-update/origin.git" "$into"
+  git -C "$into" reset -q --hard HEAD~1
+  python3 -m venv "$into/.venv" > "$into/venv.log" 2>&1 || true
+  "$into/.venv/bin/pip" install -q -e "$into" > "$into/pip.log" 2>&1 || true
+}
+
+case_clone_on_another_branch() {
+  failures=0   # a subshell copy: a case reports only its own
+  if [[ ! -d "$WORK/git-update/origin.git" ]]; then
+    skip "branch clone: the update case left no origin to clone from"
+    return 0
+  fi
+  local sb="$WORK/branch-clone"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+  prepare_clone "$sb/install"
+
+  # The ordinary dev-clone state: working on something, not on the channel
+  # branch. Pulling here would track the wrong upstream, so quern reports
+  # what is available and leaves the decision alone (#40).
+  git -C "$sb/install" checkout -q -b my-work
+
+  set +e
+  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if grep -q "You're on branch" "$sb/update.log" \
+     && grep -q "release/stable" "$sb/update.log"; then
+    ok "it names the branch you are on and the one to switch to"
+  else
+    bad "the update did not explain why it would not pull"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  local still
+  still="$(sed -n 's/^version = "\(.*\)"/\1/p' "$sb/install/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$still" == "$prev_version" ]] \
+    && ok "the clone is left where it was, on $prev_version" \
+    || bad "the clone moved to ${still:-nothing} from a branch it should not have pulled"
+
+  [[ "$(git -C "$sb/install" rev-parse --abbrev-ref HEAD)" == "my-work" ]] \
+    && ok "and still on my-work" \
+    || bad "the update changed the checked-out branch"
+  (( rc == 0 || rc == 2 )) && ok "it exits without claiming failure (rc $rc)" \
+    || ok "it exits $rc"
+  return "$failures"
+}
+
+case_clone_with_local_changes() {
+  failures=0   # a subshell copy: a case reports only its own
+  if [[ ! -d "$WORK/git-update/origin.git" ]]; then
+    skip "dirty clone: the update case left no origin to clone from"
+    return 0
+  fi
+  local sb="$WORK/dirty-clone"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+  prepare_clone "$sb/install"
+
+  # One stray edit is all it takes, and it is the user's work: the only
+  # unacceptable outcome here is losing it.
+  local marker="# a local edit the update must not discard"
+  printf '%s\n' "$marker" >> "$sb/install/README.md"
+
+  set +e
+  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if grep -qi "local changes" "$sb/update.log"; then
+    ok "it says local changes are in the way"
+  else
+    bad "the update did not explain that local changes blocked it"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+  grep -qi "stash" "$sb/update.log" \
+    && ok "and says what to do about them" \
+    || bad "it does not say how to proceed"
+
+  # The load-bearing one.
+  if grep -qF "$marker" "$sb/install/README.md"; then
+    ok "the local edit is still there"
+  else
+    bad "the update discarded uncommitted work"
+  fi
+
+  [[ $rc -ne 0 ]] \
+    && ok "the refusal reaches the exit code (rc $rc)" \
+    || bad "a blocked update exited 0"
+  return "$failures"
+}
+
+set +e
+( case_clone_on_another_branch )
+failures=$((failures + $?))
+( case_clone_with_local_changes )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
 step "A channel offering an older release is refused"
 # --------------------------------------------------------------------------
 # 0.18.1's defect: the beta channel resolved to a release three minor
