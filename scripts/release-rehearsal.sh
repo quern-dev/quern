@@ -1167,6 +1167,100 @@ failures=$((failures + $?))
 set -e
 
 # --------------------------------------------------------------------------
+step "Setup with the menu-bar app already running"
+# --------------------------------------------------------------------------
+# #215: every run of setup quit the running app and reopened it, even when
+# there was nothing new to install -- which is every run on a git install.
+# When the reopen failed (macOS error -600, seen during a live update) the app
+# stayed quit, and the only sign was its absence from the menu bar.
+#
+# The app is faked, but the *detection* is not: setup finds it with
+# `pgrep -f <bundle>/Contents/MacOS/QuernMenuBar`, so this puts a real process
+# at that path with that argv. A stubbed pgrep would have tested the stub.
+case_menubar_app_left_running() {
+  failures=0   # a subshell copy: a case reports only its own
+  local install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "menu-bar app: the update case left no install to run setup from"
+    return 0
+  fi
+
+  local sb="$WORK/menubar-running"
+  local app="$sb/home/Applications/Quern.app"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin" "$app/Contents/MacOS"
+  make_stubs "$sb/bin"
+
+  # Current, so there is nothing to install and nothing setup needs to
+  # replace. A version behind would be a different case: then setup *should*
+  # quit it, and putting both in one test would let either pass for the
+  # other's reason.
+  cat > "$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key>
+  <string>$candidate_version</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.quern.QuernMenuBar</string>
+</dict>
+</plist>
+EOF
+  cat > "$app/Contents/MacOS/QuernMenuBar" <<'EOF'
+#!/bin/sh
+# Stands in for the app: what matters is the path and that it stays up.
+sleep 900
+EOF
+  chmod +x "$app/Contents/MacOS/QuernMenuBar"
+
+  "$app/Contents/MacOS/QuernMenuBar" &
+  local app_pid=$!
+  sleep 0.5
+  if ! kill -0 "$app_pid" 2>/dev/null; then
+    bad "menu-bar app: the stand-in would not stay running"
+    return "$failures"
+  fi
+  # Confirm setup will actually see it, or the case proves nothing.
+  if ! pgrep -f "$app/Contents/MacOS/QuernMenuBar" >/dev/null 2>&1; then
+    kill "$app_pid" 2>/dev/null || true
+    bad "menu-bar app: pgrep cannot see the stand-in, so setup would not either"
+    return "$failures"
+  fi
+  ok "a running app of the current version is in place"
+
+  set +e
+  ( cd "$install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
+      "$install/quern" setup ) > "$sb/setup.log" 2>&1
+  set -e
+
+  if kill -0 "$app_pid" 2>/dev/null; then
+    ok "setup left it running"
+  else
+    bad "setup quit the app it had nothing to replace (#215)"
+    grep -i "quern app\|menu.bar\|quit" "$sb/setup.log" | head -6 | sed 's/^/      /'
+  fi
+
+  # And it must not have decided to fetch one either: an app that is current
+  # is not an app to reinstall, and a rehearsal that downloads here would be
+  # testing the network.
+  if grep -qi "Fetching the signed menu-bar app\|Downloading" "$sb/setup.log"; then
+    bad "setup went to fetch an app it already had at $candidate_version"
+  else
+    ok "and did not go looking for another one"
+  fi
+
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  return "$failures"
+}
+
+set +e
+( case_menubar_app_left_running )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
 step "A clone that cannot be fast-forwarded"
 # --------------------------------------------------------------------------
 # Two states a real clone is often in, and in both the update must decline
