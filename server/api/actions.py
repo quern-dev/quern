@@ -28,6 +28,11 @@ from typing import Any
 from fastapi import HTTPException
 
 from server import logging_ext
+from server.logging_ext import (
+    current_action,
+    reset_current_action,
+    set_current_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,37 +123,6 @@ logger = logging.getLogger(__name__)
 
 
 
-#: The action currently being recorded on this task, so a handler deep in a
-#: long function can name the device it resolved without threading a parameter
-#: through. A ContextVar rather than a global: requests interleave on one
-#: event loop, and a global would let two boots overwrite each other's udid.
-_CURRENT: contextvars.ContextVar[ActionScope | None] = contextvars.ContextVar(
-    "quern_current_action", default=None,
-)
-
-
-class _NoAction:
-    """Stand-in when nothing is recording, so call sites need no guard.
-
-    Assigning to a field on this is deliberately a no-op rather than an
-    error: a handler that sets `udid` should not break when it is called
-    from a test, or from a path that does not log.
-    """
-
-    __slots__ = ()
-
-    def __setattr__(self, name: str, value: object) -> None:
-        return
-
-
-_NO_ACTION = _NoAction()
-
-
-def current_action() -> ActionScope | _NoAction:
-    """The action being recorded, or a no-op stand-in."""
-    return _CURRENT.get() or _NO_ACTION
-
-
 def logged_action(
     name: str, *, category: str = "device.action",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -167,11 +141,11 @@ def logged_action(
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 with action(name, category=category) as scope:
-                    token = _CURRENT.set(scope)
+                    token = set_current_action(scope)
                     try:
                         return await fn(*args, **kwargs)
                     finally:
-                        _CURRENT.reset(token)
+                        reset_current_action(token)
             return wrapper
 
         # A sync handler is rarer here but FastAPI accepts them, and
@@ -182,10 +156,10 @@ def logged_action(
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             with action(name, category=category) as scope:
-                token = _CURRENT.set(scope)
+                token = set_current_action(scope)
                 try:
                     return fn(*args, **kwargs)
                 finally:
-                    _CURRENT.reset(token)
+                    reset_current_action(token)
         return sync_wrapper
     return decorate

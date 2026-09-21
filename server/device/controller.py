@@ -7,6 +7,7 @@ import logging
 import time
 
 from server import logging_ext
+from server.logging_ext import current_action
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.devicectl import DevicectlBackend
@@ -396,6 +397,22 @@ class DeviceController(DeviceControllerUI):
             await self.list_devices()
 
     async def resolve_udid(self, udid: str | None = None) -> str:
+        """Resolve which device to target, and tell the action log about it.
+
+        This is the one place that *decides* which device a call goes to, so
+        it is where the action entry learns its udid. Recording it in each
+        handler instead was tried and left most of them blank: the handlers
+        wrapped in a `with action(...)` block set it, and the ~78 decorated
+        with `@logged_action` did not, so a per-device trace silently lost
+        every one of them and their flows fell back to matching on time alone.
+
+        The assignment is a no-op when no action is being recorded.
+        """
+        resolved = await self._resolve_udid(udid)
+        current_action().udid = resolved
+        return resolved
+
+    async def _resolve_udid(self, udid: str | None = None) -> str:
         """Resolve which device to target.
 
         If a DevicePool is attached, attempts pool-based resolution for

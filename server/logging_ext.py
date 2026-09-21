@@ -18,6 +18,7 @@ things.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Final
 
@@ -200,3 +201,43 @@ def category_of(record: logging.LogRecord) -> str:
 def udid_of(record: logging.LogRecord) -> str:
     """The resolved udid a record carries, or ""."""
     return getattr(record, f"{_PREFIX}udid", "") or ""
+
+
+#: The action being recorded on this task, so the place that *decides* a
+#: device can record it without every handler threading a parameter out.
+#: A ContextVar rather than a global: requests interleave on one event loop,
+#: and two concurrent boots would overwrite each other's device.
+_CURRENT: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "quern_current_action", default=None,
+)
+
+
+class _NoAction:
+    """Stand-in when nothing is recording, so call sites need no guard.
+
+    Assigning a field on this is deliberately a no-op rather than an error:
+    `resolve_udid` runs on paths with no action in progress -- from a test,
+    from startup -- and must not care.
+    """
+
+    __slots__ = ()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        return
+
+
+_NO_ACTION = _NoAction()
+
+
+def current_action():
+    """The action being recorded, or a no-op stand-in."""
+    return _CURRENT.get() or _NO_ACTION
+
+
+def set_current_action(scope: object):
+    """Record the action for this task. Returns the token to reset with."""
+    return _CURRENT.set(scope)
+
+
+def reset_current_action(token) -> None:
+    _CURRENT.reset(token)
