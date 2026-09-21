@@ -43,7 +43,10 @@ class ActionScope:
     as the thing it describes, which is what `[PERF]` did.
     """
 
-    __slots__ = ("name", "category", "udid", "outcome", "detail", "_start")
+    __slots__ = (
+        "name", "category", "udid", "outcome", "detail", "_start",
+        "started_monotonic",
+    )
 
     def __init__(self, name: str, category: str) -> None:
         self.name = name
@@ -52,6 +55,11 @@ class ActionScope:
         self.outcome = "ok"
         self.detail = ""
         self._start = time.perf_counter()
+        # Recorded as well as the perf_counter, because this one is published.
+        # Same base on this platform, but perf_counter is documented only as
+        # "a clock with the highest resolution", and a consumer aligning video
+        # against it deserves the clock that is actually specified.
+        self.started_monotonic = time.monotonic()
 
     @property
     def duration_ms(self) -> int:
@@ -109,6 +117,7 @@ def action(
             outcome=scope.outcome,
             duration_ms=scope.duration_ms,
             detail=scope.detail,
+            started_monotonic=scope.started_monotonic,
         )
 
 logger = logging.getLogger(__name__)

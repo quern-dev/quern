@@ -138,6 +138,7 @@ def action(
     outcome: str,
     duration_ms: int,
     detail: str = "",
+    started_monotonic: float | None = None,
 ) -> None:
     """One entry per completed action -- the spine of the combined trace.
 
@@ -174,6 +175,7 @@ def action(
             f"{_PREFIX}action": action,
             f"{_PREFIX}outcome": outcome,
             f"{_PREFIX}duration_ms": duration_ms,
+            f"{_PREFIX}started_monotonic": started_monotonic,
         },
     )
 
@@ -191,6 +193,11 @@ def outcome_of(record: logging.LogRecord) -> str:
 def duration_ms_of(record: logging.LogRecord) -> int | None:
     """The duration a record carries, or None."""
     return getattr(record, f"{_PREFIX}duration_ms", None)
+
+
+def started_monotonic_of(record: logging.LogRecord) -> float | None:
+    """When the action began, on time.monotonic(), or None."""
+    return getattr(record, f"{_PREFIX}started_monotonic", None)
 
 
 def category_of(record: logging.LogRecord) -> str:

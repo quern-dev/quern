@@ -12,6 +12,7 @@ per regime -- is a pure function that can be tested without a server.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Query, Request
@@ -37,7 +38,20 @@ def _serialise(attribution: Attribution) -> dict:
         "outcome": action.outcome,
         "duration_ms": action.duration_ms,
         "category": action.category,
+        # The whole interval, as a property of the record. `finished_at` alone
+        # is a trap: entries are written when an action *ends*, so a consumer
+        # placing a marker at it is late by the action's own duration -- and
+        # that is not a constant to subtract out (measured 2369ms cold and
+        # 129ms warm for the same tap on one simulator).
+        "started_at": (
+            action.timestamp - timedelta(milliseconds=action.duration_ms or 0)
+        ).isoformat(),
         "finished_at": action.timestamp.isoformat(),
+        # On time.monotonic(), the same base as mach absolute time, which is
+        # what video capture stamps frames with. Published so a consumer
+        # aligning against a recording needs no wall-clock conversion and
+        # inherits none of its drift. End is this plus duration_ms.
+        "started_monotonic": action.started_monotonic,
         "detail": action.message,
         "flows": [
             {
@@ -114,6 +128,16 @@ async def get_trace(
     return {
         "since": window_start.isoformat(),
         "udid": udid,
+        # Read now, per export, rather than once at server start. The two
+        # clocks do not stay a fixed distance apart -- measured 4.078s of
+        # divergence on one machine -- so a single anchor recorded at startup
+        # silently decays, with nothing to detect it. Reading it per export
+        # costs two syscalls and removes the failure mode where a laptop lid
+        # ruins an overnight alignment.
+        "clock_anchor": {
+            "wall": datetime.now(UTC).isoformat(),
+            "monotonic": time.monotonic(),
+        },
         "actions": [_serialise(a) for a in attributions],
         # Said plainly rather than left to be inferred from empty lists: a
         # trace with no flows because the proxy was off looks identical to one

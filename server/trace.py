@@ -34,13 +34,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from server.models import FlowRecord, LogEntry
+from server.models import FlowRecord, LogEntry, LogSource
 
 #: How long after a recorded `client_ip` we still believe it identifies a
 #: device. It is written once, at proxy setup, and DHCP reassigns: a stale
 #: mapping does not fail, it attributes another device's traffic to this one,
 #: which is worse than not attributing it at all.
 IP_MAPPING_TRUSTED_FOR = timedelta(days=7)
+
+#: Sources whose timestamps come from a physical device's clock rather than
+#: the host's. Simulator sources are deliberately absent: a simulator runs on
+#: the host clock, so there is no skew to declare and saying otherwise would
+#: make the caveat noise.
+_DEVICE_CLOCK_SOURCES = frozenset({LogSource.DEVICE, LogSource.LOGCAT})
 
 
 @dataclass
@@ -197,6 +203,23 @@ def build_trace(
                 and entry.device_id != attribution.action.udid
             ):
                 continue
+            # Clock mismatch, stated rather than silently compared. An action
+            # interval is on the host clock; a device log line is stamped by
+            # OSLog on the *device's* clock. A simulator shares the host's, so
+            # there is nothing to reconcile. A physical device does not, and
+            # quern applies no offset -- so an attribution near an interval
+            # boundary may be on the wrong side of it.
+            #
+            # Measurable, just not measured here: alignment under a
+            # millisecond has been observed over a held lockdown connection,
+            # but only while it is held, so it is a live reading rather than a
+            # constant a trace could cache.
+            if entry.source in _DEVICE_CLOCK_SOURCES:
+                _note(
+                    attribution,
+                    "device log times come from the device's own clock and "
+                    "are compared against host-clock intervals with no offset",
+                )
             attribution.logs.append(entry)
 
     return result

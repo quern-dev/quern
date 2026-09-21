@@ -15,7 +15,13 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from server.models import FlowRecord, FlowRequest, LogEntry, LogLevel, LogSource
+from server.models import (
+    FlowRecord,
+    FlowRequest,
+    LogEntry,
+    LogLevel,
+    LogSource,
+)
 from server.trace import IP_MAPPING_TRUSTED_FOR, build_trace, device_of, ip_to_udid
 
 BASE = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
@@ -273,3 +279,47 @@ class TestTwoCallersOnOneServer:
 
         assert [e.message for e in a_attr.logs] == ["from A"]
         assert [e.message for e in b_attr.logs] == ["from B"]
+
+
+class TestClocksAreDeclaredNotAssumed:
+    """A device log line is stamped on the device's clock; an action interval
+    is on the host's. For a simulator they are the same clock. For a physical
+    device they are not, and quern applies no offset -- so the trace says so
+    rather than comparing them silently.
+
+    Raised by the media-engine work (PR #164), which aligns video keyframes
+    against these intervals and needs to know which numbers are facts.
+    """
+
+    @staticmethod
+    def _line(source, device="SIM-A"):
+        return LogEntry(
+            id=uuid.uuid4().hex,
+            timestamp=BASE + timedelta(seconds=9),
+            device_id=device,
+            process="MyApp",
+            level=LogLevel.INFO,
+            message="hello",
+            source=source,
+        )
+
+    def test_a_physical_device_log_carries_the_clock_caveat(self):
+        action = _action("tap", at_s=10, duration_ms=2000, udid="PHONE-1")
+        line = self._line(LogSource.DEVICE, device="PHONE-1")
+
+        [attribution] = build_trace([action], [], [line])
+
+        assert attribution.logs == [line]
+        assert any("own clock" in c for c in attribution.caveats)
+
+    def test_a_simulator_log_does_not(self):
+        """A simulator runs on the host clock. Declaring skew that cannot
+        exist would make the caveat noise, and a caveat nobody believes is
+        worse than none."""
+        action = _action("tap", at_s=10, duration_ms=2000, udid="SIM-A")
+        line = self._line(LogSource.SIMULATOR)
+
+        [attribution] = build_trace([action], [], [line])
+
+        assert attribution.logs == [line]
+        assert not any("own clock" in c for c in attribution.caveats)

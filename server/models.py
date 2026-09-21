@@ -87,6 +87,16 @@ class LogEntry(BaseModel):
     duration_ms: int | None = Field(
         default=None, description="How long the action took, once it is over",
     )
+    started_monotonic: float | None = Field(
+        default=None,
+        description=(
+            "When the action began, on time.monotonic() -- the same base as "
+            "mach absolute time, which is what video capture stamps frames "
+            "with. Given directly so a caller aligning against a recording "
+            "needs no wall-clock conversion and inherits none of its drift. "
+            "The end is this plus duration_ms, measured on the same clock."
+        ),
+    )
     outcome: str = Field(
         default="",
         description=(
