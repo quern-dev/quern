@@ -112,16 +112,31 @@ each other.
       - **The `clock_anchor` is for labels, not for the join.** A
         `(wall, monotonic)` pair is written per export, so wall-clock times
         can be rendered; nothing in the video join depends on it.
-      - **`wall - monotonic` is not constant, and the cause is not settled.**
-        Measured +4.078s, then +4.298s ten minutes later, against
-        `kern.boottime` on this host. An earlier version of this note blamed
-        sleep — the monotonic base genuinely does not tick while asleep — but
-        the figure *moves* between readings, and `kern.boottime` is itself
-        adjusted when the wall clock steps, so the comparison conflates at
-        least two effects. Do not build on the direction or the cause. The
-        only load-bearing conclusion is that one anchor captured at server
-        start decays with nothing to detect it, which is why it is per
-        export.
+      - **`wall - monotonic` looks constant, and per-export is justified
+        by a different argument.** Two wrong claims were made about this in
+        one day, so the readings are recorded with how they were parsed:
+
+            sysctl -n kern.boottime -> { sec = 1789402153, usec = 218257 }
+
+            parsed sec+usec : mono - (wall - boot) = +4.2956  then  +4.2980
+            parsed sec only : mono - (wall - boot) = +4.0773  then  +4.0800
+
+        The 0.218257 between the two columns is exactly the dropped `usec`.
+        An apparent 0.2s of "drift" was one reading from each column being
+        differenced against the other; three readings twenty seconds apart
+        agree to the millisecond, and half an hour apart to ~2ms. Nothing
+        here has observed drift.
+
+        So the honest reason for reading the anchor per export is **not**
+        measured drift. It is that a recorded anchor is wrong the moment the
+        wall clock is *stepped* — NTP correction, a manual change — which a
+        long-running server cannot detect, and the failure is silent and
+        unbounded. Two syscalls to avoid it. That argument needs no
+        measurement, which is the point.
+
+        The monotonic base also does not tick while the machine is asleep.
+        True, and not what these numbers show.
+
       - **`finished_at` is when an action ENDED.** Markers placed there are
         late by the action's own duration — measured 2369ms cold and 129ms
         warm for a tap on one simulator, so not a constant to subtract. The
