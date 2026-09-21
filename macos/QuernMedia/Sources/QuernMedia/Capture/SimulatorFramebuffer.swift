@@ -114,6 +114,17 @@ public final class SimulatorFramebuffer: FrameSource {
         queue.async { [weak self] in self?.captureLatest() }
     }
 
+    /// Re-delivers the current framebuffer surface, exactly as `start()`
+    /// primes with. Safe from any thread, and a no-op once stopped —
+    /// `captureLatest` re-checks that on the queue as well.
+    public func requestCurrentFrame() {
+        stateLock.lock()
+        let done = stopped
+        stateLock.unlock()
+        guard !done else { return }
+        queue.async { [weak self] in self?.captureLatest() }
+    }
+
     /// Safe from any thread, including from inside `onFrame`.
     public func stop() {
         // The flag goes up first, so a `captureLatest` already sitting in the

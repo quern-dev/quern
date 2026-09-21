@@ -78,14 +78,30 @@ each other.
 
 ### Product work
 
-- [ ] **A viewer attaching to an idle simulator sees ~14s of black.**
-      `multipart/x-mixed-replace` makes URLSession deliver a "response" per
-      part, so the add acknowledgement is in practice gated on the first
-      frame rather than the HTTP header — and an idle simulator composites
-      nothing. Fix: cache the last payload in `HTTPStreamServer` and write it
-      to a newly streaming client. Valid for MJPEG, where every frame stands
-      alone; H.264 needs the existing `onClientAttached` keyframe request
-      instead. This also removes the acknowledgement latency.
+- **Done: a viewer attaching to an idle simulator now gets a picture in
+      ~0.1s.** Measured on a completely idle simulator: 0.108s to the first
+      complete JPEG, against **no frame at all within 25 seconds** before —
+      the previously recorded "~14s" was just something eventually
+      compositing, so the real behaviour was unbounded.
+
+      The planned fix recorded here — cache the last payload in
+      `HTTPStreamServer` and replay it to a new client — **would not have
+      worked**, and checking beat implementing. `StreamPipeline.consume`
+      returns before encoding when no sink wants frames, so with nobody
+      watching there is no last payload to cache; the cache would have been
+      empty for the first viewer, which is the case that actually hurts.
+
+      What works is priming on attach, which `start()` already did once:
+      `FrameSource.requestCurrentFrame()` (default no-op, since a continuous
+      CoreMediaIO source delivers at 60fps regardless), implemented on
+      `SimulatorFramebuffer` as the same `captureLatest()` hop, and wired to
+      the server's attach handler in `main.swift` alongside the keyframe
+      request.
+
+      Only verified live: the wiring is in `main.swift`, which no test target
+      covers. The unit test asserts only that the call is safe before start
+      and after stop.
+
 - [ ] **No client-side liveness bound on a stream.** Both URLSession
       timeouts are unbounded, which is correct — a 15s inactivity timeout
       killed idle previews — but it means only a peer that *closes* the

@@ -86,6 +86,17 @@ struct LogHandlerTests {
         #expect(missing == nil)
     }
 
+    @Test("asking an unstarted or stopped source for a frame is safe")
+    func requestCurrentFrameIsSafeWhenNotRunning() {
+        // Called from the HTTP server's attach handler, which can fire while
+        // the source is being torn down. It must not touch the descriptors
+        // that stop() is clearing.
+        let source = SimulatorFramebuffer(udid: "not-a-real-udid") { _ in }
+        source.requestCurrentFrame()
+        source.stop()
+        source.requestCurrentFrame()
+    }
+
     @Test("SimulatorKit is found wherever this Xcode keeps it")
     func simulatorKitIsLocatable() throws {
         // Xcode 27 moved SimulatorKit from Developer/Library/PrivateFrameworks

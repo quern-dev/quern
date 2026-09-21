@@ -88,10 +88,15 @@ if let path = options.recordPath {
     }
 }
 
+// Assigned once the source exists. The server is constructed first so the
+// pipeline can take it as a sink, so the attach handler cannot name `source`
+// directly yet.
+var onViewerAttached: (() -> Void)?
+
 var server: HTTPStreamServer?
 if let port = options.servePort {
     let s = HTTPStreamServer(port: port, bindAll: options.bindAll, codec: options.codec) {
-        pipeline.requestKeyframe()
+        onViewerAttached?()
     }
     do { try s.start() } catch { fail("cannot bind port \(port): \(error)") }
     pipeline.add(s)
@@ -121,6 +126,16 @@ case .device(let match):
     source = CaptureDeviceSource(device: device) { pipeline.consume($0) }
     do { try source.start() } catch { fail("\(error)") }
     MediaLog.log("[capture] streaming \(device.localizedName)")
+}
+
+// A viewer that has just attached needs a picture, and on an event-driven
+// source there may not be another one for a long time: an idle simulator
+// composites nothing, so the window stayed black until the screen happened to
+// change. Asking the source to re-deliver what is already on screen costs one
+// encode and removes the wait.
+onViewerAttached = {
+    pipeline.requestKeyframe()
+    source.requestCurrentFrame()
 }
 
 // MARK: - lifetime

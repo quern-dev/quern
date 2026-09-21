@@ -44,6 +44,22 @@ public enum TimeAccuracy: Sendable {
 public protocol FrameSource: AnyObject {
     func start() throws
     func stop()
+
+    /// Re-deliver whatever is on screen now, if this source can.
+    ///
+    /// An event-driven source composites nothing while the screen is still,
+    /// so a viewer attaching to an idle simulator sees black until something
+    /// happens to change it — measured at roughly 14 seconds, and unbounded
+    /// in principle. This is the same priming `start()` already does, exposed
+    /// so a late viewer gets it too.
+    ///
+    /// Continuous sources have nothing to do here, which is why the default
+    /// is empty: CoreMediaIO delivers at 60fps whether or not anyone asked.
+    func requestCurrentFrame()
+}
+
+public extension FrameSource {
+    func requestCurrentFrame() {}
 }
 
 /// One already-compressed frame from a source that encodes on our behalf.
