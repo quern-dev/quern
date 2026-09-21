@@ -119,6 +119,24 @@ async def get_trace(
     device_logs = await ring_buffer.filter_entries(
         LogQueryParams(since=window_start, limit=limit * 10),
     )
+
+    # Did the window outlive the buffer?
+    #
+    # The ring buffer is a deque with a maxlen, shared by syslog, oslog,
+    # crash, build and proxy. Eviction is silent -- nothing counts drops -- so
+    # a trace asking for the last five minutes gets whatever survived and
+    # looks identical whether or not anything was lost. A busy device can turn
+    # over 10,000 entries in well under that.
+    #
+    # It is detectable without new bookkeeping: if the buffer is full and its
+    # oldest surviving entry starts after the window did, the beginning of the
+    # window has been evicted. Cheap, and a false negative at worst -- it
+    # cannot claim truncation that did not happen.
+    truncated = False
+    if ring_buffer.size >= ring_buffer.max_size:
+        oldest = await ring_buffer.get_recent(count=ring_buffer.size)
+        if oldest and oldest[0].timestamp > window_start:
+            truncated = True
     flows = await flow_store.get_since(window_start) if flow_store else []
 
     attributions = build_trace(
@@ -149,6 +167,10 @@ async def get_trace(
             "monotonic": time.monotonic(),
         },
         "actions": [_serialise(a) for a in attributions],
+        # Said rather than left to be inferred. An incomplete trace that looks
+        # complete is worse than one that admits it: the reader concludes the
+        # app logged nothing, when the entries were evicted.
+        "log_window_truncated": truncated,
         # Said plainly rather than left to be inferred from empty lists: a
         # trace with no flows because the proxy was off looks identical to one
         # where nothing was requested.
