@@ -936,13 +936,19 @@ without configuring a system proxy.
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
 
-SETS THE LIST, does not add to it. Whatever is not named is dropped, so read
-proxy_status first and pass the processes already there alongside the new one.
-Told "capture MyApp", sending ["MyApp"] silently stops capturing everything
-else -- most often the web-view defaults, which are applied only when nothing
-is specified. The response echoes only the new list, so it cannot tell you
-what went missing; the drop is recorded as a warning in the server log, which
-query_logs(source: "server") will show you.
+SETS THE LIST, but a minimum is always kept. Naming ["MyApp"] no longer drops
+MobileSafari or com.apple.WebKit.Networking: a webview's requests leave through
+WebKit and an OAuth hand-off goes through Safari, so removing them silently
+stopped capturing the traffic people were usually looking for. What was added
+for you comes back as capture_added on the response, and anything your list
+did drop as capture_removed -- read them rather than the server log.
+
+It is still a set rather than an add for everything else, so read proxy_status
+first and pass processes you want kept. The HTTP endpoint takes only: true to
+capture exactly your list for the running server; it is not exposed here yet.
+Note what only does NOT mean: the flag is not stored, but the list it writes
+IS, so it replaces whatever was configured before and start-up widens that
+stored list again. It is a one-shot narrowing, not a temporary view.
 
 CERTIFICATE CHECK. Enabling capture refuses with HTTP 428 when a booted
 simulator does not trust the mitmproxy CA and auto_install_cert is off. With
@@ -960,7 +966,7 @@ extension in System Settings > Privacy & Security.`,
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Replaces the current list; empty list disables local capture.'
+          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"], and those two are kept even when you name others. Replaces the rest of the current list; empty list disables local capture.'
         ),
       skip_cert_check: z
         .boolean()

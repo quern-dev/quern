@@ -1394,16 +1394,19 @@ class TestBootAutoStartAsksTheTrustStore:
 
 
 class TestSettingCaptureSaysWhatItDropped:
-    """`set` replaces, silently, and the response echoes only the new list.
+    """`set` still replaces everything outside the kept minimum, so removing a
+    process looks identical to adding one unless something says otherwise.
 
-    So removing a process looks identical to adding one. An agent told
-    "capture MobileSafari" sends `["MobileSafari"]` and deletes whatever else
-    was being watched. The defaults are the usual casualty -- MobileSafari and
-    com.apple.WebKit.Networking are applied only when nothing is specified, so
-    naming one process drops them and web-view traffic stops being captured.
+    The web-view defaults are no longer the casualty -- they are kept for the
+    caller now -- but anything else they had named still goes, silently, and
+    the response echoes only the new list.
 
     Reported from a real session: two of three processes were passed and the
     third vanished with nothing said.
+
+    What this test is actually about: the warning must name **only** what was
+    genuinely dropped. Naming a process that is still being captured would
+    send the reader looking for a fault that is not there.
     """
 
     def _app_with_proxy(self, app, current):
@@ -1454,7 +1457,10 @@ class TestSettingCaptureSaysWhatItDropped:
         assert len(warnings) == 1, "a process was dropped with nothing said"
         msg = warnings[0].getMessage()
         assert "Metatext" in msg
-        assert "MobileSafari" not in msg.split("replaced by")[0], (
+        # The dropped list is the clause before "(now ...)"; splitting on the
+        # wrong marker searches the whole message and finds the kept processes
+        # in the second half, which is a false failure rather than a real one.
+        assert "MobileSafari" not in msg.split("(now")[0], (
             "the warning named a process that is still being captured"
         )
 
