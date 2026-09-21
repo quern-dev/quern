@@ -37,8 +37,11 @@ async def _capture(coro_factory, *, level=logging.INFO) -> list:
     try:
         try:
             await coro_factory()
-        except Exception:
-            pass  # the entry is the subject, not the exception
+        except (Exception, asyncio.CancelledError):
+            # CancelledError is a BaseException, so `except Exception` misses
+            # it -- the same blind spot this helper is used to test for in the
+            # product code. The entry is the subject here, not the exception.
+            pass
         for _ in range(10):
             await asyncio.sleep(0)
         await asyncio.sleep(0.05)
@@ -511,3 +514,55 @@ class TestTheDecoratorFormActuallyEmits:
             return {"ok": True}
 
         assert handler() == {"ok": True}
+
+
+class TestACancelledActionDoesNotReportSuccess:
+    """`asyncio.CancelledError` is a BaseException, so `except Exception`
+    misses it and the `finally` would write `ok` for work that was abandoned
+    part-way.
+
+    Not hypothetical: `_run_until_client_leaves` cancels deliberately when the
+    caller disconnects, so this is the common case rather than an edge, and
+    reporting it as success is the exact bug the action log exists to expose
+    (CodeRabbit, #253).
+    """
+
+    async def test_a_cancelled_action_is_not_ok(self):
+        from server.api.actions import logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler():
+            raise asyncio.CancelledError
+
+        entries = await _capture(handler)
+
+        assert entries[0].outcome != "ok", (
+            "an abandoned action reported success"
+        )
+        assert entries[0].outcome == "cancelled"
+
+    async def test_it_is_a_warning_not_an_error(self):
+        """A caller that left is not a fault, but the work may be half
+        applied -- input is not idempotent -- so it is not plain success
+        either."""
+        from server.api.actions import logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler():
+            raise asyncio.CancelledError
+
+        entries = await _capture(handler)
+
+        assert entries[0].level == LogLevel.WARNING
+
+    async def test_the_cancellation_still_propagates(self):
+        """Swallowing it would leave the caller's task looking complete and
+        break every `finally` above this one."""
+        from server.api.actions import logged_action
+
+        @logged_action("pretend_action", category="proxy")
+        async def handler():
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await handler()

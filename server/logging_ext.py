@@ -58,8 +58,13 @@ _PREFIX: Final[str] = "quern_"
 #: device whose input services were taken is the same shape. It is distinct
 #: from `failed`, which means the caller did not get what they asked for at
 #: all, and logging it as an error would train the reader to ignore errors.
+#: `cancelled` is distinct from `failed` on purpose. Quern cancels work when
+#: the client disconnects -- that is what `_run_until_client_leaves` is for --
+#: and an abandoned sweep is not a broken one. It may also be half-applied,
+#: since input is not idempotent, so it is reported at WARNING rather than
+#: INFO: something happened and the result is not to be trusted.
 OUTCOMES: Final[tuple[str, ...]] = (
-    "ok", "failed", "suspect", "not_found", "ambiguous", "started",
+    "ok", "failed", "suspect", "cancelled", "not_found", "ambiguous", "started",
 )
 
 
@@ -67,6 +72,7 @@ OUTCOMES: Final[tuple[str, ...]] = (
 _LEVEL_FOR_OUTCOME: Final[dict[str, int]] = {
     "failed": logging.ERROR,
     "suspect": logging.WARNING,
+    "cancelled": logging.WARNING,
 }
 
 
