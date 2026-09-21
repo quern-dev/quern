@@ -921,10 +921,17 @@ hold_default_ports() {
   local sb="$1"
   python3 - "$sb/decoy.pid" <<'PY' > "$sb/decoy.log" 2>&1 &
 import socket, sys, time
+
+# Deliberately NOT SO_REUSEADDR. The bind failing is the whole signal: it is
+# how this knows a real quern already has the port, so the case can refuse to
+# run rather than let the restart reclaim it. With SO_REUSEADDR set, binding
+# 127.0.0.1:9100 SUCCEEDS while a server holds 0.0.0.0:9100 -- so the guard
+# reported the ports held, the case ran, and `reclaim_port` (which asks lsof,
+# and finds the real listener) killed the developer's server. Measured: it
+# did, twice.
 held = []
 for port in (9100, 9101):
     s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(("127.0.0.1", port))
     except OSError:
