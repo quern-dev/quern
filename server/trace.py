@@ -239,9 +239,18 @@ def build_trace(
             owner = result[i].action.udid
             return not (udid and owner and udid != owner)
 
+        # Half-open, `(start, end]`, so an instant shared by two actions has
+        # exactly one owner. With both ends inclusive, a flow landing where
+        # one action ends and the next begins satisfied both -- and because
+        # touching intervals are deliberately *not* treated as overlapping,
+        # neither attribution carried an ambiguity caveat. It was silently
+        # counted twice.
+        #
+        # The earlier action wins the boundary: it had been running up to
+        # that instant, while the later one had not yet done anything.
         during = [
             i for i in range(len(result))
-            if _matches(i) and intervals[i][0] <= flow.timestamp <= intervals[i][1]
+            if _matches(i) and intervals[i][0] < flow.timestamp <= intervals[i][1]
         ]
         after = [
             i for i in range(len(result))

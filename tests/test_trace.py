@@ -478,3 +478,30 @@ class TestADuplicateAddressResolvesToTheLatestDevice:
         ip_map = ip_to_udid(state, now=BASE)
 
         assert ip_map["192.168.1.50"][0] == "PHONE-NEW"
+
+
+class TestAFlowOnASharedBoundaryHasOneOwner:
+    """A flow at the instant one action ends and the next begins satisfied
+    both inclusive interval checks — and because touching intervals are
+    deliberately not treated as overlapping, neither attribution carried an
+    ambiguity caveat. It was silently counted twice (CodeRabbit, #259).
+    """
+
+    def test_the_earlier_action_owns_the_boundary(self):
+        first = _action("tap", at_s=10, duration_ms=2000)      # (8, 10]
+        second = _action("swipe", at_s=12, duration_ms=2000)   # (10, 12]
+        flow = _flow(at_s=10, udid="SIM-A")                    # exactly at 10
+
+        first_a, second_a = build_trace([first, second], [flow], [])
+
+        assert first_a.flows == [flow], "the action that was running lost it"
+        assert second_a.flows == []
+
+    def test_it_is_not_double_counted(self):
+        first = _action("tap", at_s=10, duration_ms=2000)
+        second = _action("swipe", at_s=12, duration_ms=2000)
+        flow = _flow(at_s=10, udid="SIM-A")
+
+        attributions = build_trace([first, second], [flow], [])
+
+        assert sum(len(a.flows) for a in attributions) == 1

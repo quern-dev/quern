@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
-from typing import Any, Final
+from typing import Final, Protocol
 
 #: The closed category vocabulary. A call site that does not fit one of these
 #: is a reason to change this tuple in review, not to invent a string: a
@@ -210,11 +210,24 @@ def udid_of(record: logging.LogRecord) -> str:
     return getattr(record, f"{_PREFIX}udid", "") or ""
 
 
+class ActionRecorder(Protocol):
+    """What a caller needs from the action being recorded: somewhere to put
+    the device it resolved.
+
+    A Protocol rather than the concrete `ActionScope`, which lives in the API
+    layer -- and the controller imports *this* module to record a device, so
+    an import the other way would be a cycle. The contract is one field, and
+    saying so in the type is better than `Any` and a comment.
+    """
+
+    udid: str
+
+
 #: The action being recorded on this task, so the place that *decides* a
 #: device can record it without every handler threading a parameter out.
 #: A ContextVar rather than a global: requests interleave on one event loop,
 #: and two concurrent boots would overwrite each other's device.
-_CURRENT: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+_CURRENT: contextvars.ContextVar[ActionRecorder | None] = contextvars.ContextVar(
     "quern_current_action", default=None,
 )
 
@@ -222,12 +235,14 @@ _CURRENT: contextvars.ContextVar[object | None] = contextvars.ContextVar(
 class _NoAction:
     """Stand-in when nothing is recording, so call sites need no guard.
 
-    Assigning a field on this is deliberately a no-op rather than an error:
+    Assigning `udid` on this is deliberately a no-op rather than an error:
     `resolve_udid` runs on paths with no action in progress -- from a test,
     from startup -- and must not care.
     """
 
     __slots__ = ()
+
+    udid: str = ""
 
     def __setattr__(self, name: str, value: object) -> None:
         return
@@ -236,21 +251,20 @@ class _NoAction:
 _NO_ACTION = _NoAction()
 
 
-def current_action() -> Any:
-    """The action being recorded, or a no-op stand-in.
-
-    Typed loosely on purpose: the scope is an API-layer object and this module
-    must not import from there, since the controller imports *this* to record
-    a device it resolved. Callers only ever assign fields on the result.
-    """
+def current_action() -> ActionRecorder:
+    """The action being recorded, or a no-op stand-in."""
     return _CURRENT.get() or _NO_ACTION
 
 
-def set_current_action(scope: object) -> contextvars.Token[object | None]:
+def set_current_action(
+    scope: ActionRecorder,
+) -> contextvars.Token[ActionRecorder | None]:
     """Record the action for this task. Returns the token to reset with."""
     return _CURRENT.set(scope)
 
 
-def reset_current_action(token: contextvars.Token[object | None]) -> None:
+def reset_current_action(
+    token: contextvars.Token[ActionRecorder | None],
+) -> None:
     """Restore whatever was current before, so nesting cannot leak."""
     _CURRENT.reset(token)

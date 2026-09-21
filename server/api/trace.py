@@ -136,6 +136,16 @@ async def get_trace(
     device_logs = await ring_buffer.filter_entries(
         LogQueryParams(since=window_start, limit=log_limit),
     )
+    # `filter_entries` returns everything that matches -- its docstring says
+    # "ALL matching entries (no pagination)" -- so the limit above only stops
+    # the query being rejected. Bounding the result is this slice.
+    #
+    # It is not only tidiness: attribution compares every log against every
+    # action, so 1,000 actions against a full 10,000-entry buffer is ten
+    # million comparisons on one request.
+    logs_over_limit = len(device_logs) > log_limit
+    if logs_over_limit:
+        device_logs = device_logs[-log_limit:]
 
     # Did the window outlive the buffer?
     #
@@ -188,6 +198,12 @@ async def get_trace(
         # complete is worse than one that admits it: the reader concludes the
         # app logged nothing, when the entries were evicted.
         "log_window_truncated": truncated,
+        # Deliberately separate from the above. That one means log lines were
+        # evicted from the buffer before this trace asked for them; this one
+        # means more matched than were returned. Same visible symptom --
+        # fewer logs than really existed -- and different causes, so folding
+        # them together would send a reader to the wrong fix.
+        "logs_over_limit": logs_over_limit,
         # The adapter's own view, not "a flow store exists". The store is
         # created at startup and outlives a stopped proxy, so the previous
         # check reported True with capture off -- which is exactly the

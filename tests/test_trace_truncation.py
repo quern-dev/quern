@@ -111,3 +111,40 @@ async def _call_with_limit(ring, since, limit):
         flow_store=None, proxy_adapter=None,
     )))
     return await get_trace(request=request, since=since, udid=None, limit=limit)
+
+
+class TestMoreLogsThanAskedFor:
+    """`filter_entries` returns everything that matches — its docstring says
+    "ALL matching entries (no pagination)" — so the query limit only stops the
+    query being rejected. Bounding the result is a separate slice, and the
+    loss it causes is a different one from eviction."""
+
+    async def test_the_result_is_bounded(self):
+        ring = RingBuffer(max_size=5000)
+        for i in range(50):
+            await ring.append(_entry(i))
+
+        result = await _call_with_limit(ring, BASE, limit=1)
+
+        # limit*10 == 10 device logs retained, from 50 matching.
+        assert result["logs_over_limit"] is True
+
+    async def test_a_result_within_the_limit_is_not_flagged(self):
+        ring = RingBuffer(max_size=5000)
+        await ring.append(_entry(1))
+
+        result = await _call_with_limit(ring, BASE, limit=100)
+
+        assert result["logs_over_limit"] is False
+
+    async def test_it_is_distinct_from_eviction(self):
+        """Same symptom, different cause: folding them together would send a
+        reader to the wrong fix."""
+        ring = RingBuffer(max_size=5000)
+        for i in range(50):
+            await ring.append(_entry(i))
+
+        result = await _call_with_limit(ring, BASE, limit=1)
+
+        assert result["logs_over_limit"] is True
+        assert result["log_window_truncated"] is False
