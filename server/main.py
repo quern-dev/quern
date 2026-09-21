@@ -757,6 +757,36 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _keep_running_ports(args: argparse.Namespace) -> argparse.Namespace:
+    """For a restart, stay on the ports the server is actually using.
+
+    `restart` takes no ports of its own, so they arrived as None and
+    `_resolve_args` filled in the defaults -- meaning a server started on
+    another port came back on 9100. That is not hypothetical: `quern update`
+    restarts the server for you, so an update silently moved it, and the
+    state file recorded the new port while every script that had been told
+    the old one broke.
+
+    Only when the caller said nothing. `quern restart --port N` is a request
+    to move, and this must not override it.
+
+    Called before `_resolve_args`, which is the last moment "the user did not
+    say" is still distinguishable from "the user said 9100".
+    """
+    state = read_state()
+    if not state:
+        return args
+    if getattr(args, "port", None) is None:
+        port = state.get("server_port")
+        if isinstance(port, int):
+            args.port = port
+    if getattr(args, "proxy_port", None) is None:
+        proxy_port = state.get("proxy_port")
+        if isinstance(proxy_port, int):
+            args.proxy_port = proxy_port
+    return args
+
+
 def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Fill in defaults for None-valued port args."""
     if args.port is None:
@@ -1886,8 +1916,12 @@ def cli() -> None:
         # case above, where server flags live on `start_parser`.
         parser.error("unrecognised arguments: " + " ".join(remaining))
 
-    # Fill port defaults
+    # Fill port defaults. A restart first adopts whatever the running server
+    # is on, since by the time defaults are filled in, "not given" and "9100"
+    # are the same value.
     if hasattr(args, "port"):
+        if args.command == "restart":
+            _keep_running_ports(args)
         _resolve_args(args)
 
     # Dispatch

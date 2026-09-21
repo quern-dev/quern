@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -2844,3 +2845,82 @@ class TestUrlAndEnv:
         it with a deprecation warning; nothing should be teaching it."""
         self._run(monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret")
         assert "QUERN_DEBUG_SERVER_URL" not in capsys.readouterr().out
+
+
+class TestRestartKeepsThePort:
+    """`quern restart` takes no ports, so they arrived as None and the
+    defaults were filled in — meaning a server on any other port came back on
+    9100.
+
+    Not hypothetical: `quern update` restarts the server for you, so an
+    update silently moved it. The rehearsal caught this by starting a server
+    on 9190 and watching it return on 9102.
+    """
+
+    def _resolved(self, monkeypatch, argv, state):
+        """The ports `cli()` would hand to start, without starting anything."""
+        from server import main as main_mod
+
+        monkeypatch.setattr(main_mod, "read_state", lambda: state)
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", *argv])
+        seen = {}
+        monkeypatch.setattr(main_mod, "_cmd_restart",
+                            lambda args: seen.update(port=args.port,
+                                                     proxy=args.proxy_port))
+        # `cli()` returns for restart rather than exiting; other commands
+        # exit, so both are tolerated.
+        with contextlib.suppress(SystemExit):
+            main_mod.cli()
+        return seen
+
+    def test_it_returns_to_the_port_it_was_on(self, monkeypatch):
+        seen = self._resolved(
+            monkeypatch, ["restart"],
+            state={"server_port": 9190, "proxy_port": 9191},
+        )
+        assert seen == {"port": 9190, "proxy": 9191}, (
+            "the restart moved the server to the default port"
+        )
+
+    def test_an_explicit_port_still_wins(self, monkeypatch):
+        """`quern restart --port N` is a request to move, and adopting the
+        running port must not override it."""
+        seen = self._resolved(
+            monkeypatch, ["restart", "--port", "9300"],
+            state={"server_port": 9190, "proxy_port": 9191},
+        )
+        assert seen["port"] == 9300
+        assert seen["proxy"] == 9191, "the proxy port was not asked about"
+
+    def test_with_no_server_it_falls_back_to_the_defaults(self, monkeypatch):
+        from server.lifecycle.ports import DEFAULT_PROXY_PORT, DEFAULT_SERVER_PORT
+
+        seen = self._resolved(monkeypatch, ["restart"], state=None)
+        assert seen == {"port": DEFAULT_SERVER_PORT, "proxy": DEFAULT_PROXY_PORT}
+
+    def test_a_junk_port_in_state_does_not_become_the_port(self, monkeypatch):
+        """State is a file on disk and can be anything. A non-integer must
+        fall through to the default rather than reaching `bind`."""
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        seen = self._resolved(
+            monkeypatch, ["restart"],
+            state={"server_port": "not-a-port", "proxy_port": None},
+        )
+        assert seen["port"] == DEFAULT_SERVER_PORT
+
+    def test_start_is_not_affected(self, monkeypatch):
+        """Only restart adopts. `quern start` with no port means the default,
+        which is how someone deliberately returns a moved server to 9100."""
+        from server import main as main_mod
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        monkeypatch.setattr(main_mod, "read_state",
+                            lambda: {"server_port": 9190, "proxy_port": 9191})
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", "start"])
+        seen = {}
+        monkeypatch.setattr(main_mod, "_cmd_start",
+                            lambda args: seen.update(port=args.port))
+        with contextlib.suppress(SystemExit):
+            main_mod.cli()
+        assert seen == {"port": DEFAULT_SERVER_PORT}
