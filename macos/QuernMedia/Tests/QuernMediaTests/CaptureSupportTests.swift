@@ -86,6 +86,24 @@ struct LogHandlerTests {
         #expect(missing == nil)
     }
 
+    @Test("SimulatorKit is found wherever this Xcode keeps it")
+    func simulatorKitIsLocatable() throws {
+        // Xcode 27 moved SimulatorKit from Developer/Library/PrivateFrameworks
+        // to Contents/SharedFrameworks, a sibling of Developer rather than a
+        // relocation inside it. The old path was hardcoded, so the dlopen
+        // failed on every load -- silently, because the framebuffer does not
+        // need it, and the only symptom was a log line nobody reads.
+        //
+        // Asserts a real path on this machine, like the enumeration test
+        // above: any host that can run the rest of this suite has an Xcode.
+        let dev = PrivateFrameworks.developerDir()
+        let path = try #require(
+            PrivateFrameworks.simulatorKitPath(at: dev),
+            "no SimulatorKit under \(dev) via \(PrivateFrameworks.simulatorKitRelativePaths)"
+        )
+        #expect(FileManager.default.fileExists(atPath: path))
+    }
+
     @Test("starting a framebuffer for an unknown udid reports device-not-found")
     func framebufferRejectsUnknownDevice() {
         let source = SimulatorFramebuffer(udid: "not-a-real-udid") { _ in }

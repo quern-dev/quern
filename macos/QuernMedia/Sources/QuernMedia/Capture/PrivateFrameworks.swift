@@ -29,10 +29,16 @@ public enum PrivateFrameworks {
         // Not needed for the framebuffer itself — CoreSimulator owns the
         // IOSurface — but loaded so this stays a drop-in neighbour of
         // sim-bridge, which needs it for HID input.
-        let simKit = (developerDir() as NSString)
-            .appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit")
-        if dlopen(simKit, RTLD_NOW | RTLD_GLOBAL) == nil {
-            MediaLog.log("[capture] SimulatorKit load failed: \(dlerrorString())")
+        //
+        // Loads the path that was actually found, rather than rebuilding it
+        // from a constant the probe agreed with. Same reasoning as
+        // `simulatorKitPath` in tools/sim-bridge.swift, which this mirrors.
+        if let simKit = simulatorKitPath(at: developerDir()) {
+            if dlopen(simKit, RTLD_NOW | RTLD_GLOBAL) == nil {
+                MediaLog.log("[capture] SimulatorKit load failed: \(dlerrorString())")
+            }
+        } else {
+            MediaLog.log("[capture] SimulatorKit not found under \(developerDir())")
         }
     }
 
@@ -57,10 +63,41 @@ public enum PrivateFrameworks {
         return xcodeSelectDir() ?? canonical
     }
 
+    /// Where the SimulatorKit binary sits, relative to a developer directory.
+    ///
+    /// Xcode 27 moved it out of the developer directory altogether:
+    ///
+    ///   <= 26  Xcode.app/Contents/Developer/Library/PrivateFrameworks/…
+    ///   27+    Xcode.app/Contents/SharedFrameworks/SimulatorKit.framework
+    ///
+    /// The second is a *sibling* of `Developer`, not a relocation within it,
+    /// so nothing rooted at the developer directory reaches it without
+    /// stepping up a level. Both are checked rather than switching on a
+    /// version: one `stat`, and it survives whatever the next Xcode ships.
+    ///
+    /// Kept in step with `tools/sim-bridge.swift`, which resolves the same
+    /// framework the same way for HID input.
+    static let simulatorKitRelativePaths = [
+        "Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit",
+        "../SharedFrameworks/SimulatorKit.framework/SimulatorKit",
+    ]
+
+    /// The SimulatorKit binary for this developer directory, or nil if absent.
+    ///
+    /// Returns the path rather than a yes/no so callers load the file that was
+    /// actually found; a bool plus a rebuilt constant is how the probe and the
+    /// `dlopen` came to disagree when Xcode 27 moved the framework.
+    public static func simulatorKitPath(at dev: String) -> String? {
+        for relative in simulatorKitRelativePaths {
+            let path = ((dev as NSString).appendingPathComponent(relative) as NSString)
+                .standardizingPath
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        return nil
+    }
+
     static func hasSimulatorKit(at dev: String) -> Bool {
-        let path = (dev as NSString)
-            .appendingPathComponent("Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit")
-        return FileManager.default.fileExists(atPath: path)
+        return simulatorKitPath(at: dev) != nil
     }
 
     private static func xcodeSelectDir() -> String? {

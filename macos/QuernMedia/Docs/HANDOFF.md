@@ -188,6 +188,20 @@ each other.
   Accumulate to `\r\n\r\n`.
 - `ps %cpu` is a since-start average and read about **half** the real value.
   Measure CPU-time deltas over a window.
+- **Xcode 27 moved SimulatorKit and deleted the directory it lived in.**
+  `Contents/Developer/Library/PrivateFrameworks/` no longer exists; the
+  framework is now at `Contents/SharedFrameworks/SimulatorKit.framework`, a
+  *sibling* of `Developer` rather than a relocation inside it. CoreSimulator
+  is unaffected — it lives at `/Library/Developer/PrivateFrameworks/`, outside
+  Xcode — which is why capture kept working and the only symptom was a
+  `dlopen` line in the log. `tools/sim-bridge.swift` was already fixed on
+  main; `PrivateFrameworks.swift` had the same hardcoded path and was not.
+  Check both when a probe and a `dlopen` can disagree.
+- **Xcode 27's SwiftPM changed the build layout.** Products are under
+  `<scratch>/out/Products/Debug/` rather than
+  `<scratch>/arm64-apple-macosx/debug/`. Nothing in the repo hardcodes it —
+  `media_engine.py` asks `swift build --show-bin-path`, which returns the new
+  location — but anything that guesses the path will break.
 - CoreMediaIO publishes devices only while a run loop turns. `Thread.sleep`
   finds nothing, which is indistinguishable from "no device connected".
 
