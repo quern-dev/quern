@@ -119,6 +119,10 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 
 Name the process that actually makes the requests. Safari's traffic leaves through `com.apple.WebKit.Networking`, not `MobileSafari`, and so does every in-app web view, so a list with `MobileSafari` alone captures nothing.
 
+**Refusals worth recognising.** These are answers, not faults, and retrying
+them wastes a turn: a `launch_app` failure on an app that cannot start (see
+*Debugging UI Issues*), and the three proxy refusals below.
+
 **Three tools can refuse, and that refusal is not an error to retry.** `configure_system_proxy`, `set_local_capture`, and `start_proxy` **when called with `system_proxy: true`** all return **428** when a booted simulator does not trust the mitmproxy CA. Capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and three ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, or pass `skip_cert_check` to proceed anyway.
 
 **Do not route around it.** The three share one gate, so reaching the configured state by another tool recreates exactly the failure the refusal exists to prevent. In particular, `start_proxy {system_proxy: true}` after `configure_system_proxy` refused is the same action by another name — it used to work, and that was the bug. Starting the proxy *without* that flag is never refused, because binding a listener routes nothing; nor is disabling local capture with an empty `processes` list, since that is how you leave the broken state rather than enter it.
@@ -170,6 +174,31 @@ Ask the user which resolution they want. Installing a certificate authority pers
 4. If the result is unexpected, use `get_ui_tree` (optionally scoped with `children_of`) to inspect the full hierarchy
 
 **Key insight**: Use summary for quick checks, full tree when you need details.
+
+**An input call can come back `ok` with an advisory, and the advisory is the
+real answer.** Xcode 27's Device Hub attaches a guest HID daemon to every
+booted simulator, which disconnects the touch, button and keyboard services
+quern drives and never reconnects them. Everything else keeps working — tree
+reads, screenshots, `open_url`, app launches — so the device looks healthy
+while nothing you do reaches it. When quern has read that state, `tap`,
+`tap_element`, `swipe`, `type_text`, `clear_text` and `press_button` carry an
+advisory on the response. Do not treat the tap as landed because the status
+says `ok`: read the advisory, and if it is there, call
+`restore_simulator_input` before continuing. That restarts SpringBoard, so
+running apps are killed and you will need to relaunch — which is why it is
+asked for rather than done for you. Nothing is said for a healthy device, or
+for one whose state has not been read.
+
+**A launch that reports success is now a launch that happened.** `simctl
+launch` reports the launch it was *asked* for and returns a pid, so an app
+that cannot start — on iOS 27, any app that has not adopted the UIScene
+lifecycle — used to come back as launched while the screen stayed on
+SpringBoard. Every later call then failed for a reason unrelated to the
+cause, typically `tap_element` reporting "no element found". `launch_app` now
+confirms the app is actually frontmost before reporting success, so a launch
+failure surfaces where it happens. **That failure is not one to retry**: the
+app cannot launch on that runtime, and retrying will produce the same result
+more slowly.
 
 **If the element isn't on screen**: reach for `tap_element` (which auto-scrolls) or `scroll_to_element` rather than a manual `swipe` loop. Be aware that reading the full UI tree can itself scroll the content — on Android's `CoordinatorLayout`/`RecyclerView` screens the accessibility traversal a dump performs pushes top controls out of view before your tap lands. Both scroll paths avoid the dump for exactly this reason, so prefer them over "dump, read coordinates, tap".
 
