@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from collections import deque
 
@@ -24,12 +25,15 @@ class TestBuildBundle:
         binary.parent.mkdir(parents=True)
         binary.write_text("compiled")
 
-        source = tmp_path / "ios-preview.swift"
+        source = tmp_path / "main.swift"
         source.write_text("// source")
         import os
         os.utime(source, (1, 1))  # older than the binary
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
+        # Pinned empty: otherwise freshness is compared against the real
+        # JPEGFraming.swift, and these tests pass or fail on its mtime.
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
         monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
 
         assert not (bundle / "Contents" / "Info.plist").exists()
@@ -43,10 +47,13 @@ class TestBuildBundle:
 
         bundle = tmp_path / "Quern Preview.app"
         binary = bundle / "Contents" / "MacOS" / "ios-preview"
-        source = tmp_path / "ios-preview.swift"
+        source = tmp_path / "main.swift"
         source.write_text("// source")
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
+        # Pinned empty: otherwise freshness is compared against the real
+        # JPEGFraming.swift, and these tests pass or fail on its mtime.
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
         monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
         monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
         monkeypatch.setattr(
@@ -65,7 +72,7 @@ class TestBuildBundle:
 
         bundle = tmp_path / "Quern Preview.app"
         binary = bundle / "Contents" / "MacOS" / "ios-preview"
-        source = tmp_path / "ios-preview.swift"
+        source = tmp_path / "main.swift"
         source.write_text("// source")
         captured: dict = {}
 
@@ -76,6 +83,9 @@ class TestBuildBundle:
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
+        # Pinned empty: otherwise freshness is compared against the real
+        # JPEGFraming.swift, and these tests pass or fail on its mtime.
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
         monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
         monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
         monkeypatch.setattr(preview.subprocess, "run", fake_run)
@@ -620,3 +630,43 @@ class TestTeardownFailureReporting:
             "the teardown failure was not reported by the manager; "
             f"records seen: {[(r.name, r.getMessage()[:60]) for r in caplog.records]}"
         )
+
+
+class TestSharedSourceFreshness:
+    def test_editing_the_shared_parser_rebuilds_the_app(self, tmp_path, monkeypatch):
+        """The binary is compiled from the script *and* the shared frame
+        parser. Comparing the binary against the script alone would leave an
+        edit to the parser silently not taking — the app keeps running the
+        previous build and nothing says so."""
+        from server.device import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        binary = bundle / "Contents" / "MacOS" / "ios-preview"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("compiled")
+
+        source = tmp_path / "main.swift"
+        source.write_text("// source")
+        os.utime(source, (1, 1))  # older than the binary
+
+        shared = tmp_path / "JPEGFraming.swift"
+        shared.write_text("// parser")  # newer than the binary
+
+        compiled: list = []
+
+        def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+            compiled.append(cmd)
+            binary.write_text("recompiled")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(preview, "_find_source", lambda: source)
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [shared])
+        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+        monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
+        monkeypatch.setattr(preview.subprocess, "run", fake_run)
+
+        preview.build_preview_bundle()
+
+        assert compiled, "a newer shared source did not trigger a rebuild"
+        assert str(shared) in compiled[0], "the shared source was not compiled in"
+        assert str(source) in compiled[0]

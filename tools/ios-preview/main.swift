@@ -10,7 +10,13 @@
 //   ios-preview 0 2          # preview devices by index
 //   ios-preview --interactive # JSON Lines protocol on stdin/stdout
 //
-// Build: swiftc -o tools/ios-preview tools/ios-preview.swift -framework AVFoundation -framework CoreMediaIO -framework AppKit
+// Build: swiftc -o ios-preview tools/ios-preview/main.swift \
+//          macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
+//          -framework AVFoundation -framework CoreMediaIO -framework AppKit
+//
+// Named main.swift because it is top-level code: Swift allows that only
+// in a file with that name, and it has to compile alongside a second file
+// so the frame parser can live somewhere with a test target.
 
 import AVFoundation
 import AppKit
@@ -665,19 +671,15 @@ protocol PreviewSessionKind: AnyObject {
 
 /// Reads an MJPEG stream and hands back one image per frame.
 ///
-/// Frames are found by scanning for JPEG start- and end-of-image markers
-/// rather than by splitting on the multipart boundary. URLSession parses
-/// `multipart/x-mixed-replace` itself and yields part bodies with the framing
-/// already stripped, so a boundary parser would find nothing to split on;
-/// marker scanning works whether the framing survives or not. FF bytes inside
-/// entropy-coded data are byte-stuffed as FF00, so FFD9 appears only as a
-/// real EOI -- an embedded EXIF thumbnail would break that assumption, and
-/// VideoToolbox does not write one.
+/// The framing itself — why markers rather than the multipart boundary — is
+/// documented on `JPEGFraming`, which owns it.
 final class MJPEGClient: NSObject, URLSessionDataDelegate {
-    private static let soi = Data([0xFF, 0xD8])
-    private static let eoi = Data([0xFF, 0xD9])
-    /// Past this, the far end is not sending anything we can parse.
-    private static let maxBuffer = 8 << 20
+    /// Frame extraction lives in `QuernMedia/Encode/JPEGFraming.swift`, which
+    /// `build_preview_bundle` compiles alongside this file. It is the one part
+    /// of this client that is pure enough to test, and this file has no test
+    /// target — which is how a 15s inactivity timeout and a black window both
+    /// shipped from here.
+    private var framing = JPEGFraming()
 
     private let url: URL
     private let onConnected: () -> Void
@@ -686,12 +688,11 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
 
     /// Guards `session`, `task` and `stopped`, which `stop()` writes from the
     /// main queue while the delegate callbacks read them on URLSession's.
-    /// `buffer` and `announced` are not guarded: both are touched only from
+    /// `framing` and `announced` are not guarded: both are touched only from
     /// the delegate queue, which is serial.
     private let lock = NSLock()
     private var session: URLSession?
     private var task: URLSessionDataTask?
-    private var buffer = Data()
     private var stopped = false
     /// `multipart/x-mixed-replace` is a sequence of responses as far as
     /// URLSession is concerned, so this delegate call arrives once per *frame*,
@@ -792,10 +793,11 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
         guard !isStopped else { return }
-        buffer.append(data)
-        extractFrames()
-        if buffer.count > Self.maxBuffer {
-            buffer.removeAll(keepingCapacity: false)
+        for jpeg in framing.append(data) {
+            if let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                onFrame(image)
+            }
         }
     }
 
@@ -806,30 +808,6 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         onError(error?.localizedDescription ?? "stream ended")
     }
 
-    private func extractFrames() {
-        while true {
-            guard let start = buffer.range(of: Self.soi) else {
-                // Nothing that could begin a frame; keep none of it.
-                buffer.removeAll(keepingCapacity: true)
-                return
-            }
-            guard let end = buffer.range(
-                of: Self.eoi, options: [], in: start.upperBound..<buffer.endIndex
-            ) else {
-                // A partial frame. Drop only what precedes it.
-                if start.lowerBound > buffer.startIndex {
-                    buffer.removeSubrange(buffer.startIndex..<start.lowerBound)
-                }
-                return
-            }
-            let jpeg = Data(buffer[start.lowerBound..<end.upperBound])
-            buffer.removeSubrange(buffer.startIndex..<end.upperBound)
-            if let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
-               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                onFrame(image)
-            }
-        }
-    }
 }
 
 // MARK: - Stream-backed preview window

@@ -41,8 +41,18 @@ logger = logging.getLogger(__name__)
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "ios-preview"
 APP_BUNDLE_NAME = "Quern Preview.app"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _SOURCE_CANDIDATES = [
-    Path(__file__).resolve().parent.parent.parent / "tools" / "ios-preview.swift",
+    _PROJECT_ROOT / "tools" / "ios-preview" / "main.swift",
+]
+#: Compiled alongside the script. It is named main.swift because Swift allows
+#: top-level code only in a file called that, which is what lets a second file
+#: join the same `swiftc` invocation — and that is what puts the frame parser
+#: somewhere with a test target, rather than duplicated inside a file that has
+#: none. A list so tests can empty it.
+_SHARED_SOURCE_CANDIDATES = [
+    _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
+    / "Encode" / "JPEGFraming.swift",
 ]
 _RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
 
@@ -141,12 +151,18 @@ def build_preview_bundle() -> Path:
     source = _find_source()
     if source is None:
         raise RuntimeError(
-            "ios-preview.swift source not found. "
-            "Expected at tools/ios-preview.swift relative to the project root."
+            "ios-preview source not found. Expected at "
+            "tools/ios-preview/main.swift relative to the project root."
         )
 
+    # Every file that goes into the binary, so editing the shared parser
+    # rebuilds too. Comparing against the script alone would leave a stale app
+    # behind an edit that never appeared to take.
+    sources = [source, *_shared_sources()]
+    newest_source = max(p.stat().st_mtime for p in sources)
+
     bundle, binary = bundle_paths()
-    if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+    if binary.exists() and binary.stat().st_mtime >= newest_source:
         # Rewrite the bundle scaffolding even on the fast path. The freshness
         # test only asks about the binary, so a run that compiled and then
         # failed to finish the bundle -- no Info.plist, no icon -- leaves a
@@ -171,7 +187,7 @@ def build_preview_bundle() -> Path:
             [
                 swiftc,
                 "-o", str(binary),
-                str(source),
+                *[str(p) for p in sources],
                 "-framework", "AVFoundation",
                 "-framework", "CoreMediaIO",
                 "-framework", "AppKit",
@@ -203,6 +219,11 @@ def _find_source() -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def _shared_sources() -> list[Path]:
+    """Extra files compiled into the app, those that exist."""
+    return [p for p in _SHARED_SOURCE_CANDIDATES if p.exists()]
 
 
 @dataclass

@@ -251,10 +251,23 @@ each other.
 
 ### Test coverage gaps
 
-- [ ] **`tools/ios-preview.swift` has no test target at all.** It is a
-      single-file `swiftc` script, which is why the 15s idle-preview defect
-      shipped. The MJPEG frame parser and the session-key resolution are both
-      pure functions that would test cheaply if the file were split.
+- [ ] **`tools/ios-preview/main.swift` still has no test target** — but the
+      riskiest piece is out of it. The frame parser now lives in
+      `QuernMedia/Encode/JPEGFraming.swift` with seven tests, and the script
+      compiles that same file rather than carrying a copy.
+
+      The mechanism, since it is not obvious: Swift allows top-level code only
+      in a file named `main.swift`, so renaming the script is what lets a
+      second file join the same single `swiftc` invocation. No module, no
+      link step, one compile as before. `build_preview_bundle` compiles both
+      and takes freshness from the newest of them — comparing against the
+      script alone would leave an edit to the parser silently not taking.
+
+      What is still untested in there: the session lifecycle, the JSON-lines
+      command handling, the window sizing, and the URLSession delegate
+      behaviour that produced both shipped defects. Those are not pure, and
+      testing them means either a real test target for the app or moving more
+      logic into the package.
 - [ ] **`ShutdownGuard` and the exit-status propagation are untested** — the
       type lives in the executable target and nothing imports it.
 - [ ] **`HTTPStreamServer.StartFailure` is untested.** Neither `.notReady`
