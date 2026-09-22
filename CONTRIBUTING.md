@@ -433,7 +433,14 @@ new route. So:
 - `git log -1 --format='%cr' <branch>` (or the directory's mtime) says whether
   it is worth asking.
 
-Never the name alone. **Re-homing a tree you have adopted is explicitly
+Never the name alone -- and note that a prefix match is a hint about *whom to
+ask*, not proof of whose tree it is. The collision is concurrent as well as
+historical: two live sessions can hold the same prefix at the same instant, so
+a match may name either of them. `ListAgents` is built for this, appending a
+`[ref]` when two rows share a name, which is as plain a statement as you could
+want that the name alone does not identify anyone.
+
+**Re-homing a tree you have adopted is explicitly
 allowed** -- a stale prefix is not somebody's claim on a tree you are the one
 using, and leaving it there to be polite is how it ages into the confusion the
 prefix exists to remove.
