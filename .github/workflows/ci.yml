@@ -88,7 +88,35 @@ jobs:
         # Apple-only path fails at collection, and the default is to abort the
         # entire run on the first one -- reporting a single error where this job
         # needs the whole list. --tb=line keeps that list scannable.
-        run: .venv/bin/python -m pytest tests/ --continue-on-collection-errors --tb=line -rf -q
+        #
+        # The counts go to the step summary as well as the log, because this job
+        # is read as a trend rather than a pass/fail: "44 failures, 39 of them in
+        # one file" is the number worth seeing without opening the log, and the
+        # direction it moves after each piece of platform work is the point.
+        shell: bash
+        run: |
+          set +e
+          .venv/bin/python -m pytest tests/ \
+            --continue-on-collection-errors --tb=line -rf -q | tee /tmp/pytest.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "## Linux probe"
+            echo
+            echo '```'
+            tail -n 1 /tmp/pytest.log
+            echo '```'
+            echo
+            echo "### Failures by file"
+            echo
+            if grep -q '^FAILED ' /tmp/pytest.log; then
+              grep '^FAILED ' /tmp/pytest.log \
+                | sed 's/^FAILED //' | cut -d: -f1 \
+                | sort | uniq -c | sort -rn | sed 's/^/    /'
+            else
+              echo "    none"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
   menubar-build:
     # The Swift menu-bar app is not covered by the Python suite, and nothing
