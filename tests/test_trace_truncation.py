@@ -461,3 +461,45 @@ class TestTheTimelineIsInOrder:
         assert oldest_kept > (BASE + timedelta(seconds=1)).isoformat(), (
             "the oldest flow survived the bound while a newer one was dropped"
         )
+
+
+class TestANaiveSinceIsServed:
+    """`?since=2026-09-21T12:00:00` -- no offset -- is valid ISO 8601 and
+    FastAPI hands it over naive. Comparing it against the UTC-aware timestamps
+    everything else uses raised TypeError, so a well-formed request returned
+    HTTP 500 and read as quern being broken."""
+
+    async def test_it_does_not_raise(self):
+        ring = RingBuffer(max_size=10)
+        await ring.append(_entry(1))
+        server = RingBuffer(max_size=10)
+        await server.append(_action_entry(2, duration_ms=3000))
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            server_buffer=server, ring_buffer=ring,
+            flow_store=_FakeFlowStore([_flow(1)]), proxy_adapter=None,
+        )))
+        result = await get_trace(
+            request=request, since=BASE.replace(tzinfo=None), udid=None, limit=10,
+        )
+
+        assert result["since"] == BASE.isoformat()
+
+    async def test_it_is_read_as_utc(self):
+        """Not as local time. A window silently shifted by the server's offset
+        returns the wrong entries and says nothing."""
+        ring = RingBuffer(max_size=3)
+        for at in (10, 11, 12):
+            await ring.append(_entry(at))
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            server_buffer=RingBuffer(max_size=10), ring_buffer=ring,
+            flow_store=None, proxy_adapter=None,
+        )))
+        result = await get_trace(
+            request=request,
+            since=(BASE + timedelta(seconds=11)).replace(tzinfo=None),
+            udid=None, limit=10,
+        )
+
+        assert result["log_window_truncated"] is False

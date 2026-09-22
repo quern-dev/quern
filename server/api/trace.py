@@ -110,6 +110,14 @@ async def get_trace(
 ) -> dict:
     """Actions in a window, each with the flows and log lines it caused."""
     window_start = since or datetime.now(UTC) - DEFAULT_WINDOW
+    # `?since=2026-09-21T12:00:00` is a valid ISO 8601 timestamp and FastAPI
+    # parses it into a naive datetime. Every timestamp it is then compared
+    # against is UTC-aware, so the first comparison raised TypeError and the
+    # caller got an HTTP 500 -- a server error for a well-formed request,
+    # reported as though quern had broken. Assume UTC, which is what every
+    # timestamp this endpoint returns is in.
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=UTC)
 
     server_buffer = request.app.state.server_buffer
     ring_buffer = request.app.state.ring_buffer
