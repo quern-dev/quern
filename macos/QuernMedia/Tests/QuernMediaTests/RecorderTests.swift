@@ -254,3 +254,20 @@ func startedButWroteNothingIsAFailure() throws {
         return
     }
 }
+
+@Test("a recording sink forwards the recorder's reason for failing")
+func recordingSinkForwardsFailure() throws {
+    // The sink owns the recorder privately, so a nil finish() is only
+    // actionable if the reason comes out with it. main.swift dispatches on
+    // exactly this, and it was public API with no test.
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let sink = RecordingSink(recorder: try Recorder(url: url))
+
+    #expect(sink.failure == nil, "a fresh sink should have nothing to report")
+    #expect(sink.finish() == nil, "nothing was recorded")
+    guard case .neverStarted = try #require(sink.failure) else {
+        Issue.record("expected neverStarted, got \(String(describing: sink.failure))")
+        return
+    }
+}

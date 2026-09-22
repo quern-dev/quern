@@ -240,7 +240,11 @@ each other.
         buffer without a verified source filter, so a trace's `logs` could
         carry a line that is not an app log. Does not touch
         `started_monotonic` or the interval fields.
-      - **The trace branch is unmerged**, stacked on PR #253 and awaiting a
+      - **Re-read `clock_anchor` per recording, never cache one.** Their
+        side reads it per export precisely because a stepped wall clock
+        invalidates it silently. An anchor kept alongside an earlier
+        recording is wrong with nothing to say so.
+      - **The trace branch is unmerged**, now PR #259 and awaiting a
         review window. The fields above are real and testable now, but the
         shape can still move if review pushes back.
 - [ ] Android on-device encoder.
@@ -259,10 +263,10 @@ each other.
       before the early return, so frames are suppressed either way.
 - [ ] **`Recorder.finish()` discards the frame counts when it returns nil.**
       A caller reporting a failed recording cannot say how much was in it.
-- [ ] **`MJPEGClient.buffer` and `announced` are unguarded** on the grounds
+- [ ] **`MJPEGClient.framing` and `announced` are unguarded** on the grounds
       that only URLSession's serial delegate queue touches them. Verified
-      true today and enforced by nothing — a future `reconnect()` breaks it
-      silently.
+      true and enforced by nothing — a future `reconnect()` breaks it
+      silently. (`buffer` is gone; the parser holds that state now.)
 - [ ] **`Recorder.finishWritingOverride` is `internal`, not test-scoped**, so
       anything in the module can swap the writer out.
 
@@ -285,14 +289,18 @@ each other.
       behaviour that produced both shipped defects. Those are not pure, and
       testing them means either a real test target for the app or moving more
       logic into the package.
-- [ ] **`ShutdownGuard` and the exit-status propagation are untested** — the
-      type lives in the executable target and nothing imports it.
-- [ ] **`HTTPStreamServer.StartFailure` is untested.** Neither `.notReady`
-      nor `.listenerFailed` appears in any test, though "a bind failure was
-      only logged, so a server that never came up still looked started" was
-      half the reason for the `.ready` wait. A test needs a reliably
-      unbindable port, which `allowLocalEndpointReuse` makes awkward.
-- [ ] **`RecordingSink.failure`** is public API with no test.
+- **Done: `ShutdownGuard` moved into the package and tested.** It was
+      untestable only because it sat in the executable target. Three tests,
+      including the one that matters: a caller arriving mid-run must *wait*
+      for the real status rather than be handed a zero. Mutation-tested
+      against the "publish done on entry" version.
+- **Done: `StartFailure` is tested.** Two `HTTPStreamServer`s on one port
+      do reliably conflict despite `allowLocalEndpointReuse` — the second
+      `start()` throws and `isListening` stays false. Mutation-tested by
+      restoring the log-and-continue behaviour.
+- **Done: `RecordingSink.failure`** is covered — the sink owns its recorder
+      privately, so a nil `finish()` is only actionable if the reason comes
+      out with it, and `main.swift` dispatches on exactly that.
 
 ### Decided against
 

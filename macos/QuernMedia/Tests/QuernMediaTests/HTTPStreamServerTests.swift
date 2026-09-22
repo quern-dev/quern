@@ -357,3 +357,22 @@ func keepaliveStaysOutOfTheWayWhenFramesFlow() async throws {
     #expect(server.keepalivesSent == 0,
             "a stream with frames flowing still sent \(server.keepalivesSent) keepalives")
 }
+
+@Test("a port already taken is reported, not logged and forgotten")
+func startFailsLoudlyOnABoundPort() throws {
+    // "A bind failure was only logged, so a server that never came up still
+    // looked started" was half the reason start() waits for .ready. Nothing
+    // asserted the other half: that the caller is actually told.
+    let port = freePort()
+    let first = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try first.start()
+    defer { first.stop() }
+    #expect(first.isListening)
+
+    let second = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    defer { second.stop() }
+    #expect(throws: HTTPStreamServer.StartFailure.self) {
+        try second.start()
+    }
+    #expect(!second.isListening)
+}
