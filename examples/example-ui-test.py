@@ -10,6 +10,7 @@ The coordinator passes device info via environment variables:
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -26,7 +27,8 @@ def _discover_server_url() -> str:
     """
     state_path = Path.home() / ".quern" / "state.json"
     try:
-        port = json.loads(state_path.read_text())["server_port"]
+        state = json.loads(state_path.read_text())
+        port = state["server_port"]
     except (OSError, ValueError, KeyError) as exc:
         raise SystemExit(
             f"No running server found via {state_path} ({exc}).\n"
@@ -48,7 +50,31 @@ def _discover_server_url() -> str:
             f"{state_path} says port {port}, but nothing is answering there.\n"
             "Start the server with `quern start`, or set QUERN_SERVER_URL."
         )
+    # Nor is answering proof of being Quern, and the next thing this script
+    # does is send it an API key. Quern uses whatever port was free, so if it
+    # dies, another local process can take the freed one and answer 200. The
+    # recorded pid is what an impostor does not control.
+    if not _listener_is(state, port):
+        raise SystemExit(
+            f"Something other than the Quern recorded in {state_path} is "
+            f"listening on port {port}; refusing to send it the API key."
+        )
     return f"http://127.0.0.1:{port}"
+
+
+def _listener_is(state: dict, port: int) -> bool:
+    """Whether the process listening on `port` is the one `state` records."""
+    recorded = state.get("pid")
+    if not isinstance(recorded, int):
+        return True          # nothing to compare against; health check stands
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return True          # could not ask, so do not invent a refusal
+    return not out or str(recorded) in out
 
 
 def _server_is_up(port: int, timeout: float = 2.0) -> bool:

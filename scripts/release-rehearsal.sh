@@ -1305,6 +1305,14 @@ EOF
   stray="$(cat "$app/Contents/MacOS/QuernMenuBar.child" 2>/dev/null || true)"
   if [[ -n "$stray" ]]; then
     kill "$stray" 2>/dev/null || true
+    # `kill` returns when the signal is delivered, not when the process is
+    # gone, so an immediate `kill -0` can still find it mid-exit and report a
+    # leak that cleanup had handled. A flake in the check would be worse than
+    # the leak it looks for.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$stray" 2>/dev/null || break
+      sleep 0.1
+    done
   fi
   if [[ -n "$stray" ]] && kill -0 "$stray" 2>/dev/null; then
     bad "the stand-in left $stray running"

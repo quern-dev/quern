@@ -793,6 +793,7 @@ def _server_base_url() -> str | None:
     refuses connections -- which is worse than the hardcoded 9100 these
     commands replaced, because it looks authoritative.
     """
+    from server.lifecycle.ports import _get_pid_on_port
     from server.lifecycle.state import is_server_healthy, read_state
 
     state = read_state()
@@ -801,6 +802,21 @@ def _server_base_url() -> str | None:
     port = _valid_port(state.get("server_port"))
     if port is None or not is_server_healthy(port):
         return None
+
+    # Answering /health is not proof of being ours, and `quern env` prints the
+    # API key. Quern records the port it settled on, which is not 9100 when
+    # something else had that first -- so if quern then dies, an untrusted
+    # local process can take the freed port, answer 200, and be handed the key
+    # by a caller that only checked for a pulse.
+    #
+    # The recorded pid is the thing an impostor does not control. Anyone who
+    # can rewrite state.json can read ~/.quern/api-key directly, so this is
+    # not the weak link.
+    recorded = state.get("pid")
+    if isinstance(recorded, int):
+        listener = _get_pid_on_port(port)
+        if listener is not None and listener != recorded:
+            return None
     return f"http://127.0.0.1:{port}"
 
 

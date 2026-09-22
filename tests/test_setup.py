@@ -2789,6 +2789,9 @@ class TestUrlAndEnv:
         monkeypatch.setattr(
             "server.lifecycle.state.is_server_healthy", lambda port, **kw: True,
         )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: None,
+        )
         if key is not None:
             import tempfile
             from pathlib import Path
@@ -2846,6 +2849,72 @@ class TestUrlAndEnv:
             entry.main()
         assert exc.value.code == 1, f"{port!r} was accepted as a port"
         assert capsys.readouterr().out == ""
+
+    def test_a_different_process_on_the_port_gets_nothing(self, monkeypatch, capsys):
+        """Answering /health is not proof of being ours, and `quern env`
+        prints the API key. Quern takes whatever port was free, so if it dies
+        an untrusted local process can claim the freed one and answer 200."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "env"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: 9999,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "the API key went to a process that is not quern"
+        assert "quern start" in err
+
+    def test_our_own_server_is_accepted(self, monkeypatch, capsys):
+        """The other half: the check must not refuse the real thing."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: 4242,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_an_unanswerable_owner_check_does_not_invent_a_refusal(
+        self, monkeypatch, capsys
+    ):
+        """`lsof` can fail or be absent. "Could not ask" must not read as
+        "an impostor" -- that would break the command on machines where the
+        real server is running perfectly well."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr("server.lifecycle.ports._get_pid_on_port", lambda p: None)
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
 
     def test_url_says_so_when_nothing_is_running(self, monkeypatch, capsys):
         code = self._run(monkeypatch, ["url"], state=None)
