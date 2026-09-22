@@ -46,8 +46,10 @@ docs/proposals/logging-spec.md.
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from server.models import FlowRecord, LogEntry, LogSource
 
@@ -181,7 +183,7 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
     "probably this device, recorded three weeks ago" is more useful than
     silence -- as long as it says so.
     """
-    now = now or datetime.now(tz=_tz_of(cert_state))
+    now = now or datetime.now(UTC)
     mapping: dict[str, tuple[str, bool]] = {}
     recorded_at: dict[str, datetime | None] = {}
     for udid, record in (cert_state or {}).items():
@@ -206,6 +208,18 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
                     recorded = datetime.fromisoformat(set_at)
                 except ValueError:
                     recorded = None
+                # Naive is possible and the consequence is severe. Our writer
+                # stamps UTC-aware, but `set_at` is typed `str | None` and the
+                # file is plain JSON on disk -- hand-edited, restored from a
+                # backup, or written by an older build. A naive value here
+                # makes `now - recorded` raise TypeError, which `_ip_map`
+                # swallows with a bare except and returns `{}`: one bad record
+                # would silently disable *every* physical device's
+                # attribution, and an empty map is indistinguishable from
+                # having no devices on Wi-Fi. Assume UTC, which is what the
+                # writer records.
+                if recorded is not None and recorded.tzinfo is None:
+                    recorded = recorded.replace(tzinfo=UTC)
             # Unknown age is not freshness. Claiming it would be the exact
             # thing the caveat exists to prevent -- a stale mapping presented
             # as trustworthy attributes another device's traffic to this one.
@@ -232,11 +246,6 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
             mapping[ip] = (udid, fresh)
     return mapping
 
-
-def _tz_of(_: dict):
-    from datetime import UTC
-
-    return UTC
 
 
 def device_of(flow: FlowRecord, ip_map: dict[str, tuple[str, bool]]) -> tuple[str | None, bool]:
@@ -339,10 +348,10 @@ def _attribute(
     intervals: list[tuple[datetime, datetime]],
     grace: timedelta,
     *,
-    device_of_item,
-    sink,
+    device_of_item: Callable[[Any], tuple[str | None, bool]],
+    sink: Callable[[Attribution, Any], None],
     noun: str,
-    extra_caveat,
+    extra_caveat: Callable[[Attribution, Any, bool], None],
 ) -> None:
     """Attach each item to the action that owns it.
 

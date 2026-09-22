@@ -696,3 +696,87 @@ class TestTheLogPathObeysTheSameRulesAsFlows:
         [attribution] = build_trace([action], [], [self._line(9, device="SIM-B")])
 
         assert attribution.logs == []
+
+
+class TestANaiveSetAtDoesNotDisableAttribution:
+    """`set_at` is typed `str | None` and lives in plain JSON on disk. Our
+    writer stamps it UTC-aware, but a hand-edited file, a restored backup or
+    an older build can leave it naive -- and then `now - recorded` raises
+    TypeError, which `_ip_map` swallows with a bare except and returns `{}`.
+
+    One bad record therefore disabled *every* physical device's attribution,
+    and an empty map is indistinguishable from having no devices on Wi-Fi.
+    Same shape as the naive `?since`, and with a worse failure: silent rather
+    than a 500."""
+
+    def _state(self, set_at):
+        return {
+            "PHONE-1": {
+                "wifi_proxy_configs": {
+                    "home": {"client_ip": "192.168.1.50", "set_at": set_at},
+                },
+            },
+        }
+
+    def test_a_recent_naive_stamp_is_trusted(self):
+        naive = (BASE - timedelta(days=1)).replace(tzinfo=None).isoformat()
+
+        ip_map = ip_to_udid(self._state(naive), now=BASE)
+
+        assert ip_map == {"192.168.1.50": ("PHONE-1", True)}
+
+    def test_an_old_naive_stamp_is_mapped_but_not_trusted(self):
+        old = (
+            BASE - IP_MAPPING_TRUSTED_FOR - timedelta(days=1)
+        ).replace(tzinfo=None).isoformat()
+
+        ip_map = ip_to_udid(self._state(old), now=BASE)
+
+        assert ip_map == {"192.168.1.50": ("PHONE-1", False)}
+
+    def test_a_naive_stamp_is_read_as_utc_not_local(self, monkeypatch):
+        """The choice of UTC is load-bearing, not incidental.
+
+        `astimezone(UTC)` on a naive value reads it as *local* time, which is
+        a plausible-looking alternative and wrong: it shifts the stamp by the
+        server's offset, so a mapping an hour inside the trust window reads as
+        six hours outside it. The server's timezone then decides whether a
+        physical device's flows are trusted.
+
+        The timezone is pinned rather than inherited. The bug is invisible
+        under `TZ=UTC`, and CI runs there -- a test that only fails on a
+        developer's machine is the shape this file exists to avoid."""
+        import time
+
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        time.tzset()
+        # One hour *past* the window. Read as UTC: stale. Read as local
+        # (UTC-7 in summer) the stamp lands seven hours later in UTC, so it
+        # comes back inside the window and reports itself trustworthy -- the
+        # direction that matters, because it attributes another device's
+        # traffic to this one on a mapping that has expired.
+        edge = (
+            BASE - IP_MAPPING_TRUSTED_FOR - timedelta(hours=1)
+        ).replace(tzinfo=None).isoformat()
+
+        ip_map = ip_to_udid(self._state(edge), now=BASE)
+
+        assert ip_map == {"192.168.1.50": ("PHONE-1", False)}
+
+    def test_one_bad_record_does_not_take_the_others_with_it(self):
+        """The reason this matters. The map is built in one pass, so the
+        exception did not cost one device its attribution -- it cost all of
+        them."""
+        state = self._state((BASE - timedelta(days=1)).replace(tzinfo=None).isoformat())
+        state["PHONE-2"] = {
+            "wifi_proxy_configs": {
+                "home": {
+                    "client_ip": "192.168.1.51",
+                    "set_at": (BASE - timedelta(days=1)).isoformat(),
+                },
+            },
+        }
+
+        ip_map = ip_to_udid(state, now=BASE)
+
+        assert ip_map["192.168.1.51"] == ("PHONE-2", True)
