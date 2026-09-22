@@ -485,7 +485,7 @@ class TestANaiveSinceIsServed:
 
         assert result["since"] == BASE.isoformat()
 
-    async def test_it_is_read_as_utc(self, monkeypatch):
+    async def test_it_is_read_as_utc(self, pinned_timezone):
         """Not as local time. A window silently shifted by the server's offset
         returns the wrong entries and says nothing about it.
 
@@ -495,10 +495,7 @@ class TestANaiveSinceIsServed:
         this test is green against the bug -- measured, and CI runs in UTC.
         A test that only fails in some timezones is the shape this file
         exists to avoid."""
-        import time
-
-        monkeypatch.setenv("TZ", "Asia/Tokyo")
-        time.tzset()
+        pinned_timezone("Asia/Tokyo")
         ring = RingBuffer(max_size=3)
         for at in (10, 11, 12):
             await ring.append(_entry(at))

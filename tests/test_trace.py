@@ -12,6 +12,7 @@ cannot tell.
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -754,7 +755,7 @@ class TestANaiveSetAtDoesNotDisableAttribution:
 
         assert ip_map == {"192.168.1.50": ("PHONE-1", False)}
 
-    def test_a_naive_stamp_is_read_as_utc_not_local(self, monkeypatch):
+    def test_a_naive_stamp_is_read_as_utc_not_local(self, pinned_timezone):
         """The choice of UTC is load-bearing, not incidental.
 
         `astimezone(UTC)` on a naive value reads it as *local* time, which is
@@ -766,10 +767,7 @@ class TestANaiveSetAtDoesNotDisableAttribution:
         The timezone is pinned rather than inherited. The bug is invisible
         under `TZ=UTC`, and CI runs there -- a test that only fails on a
         developer's machine is the shape this file exists to avoid."""
-        import time
-
-        monkeypatch.setenv("TZ", "America/Los_Angeles")
-        time.tzset()
+        pinned_timezone("America/Los_Angeles")
         # One hour *past* the window. Read as UTC: stale. Read as local
         # (UTC-7 in summer) the stamp lands seven hours later in UTC, so it
         # comes back inside the window and reports itself trustworthy -- the
@@ -881,3 +879,33 @@ class TestTheTraceSaysHowItIdentifiedTheDevice:
         entry = _log(at_s=1, udid="")
 
         assert log_identified_by(entry) is IdentifiedBy.UNIDENTIFIED
+
+
+#: The process timezone as it was before any test touched it. Captured at
+#: import so the restore assertion below has something to compare against
+#: that does not assume the host is in any particular zone -- the first draft
+#: asserted "not JST" and failed legitimately under `TZ=Asia/Tokyo`, where the
+#: correct restore *is* JST.
+_ORIGINAL_TZNAME = time.tzname
+
+
+class TestThePinnedTimezoneFixturePutsItBack:
+    """The fixture exists because `monkeypatch.setenv("TZ", ...)` restores the
+    variable while the process keeps the timezone -- `time.tzset()` is what
+    re-reads it, and nothing was calling it on the way out. Reproduced: `TZ`
+    back to `UTC` and `time.tzname` still `('JST', 'JST')`.
+
+    These two run in order and the second is the assertion; delete the
+    teardown and it fails.
+    """
+
+    def test_one_pins_a_timezone(self, pinned_timezone):
+        pinned_timezone("Asia/Tokyo")
+
+        assert time.tzname[0] == "JST"
+
+    def test_two_does_not_inherit_it(self):
+        assert time.tzname == _ORIGINAL_TZNAME, (
+            f"the previous test's timezone leaked: {time.tzname} "
+            f"instead of {_ORIGINAL_TZNAME}"
+        )
