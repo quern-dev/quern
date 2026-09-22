@@ -576,11 +576,26 @@ class TestAnActionWithNoDeviceCannotClaimAnothersWork:
         a = _action("tap", at_s=10, duration_ms=2000, udid="SIM-A")
         b = _action("tap", at_s=10, duration_ms=2000, udid="SIM-B")
 
-        attributions = build_trace(
-            [unscoped, a, b], [_flow(at_s=9, udid="SIM-A")], [],
-        )
+        flow = _flow(at_s=9, udid="SIM-A")
 
-        assert attributions[0].flows == [] if attributions[0].action.udid == "" else True
+        attributions = build_trace([unscoped, a, b], [flow], [])
+        # Keyed by udid, not by name: both taps are called "tap", so a
+        # name-keyed dict silently keeps only the last and the assertions
+        # below would be about SIM-B while claiming to be about SIM-A.
+        by_udid = {x.action.udid: x for x in attributions}
+
+        # Selected rather than indexed. The previous version read
+        # `assert X == [] if attributions[0].action.udid == "" else True`,
+        # which is a conditional *expression*: whenever the first attribution
+        # was not the unscoped one, it evaluated to `assert True` and checked
+        # nothing at all. The only surviving assertion was that the total was
+        # one, which is equally true when the wrong action holds it -- so the
+        # test could pass against the bug it names.
+        assert by_udid[""].flows == [], (
+            "the unscoped action took work belonging to SIM-A"
+        )
+        assert by_udid["SIM-A"].flows == [flow], "SIM-A's own action lost its flow"
+        assert by_udid["SIM-B"].flows == [], "SIM-B claimed SIM-A's flow"
         assert sum(len(x.flows) for x in attributions) == 1
 
 
