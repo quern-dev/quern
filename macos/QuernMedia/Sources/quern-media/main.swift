@@ -185,7 +185,14 @@ let shutdownOnce = ShutdownGuard { () -> Int32 in
             // Not a failure. No keyframe ever reached the recorder, so there
             // is no file -- reporting that as a broken recording, and exiting
             // 1 for it, told the caller their capture was corrupt when there
-            // simply was not one. Reachable with ^C on an idle simulator.
+            // simply was not one.
+            //
+            // An earlier version of this comment claimed ^C on an idle
+            // simulator reaches it. Measured: it does not. `start()` primes
+            // the framebuffer, so even a run interrupted after three seconds
+            // on a still screen recorded 2 frames. This is the defensive case
+            // -- a source that produces nothing at all before shutdown, which
+            // a capture device with no signal can do.
             MediaLog.log("[record] nothing was recorded")
         } else {
             // A recording that could not be finalised is an unopenable file,
