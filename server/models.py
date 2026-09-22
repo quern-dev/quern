@@ -50,8 +50,16 @@ class LogEntry(BaseModel):
     id: str = Field(description="Unique entry identifier")
     timestamp: datetime
     device_id: str = Field(
-        default="default",
-        description="Device identifier (for future multi-device)",
+        default="",
+        description=(
+            "Which device this came from, or empty when it came from no "
+            "device -- build output, quern's own logging. Never a sentinel "
+            "that looks like a device: the previous default of 'default' "
+            "passed every truthiness check and failed every equality one, so "
+            "app log lines were silently treated as belonging to a device "
+            "called 'default' and matched nothing. Every consumer already "
+            "reads this as 'unknown, do not filter' when it is empty."
+        ),
     )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")

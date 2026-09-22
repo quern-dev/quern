@@ -784,6 +784,10 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     adapter = SimulatorLogAdapter(
         udid=udid,
+        # Without this every entry carries the model default, so nothing
+        # downstream can tell which device it came from -- which is what made
+        # the trace's log attribution reject every line it was given.
+        device_id=udid,
         on_entry=dedup.process,
         process_filter=body.process,
         subsystem_filter=body.subsystem,
@@ -967,6 +971,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     else:
         adapter = PhysicalDeviceLogAdapter(
             udid=udid,
+            device_id=udid,
             on_entry=dedup.process,
             process_filter=body.process,
             match_filter=body.match,
