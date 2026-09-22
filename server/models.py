@@ -165,7 +165,11 @@ class SourceStatus(BaseModel):
     id: str
     type: str
     status: str  # "streaming", "watching", "stopped", "error"
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     entries_captured: int = 0
     started_at: datetime | None = None
     error: str | None = None
@@ -216,7 +220,11 @@ class CrashReport(BaseModel):
 
     crash_id: str = Field(description="Unique crash identifier")
     timestamp: datetime
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     process: str = Field(default="", description="Crashed process name")
     exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
     exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
@@ -373,7 +381,11 @@ class FlowRecord(BaseModel):
 
     id: str = Field(description="Unique flow identifier")
     timestamp: datetime
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     request: FlowRequest
     response: FlowResponse | None = None
     timing: FlowTiming = Field(default_factory=FlowTiming)
@@ -411,7 +423,11 @@ class FlowQueryParams(BaseModel):
     has_error: bool | None = None
     since: datetime | None = None
     until: datetime | None = None
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     simulator_udid: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
@@ -826,7 +842,11 @@ class FlowEvent(BaseModel):
     duration_ms: float | None = None
     request_size: int = 0
     response_size: int = 0
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     simulator_udid: str | None = None
     source_process: str | None = None
 

@@ -61,7 +61,7 @@ class SyslogAdapter(BaseSourceAdapter):
 
     def __init__(
         self,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         process_filter: str | None = None,
         udid: str | None = None,

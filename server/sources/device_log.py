@@ -60,7 +60,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
     def __init__(
         self,
         udid: str,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         process_filter: str | None = None,
         match_filter: str | None = None,

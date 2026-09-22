@@ -28,7 +28,7 @@ class BaseSourceAdapter(abc.ABC):
         self,
         adapter_id: str,
         adapter_type: str,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
     ) -> None:
         self.adapter_id = adapter_id
