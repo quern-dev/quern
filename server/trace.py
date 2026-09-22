@@ -15,12 +15,26 @@ the device reaches the proxy:
 
 | regime | joins by | tells apps apart? |
 |---|---|---|
-| simulator + local capture | `simulator_udid`, resolved from the pid | yes, `source_process` |
+| iOS simulator + local capture | `simulator_udid`, resolved from the pid | yes, `source_process` |
 | physical device + Wi-Fi proxy | `client_ip`, via recorded proxy config | no |
-| simulator + Wi-Fi proxy | nothing; interval only | no |
+| iOS simulator + Wi-Fi proxy | nothing; interval only | no |
+| **Android emulator, any route** | **nothing; interval only** | no |
 
-The last row is why `set_local_capture` is worth recommending to anyone who
+The third row is why `set_local_capture` is worth recommending to anyone who
 wants a trace.
+
+The fourth is a gap rather than a limit. There are three kinds of device
+here -- iOS simulators, physical devices and Android emulators -- and the
+flow side identifies two. An emulator is not a `launchd_sim` child, so the
+pid walk finds nothing, and it is not in `wifi_proxy_configs` either, so its
+traffic falls to the weakest regime with nothing saying why. The equivalent
+walk exists in principle (an emulator process carries its console port, which
+is its serial), it has simply never been written. Logs are fine: `LOGCAT` is
+in `APP_LOG_SOURCES` and the adapter names its device.
+
+Android is the one that gets forgotten because the other two are what anyone
+tests against, which is how it was found here -- by being asked about, not by
+failing.
 
 **Ambiguity is marked, never guessed.** Two actions running against one device
 with no app to tell them apart produce overlapping intervals, and a flow

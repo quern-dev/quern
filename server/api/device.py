@@ -965,6 +965,10 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     if is_android:
         adapter = LogcatAdapter(
             serial=udid,
+            # Same omission as the two iOS adapters had: the serial is right
+            # here and was never forwarded, so every Android line arrived
+            # naming no device.
+            device_id=udid,
             on_entry=dedup.process,
             process_filter=body.process,
         )

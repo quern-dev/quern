@@ -71,3 +71,18 @@ class TestAdaptersNameTheirDevice:
 
         source = inspect.getsource(device_api.start_device_logging)
         assert "device_id=udid" in source
+
+    def test_android_is_not_forgotten(self):
+        """Three device kinds reach this codebase — iOS simulators, physical
+        devices and Android emulators — and the third is the one that gets
+        missed, because the first two are what anyone tests against. The
+        logcat adapter had the same omission as the other two."""
+        import inspect
+
+        from server.api import device as device_api
+
+        source = inspect.getsource(device_api.start_device_logging)
+        logcat = source[source.index("LogcatAdapter("):]
+        assert "device_id=udid" in logcat[:300], (
+            "Android log lines would name no device"
+        )
