@@ -414,7 +414,12 @@ commit is the same author. The path is the only place ownership can live.
 
 **But the name is a creation-time hint, not a claim.** Worktrees outlive the
 sessions that make them -- `quern-media-engine` was created by one session and
-inherited by another -- and session names are reused. A stale prefix read as
+inherited by another -- and session names are not unique over time. Every one
+seen here is `dev-` plus two hex digits (`dev-3a`, `dev-d6`, `dev-34`), which
+is a space of 256: two sessions share a suffix at better than even odds by the
+twentieth, and at 83% by the thirtieth. So a prefix can be confidently wrong
+rather than merely stale, and by collision rather than by anyone reusing a
+name deliberately. A stale prefix read as
 current fact is this repo's "a trust record is not trust" rule arriving by a
 new route. So:
 
