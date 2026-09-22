@@ -70,6 +70,17 @@ public final class HTTPStreamServer: FrameSink {
         return false
     }
 
+    private let keepalive: TimeInterval
+    private var keepaliveTimer: DispatchSourceTimer?
+    /// The last MJPEG part written, replayed when the stream goes quiet.
+    private var lastPart: Data?
+    private var lastSendAt = Date.distantPast
+
+    /// How many times a frame has been repeated to keep the stream alive.
+    /// Counted so a test can assert it happened, rather than asserting that
+    /// nothing went wrong.
+    public private(set) var keepalivesSent = 0
+
     public private(set) var framesSent = 0
     public private(set) var framesSkipped = 0
     public private(set) var bytesSent = 0
@@ -80,15 +91,32 @@ public final class HTTPStreamServer: FrameSink {
     ///   - onClientAttached: wire this to `StreamPipeline.requestKeyframe()`.
     ///     H.264 frames depend on earlier ones, so a viewer arriving mid-stream
     ///     decodes nothing until an IDR.
+    /// - Parameter keepalive: how long the server may go without sending
+    ///   before it repeats its last frame to every viewer.
+    ///
+    ///   A viewer cannot otherwise tell an idle screen from a dead server.
+    ///   Both URLSession timeouts on the client are unbounded, deliberately —
+    ///   a 15s inactivity timeout killed previews of idle simulators — so the
+    ///   only thing left that detects a dead peer is the peer closing the
+    ///   connection. A dropped network or a wedged producer never does that,
+    ///   and the window sits on its last frame while the server reports the
+    ///   preview as live.
+    ///
+    ///   MJPEG only. Every JPEG stands alone, so repeating one is valid and a
+    ///   browser redraws the same picture. An H.264 stream cannot have frames
+    ///   replayed into it, and its consumers are ffplay and the recorder
+    ///   rather than the preview window, so they are left alone.
     public init(
         port: UInt16,
         bindAll: Bool,
         codec: StreamPipeline.Codec,
+        keepalive: TimeInterval = 5,
         onClientAttached: (() -> Void)? = nil
     ) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8422
         self.bindAll = bindAll
         self.codec = codec
+        self.keepalive = keepalive
         self.onClientAttached = onClientAttached
     }
 
@@ -156,9 +184,14 @@ public final class HTTPStreamServer: FrameSink {
         listener?.cancel()
         listener = nil
         lock.lock()
+        let timer = keepaliveTimer
+        keepaliveTimer = nil
         let all = Array(clients.values)
         clients.removeAll()
         lock.unlock()
+        // Cancelled outside the lock: the handler takes it, and a timer
+        // cancelled while its handler is mid-flight would otherwise deadlock.
+        timer?.cancel()
         for client in all { client.connection.cancel() }
     }
 
@@ -190,6 +223,8 @@ public final class HTTPStreamServer: FrameSink {
         framesSent += targets.isEmpty ? 0 : 1
         framesSkipped += skipped
         bytesSent += bytes.count * targets.count
+        if codec == .mjpeg { lastPart = bytes }
+        lastSendAt = Date()
         lock.unlock()
 
         for client in targets {
@@ -243,6 +278,50 @@ public final class HTTPStreamServer: FrameSink {
         readRequest(client)
     }
 
+    /// Repeats the last frame when the stream has gone quiet.
+    ///
+    /// Runs only while someone is watching, and only sends when nothing else
+    /// has for `keepalive` — so an active stream pays nothing, and an idle one
+    /// costs one already-encoded frame every few seconds.
+    private func startKeepaliveIfNeeded() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard keepaliveTimer == nil, keepalive > 0, codec == .mjpeg else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        // Checked more often than the interval so the gap between a quiet
+        // stream and the repeat is bounded by the interval, not twice it.
+        timer.schedule(deadline: .now() + keepalive / 2, repeating: keepalive / 2)
+        timer.setEventHandler { [weak self] in self?.sendKeepaliveIfQuiet() }
+        keepaliveTimer = timer
+        timer.resume()
+    }
+
+    private func sendKeepaliveIfQuiet() {
+        lock.lock()
+        let quiet = Date().timeIntervalSince(lastSendAt) >= keepalive
+        let watchers = clients.values.filter { $0.streaming && !$0.inFlight }
+        guard quiet, !watchers.isEmpty, let part = lastPart else {
+            lock.unlock()
+            return
+        }
+        for client in watchers { client.inFlight = true }
+        keepalivesSent += 1
+        bytesSent += part.count * watchers.count
+        lastSendAt = Date()
+        lock.unlock()
+
+        for client in watchers {
+            client.connection.send(content: part, completion: .contentProcessed {
+                [weak self, weak client] _ in
+                guard let self, let client else { return }
+                self.lock.lock()
+                client.inFlight = false
+                self.lock.unlock()
+            })
+        }
+    }
+
     private func readRequest(_ client: Client) {
         client.connection.receive(
             minimumIncompleteLength: 1, maximumLength: Self.maxHeadBytes
@@ -292,6 +371,7 @@ public final class HTTPStreamServer: FrameSink {
         let total = clients.values.filter(\.streaming).count
         lock.unlock()
 
+        startKeepaliveIfNeeded()
         MediaLog.log("[http] viewer attached (\(total) total)")
         // Ask for a keyframe now rather than making this viewer wait for the
         // periodic one.

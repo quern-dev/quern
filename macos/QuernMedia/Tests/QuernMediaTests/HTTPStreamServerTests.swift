@@ -93,6 +93,49 @@ private func rawGet(
     }
 }
 
+/// Attaches a viewer, runs `whileAttached` once it is streaming, and returns
+/// everything received until the timeout.
+///
+/// Unlike `rawGet` this never stops early on a byte count: the point is what
+/// arrives *over time*, so it always runs the full window.
+private func rawGetWhile(
+    path: String, port: UInt16, timeout: TimeInterval,
+    whileAttached: @escaping @Sendable () -> Void
+) async -> Data {
+    await withCheckedContinuation { continuation in
+        let conn = NWConnection(
+            host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!, using: .tcp
+        )
+        let box = Box()
+        let finish = {
+            guard let data = box.claim() else { return }
+            conn.cancel()
+            continuation.resume(returning: data)
+        }
+        func readMore() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { c, _, done, err in
+                if let c { box.append(c) }
+                if done || err != nil { finish() } else { readMore() }
+            }
+        }
+        conn.stateUpdateHandler = { state in
+            if case .ready = state {
+                let request = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                conn.send(content: Data(request.utf8), completion: .contentProcessed { _ in })
+                readMore()
+                // Give route() time to mark the client streaming before the
+                // caller starts pushing frames at it.
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                    whileAttached()
+                }
+            }
+            if case .failed = state { finish() }
+        }
+        conn.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish() }
+    }
+}
+
 private final class Box: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = Data()
@@ -263,4 +306,54 @@ func splitRequestHeadIsReassembled() async throws {
     let text = String(decoding: received, as: UTF8.self)
     #expect(text.contains("multipart/x-mixed-replace"),
             "a split head was routed somewhere other than the stream: \(text.prefix(120))")
+}
+
+@Test("a quiet stream repeats its last frame so a viewer can tell idle from dead")
+func keepaliveRepeatsTheLastFrame() async throws {
+    // Both URLSession timeouts on the client are unbounded, deliberately — a
+    // 15s inactivity timeout killed previews of idle simulators. That leaves
+    // nothing to detect a dead peer except the peer closing the connection,
+    // which a dropped network and a wedged producer never do. The keepalive
+    // is what makes silence mean something.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg, keepalive: 0.3)
+    try server.start()
+    defer { server.stop() }
+
+    let surface = try #require(TestSurface.make(width: 64, height: 64))
+    let encoder = JPEGEncoder(maxDimension: 0, quality: 0.5)
+    let jpeg = try #require(encoder.encode(surface))
+
+    // Attach a viewer, send exactly one frame, then go quiet.
+    let received = await rawGetWhile(path: "/stream", port: port, timeout: 3) {
+        server.receive(.jpeg(jpeg))
+    }
+
+    #expect(server.keepalivesSent >= 1, "a quiet stream sent no keepalive")
+    let text = String(decoding: received, as: UTF8.self)
+    let parts = text.components(separatedBy: "--\(HTTPWire.mjpegBoundary)").count - 1
+    #expect(parts >= 2, "expected the frame plus at least one repeat, got \(parts)")
+}
+
+@Test("an active stream does not pay for the keepalive")
+func keepaliveStaysOutOfTheWayWhenFramesFlow() async throws {
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg, keepalive: 0.3)
+    try server.start()
+    defer { server.stop() }
+
+    let surface = try #require(TestSurface.make(width: 64, height: 64))
+    let encoder = JPEGEncoder(maxDimension: 0, quality: 0.5)
+    let jpeg = try #require(encoder.encode(surface))
+
+    _ = await rawGetWhile(path: "/stream", port: port, timeout: 1.5) {
+        // Keep sending faster than the keepalive interval.
+        for _ in 0..<12 {
+            server.receive(.jpeg(jpeg))
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
+    #expect(server.keepalivesSent == 0,
+            "a stream with frames flowing still sent \(server.keepalivesSent) keepalives")
 }

@@ -690,10 +690,24 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
     /// main queue while the delegate callbacks read them on URLSession's.
     /// `framing` and `announced` are not guarded: both are touched only from
     /// the delegate queue, which is serial.
+    /// Silence longer than this means the stream is gone, not merely idle.
+    ///
+    /// Both URLSession timeouts are unbounded on purpose — see `start()` — so
+    /// nothing else notices a peer that stops sending without closing. That
+    /// is a dropped network, or a producer wedged with its socket open; a
+    /// process that dies sends a FIN and arrives as didCompleteWithError.
+    ///
+    /// The server repeats its last frame every few seconds so that silence
+    /// means something. This sits well above that: missing one repeat is a
+    /// hiccup, missing several is a dead peer.
+    private static let idleTimeout: TimeInterval = 20
+
     private let lock = NSLock()
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var stopped = false
+    private var lastDataAt = Date()
+    private var watchdog: DispatchSourceTimer?
     /// `multipart/x-mixed-replace` is a sequence of responses as far as
     /// URLSession is concerned, so this delegate call arrives once per *frame*,
     /// not once per stream. Measured: the acknowledgement fired on every frame
@@ -732,7 +746,9 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         lock.lock()
         self.session = session
         self.task = task
+        lastDataAt = Date()
         lock.unlock()
+        startWatchdog()
         task.resume()
     }
 
@@ -743,12 +759,38 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         stopped = true
         let task = self.task
         let session = self.session
+        let timer = watchdog
         self.session = nil
         self.task = nil
+        watchdog = nil
         lock.unlock()
 
+        timer?.cancel()
         task?.cancel()
         session?.invalidateAndCancel()
+    }
+
+    private func startWatchdog() {
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "quern.preview.watchdog")
+        )
+        let tick = Self.idleTimeout / 4
+        timer.schedule(deadline: .now() + tick, repeating: tick)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let silent = Date().timeIntervalSince(self.lastDataAt)
+            let alreadyStopped = self.stopped
+            self.lock.unlock()
+            guard !alreadyStopped, silent >= Self.idleTimeout else { return }
+            self.onError(String(
+                format: "no data for %.0fs — the stream is gone, not idle", silent
+            ))
+        }
+        lock.lock()
+        watchdog = timer
+        lock.unlock()
+        timer.resume()
     }
 
     private var isStopped: Bool {
@@ -793,6 +835,9 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
         guard !isStopped else { return }
+        lock.lock()
+        lastDataAt = Date()
+        lock.unlock()
         for jpeg in framing.append(data) {
             guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {

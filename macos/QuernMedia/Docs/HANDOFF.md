@@ -102,14 +102,31 @@ each other.
       covers. The unit test asserts only that the call is safe before start
       and after stop.
 
-- [ ] **No client-side liveness bound on a stream.** Both URLSession
-      timeouts are unbounded, which is correct — a 15s inactivity timeout
-      killed idle previews — but it means only a peer that *closes* the
-      connection is detected. A dropped network or a wedged `quern-media`
-      leaves the window on its last frame with the server still believing the
-      preview is live. Fix: an idle watchdog in `MJPEGClient` plus a periodic
-      keepalive part from `HTTPStreamServer`, since a transport timeout
-      cannot tell "idle" from "gone".
+- **Done: a dead stream is now noticed.** Both URLSession timeouts stay
+      unbounded — a 15s inactivity timeout killed previews of idle
+      simulators — so the detection is a pair, not a timeout:
+
+      - `HTTPStreamServer` repeats its last frame when nothing has been sent
+        for `keepalive` (5s default), MJPEG only. Every JPEG stands alone, so
+        a repeat is valid and a browser simply redraws; an H.264 stream
+        cannot have frames replayed into it, and its consumers are ffplay and
+        the recorder rather than the preview window. An active stream pays
+        nothing — both cases are tested, and `keepalivesSent` is counted so a
+        test asserts the repeat happened rather than that nothing broke.
+      - `MJPEGClient` treats 20s of silence as death, which is four missed
+        keepalives. It reports through the existing `onError` path, so the
+        server hears `window_closed` and tears the producer down.
+
+      Verified against the case a closed connection cannot cover: `SIGSTOP`
+      on `quern-media`, so the socket stays open and no FIN is ever sent.
+      Wedged at 9.0s, reported at 29.0s, `window_closed` at 29.1s. A peer
+      that *dies* still arrives faster, as `didCompleteWithError`.
+
+      The one invariant to keep: the client timeout must stay well above the
+      server keepalive. Setting it below inverts the pair and every idle
+      stream is declared dead — observed while testing with a deliberately
+      short timeout.
+
 - [ ] **WDA supervision (#159).** Quern has none. The runner died three
       times in one session.
 - [ ] **Wifi devices (#163) — re-diagnosed, and harder than it looked.** The
