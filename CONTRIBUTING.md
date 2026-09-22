@@ -360,6 +360,34 @@ directory, not the registration:
 git worktree remove --force "$d"; [ -d "$d" ] && echo "STILL THERE: $d"
 ```
 
+That only helps the session doing the removing. To audit afterwards -- or when
+someone else removed it and nobody saw the exit code -- the three checks
+disagree, which is the point:
+
+```sh
+git worktree list                 # the registration
+ls -A .claude/worktrees/          # the directory
+ls -A .git/worktrees/             # git's admin dirs, one per live worktree
+```
+
+A `.DS_Store` in the *parent* is harmless; the hazard needs one inside the tree
+being removed. Expect them either way -- Finder writes them wherever anyone
+looks, so the trigger is ambient rather than unlucky.
+
+**None of those find a `git archive` copy.** Mutation testing works from
+extracted tarballs, which are not worktrees and never appear in any of the
+three. A cleanup sweep that reports "none of the worktrees are mine" can be
+true and incomplete at the same time; scratch copies want their own pass.
+
+And keep the sweep narrow. Globbing `quern-*` under `/tmp` returns log files,
+`QUERN_STATE_DIR` directories and stray markdown, which reads as a pile of
+findings and is an artefact of the question. The one that answers it is "a
+directory with `server/` and `tests/` and no registration".
+
+`PYTHONPATH=$PWD` is redundant when running from inside a worktree: cwd already
+precedes site-packages. Harmless, but it implies the import needs help it does
+not, which is worth not teaching.
+
 Give reviewers the failure mode to hunt, not just the diff. The briefs that found
 real defects named this repo's habit — tests that pass for the wrong reason — and
 listed concrete recent examples to calibrate against.
