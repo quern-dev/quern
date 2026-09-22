@@ -277,7 +277,89 @@ def _no_real_network_settings(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_subprocess_spawns(monkeypatch):
+def _no_hardware_attached(monkeypatch, request):
+    """Device enumeration finds nothing, unless a test says otherwise.
+
+    The four backends behind `DeviceController.list_devices` are where the
+    machine actually gets asked. Stubbing them there leaves the aggregation,
+    the type cache and the identifier canonicalisation running for real: the
+    logic stays under test, only the question to the hardware goes away.
+
+    Empty is the honest default -- it is what a machine with nothing attached
+    returns, and what CI sees.
+
+    **On the instance, not the class, is how a test opts out.** Every test
+    that exercises `list_devices` itself already assigns
+    `ctrl.simctl.list_devices = AsyncMock(...)` and its three siblings, and an
+    instance attribute shadows this patch, so those keep working untouched.
+    That is also why the seam is here rather than on
+    `DeviceController.list_devices`: patching there replaced the very method
+    those tests exist to check, and broke eleven of them.
+
+    The backend unit tests are the other direction -- they call
+    `SimctlBackend.list_devices` directly, mocking the subprocess beneath it,
+    so this patch would erase their subject. They carry
+    `pytest.mark.device_discovery`.
+
+    Without any of this, 101 tests reached the developer's desk and their
+    assertions were about whatever happened to be plugged in. See
+    `_no_real_subprocess_spawns` below: that is what makes a regression fail
+    rather than quietly go back to asking.
+    """
+    if request.node.get_closest_marker("real_device_tools"):
+        return
+    if request.node.get_closest_marker("device_discovery"):
+        return
+
+    from server.device.adb import AdbBackend
+    from server.device.devicectl import DevicectlBackend
+    from server.device.simctl import SimctlBackend
+    from server.device.usbmux import UsbmuxBackend
+
+    async def _none(self, *a, **k):
+        return []
+
+    async def _no_map(self, *a, **k):
+        return {}
+
+    for backend in (SimctlBackend, DevicectlBackend, UsbmuxBackend, AdbBackend):
+        monkeypatch.setattr(backend, "list_devices", _none, raising=False)
+    monkeypatch.setattr(UsbmuxBackend, "get_usb_udid_map", _no_map, raising=False)
+    monkeypatch.setattr(AdbBackend, "list_avds", _none, raising=False)
+
+    # "Is this tool installed?" is the machine's second question, asked by
+    # `check_tools` via `simctl help`, `idb --help`, `devicectl list devices`,
+    # `pymobiledevice3 version` and `adb version`. It is as machine-dependent
+    # as the device list: a test would pass or fail on whether idb happens to
+    # be installed on the developer's laptop. Answer yes, deterministically,
+    # so the code under test takes its normal path rather than its
+    # tool-missing one -- a test about the missing path patches its own
+    # instance, which shadows this.
+    from server.device.idb import IdbBackend
+    from server.device.pmd3 import Pmd3Backend
+    from server.device.sim_bridge import SimBridgeBackend
+
+    async def _yes(self, *a, **k):
+        return True
+
+    for backend in (
+        SimctlBackend, DevicectlBackend, UsbmuxBackend, AdbBackend,
+        IdbBackend, Pmd3Backend, SimBridgeBackend,
+    ):
+        monkeypatch.setattr(backend, "is_available", _yes, raising=False)
+
+
+#: Commands that ask the machine what hardware is attached to it, or talk to
+#: it. A test reaching any of these is reading the developer's desk.
+_DEVICE_TOOLS = frozenset({
+    "xcrun", "simctl", "devicectl", "instruments",
+    "adb", "emulator", "avdmanager", "sdkmanager",
+    "idb", "idb_companion", "pymobiledevice3", "scrcpy",
+})
+
+
+@pytest.fixture(autouse=True)
+def _no_real_subprocess_spawns(monkeypatch, request):
     """Fail any test that spawns a real device-side subprocess.
 
     `_start_usbmux_forward` runs `pymobiledevice3 usbmux forward 18100 8100
@@ -296,25 +378,54 @@ def _no_real_subprocess_spawns(monkeypatch):
 
     Recorded and re-raised at teardown, because callers of this path wrap it in
     their own error handling.
+
+    **Widened in #272 from one command shape to every device tool.** It used to
+    block only `pymobiledevice3 ... forward` while this docstring claimed the
+    whole class, and `simctl`, `devicectl`, `adb` and `emulator` went straight
+    through: one test in `test_device_controller.py` spawned fifty real
+    processes, including `adb -s <a real phone's serial>`. That is not merely
+    slow (88s for 129 tests). It is the exact defect `CONTRIBUTING.md` records
+    from the first Linux CI run -- tests that "shelled out to a real `xcrun`,
+    got a list their fake UDID was not in, and passed regardless". Green then
+    means the developer's desk, not the code.
+
+    Escape hatch: `@pytest.mark.real_device_tools` on a test that genuinely
+    needs hardware. It is a marker rather than a silent stub on purpose --
+    substituting an empty list would let a test go on asserting against a
+    query it never really made, which is the same failure one level quieter.
     """
     import asyncio
 
     violations: list[str] = []
+    forwards: list[str] = []
     real_exec = asyncio.create_subprocess_exec
+    allowed = request.node.get_closest_marker("real_device_tools") is not None
 
     async def guarded(program, *args, **kwargs):
         parts = [str(program), *(str(a) for a in args)]
         name = parts[0].split("/")[-1]
         if name.startswith("pymobiledevice3") and "forward" in parts:
-            violations.append(" ".join(parts))
+            forwards.append(" ".join(parts))
             raise AssertionError(f"blocked: {' '.join(parts)}")
+        if not allowed and name in _DEVICE_TOOLS:
+            violations.append(" ".join(parts[:4]))
+            raise AssertionError(f"blocked: {' '.join(parts[:4])}")
         return await real_exec(program, *args, **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded)
     yield
-    assert not violations, (
+    assert not forwards, (
         "this test spawned a real usbmux forward, which outlives it and squats "
-        "port 18100 (issue #160): " + "; ".join(violations)
+        "port 18100 (issue #160): " + "; ".join(forwards)
+    )
+    assert not violations, (
+        "this test asked the developer's actual machine what devices are "
+        "attached (#272). Its assertions are then about whatever happened to "
+        "be plugged in: a fake UDID passes because it is absent from a real "
+        "list, not because the code is right -- which is how the first Linux "
+        "CI run produced 41 failures from one bug. Mock the backend, or mark "
+        "the test `@pytest.mark.real_device_tools` if it genuinely needs "
+        "hardware. Spawned: " + "; ".join(dict.fromkeys(violations))
     )
 
 

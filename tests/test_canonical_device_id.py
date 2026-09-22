@@ -30,6 +30,11 @@ from server.device import devicectl as dc
 from server.device.controller import DeviceController
 from server.models import DeviceType
 
+#: This file *is* the discovery code -- the autouse stubs in conftest replace
+#: these very methods, so it opts out rather than asserting against them.
+#: The subprocess layer beneath is mocked, so nothing here reaches the machine.
+pytestmark = pytest.mark.device_discovery
+
 CD_UUID = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
 HW_UDID = "00008030-000C59623A69802E"
 
