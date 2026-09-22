@@ -22,7 +22,15 @@ from server.models import (
     LogLevel,
     LogSource,
 )
-from server.trace import IP_MAPPING_TRUSTED_FOR, build_trace, device_of, ip_to_udid
+from server.trace import (
+    IP_MAPPING_TRUSTED_FOR,
+    IdentifiedBy,
+    build_trace,
+    device_of,
+    identified_by,
+    ip_to_udid,
+    log_identified_by,
+)
 
 BASE = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
 
@@ -41,6 +49,18 @@ def _action(name, *, at_s, duration_ms, udid="SIM-A"):
         udid=udid,
         duration_ms=duration_ms,
         outcome="ok",
+    )
+
+
+def _log(*, at_s, udid="SIM-A", process="MyApp"):
+    return LogEntry(
+        id=uuid.uuid4().hex,
+        timestamp=BASE + timedelta(seconds=at_s),
+        device_id=udid,
+        process=process,
+        level=LogLevel.INFO,
+        message="x",
+        source=LogSource.SIMULATOR,
     )
 
 
@@ -780,3 +800,84 @@ class TestANaiveSetAtDoesNotDisableAttribution:
         ip_map = ip_to_udid(state, now=BASE)
 
         assert ip_map["192.168.1.51"] == ("PHONE-2", True)
+
+
+class TestTheTraceSaysHowItIdentifiedTheDevice:
+    """Every flow and log line carries `identified_by`, on every item.
+
+    Found live: a flow attributed to a physical iPhone purely from a recorded
+    `client_ip` came back with `caveats: []`, and the only thing distinguishing
+    it from an exact pid-resolved attribution was that `source_process` was
+    absent -- which also just means "not a simulator". Two very different
+    levels of confidence, told apart by a missing field.
+
+    The regimes are not equally good and the gap is wide: a pid is exact,
+    while an address recorded at proxy setup can be reassigned by DHCP to a
+    different device entirely. A reader deciding whether to trust an
+    attribution has to be able to see which one it got.
+    """
+
+    def _map(self, *, fresh=True, at=None):
+        return ip_to_udid(
+            {
+                "PHONE-1": {
+                    "wifi_proxy_configs": {
+                        "home": {
+                            "client_ip": "192.168.1.50",
+                            "set_at": (
+                                at or (
+                                    BASE - timedelta(days=1) if fresh
+                                    else BASE - IP_MAPPING_TRUSTED_FOR
+                                    - timedelta(days=1)
+                                )
+                            ).isoformat(),
+                        },
+                    },
+                },
+            },
+            now=BASE,
+        )
+
+    def test_a_pid_resolved_flow_says_process(self):
+        assert identified_by(_flow(at_s=1, udid="SIM-A"), {}) is IdentifiedBy.PROCESS
+
+    def test_a_fresh_ip_mapped_flow_says_client_ip(self):
+        flow = _flow(at_s=1, ip="192.168.1.50")
+
+        assert identified_by(flow, self._map()) is IdentifiedBy.CLIENT_IP
+
+    def test_a_stale_ip_mapped_flow_says_so_distinctly(self):
+        """Not folded in with the fresh case. The caveat already reports it,
+        but a caveat sits on the action while this sits on the flow, and an
+        action can hold one of each."""
+        flow = _flow(at_s=1, ip="192.168.1.50")
+
+        assert (
+            identified_by(flow, self._map(fresh=False))
+            is IdentifiedBy.CLIENT_IP_EXPIRED
+        )
+
+    def test_an_unknown_address_is_unidentified(self):
+        flow = _flow(at_s=1, ip="10.9.9.9")
+
+        assert identified_by(flow, self._map()) is IdentifiedBy.UNIDENTIFIED
+
+    def test_a_flow_with_nothing_at_all_is_unidentified(self):
+        assert identified_by(_flow(at_s=1), {}) is IdentifiedBy.UNIDENTIFIED
+
+    def test_a_pid_beats_an_ip_that_also_matches(self):
+        """`device_of` prefers the pid, so this must agree with it -- the
+        field would otherwise describe a resolution that did not happen."""
+        flow = _flow(at_s=1, udid="SIM-A", ip="192.168.1.50")
+
+        assert identified_by(flow, self._map()) is IdentifiedBy.PROCESS
+
+    def test_a_named_log_line_says_adapter(self):
+        entry = _log(at_s=1, udid="SIM-A")
+
+        assert log_identified_by(entry) is IdentifiedBy.ADAPTER
+
+    def test_an_unnamed_log_line_is_unidentified(self):
+        entry = _log(at_s=1, udid="")
+
+        assert log_identified_by(entry) is IdentifiedBy.UNIDENTIFIED

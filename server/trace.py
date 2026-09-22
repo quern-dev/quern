@@ -248,6 +248,51 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
 
 
 
+class IdentifiedBy(enum.StrEnum):
+    """How a flow's or a log line's device was established.
+
+    Said positively, on every item, because the alternative is inference from
+    an absent field -- and `source_process: None` already means two different
+    things ("not a simulator" and "could not be resolved"). A reader deciding
+    how far to trust an attribution should not have to know which.
+
+    The three flow regimes are not equally good and the gap is large: PROCESS
+    is the client process resolved from the pid, which is exact; CLIENT_IP is
+    an address recorded once at proxy setup, which DHCP can reassign
+    underneath; UNIDENTIFIED means only time connects the flow to the action.
+    """
+
+    #: Resolved from the client's pid. Exact.
+    PROCESS = "process"
+    #: From a `client_ip` recorded at proxy setup, still inside the trust
+    #: window. Right unless the address has been reassigned since.
+    CLIENT_IP = "client_ip"
+    #: The same, but recorded longer ago than we are willing to vouch for.
+    #: Carried on the attribution as a caveat too.
+    CLIENT_IP_EXPIRED = "client_ip_expired"
+    #: The log adapter named the device when it captured the line.
+    ADAPTER = "adapter"
+    #: No device could be established. Time alone connects this to the action.
+    UNIDENTIFIED = "unidentified"
+
+
+def identified_by(
+    flow: FlowRecord, ip_map: dict[str, tuple[str, bool]],
+) -> IdentifiedBy:
+    """Which regime identified this flow's device. Mirrors `device_of`."""
+    if flow.simulator_udid:
+        return IdentifiedBy.PROCESS
+    if flow.client_ip and flow.client_ip in ip_map:
+        _, fresh = ip_map[flow.client_ip]
+        return IdentifiedBy.CLIENT_IP if fresh else IdentifiedBy.CLIENT_IP_EXPIRED
+    return IdentifiedBy.UNIDENTIFIED
+
+
+def log_identified_by(entry: LogEntry) -> IdentifiedBy:
+    """The same for a log line, which has only the one source."""
+    return IdentifiedBy.ADAPTER if entry.device_id else IdentifiedBy.UNIDENTIFIED
+
+
 def device_of(flow: FlowRecord, ip_map: dict[str, tuple[str, bool]]) -> tuple[str | None, bool]:
     """Which device a flow came from, and whether that is firmly known.
 

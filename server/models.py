@@ -629,6 +629,15 @@ class TraceFlow(BaseModel):
     url: str
     status: int | None = None
     source_process: str | None = None
+    #: How this flow's device was established: "process" (exact, resolved from
+    #: the client pid), "client_ip" (a recorded address, still trusted),
+    #: "client_ip_expired" (recorded too long ago to vouch for), or
+    #: "unidentified" (only time connects it to the action).
+    #:
+    #: Said positively rather than left to be inferred from a missing
+    #: `source_process`, which already means both "not a simulator" and "could
+    #: not be resolved". Those deserve different amounts of trust.
+    identified_by: str
 
 
 class TraceLogLine(BaseModel):
@@ -638,6 +647,9 @@ class TraceLogLine(BaseModel):
     level: str
     process: str
     message: str
+    #: "adapter" when the capturing adapter named the device, "unidentified"
+    #: when it did not and only time connects this line to the action.
+    identified_by: str
 
 
 class TracedAction(BaseModel):

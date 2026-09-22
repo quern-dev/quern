@@ -25,7 +25,9 @@ from server.trace import (
     Ownership,
     build_trace,
     device_of,
+    identified_by,
     ip_to_udid,
+    log_identified_by,
     owns,
 )
 
@@ -42,7 +44,7 @@ DEFAULT_WINDOW = timedelta(minutes=5)
 _MAX_QUERY_LIMIT = 1000
 
 
-def _serialise(attribution: Attribution) -> dict:
+def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) -> dict:
     action = attribution.action
     return {
         "action": action.action,
@@ -73,6 +75,9 @@ def _serialise(attribution: Attribution) -> dict:
                 "url": flow.request.url,
                 "status": flow.response.status_code if flow.response else None,
                 "source_process": flow.source_process,
+                # On every flow, not only the doubtful ones. A reader should
+                # never have to infer the good case from silence.
+                "identified_by": identified_by(flow, ip_map).value,
             }
             for flow in attribution.flows
         ],
@@ -82,6 +87,7 @@ def _serialise(attribution: Attribution) -> dict:
                 "level": entry.level.value,
                 "process": entry.process,
                 "message": entry.message,
+                "identified_by": log_identified_by(entry).value,
             }
             for entry in attribution.logs
         ],
@@ -296,7 +302,7 @@ async def get_trace(
             "wall": datetime.now(UTC).isoformat(),
             "monotonic": time.monotonic(),
         },
-        "actions": [_serialise(a) for a in attributions],
+        "actions": [_serialise(a, ip_map) for a in attributions],
         # Said rather than left to be inferred. An incomplete trace that looks
         # complete is worse than one that admits it: the reader concludes the
         # app logged nothing, when the entries were evicted.

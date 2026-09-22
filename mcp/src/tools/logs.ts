@@ -682,6 +682,8 @@ Each action carries its resolved device, outcome and duration. Flows and log lin
 
 Flows are attributed to an action if they happen during it, or within a few seconds after it returns — most actions hand work to the device and return before the request goes out. Anything attributed that way is marked in \`caveats\`, because timing is not observed causation.
 
+Every flow and log line carries \`identified_by\`, saying how its device was established: \`process\` (exact — resolved from the client pid under local capture), \`client_ip\` (an address recorded at proxy setup, which DHCP can reassign), \`client_ip_expired\` (recorded longer ago than quern will vouch for), \`adapter\` (a log line the capturing adapter named), or \`unidentified\` (only time connects it to the action). Weight an attribution by that field — it is stated on every item so you never have to infer confidence from a missing one.
+
 Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is by device and time, because the proxy is a separate process and nothing quern controls travels with the app's requests. Two actions overlapping on one device cannot be told apart, and that is reported rather than guessed. Simulators under local capture (see set_local_capture) attribute most precisely, because flows carry a UDID resolved from the client process.
 
 With several agents on one server, pass \`udid\` to get only your own device's actions.`,

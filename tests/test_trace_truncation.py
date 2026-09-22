@@ -514,3 +514,56 @@ class TestANaiveSinceIsServed:
         )
 
         assert result["log_window_truncated"] is False
+
+
+class TestIdentifiedByReachesTheResponse:
+    """The helper being right is not the same as the response carrying it.
+
+    Both halves need a test: the unit tests in test_trace.py pass whether or
+    not `_serialise` ever calls the helper, which is the shape that has
+    already caught this branch twice."""
+
+    @pytest.fixture
+    def ip_map(self, monkeypatch):
+        mapping = {}
+        monkeypatch.setattr("server.api.trace._ip_map", lambda: mapping)
+        return mapping
+
+    async def _trace(self, *, store=None, ring=None):
+        server = RingBuffer(max_size=100)
+        await server.append(_action_entry(2, duration_ms=4000))
+        result = await _call_full(
+            ring=ring or RingBuffer(max_size=10), flows=store, limit=100,
+            server=server, udid="SIM-A",
+        )
+        [action] = result["actions"]
+        return action
+
+    async def test_a_simulator_flow_is_marked_process(self, ip_map):
+        action = await self._trace(store=_FakeFlowStore([_flow(1, simulator_udid="SIM-A")]))
+
+        assert action["flows"][0]["identified_by"] == "process"
+
+    async def test_an_ip_mapped_flow_is_marked_client_ip(self, ip_map):
+        ip_map["10.0.0.1"] = ("SIM-A", True)
+        action = await self._trace(store=_FakeFlowStore([_flow(1, client_ip="10.0.0.1")]))
+
+        assert action["flows"][0]["identified_by"] == "client_ip"
+
+    async def test_a_stale_mapping_is_marked_expired(self, ip_map):
+        ip_map["10.0.0.1"] = ("SIM-A", False)
+        action = await self._trace(store=_FakeFlowStore([_flow(1, client_ip="10.0.0.1")]))
+
+        assert action["flows"][0]["identified_by"] == "client_ip_expired"
+
+    async def test_a_flow_with_no_device_is_marked_unidentified(self, ip_map):
+        action = await self._trace(store=_FakeFlowStore([_flow(1)]))
+
+        assert action["flows"][0]["identified_by"] == "unidentified"
+
+    async def test_log_lines_carry_it_too(self, ip_map):
+        ring = RingBuffer(max_size=100)
+        await ring.append(_entry(1))          # device_id="SIM-A"
+        action = await self._trace(ring=ring)
+
+        assert action["logs"][0]["identified_by"] == "adapter"
