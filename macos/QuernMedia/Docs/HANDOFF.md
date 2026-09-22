@@ -135,23 +135,50 @@ each other.
 
 ### Product work
 
-- [ ] **`feat/media-keyframe-control` is pushed and parked, awaiting #164.**
-  One commit (`be73b74`): `POST /keyframe` on the stream server, so a
-  caller can ask for an IDR without reconnecting. No PR yet, on purpose —
-  it stacks, and a stacked PR is never auto-reviewed.
+- [ ] **`feat/media-keyframe-control`: rebased onto main, reviewed, no PR yet.**
+  One commit: `POST /keyframe` on the stream server, so a caller can ask for
+  an IDR without reconnecting. #164 has landed, so it no longer stacks.
 
-  **Collapse the two callbacks when rebasing it, do not keep both.** That
-  branch adds `onKeyframeRequested` beside `onClientAttached` and wires
-  both to the same closure in `main.swift`. #164 has since renamed
-  `onClientAttached` to `onKeyframeNeeded`, because the H.264 desync gate
-  made it fire for a second reason; a control request is a third, and all
-  three mean one thing to the pipeline. So the rebase should call the
-  existing `onKeyframeNeeded?()` from the `POST /keyframe` route and
-  delete the added parameter. A mechanical conflict resolution keeps both,
-  which restores the trailing-closure hazard that branch's own comment
-  spends six lines warning about — a lone trailing closure binds to the
-  *last* closure parameter, so adding one at the end silently rebound
-  every existing call site with no diagnostic.
+  The callback collapse this entry used to ask for is **done**. There is one
+  hook, `onKeyframeNeeded`, fired by three things -- a viewer attaching, the
+  H.264 desync gate skipping a frame, and a control request. All three mean
+  the same thing to the pipeline. That also leaves the initialiser with a
+  single closure parameter, so the trailing-closure hazard the branch's own
+  comment warned about cannot recur. All three producers are pinned by tests;
+  mutating any one of them fails a test that names it.
+
+  A review agent found nine things on it. Fixed: a near-miss control path
+  (`POST /keyframe?t=1`, `/keyframe/`) fell through to the index page and
+  answered **200 with HTML**, so a discarded request read as success and
+  `curl -sSf` exited 0 on it; the same fall-through gave *any* method on
+  *any* unknown path a 200 and an HTML body; methods were uppercased, so
+  `post` fired the encoder and a test asserted that as intended; the new
+  counter was in no log line and absent from the shutdown summary; and the
+  endpoint was in no usage text.
+
+  Two deliberately not fixed:
+
+  - **A request *rate* forces continuous IDRs.** Measured on a booted
+    simulator: ~3,500 requests a second took the stream from 1 frame in 20
+    being an IDR to 19 in 20, which makes an H.264 stream and any `--record`
+    file effectively all-intra. It is bounded by `--fps`, self-heals the
+    instant the requests stop, and needs `--bind-all` to reach off-machine --
+    which is opt-in and already documented as serving the screen to anyone on
+    the network. Rate-limiting it is a policy decision, not a bug fix. The
+    comment claiming "the cost of an unwanted call is one encode" has been
+    corrected, because that sentence was doing the security-justification work
+    and is true per call and false per second.
+  - **At capacity the control endpoint fails with a bare TCP close**, no
+    status, so a caller cannot tell it from a wrong port. The fix is not
+    cheap: the refusal happens in `accept` before the connection is ready or
+    has a state handler, so answering would mean starting and sequencing a
+    connection purely to reject it. Left alone on the grounds that the risk of
+    breaking the accept path exceeds the value of a clearer error.
+
+  Also known: a POST body larger than one segment gets an RST after the 204,
+  because the route replies and cancels without draining. Nil impact for a
+  body-less control endpoint; a caller that sends one anyway can be told it
+  failed when it succeeded.
 
 - **Done: a viewer attaching to an idle simulator now gets a picture in
   ~0.1s.** Measured on a completely idle simulator: 0.108s to the first

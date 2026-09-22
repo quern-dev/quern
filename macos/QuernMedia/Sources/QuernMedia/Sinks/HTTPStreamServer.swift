@@ -86,6 +86,10 @@ public final class HTTPStreamServer: FrameSink {
     private var lastPart: Data?
     private var lastSendAt = Date.distantPast
 
+    /// Control requests served. Counted so a test asserts the endpoint did
+    /// something, rather than asserting nothing went wrong.
+    public private(set) var keyframeRequests = 0
+
     /// How many times a frame has been repeated to keep the stream alive.
     /// Counted so a test can assert it happened, rather than asserting that
     /// nothing went wrong.
@@ -406,12 +410,69 @@ public final class HTTPStreamServer: FrameSink {
 
             let head = String(decoding: client.head[..<end.lowerBound], as: UTF8.self)
             client.head = Data()
-            self.route(client, path: HTTPWire.requestPath(head))
+            self.route(
+                client,
+                method: HTTPWire.requestMethod(head),
+                path: HTTPWire.requestPath(head)
+            )
         }
     }
 
-    private func route(_ client: Client, path: String) {
+    private func route(_ client: Client, method: String, path: String) {
+        // Checked before the stream path, and strictly. A GET here is a
+        // mistake worth reporting rather than quietly serving the index page
+        // the way an unrecognised path does.
+        // A mistyped control path is refused, never answered with the index
+        // page. Falling through gave it 200 and an HTML body, which to a
+        // caller of a 204 endpoint is indistinguishable from success.
+        if HTTPWire.keyframePathMatch(path) == .nearMiss {
+            client.connection.send(
+                content: HTTPWire.notFoundResponse(),
+                completion: .contentProcessed { _ in client.connection.cancel() }
+            )
+            return
+        }
+
+        if HTTPWire.isKeyframePath(path) {
+            guard method == "POST" else {
+                client.connection.send(
+                    content: HTTPWire.methodNotAllowedResponse(),
+                    completion: .contentProcessed { _ in client.connection.cancel() }
+                )
+                return
+            }
+            lock.lock()
+            keyframeRequests += 1
+            let count = keyframeRequests
+            lock.unlock()
+            // The same hook a viewer attaching and a desync skip both fire.
+            // All three mean one thing to the pipeline -- it owes us an IDR --
+            // so this route reuses it rather than adding a second callback
+            // wired to the same closure. That also keeps the initialiser to a
+            // single closure parameter, which is what makes the trailing-
+            // closure form at the call sites unambiguous.
+            onKeyframeNeeded?()
+            MediaLog.log("[http] keyframe requested (\(count) total)")
+            client.connection.send(
+                content: HTTPWire.noContentResponse(),
+                completion: .contentProcessed { _ in client.connection.cancel() }
+            )
+            return
+        }
+
         guard HTTPWire.isStreamPath(path) else {
+            // The index page is a page, so it answers the methods a browser
+            // uses and nothing else. `POST /anything` used to get 200 and an
+            // HTML body -- harmless for a person typing a URL, and for a
+            // caller driving this as an API the same false success the
+            // control path above just had to be fixed for.
+            guard method == "GET" || method == "HEAD" else {
+                client.connection.send(
+                    content: HTTPWire.notFoundResponse(),
+                    completion: .contentProcessed { _ in client.connection.cancel() }
+                )
+                return
+            }
             client.connection.send(
                 content: HTTPWire.indexPage(for: codec),
                 completion: .contentProcessed { _ in client.connection.cancel() }

@@ -136,6 +136,40 @@ private func rawGetWhile(
     }
 }
 
+/// One request, any method, and whatever comes back before the socket closes.
+private func rawRequest(
+    method: String, path: String, port: UInt16, timeout: TimeInterval = 5
+) async -> Data {
+    await withCheckedContinuation { continuation in
+        let conn = NWConnection(
+            host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!, using: .tcp
+        )
+        let box = Box()
+        let finish = {
+            guard let data = box.claim() else { return }
+            conn.cancel()
+            continuation.resume(returning: data)
+        }
+        func readMore() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { c, _, done, err in
+                if let c { box.append(c) }
+                if done || err != nil { finish() } else { readMore() }
+            }
+        }
+        conn.stateUpdateHandler = { state in
+            if case .ready = state {
+                let request = "\(method) \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Content-Length: 0\r\n\r\n"
+                conn.send(content: Data(request.utf8), completion: .contentProcessed { _ in })
+                readMore()
+            }
+            if case .failed = state { finish() }
+        }
+        conn.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish() }
+    }
+}
+
 private final class Box: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = Data()
@@ -501,4 +535,152 @@ func h264SkipHoldsUntilKeyframe() async throws {
     server.receive(try h264(bytes: 1024, keyframe: true))
     #expect(server.bytesSent > baseline, "a keyframe should have resynced the client")
     #expect(server.keyframeResyncs == 1)
+}
+
+
+@Test("POST /keyframe invokes the handler and answers 204")
+func keyframeEndpointInvokesTheHandler() async throws {
+    let port = freePort()
+    let calls = Box()
+    let server = HTTPStreamServer(
+        port: port, bindAll: false, codec: .h264,
+        onKeyframeNeeded: { calls.append(Data([1])) }
+    )
+    try server.start()
+    defer { server.stop() }
+
+    let reply = await rawRequest(method: "POST", path: "/keyframe", port: port)
+    let text = String(decoding: reply, as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 204"), "got: \(text.prefix(40))")
+    #expect(calls.count == 1, "the handler was not invoked")
+    #expect(server.keyframeRequests == 1)
+}
+
+@Test("a GET to the control path is refused rather than quietly served")
+func keyframeEndpointRejectsGet() async throws {
+    // Every other unmatched path falls through to the index page, which is
+    // right for a browser and wrong for an endpoint that causes work: a GET
+    // here is a mistake, and answering it with HTML hides that.
+    let port = freePort()
+    let calls = Box()
+    let server = HTTPStreamServer(
+        port: port, bindAll: false, codec: .h264,
+        onKeyframeNeeded: { calls.append(Data([1])) }
+    )
+    try server.start()
+    defer { server.stop() }
+
+    let reply = await rawRequest(method: "GET", path: "/keyframe", port: port)
+    let text = String(decoding: reply, as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 405"), "got: \(text.prefix(40))")
+    #expect(text.contains("Allow: POST"))
+    #expect(calls.count == 0, "a GET triggered the handler")
+    #expect(server.keyframeRequests == 0)
+}
+
+@Test("the control endpoint does not disturb the stream path")
+func keyframeEndpointLeavesTheStreamAlone() async throws {
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 20)
+    #expect(String(decoding: page, as: UTF8.self).contains("<img src=\"/stream\">"))
+    #expect(server.keyframeRequests == 0)
+}
+
+
+@Test("a near-miss control path is refused, not answered with the index page")
+func keyframeNearMissIsRefused() async throws {
+    // The predicate tests next door assert what `keyframePathMatch` returns.
+    // They were silent about what `route()` then did with it, and what it did
+    // was fall through to the index page: 200, `text/html`, and a discarded
+    // request. To a caller of a 204 endpoint -- whose only signal is the
+    // status code -- that is indistinguishable from success. `curl -sSf`
+    // exited 0 on it. Measured against a live server, not reasoned about.
+    let port = freePort()
+    let calls = Box()
+    let server = HTTPStreamServer(
+        port: port, bindAll: false, codec: .h264,
+        onKeyframeNeeded: { calls.append(Data([1])) }
+    )
+    try server.start()
+    defer { server.stop() }
+
+    // GET as well as POST, and GET is the one that proves this branch exists.
+    // A POST to an unknown path is refused by the index-page method guard
+    // anyway, so testing only POST passed with the near-miss branch deleted
+    // -- found by mutating it, not by reading it. A GET falls straight to the
+    // index page without this.
+    for method in ["POST", "GET"] {
+        let reply = await rawRequest(method: method, path: "/KEYFRAME", port: port)
+        let text = String(decoding: reply, as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 404"), "\(method) got: \(text.prefix(40))")
+        // Asserted explicitly rather than trusting the status line: serving
+        // the page *is* the bug, so its absence is the property under test.
+        #expect(!text.contains("<img src="), "\(method) got the index page")
+    }
+    #expect(calls.count == 0, "a near miss fired the encoder")
+    #expect(server.keyframeRequests == 0)
+}
+
+@Test("a query string and a trailing slash still reach the control endpoint")
+func keyframeAcceptsQueryAndTrailingSlash() async throws {
+    let port = freePort()
+    let calls = Box()
+    let server = HTTPStreamServer(
+        port: port, bindAll: false, codec: .h264,
+        onKeyframeNeeded: { calls.append(Data([1])) }
+    )
+    try server.start()
+    defer { server.stop() }
+
+    for path in ["/keyframe?t=1", "/keyframe/"] {
+        let reply = await rawRequest(method: "POST", path: path, port: port)
+        let text = String(decoding: reply, as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 204"), "\(path) got: \(text.prefix(40))")
+    }
+    #expect(calls.count == 2, "the hook did not fire for both forms")
+    #expect(server.keyframeRequests == 2)
+}
+
+@Test("a lowercase method does not reach the control endpoint")
+func keyframeMethodIsCaseSensitive() async throws {
+    // `post` used to be uppercased into `POST` and fire the encoder, and a
+    // test asserted the uppercasing as intended. Methods are case-sensitive.
+    let port = freePort()
+    let calls = Box()
+    let server = HTTPStreamServer(
+        port: port, bindAll: false, codec: .h264,
+        onKeyframeNeeded: { calls.append(Data([1])) }
+    )
+    try server.start()
+    defer { server.stop() }
+
+    let reply = await rawRequest(method: "post", path: "/keyframe", port: port)
+    let text = String(decoding: reply, as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 405"), "got: \(text.prefix(40))")
+    #expect(calls.count == 0, "a lowercase method fired the encoder")
+}
+
+@Test("an unknown path gets the index page for a browser and a 404 otherwise")
+func indexPageOnlyAnswersBrowserMethods() async throws {
+    // Every unknown path answered 200 with HTML whatever the method, so an
+    // API caller that mistyped a route was told it had worked. Harmless for
+    // a person typing a URL, which is why GET still gets the page.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let page = await rawRequest(method: "GET", path: "/nope", port: port)
+    let pageText = String(decoding: page, as: UTF8.self)
+    #expect(pageText.hasPrefix("HTTP/1.1 200"), "got: \(pageText.prefix(40))")
+    #expect(pageText.contains("<img src="), "a browser stopped getting the page")
+
+    let posted = await rawRequest(method: "POST", path: "/nope", port: port)
+    let postText = String(decoding: posted, as: UTF8.self)
+    #expect(postText.hasPrefix("HTTP/1.1 404"), "got: \(postText.prefix(40))")
+    #expect(!postText.contains("<img src="), "HTML served to a POST")
 }
