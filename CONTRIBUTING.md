@@ -338,6 +338,16 @@ is shared from every checkout, which cuts both ways: live-testing capture from
 a worktree works against an already-trusted simulator without installing a
 second root CA, and a worktree cannot be assumed to have a CA of its own.
 
+Nor does it isolate the **SwiftPM build lock**. A `swift test` that is killed
+can leave `swift-test` and `swiftpm-testing-helper` processes holding the lock
+on a shared `--scratch-path`, and the next run then blocks for its full 600s
+timeout -- which looks exactly like the hang you were trying to fix. Before
+believing a Swift hang:
+
+```sh
+pgrep -fl "swift-test|swiftpm-testing-helper"
+```
+
 **`git worktree remove` can half-succeed, and only its exit code says so.** It
 deregisters the worktree, deletes most of the tree, and then refuses a
 directory something else has written into -- a Finder `.DS_Store` is enough.
