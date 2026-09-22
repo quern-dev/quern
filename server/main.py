@@ -294,6 +294,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
+    # The controller's view of the landmark registry, like `_pool` below.
+    # `tap_element` asks it whether the current screen scrolls before deciding
+    # to sweep (#274); a controller without it behaves as though nothing were
+    # recorded, which is right for one built outside the app as every unit
+    # test does.
+    #
+    # Here rather than beside the registry's construction: that runs in
+    # `create_app`, where `app.state.device_controller` is still None, and the
+    # real controller is not built until the lifespan starts. Attaching there
+    # raised AttributeError on boot -- found by running the server, since every
+    # test sets `_landmarks` on its own controller directly.
+    device_controller._landmarks = app.state.landmark_registry
     tools = await device_controller.check_tools(adopt=True)
     logger.info("Device tools: %s", tools)
     if tools.get("sim_bridge"):

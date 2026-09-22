@@ -64,9 +64,21 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
 
     if body.landmarks:
         screens: list[ScreenLandmarks] = []
-        for screen_name, lm_list in body.landmarks.items():
-            landmarks = [Landmark(**lm) for lm in lm_list]
-            screens.append(ScreenLandmarks(screen=screen_name, landmarks=landmarks))
+        for screen_name, entry in body.landmarks.items():
+            if isinstance(entry, dict):
+                raw = entry.get("landmarks") or []
+                raw_scrollable = entry.get("scrollable")
+            else:
+                raw = entry
+                raw_scrollable = None
+            # Anything but a literal bool reads as unset, matching the file
+            # parser: a typo must mean "nobody has said" rather than quietly
+            # asserting one of the two answers.
+            scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
+            landmarks = [Landmark(**lm) for lm in raw]
+            screens.append(ScreenLandmarks(
+                screen=screen_name, landmarks=landmarks, scrollable=scrollable,
+            ))
         count = registry.load(body.app, screens)
         return {
             "loaded": body.app,

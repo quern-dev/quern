@@ -408,8 +408,16 @@ def parse_screen_landmarks(
             file=label, screen=screen_name, reason="invalid_entries",
         ), web_content=hints)
 
+    # Anything other than a literal bool reads as unset. A typo must mean
+    # "nobody has said" rather than silently asserting one of the two answers
+    # -- the same rule `auto_install_cert` follows for the same reason.
+    raw_scrollable = data.get("scrollable")
+    scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
+
     return ParseResult(
-        screen=ScreenLandmarks(screen=screen_name, landmarks=landmarks),
+        screen=ScreenLandmarks(
+            screen=screen_name, landmarks=landmarks, scrollable=scrollable,
+        ),
         web_content=hints,
     )
 
@@ -522,6 +530,35 @@ class LandmarkRegistry:
     def list_sets(self) -> dict[str, int]:
         """Return app -> screen count mapping."""
         return {app: len(screens) for app, screens in self._sets.items()}
+
+    def scrollable_for(
+        self, elements: list[UIElement], app: str | None = None,
+    ) -> tuple[bool | None, str | None]:
+        """Does the screen these elements came from scroll? And which screen?
+
+        Returns `(scrollable, screen_name)`. `scrollable` is None whenever
+        nobody has said -- no knowledge base loaded, the screen unrecognised,
+        or recognised but carrying no `scrollable:` field.
+
+        **Only an exact identification counts.** `ambiguous` means two screens
+        matched, and they can disagree about scrolling; taking either would be
+        a guess presented as knowledge, which is the failure the whole
+        knowledge base exists to avoid. Ambiguous reads as unknown.
+
+        Pure: no device read. `identify_screen` works off the element list the
+        caller already has.
+        """
+        screens = self.all_screens(app)
+        if not screens:
+            return None, None
+        result = identify_screen(elements, screens)
+        if result.get("confidence") != "exact":
+            return None, None
+        name = result.get("matched")
+        for screen in screens:
+            if screen.screen == name:
+                return screen.scrollable, name
+        return None, name
 
     def all_screens(self, app: str | None = None) -> list[ScreenLandmarks]:
         """Get all screens, optionally filtered by app."""

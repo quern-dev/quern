@@ -367,3 +367,57 @@ async def test_a_fast_success_stays_quiet(controller, caplog):
     assert not any("slower than expected" in r.message for r in caplog.records), (
         "a fast sweep logged its trace; only slow ones should"
     )
+
+
+async def test_the_sweep_reports_what_it_did_to_the_screen(controller):
+    """Every swipe is a real gesture, and the caller has to be able to see it.
+
+    `tap_element` puts this in its `not_found` response: the upward half of the
+    sweep is the pull-to-refresh and sheet-dismiss drag, so an agent told only
+    "not found" acts next against a screen it does not know has moved (#274).
+
+    Asserted against the harness's own count rather than a constant. A test
+    that fixed the number would have to be rewritten whenever the budget
+    changes, and would pass while reporting a number that had stopped tracking
+    the swipes actually made -- which is the failure this report exists to
+    prevent, one level up.
+    """
+    controller.scrolls = False
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=10,
+        report=report,
+    )
+
+    assert report["swipes"] == controller.swipes
+    assert report["swipes"] > 0, "the sweep swiped but reported nothing"
+    assert report["moved"] is False
+
+
+async def test_the_report_says_when_the_screen_moved(controller):
+    """The other half. 'Swiped and nothing happened' and 'swiped and the list
+    scrolled' leave the caller's screen in very different states."""
+    controller.scrolls = True
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=10,
+        report=report,
+    )
+
+    assert report["moved"] is True
+
+
+async def test_a_report_is_filled_in_even_when_nothing_is_found(controller):
+    """The seeding, not the incrementing. Every exit from the sweep has to
+    leave the caller able to say what happened -- including the ones that
+    return before any swipe."""
+    controller.scrolls = False
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=0, report=report,
+    )
+
+    assert "swipes" in report and "moved" in report

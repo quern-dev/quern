@@ -420,8 +420,9 @@ async def tap_element(request: Request, body: TapElementRequest):
                 before = await _capture_action_screenshot(controller, resolved, "tap_before")
 
             # Guarded like scroll_to_element, and for the same reason: with
-            # `scroll_to_find` on -- the default -- an off-screen target runs
-            # the same sweep, and this is the path most callers reach it by.
+            # `scroll_to_find` on -- explicitly, or via a screen the knowledge
+            # base records as scrolling -- an off-screen target runs the same
+            # sweep, and this is the path most callers reach it by.
             # Guarding only the dedicated scroll endpoint left the common one
             # unbounded.
             result = await _run_until_client_leaves(
