@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "typescript": "^7.0.2",
-    "@types/node": "^22.20.3"
+    "@types/node": "^22.20.4"
   },
   "license": "Apache-2.0",
   "engines": {

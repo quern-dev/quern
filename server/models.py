@@ -50,17 +50,73 @@ class LogEntry(BaseModel):
     id: str = Field(description="Unique entry identifier")
     timestamp: datetime
     device_id: str = Field(
-        default="default",
-        description="Device identifier (for future multi-device)",
+        default="",
+        description=(
+            "Which device this came from, or empty when it came from no "
+            "device -- build output, quern's own logging. Never a sentinel "
+            "that looks like a device: the previous default of 'default' "
+            "passed every truthiness check and failed every equality one, so "
+            "app log lines were silently treated as belonging to a device "
+            "called 'default' and matched nothing. Every consumer already "
+            "reads this as 'unknown, do not filter' when it is empty."
+        ),
     )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")
-    category: str = Field(default="", description="OSLog category (e.g., 'auth')")
+    category: str = Field(
+        default="",
+        description=(
+            "For device sources, the OSLog category (e.g. 'auth'). For quern's "
+            "own entries, what quern was doing -- see server/logging_ext."
+        ),
+    )
     pid: int | None = Field(default=None, description="Process ID")
     level: LogLevel = LogLevel.INFO
     message: str
     source: LogSource
     raw: str = Field(default="", description="Original unparsed line, preserved for debugging")
+
+    # --- the action log -----------------------------------------------------
+    # One entry per completed quern action, so a trace is a query rather than
+    # a reading exercise. Empty on every other entry, including quern's own
+    # non-action logging. See docs/proposals/logging-spec.md.
+    action: str = Field(
+        default="",
+        description="The operation that completed, e.g. 'tap_element'",
+    )
+    udid: str = Field(
+        default="",
+        description=(
+            "The *resolved* target device. Deliberately separate from "
+            "`device_id`, which is 'server' for every server-side entry and "
+            "routes entries to buffers."
+        ),
+    )
+    duration_ms: int | None = Field(
+        default=None, description="How long the action took, once it is over",
+    )
+    started_monotonic: float | None = Field(
+        default=None,
+        description=(
+            "When the action began, on time.monotonic() -- the same base as "
+            "mach absolute time, which is what video capture stamps frames "
+            "with. Given directly so a caller aligning against a recording "
+            "needs no wall-clock conversion and inherits none of its drift. "
+            "The end is this plus duration_ms, measured on the same clock."
+        ),
+    )
+    outcome: str = Field(
+        default="",
+        description=(
+            "How the action ended. 'ok' worked; 'failed' means the caller did "
+            "not get what they asked for; 'suspect' means quern did it and the "
+            "result should not be trusted, such as typing that reported "
+            "success into a field still empty; 'cancelled' means the caller "
+            "disconnected part-way; 'not_found' and 'ambiguous' are answers "
+            "rather than faults; 'started' marks a begin entry, which carries "
+            "no duration. The list lives in server/logging_ext.OUTCOMES."
+        ),
+    )
     repeat_count: int = Field(
         default=1,
         description="Number of occurrences this entry represents. "
@@ -75,6 +131,7 @@ class LogQueryParams(BaseModel):
     until: datetime | None = None
     level: LogLevel | None = None
     process: str | None = None
+    category: str | None = None
     source: LogSource | None = None
     search: str | None = None
     device_id: str | None = None
@@ -108,7 +165,11 @@ class SourceStatus(BaseModel):
     id: str
     type: str
     status: str  # "streaming", "watching", "stopped", "error"
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     entries_captured: int = 0
     started_at: datetime | None = None
     error: str | None = None
@@ -159,7 +220,11 @@ class CrashReport(BaseModel):
 
     crash_id: str = Field(description="Unique crash identifier")
     timestamp: datetime
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     process: str = Field(default="", description="Crashed process name")
     exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
     exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
@@ -316,7 +381,11 @@ class FlowRecord(BaseModel):
 
     id: str = Field(description="Unique flow identifier")
     timestamp: datetime
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     request: FlowRequest
     response: FlowResponse | None = None
     timing: FlowTiming = Field(default_factory=FlowTiming)
@@ -354,7 +423,11 @@ class FlowQueryParams(BaseModel):
     has_error: bool | None = None
     since: datetime | None = None
     until: datetime | None = None
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     simulator_udid: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
@@ -563,6 +636,86 @@ class TlsRejection(BaseModel):
     last_at: str | None = None
 
 
+class TraceFlow(BaseModel):
+    """A request attributed to an action."""
+
+    id: str
+    timestamp: str
+    method: str
+    url: str
+    status: int | None = None
+    source_process: str | None = None
+    #: How this flow's device was established: "process" (exact, resolved from
+    #: the client pid), "client_ip" (a recorded address, still trusted),
+    #: "client_ip_expired" (recorded too long ago to vouch for), or
+    #: "unidentified" (only time connects it to the action).
+    #:
+    #: Said positively rather than left to be inferred from a missing
+    #: `source_process`, which already means both "not a simulator" and "could
+    #: not be resolved". Those deserve different amounts of trust.
+    identified_by: str
+
+
+class TraceLogLine(BaseModel):
+    """A log line attributed to an action."""
+
+    timestamp: str
+    level: str
+    process: str
+    message: str
+    #: "adapter" when the capturing adapter named the device, "unidentified"
+    #: when it did not and only time connects this line to the action.
+    identified_by: str
+
+
+class TracedAction(BaseModel):
+    """One action, and what it caused."""
+
+    action: str
+    udid: str
+    outcome: str
+    duration_ms: int | None = None
+    category: str
+    started_at: str
+    finished_at: str
+    started_monotonic: float | None = None
+    detail: str
+    flows: list[TraceFlow] = []
+    logs: list[TraceLogLine] = []
+    overlaps: list[str] = []
+    caveats: list[str] = []
+
+
+class ClockAnchor(BaseModel):
+    """Wall and monotonic read together, so a recording made alongside this
+    trace can be aligned against it."""
+
+    wall: str
+    monotonic: float
+
+
+class TraceResponse(BaseModel):
+    """Response from GET /api/v1/trace.
+
+    The four `*_over_limit` / `*_truncated` fields are the point of having a
+    model at all: they are how a caller tells an incomplete answer from a
+    quiet one, and leaving them to an untyped dict is how one of them would
+    quietly stop being returned.
+    """
+
+    since: str
+    udid: str | None = None
+    clock_anchor: ClockAnchor
+    actions: list[TracedAction] = []
+    proxy_running: bool
+    log_window_truncated: bool
+    logs_over_limit: bool
+    actions_over_limit: bool
+    action_window_truncated: bool
+    flows_over_limit: bool
+    flow_window_truncated: bool
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -689,7 +842,11 @@ class FlowEvent(BaseModel):
     duration_ms: float | None = None
     request_size: int = 0
     response_size: int = 0
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     simulator_udid: str | None = None
     source_process: str | None = None
 

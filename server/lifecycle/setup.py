@@ -2477,7 +2477,7 @@ def _is_cert_installed(udid: str) -> bool:
         # cheerfully offered to reinstall one that was already there.
         import logging
 
-        logging.getLogger("quern-debug-server.setup").warning(
+        logging.getLogger(__name__).warning(
             "Could not check the CA on %s", udid, exc_info=True,
         )
         return False

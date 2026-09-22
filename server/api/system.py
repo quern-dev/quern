@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from server.api.actions import logged_action
 from server.config import (
     VALID_UPDATE_CHANNELS,
     channel_to_release_branch,
@@ -25,7 +26,7 @@ from server.config import (
 )
 from server.lifecycle.update_check import read_update_info, switch_channel
 
-logger = logging.getLogger("quern-debug-server.system")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
 
@@ -111,6 +112,7 @@ async def get_channel() -> UpdateChannelResponse:
 
 
 @router.put("/channel", response_model=UpdateChannelResponse)
+@logged_action("put_channel", category="server.lifecycle")
 async def put_channel(body: SetUpdateChannelRequest) -> UpdateChannelResponse:
     """Set the update channel preference.
 
@@ -135,6 +137,7 @@ async def put_channel(body: SetUpdateChannelRequest) -> UpdateChannelResponse:
 
 
 @router.post("/update", response_model=UpdateTriggerResponse)
+@logged_action("trigger_update", category="server.lifecycle")
 async def trigger_update() -> UpdateTriggerResponse:
     """Launch ``quern update`` in a detached child and respond immediately.
 

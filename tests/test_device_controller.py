@@ -1910,3 +1910,99 @@ class TestALaunchThatNeverCameUp:
         ctrl = self._ctrl(frontmost=False, alive=False, name=None)
         with pytest.raises(DeviceError, match="was launched and is not running"):
             await ctrl.launch_app("com.example.App")
+
+
+class TestScreenshotNamesItsDevice:
+    """`resolve_udid` is what tells the action log which device a call went
+    to. `screenshot` short-circuits past it when the caller names one -- to
+    avoid changing the active device -- and so the *explicitly scoped* call
+    was the one that recorded no device at all.
+
+    Found by running it, not by reading it: `GET
+    /api/v1/device/screenshot?udid=<sim>` against a live server logged
+    `udid: ""`, so `GET /api/v1/trace?udid=<sim>` returned zero actions for a
+    screenshot that had just been taken of that exact simulator, and its app
+    logs fell back to matching on time alone. Every unit test here passed.
+    """
+
+    async def _screenshot(self, **kwargs):
+        from server.api.actions import ActionScope
+        from server.logging_ext import reset_current_action, set_current_action
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
+        ctrl._ensure_device_type_cached = AsyncMock()
+        # `_resolve_udid`, not `resolve_udid`: the public one is what records
+        # the udid, so mocking it is what the test is here to exercise.
+        ctrl._resolve_udid = AsyncMock(return_value="AAAA-1111")
+
+        scope = ActionScope("take_screenshot", "device.read")
+        token = set_current_action(scope)
+        try:
+            with patch("server.device.controller.process_screenshot") as proc:
+                proc.return_value = (b"processed", "image/png")
+                await ctrl.screenshot(**kwargs)
+        finally:
+            reset_current_action(token)
+        return scope
+
+    async def test_an_explicit_udid_reaches_the_action_log(self):
+        scope = await self._screenshot(udid="BBBB-2222")
+
+        assert scope.udid == "BBBB-2222"
+
+    async def test_the_fallback_path_still_names_it(self):
+        """The branch that did work must keep working."""
+        scope = await self._screenshot()
+
+        assert scope.udid == "AAAA-1111"
+
+
+class TestAMissingToolIsNotAnError:
+    """`list_devices` names "simctl unavailable" in its own handler, and until
+    now did not catch it.
+
+    The backends raise `DeviceError` for a tool that ran and refused. A tool
+    that is not installed never runs: `create_subprocess_exec` raises
+    `FileNotFoundError`, which is an `OSError` and not a `DeviceError`, so it
+    went straight through. Every developer machine has Xcode, so nothing
+    noticed until the suite ran on a host without it -- where 42 tests failed
+    on an `xcrun` none of them were testing.
+
+    `usbmux` is the shape the others should have had: `_find_binary()` returns
+    None and the call degrades to `{}` rather than raising at all.
+    """
+
+    @staticmethod
+    def _ctrl(absent: str) -> DeviceController:
+        ctrl = DeviceController()
+        for name in ("simctl", "devicectl", "usbmux", "adb"):
+            mock = (
+                AsyncMock(side_effect=FileNotFoundError(2, "No such file or directory", name))
+                if name == absent
+                else AsyncMock(return_value=[])
+            )
+            getattr(ctrl, name).list_devices = mock
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        return ctrl
+
+    @pytest.mark.parametrize("absent", ["simctl", "devicectl", "usbmux", "adb"])
+    async def test_an_absent_backend_is_skipped_not_raised(self, absent):
+        assert await self._ctrl(absent).list_devices() == []
+
+    async def test_the_present_backends_still_report(self):
+        """Degrading is not the same as giving up: a missing simctl must not
+        cost us the Android devices adb can still see."""
+        ctrl = self._ctrl("simctl")
+        android = _device(udid="emulator-5554", name="Pixel 8")
+        ctrl.adb.list_devices = AsyncMock(return_value=[android])
+
+        assert await ctrl.list_devices() == [android]
+
+    async def test_resolve_udid_survives_a_missing_simctl(self):
+        """The path that actually carried the exception out. An unknown UDID
+        warms the type cache, and warming it lists devices -- so every call
+        taking a UDID raised, whatever it was really doing."""
+        ctrl = self._ctrl("simctl")
+        assert await ctrl.resolve_udid("AAAA-1111") == "AAAA-1111"

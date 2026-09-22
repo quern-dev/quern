@@ -10,6 +10,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
+from server.api.actions import action, logged_action
+from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
     DeviceError,
@@ -49,7 +51,7 @@ from server.models import (
 TOOLS_IN_LIST_MAX_AGE = 5.0
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +153,7 @@ async def tool_sites(request: Request) -> ToolSitesResponse:
 
 
 @router.get("/list")
+@logged_action("list_devices", category="device.read")
 async def list_devices(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
@@ -281,6 +284,7 @@ async def list_devices(
 
 
 @router.post("/boot")
+@logged_action("boot_device", category="device.lifecycle")
 async def boot_device(request: Request, body: BootDeviceRequest):
     """Boot a simulator by udid or name."""
     from server.config import get_auto_install_cert
@@ -289,6 +293,11 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     controller = _get_controller(request)
     try:
         udid = await controller.boot(udid=body.udid, name=body.name, headless=body.headless)
+        # Decorated rather than wrapped in a `with`: the cert install and
+        # proxy auto-start below are part of what the caller waited for, and
+        # a block around just the boot would report a duration that stops
+        # before most of the work.
+        current_action().udid = udid
     except DeviceError as e:
         raise _handle_device_error(e)
 
@@ -371,11 +380,17 @@ async def boot_device(request: Request, body: BootDeviceRequest):
 async def shutdown_device(request: Request, body: ShutdownDeviceRequest):
     """Shutdown a simulator."""
     controller = _get_controller(request)
-    try:
-        await controller.shutdown(udid=body.udid)
-        return {"status": "shutdown", "udid": body.udid}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("shutdown_device", category="device.lifecycle") as act:
+        try:
+            # Resolved rather than echoed: `body.udid` is None when the caller
+            # leaves the choice to quern, and both the entry and this response
+            # then say None, which joins to nothing.
+            resolved = await controller.resolve_udid(body.udid)
+            act.udid = resolved
+            await controller.shutdown(udid=resolved)
+            return {"status": "shutdown", "udid": resolved}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 def _invalidate_cert_record(udid: str) -> None:
@@ -416,19 +431,23 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
     behind was creating the field report's state itself.
     """
     controller = _get_controller(request)
-    try:
-        await controller.erase(udid=body.udid)
-        # In a thread: the helper does blocking reads, an exclusive flock and a
-        # write, and a contended lock would stall every other request on the
-        # loop. It swallows its own exceptions, so the best-effort contract is
-        # unchanged.
-        await asyncio.to_thread(_invalidate_cert_record, body.udid)
-        return {"status": "erased", "udid": body.udid}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("erase_device", category="device.lifecycle") as act:
+        try:
+            resolved = await controller.resolve_udid(body.udid)
+            act.udid = resolved
+            await controller.erase(udid=resolved)
+            # In a thread: the helper does blocking reads, an exclusive flock
+            # and a write, and a contended lock would stall every other
+            # request on the loop. It swallows its own exceptions, so the
+            # best-effort contract is unchanged.
+            await asyncio.to_thread(_invalidate_cert_record, resolved)
+            return {"status": "erased", "udid": resolved}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/active")
+@logged_action("set_active_device", category="device.lifecycle")
 async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     """Set the active device by UDID."""
     controller = _get_controller(request)
@@ -450,14 +469,18 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
 async def install_app(request: Request, body: InstallAppRequest):
     """Install an app on a simulator."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
-        return {"status": "installed", "udid": udid, "app_path": body.app_path}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("install_app", category="device.lifecycle") as act:
+        act.detail = body.app_path
+        try:
+            udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
+            act.udid = udid
+            return {"status": "installed", "udid": udid, "app_path": body.app_path}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/app/launch")
+@logged_action("launch_app", category="device.action")
 async def launch_app(request: Request, body: LaunchAppRequest):
     """Launch an app on a simulator."""
     controller = _get_controller(request)
@@ -486,26 +509,33 @@ async def launch_app(request: Request, body: LaunchAppRequest):
 async def terminate_app(request: Request, body: TerminateAppRequest):
     """Terminate an app on a simulator."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
-        return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("terminate_app", category="device.lifecycle") as act:
+        act.detail = body.bundle_id
+        try:
+            udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
+            act.udid = udid
+            return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/app/uninstall")
 async def uninstall_app(request: Request, body: UninstallAppRequest):
     """Uninstall an app from a simulator or physical device."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
-        return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("uninstall_app", category="device.lifecycle") as act:
+        act.detail = body.bundle_id
+        try:
+            udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
+            act.udid = udid
+            return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 
 @router.get("/app/list")
+@logged_action("list_apps", category="device.read")
 async def list_apps(request: Request, udid: str | None = Query(default=None)):
     """List installed apps on a simulator."""
     controller = _get_controller(request)
@@ -525,6 +555,7 @@ async def list_apps(request: Request, udid: str | None = Query(default=None)):
 
 
 @router.get("/screenshot")
+@logged_action("take_screenshot", category="device.read")
 async def take_screenshot(
     request: Request,
     udid: str | None = Query(default=None),
@@ -597,6 +628,7 @@ async def video_stream(
 
 
 @router.post("/location")
+@logged_action("set_location", category="device.action")
 async def set_location(request: Request, body: SetLocationRequest):
     """Set the simulated GPS location."""
     controller = _get_controller(request)
@@ -615,6 +647,7 @@ async def set_location(request: Request, body: SetLocationRequest):
 
 
 @router.post("/open-url")
+@logged_action("open_url", category="device.action")
 async def open_url(request: Request, body: OpenUrlRequest):
     """Open a URL on a simulator or emulator."""
     controller = _get_controller(request)
@@ -638,6 +671,7 @@ async def open_url(request: Request, body: OpenUrlRequest):
 
 
 @router.post("/permission")
+@logged_action("grant_permission", category="device.action")
 async def grant_permission(request: Request, body: GrantPermissionRequest):
     """Grant an app permission."""
     controller = _get_controller(request)
@@ -656,6 +690,7 @@ async def grant_permission(request: Request, body: GrantPermissionRequest):
 
 
 @router.post("/locale")
+@logged_action("set_locale", category="device.action")
 async def set_locale(request: Request, body: SetLocaleRequest):
     """Set the system locale (Android only)."""
     controller = _get_controller(request)
@@ -670,6 +705,7 @@ async def set_locale(request: Request, body: SetLocaleRequest):
 
 
 @router.post("/keyboard")
+@logged_action("set_hardware_keyboard", category="device.action")
 async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardRequest):
     """Attach or detach the simulated hardware keyboard (iOS simulators only)."""
     controller = _get_controller(request)
@@ -683,6 +719,7 @@ async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardReque
 
 
 @router.post("/font-scale")
+@logged_action("set_font_scale", category="device.action")
 async def set_font_scale(request: Request, body: SetFontScaleRequest):
     """Set the font scale (Android only). 1.0 = default."""
     controller = _get_controller(request)
@@ -694,6 +731,7 @@ async def set_font_scale(request: Request, body: SetFontScaleRequest):
 
 
 @router.post("/display-density")
+@logged_action("set_display_density", category="device.action")
 async def set_display_density(request: Request, body: SetDisplayDensityRequest):
     """Set display density override (Android only). Omit dpi to reset."""
     controller = _get_controller(request)
@@ -720,6 +758,7 @@ async def set_display_density(request: Request, body: SetDisplayDensityRequest):
 
 
 @router.post("/logging/start")
+@logged_action("start_simulator_logging", category="logs")
 async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     """Start capturing logs from a simulator app via unified logging."""
     from server.sources.simulator_log import SimulatorLogAdapter
@@ -745,6 +784,10 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     adapter = SimulatorLogAdapter(
         udid=udid,
+        # Without this every entry carries the model default, so nothing
+        # downstream can tell which device it came from -- which is what made
+        # the trace's log attribution reject every line it was given.
+        device_id=udid,
         on_entry=dedup.process,
         process_filter=body.process,
         subsystem_filter=body.subsystem,
@@ -833,6 +876,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
 
 @router.post("/logging/stop")
+@logged_action("stop_simulator_logging", category="logs")
 async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     """Stop capturing logs from a simulator."""
     controller = _get_controller(request)
@@ -876,6 +920,7 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
 
 
 @router.post("/logging/device/start")
+@logged_action("start_device_logging", category="logs")
 async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     """Start capturing logs from a physical device.
 
@@ -920,12 +965,17 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     if is_android:
         adapter = LogcatAdapter(
             serial=udid,
+            # Same omission as the two iOS adapters had: the serial is right
+            # here and was never forwarded, so every Android line arrived
+            # naming no device.
+            device_id=udid,
             on_entry=dedup.process,
             process_filter=body.process,
         )
     else:
         adapter = PhysicalDeviceLogAdapter(
             udid=udid,
+            device_id=udid,
             on_entry=dedup.process,
             process_filter=body.process,
             match_filter=body.match,
@@ -966,6 +1016,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 
 
 @router.post("/logging/device/stop")
+@logged_action("stop_device_logging", category="logs")
 async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     """Stop capturing logs from a physical device."""
     controller = _get_controller(request)
@@ -1012,6 +1063,7 @@ def _get_scrcpy_preview(request: Request):
 
 
 @router.post("/preview/start")
+@logged_action("preview_start", category="media")
 async def preview_start(request: Request, body: PreviewStartRequest):
     """Start a live preview window for a device.
 
@@ -1124,6 +1176,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
 
 
 @router.post("/preview/stop")
+@logged_action("preview_stop", category="media")
 async def preview_stop(request: Request, body: PreviewStopRequest):
     """Stop live preview.
 
@@ -1200,6 +1253,7 @@ async def preview_devices(request: Request):
 
 
 @router.get("/screenshot/annotated")
+@logged_action("screenshot_annotated", category="device.read")
 async def screenshot_annotated(
     request: Request,
     udid: str | None = Query(default=None),
@@ -1227,6 +1281,7 @@ async def screenshot_annotated(
 
 
 @router.post("/screenshot/timeline/start")
+@logged_action("start_timeline", category="media")
 async def start_timeline(
     request: Request,
     body: dict | None = None,
@@ -1260,6 +1315,7 @@ async def start_timeline(
 
 
 @router.post("/screenshot/timeline/stop")
+@logged_action("stop_timeline", category="media")
 async def stop_timeline(request: Request):
     """Stop the active screenshot timeline and return its manifest."""
     timeline = getattr(request.app.state, "active_timeline", None)

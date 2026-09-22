@@ -8,7 +8,7 @@ import logging
 
 from server.models import DeviceInfo, DeviceState, DeviceType
 
-logger = logging.getLogger("quern-debug-server.usbmux")
+logger = logging.getLogger(__name__)
 
 
 class UsbmuxBackend:

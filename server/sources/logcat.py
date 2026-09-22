@@ -53,7 +53,7 @@ class LogcatAdapter(BaseSourceAdapter):
     def __init__(
         self,
         serial: str,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         process_filter: str | None = None,
         tag_filter: str | None = None,

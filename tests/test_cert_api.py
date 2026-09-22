@@ -21,6 +21,11 @@ def app():
     # breaks code paths that check for an active device.
     app.state.device_controller = MagicMock()
     app.state.device_controller._active_udid = None
+    # Handlers resolve the udid so their action entry names the device the
+    # work actually went to; a bare MagicMock attribute is not awaitable.
+    app.state.device_controller.resolve_udid = AsyncMock(
+        side_effect=lambda udid=None: udid,
+    )
     app.state.proxy_adapter = None
     app.state.flow_store = None
     return app

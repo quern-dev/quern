@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server.api.actions import logged_action
 from server.models import (
     HeldFlow,
     InterceptSetRequest,
@@ -41,6 +42,7 @@ def _require_running_proxy(request: Request):
 
 
 @router.post("/intercept")
+@logged_action("set_intercept", category="proxy")
 async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
     """Set an intercept pattern. Matching requests will be held."""
     adapter = _require_running_proxy(request)
@@ -56,6 +58,7 @@ async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
 
 
 @router.delete("/intercept")
+@logged_action("clear_intercept", category="proxy")
 async def clear_intercept(request: Request) -> dict:
     """Clear the intercept pattern and release all held flows."""
     adapter = _require_running_proxy(request)
@@ -103,6 +106,7 @@ async def list_held_flows(
 
 
 @router.post("/intercept/release")
+@logged_action("release_flow", category="proxy")
 async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
     """Release a single held flow, optionally with request modifications."""
     adapter = _require_running_proxy(request)
@@ -117,6 +121,7 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
 
 
 @router.post("/intercept/release-all")
+@logged_action("release_all", category="proxy")
 async def release_all(request: Request) -> dict:
     """Release all currently held flows."""
     adapter = _require_running_proxy(request)
@@ -131,6 +136,7 @@ async def release_all(request: Request) -> dict:
 
 
 @router.post("/replay/{flow_id}", response_model=ReplayResponse)
+@logged_action("replay_flow", category="proxy")
 async def replay_flow(
     request: Request,
     flow_id: str,
@@ -195,6 +201,7 @@ async def replay_flow(
 
 
 @router.post("/mocks")
+@logged_action("set_mock", category="proxy")
 async def set_mock(request: Request, body: SetMockRequest) -> dict:
     """Add a mock response rule. Matching requests get a synthetic response."""
     adapter = _require_running_proxy(request)
@@ -227,6 +234,7 @@ async def list_mocks(request: Request) -> MockListResponse:
 
 
 @router.patch("/mocks/{rule_id}")
+@logged_action("update_mock", category="proxy")
 async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -> dict:
     """Update an existing mock rule's pattern and/or response."""
     adapter = _require_running_proxy(request)
@@ -252,6 +260,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
 
 
 @router.delete("/mocks/{rule_id}")
+@logged_action("delete_mock", category="proxy")
 async def delete_mock(request: Request, rule_id: str) -> dict:
     """Delete a specific mock rule."""
     adapter = _require_running_proxy(request)
@@ -260,6 +269,7 @@ async def delete_mock(request: Request, rule_id: str) -> dict:
 
 
 @router.delete("/mocks")
+@logged_action("delete_all_mocks", category="proxy")
 async def delete_all_mocks(request: Request) -> dict:
     """Delete all mock rules."""
     adapter = _require_running_proxy(request)
@@ -282,6 +292,7 @@ async def get_bypass(request: Request) -> dict:
 
 
 @router.post("/bypass")
+@logged_action("set_bypass", category="proxy")
 async def set_bypass(request: Request, body: dict) -> dict:
     """Add bypass patterns. Flows matching these hosts are not captured.
 
@@ -302,6 +313,7 @@ async def set_bypass(request: Request, body: dict) -> dict:
 
 
 @router.delete("/bypass")
+@logged_action("clear_bypass", category="proxy")
 async def clear_bypass(
     request: Request,
     patterns: str | None = Query(

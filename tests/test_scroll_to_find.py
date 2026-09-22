@@ -336,7 +336,7 @@ async def test_a_slow_success_is_traced_not_just_a_failure(controller, caplog):
     ticks = itertools.count(0.0, 20.0)
 
     with (
-        caplog.at_level(logging.INFO, logger="quern-debug-server.device"),
+        caplog.at_level(logging.INFO, logger="server.device"),
         patch("server.device.controller_ui.time.perf_counter", lambda: next(ticks)),
     ):
         found = await controller._ios_scroll_to_element(
@@ -358,7 +358,7 @@ async def test_a_fast_success_stays_quiet(controller, caplog):
     """Silence on the common path is the point; a line per scroll is noise."""
     import logging
 
-    with caplog.at_level(logging.INFO, logger="quern-debug-server.device"):
+    with caplog.at_level(logging.INFO, logger="server.device"):
         found = await controller._ios_scroll_to_element(
             "SIM", label=None, identifier="item_1", max_swipes=5,
         )

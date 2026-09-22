@@ -108,7 +108,7 @@ class ProxyAdapter(BaseSourceAdapter):
 
     def __init__(
         self,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         flow_store: FlowStore | None = None,
         listen_host: str = "0.0.0.0",

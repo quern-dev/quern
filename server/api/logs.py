@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from server.api.actions import logged_action
 from server.models import (
     LogEntry,
     LogErrorsResponse,
@@ -175,6 +176,15 @@ async def query_logs(
     until: datetime | None = None,
     level: LogLevel | None = None,
     process: str | None = None,
+    category: str | None = Query(
+        default=None,
+        description=(
+            "What quern was doing, e.g. 'device.action'. Distinct from "
+            "`source`, which is who produced the entry -- both a 'proxy' "
+            "category and a LogSource.PROXY exist and they mean different "
+            "things. See server/logging_ext.CATEGORIES."
+        ),
+    ),
     source: LogSource | None = None,
     search: str | None = None,
     device_id: str | None = None,
@@ -188,6 +198,7 @@ async def query_logs(
         until=until,
         level=level,
         process=process,
+        category=category,
         source=source,
         search=search,
         device_id=device_id,
@@ -430,6 +441,7 @@ async def get_filter(request: Request) -> dict:
 
 
 @router.post("/oslog/start")
+@logged_action("start_oslog_streaming", category="logs")
 async def start_oslog_streaming(request: Request, body: StartOslogRequest):
     """Start streaming logs from the host Mac's unified logging system.
 
@@ -472,6 +484,7 @@ async def start_oslog_streaming(request: Request, body: StartOslogRequest):
 
 
 @router.post("/oslog/stop")
+@logged_action("stop_oslog_streaming", category="logs")
 async def stop_oslog_streaming(request: Request):
     """Stop the on-demand host oslog streaming adapter."""
     from fastapi import HTTPException

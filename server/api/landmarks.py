@@ -7,6 +7,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Query, Request
 
+from server.api.actions import logged_action
 from server.device.landmarks import (
     LandmarkRegistry,
     SkippedFile,
@@ -30,7 +31,7 @@ def _serialize_skipped(skipped: list[SkippedFile]) -> list[dict]:
     ]
 
 router = APIRouter(prefix="/api/v1/landmarks", tags=["landmarks"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 def _get_registry(request: Request) -> LandmarkRegistry:
@@ -47,6 +48,7 @@ def _get_controller(request: Request):
 
 
 @router.post("/load")
+@logged_action("load_landmarks", category="knowledge")
 async def load_landmarks(request: Request, body: LoadLandmarksRequest):
     """Load screen landmarks from a knowledge base path or inline JSON."""
     registry = _get_registry(request)
@@ -82,6 +84,7 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
 
 
 @router.post("/identify")
+@logged_action("identify_screen", category="knowledge")
 async def identify_screen(request: Request, body: IdentifyRequest):
     """Identify the current screen against loaded landmarks."""
     registry = _get_registry(request)
@@ -125,6 +128,7 @@ async def list_landmarks(request: Request):
 
 
 @router.delete("/")
+@logged_action("unload_landmarks", category="knowledge")
 async def unload_landmarks(
     request: Request,
     app: str | None = Query(default=None, description="App to unload (omit = all)"),
@@ -141,6 +145,7 @@ async def unload_landmarks(
 
 
 @router.post("/validate")
+@logged_action("validate_landmarks", category="knowledge")
 async def validate_landmarks(
     request: Request,
     source: str | None = None,

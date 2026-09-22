@@ -11,7 +11,7 @@ from pathlib import Path
 from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
-logger = logging.getLogger("quern-debug-server.adb")
+logger = logging.getLogger(__name__)
 
 # Short permission name → full Android permission string.
 # Matches the names used by iOS simctl where possible.

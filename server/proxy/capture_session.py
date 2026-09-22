@@ -14,7 +14,7 @@ from server.models import (
 )
 from server.proxy.flow_store import FlowStore
 
-logger = logging.getLogger("quern-debug-server.capture-session")
+logger = logging.getLogger(__name__)
 
 
 class CaptureSession:
@@ -86,7 +86,7 @@ class CaptureSessionManager:
             exclude_hosts=session.exclude_hosts,
             simulator_udid=session.simulator_udid,
             client_ip=session.client_ip,
-            device_id="",  # don't filter by device_id (default is "default")
+            device_id="",  # unscoped: do not filter by device
             limit=1000,
         )
         flows, total = await flow_store.query(params)

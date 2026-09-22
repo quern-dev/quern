@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger("quern-debug-server.config")
+logger = logging.getLogger(__name__)
 
 # Honours QUERN_STATE_DIR, so redirecting it redirects *everything* under
 # ~/.quern -- the api key, config.json, the device pool, crash reports, the
@@ -40,7 +40,16 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 9100
     ring_buffer_size: int = 10_000
-    default_device_id: str = "default"
+    #: What `device_id` a source gets when it does not know which device it
+    #: is reading. Empty, not a name: a sentinel that looks like a device
+    #: passes every truthiness check and fails every equality one, which is
+    #: how app log lines came to be treated as belonging to a device called
+    #: "default" and matched nothing anywhere.
+    #:
+    #: oslog and crash watch the *host*, so for them this is honest rather
+    #: than a placeholder -- a macOS crash report genuinely belongs to no
+    #: simulator.
+    default_device_id: str = ""
     api_key: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:

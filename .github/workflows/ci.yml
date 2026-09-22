@@ -44,6 +44,100 @@ jobs:
       - name: Lint
         run: .venv/bin/ruff check server/
 
+  test-linux:
+    # The suite on Linux. Read what this is for before changing it, because it
+    # is easy to over-read and easy to quiet.
+    #
+    # WHAT IT IS. A regression backstop for shared code. Nothing here had ever
+    # run off Darwin until #261; the first run failed 44 and 41 of those were a
+    # single bug -- list_devices caught DeviceError but not the OSError a
+    # missing binary actually raises, so every call taking a UDID died on a
+    # host without Xcode. On a Mac that same call shells out to a real xcrun,
+    # gets a list the test's fake UDID is not in, and passes anyway. So this
+    # job also catches tests that reach the machine instead of mocking it,
+    # which CONTRIBUTING.md forbids and which nothing else here detects.
+    #
+    # WHAT IT IS NOT. Evidence that quern runs on Linux. Most of the suite
+    # mocks its subprocesses, so a green run says the *Python* is portable, not
+    # the product. Still true on the day this went green: __init__ builds all
+    # seven iOS backends, _fix_developer_dir() runs unconditionally at startup,
+    # /tmp/quern/screenshots is hardcoded, and networksetup/ifconfig/route are
+    # BSD. None of that is reachable from a unit test. The server has never
+    # been started on Linux. Green here is a good start, not a readiness
+    # signal -- see docs/linux-support-plan.md.
+    #
+    # WHEN IT GOES RED. It is usually right, and usually about a macOS
+    # assumption that just entered shared code. Fix the assumption. A
+    # platform skip is the answer only when the thing under test is genuinely
+    # macOS-only -- tests/test_release_source.py has the one precedent and
+    # spells out the bar. Skipping to get green forfeits the whole point.
+    runs-on: ubuntu-latest
+    # A subprocess blocking on a missing Apple tool would otherwise burn the
+    # job's full six-hour default. The run takes ~80s.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Same reason as the macOS job.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # One version, deliberately. This probes platform coupling, which
+          # does not vary by interpreter -- the full matrix would quadruple the
+          # cost to learn the same thing.
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Worth watching in its own right: fb-idb is an unconditional dependency
+        # that exists only to supply an iOS binary, and it pulls grpcio and
+        # protobuf. If this step is what fails, that is a finding.
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Run tests
+        # --continue-on-collection-errors because a module that imports an
+        # Apple-only path fails at collection, and the default is to abort the
+        # entire run on the first one -- reporting a single error where this job
+        # needs the whole list. --tb=line keeps that list scannable.
+        #
+        # The counts go to the step summary as well as the log, because this job
+        # is read as a trend rather than a pass/fail: "44 failures, 39 of them in
+        # one file" is the number worth seeing without opening the log, and the
+        # direction it moves after each piece of platform work is the point.
+        shell: bash
+        run: |
+          set +e
+          .venv/bin/python -m pytest tests/ \
+            --continue-on-collection-errors --tb=line -rfE -q | tee /tmp/pytest.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "## Linux probe"
+            echo
+            echo '```'
+            tail -n 1 /tmp/pytest.log
+            echo '```'
+            echo
+            echo "### Failures and collection errors by file"
+            echo
+            # ERROR as well as FAILED. A module that cannot be imported is
+            # reported as an ERROR, never a FAILED, so a parser watching only
+            # for the latter drops exactly the thing
+            # --continue-on-collection-errors is here to surface -- and a run
+            # whose every module failed to import would summarise as "none".
+            if grep -qE '^(FAILED|ERROR) ' /tmp/pytest.log; then
+              grep -E '^(FAILED|ERROR) ' /tmp/pytest.log \
+                | sed -E 's/^(FAILED|ERROR) //' | sed 's/ - .*//' | cut -d: -f1 \
+                | sort | uniq -c | sort -rn | sed 's/^/    /'
+            else
+              echo "    none"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
   menubar-build:
     # The Swift menu-bar app is not covered by the Python suite, and nothing
     # else here compiles it -- a syntax error in it would pass every other

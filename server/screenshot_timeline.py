@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-logger = logging.getLogger("quern-debug-server.timeline")
+logger = logging.getLogger(__name__)
 
 _TIMELINE_BASE = Path("/tmp/quern/timeline")
 

@@ -29,7 +29,7 @@ import asyncio
 import logging
 import re
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 # simctl UDIDs are canonical uppercase UUIDs. Anything else is refused rather
 # than matched loosely: an empty string is a substring of every lsof line, so

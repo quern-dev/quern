@@ -470,3 +470,31 @@ def no_simulator_input_probes(monkeypatch, request):
 
     monkeypatch.setattr(sim_input, "legacy_input_is_suppressed", not_suppressed)
     monkeypatch.setattr(sim_input, "device_hub_is_running", no_device_hub)
+
+
+@pytest.fixture
+def pinned_timezone(monkeypatch):
+    """Set the process timezone for one test, and actually put it back.
+
+    `monkeypatch.setenv("TZ", ...)` restores the environment variable, but the
+    timezone C libraries use is only re-read by `time.tzset()` -- so without an
+    explicit teardown the *variable* reverts while the process keeps the test's
+    timezone. Every test that ran afterwards in that process inherited it,
+    which is a cross-test dependency that shows up as an unrelated failure much
+    later, and only in some run orders. Reproduced: `TZ` back to `UTC` and
+    `time.tzname` still `('JST', 'JST')`.
+
+    Use this rather than calling `tzset` inline. Timezone-sensitive tests are
+    worth writing -- a naive-datetime bug is invisible under `TZ=UTC`, which is
+    where CI runs -- so the mechanism to write them safely belongs here.
+    """
+    import time
+
+    def _set(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield _set
+    # After monkeypatch has restored TZ, re-read it. The undo is the point.
+    monkeypatch.undo()
+    time.tzset()

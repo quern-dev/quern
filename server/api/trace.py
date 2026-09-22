@@ -1,0 +1,363 @@
+"""One timeline: what quern did, what the app sent, what it logged.
+
+Reconstructing that by hand is what #84 cost a session doing. The pieces have
+all been queryable separately for a while; this is the join, and
+`server/trace.py` is where the attribution rules live and are explained.
+
+The endpoint is deliberately thin. Everything interesting -- which flow
+belongs to which action, when that cannot be decided, and how much to trust it
+per regime -- is a pure function that can be tested without a server.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import UTC, datetime, timedelta
+
+from fastapi import APIRouter, Query, Request
+
+from server.models import LogQueryParams, LogSource, TraceResponse
+from server.trace import (
+    APP_LOG_SOURCES,
+    Attribution,
+    Ownership,
+    build_trace,
+    device_of,
+    identified_by,
+    ip_to_udid,
+    log_identified_by,
+    owns,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1", tags=["trace"])
+
+#: How far back a trace reaches when the caller does not say. Long enough to
+#: cover the thing that just went wrong, short enough not to return a session.
+DEFAULT_WINDOW = timedelta(minutes=5)
+
+#: `LogQueryParams.limit` refuses anything larger, and asking for more raises
+#: inside the handler rather than returning a 4xx.
+_MAX_QUERY_LIMIT = 1000
+
+
+def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) -> dict:
+    action = attribution.action
+    return {
+        "action": action.action,
+        "udid": action.udid,
+        "outcome": action.outcome,
+        "duration_ms": action.duration_ms,
+        "category": action.category,
+        # The whole interval, as a property of the record. `finished_at` alone
+        # is a trap: entries are written when an action *ends*, so a consumer
+        # placing a marker at it is late by the action's own duration -- and
+        # that is not a constant to subtract out (measured 2369ms cold and
+        # 129ms warm for the same tap on one simulator).
+        "started_at": (
+            action.timestamp - timedelta(milliseconds=action.duration_ms or 0)
+        ).isoformat(),
+        "finished_at": action.timestamp.isoformat(),
+        # On time.monotonic(), the same base as mach absolute time, which is
+        # what video capture stamps frames with. Published so a consumer
+        # aligning against a recording needs no wall-clock conversion and
+        # inherits none of its drift. End is this plus duration_ms.
+        "started_monotonic": action.started_monotonic,
+        "detail": action.message,
+        "flows": [
+            {
+                "id": flow.id,
+                "timestamp": flow.timestamp.isoformat(),
+                "method": flow.request.method,
+                "url": flow.request.url,
+                "status": flow.response.status_code if flow.response else None,
+                "source_process": flow.source_process,
+                # On every flow, not only the doubtful ones. A reader should
+                # never have to infer the good case from silence.
+                "identified_by": identified_by(flow, ip_map).value,
+            }
+            for flow in attribution.flows
+        ],
+        "logs": [
+            {
+                "timestamp": entry.timestamp.isoformat(),
+                "level": entry.level.value,
+                "process": entry.process,
+                "message": entry.message,
+                "identified_by": log_identified_by(entry).value,
+            }
+            for entry in attribution.logs
+        ],
+        # Both always present, even when empty. A reader should not have to
+        # know whether the absence of a caveat means "firmly attributed" or
+        # "this version does not report caveats".
+        "overlaps": attribution.overlaps,
+        "caveats": attribution.caveats,
+    }
+
+
+@router.get("/trace", response_model=TraceResponse)
+async def get_trace(
+    request: Request,
+    since: datetime | None = None,
+    udid: str | None = Query(
+        default=None,
+        description=(
+            "Only actions against this device. With several agents sharing "
+            "one server this is how a caller gets its own trace: quern has no "
+            "notion of who is asking, so the device is the only separator "
+            "(see #254)."
+        ),
+    ),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict:
+    """Actions in a window, each with the flows and log lines it caused."""
+    window_start = since or datetime.now(UTC) - DEFAULT_WINDOW
+    # `?since=2026-09-21T12:00:00` is a valid ISO 8601 timestamp and FastAPI
+    # parses it into a naive datetime. Every timestamp it is then compared
+    # against is UTC-aware, so the first comparison raised TypeError and the
+    # caller got an HTTP 500 -- a server error for a well-formed request,
+    # reported as though quern had broken. Assume UTC, which is what every
+    # timestamp this endpoint returns is in.
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=UTC)
+
+    server_buffer = request.app.state.server_buffer
+    ring_buffer = request.app.state.ring_buffer
+    flow_store = getattr(request.app.state, "flow_store", None)
+
+    entries = await server_buffer.filter_entries(
+        LogQueryParams(since=window_start, source=LogSource.SERVER, limit=limit),
+    )
+    # An action entry is one with an action name. `started` markers are the
+    # DEBUG begin entries and are deliberately excluded: a trace wants one row
+    # per thing that happened, and the pair only helps when something hung.
+    actions = [
+        e for e in entries
+        if e.action and e.outcome != "started"
+        and (not udid or e.udid == udid)
+    ]
+    # `limit` bounds what the caller gets back.
+    #
+    # An earlier version of this comment said the buffer query had bounded
+    # "the wrong thing" because the udid filter runs afterwards. That was
+    # wrong: `filter_entries` ignores `params.limit` entirely, so the query
+    # never bounded anything at all -- as this file says correctly a few
+    # lines below. The slice is the only bound there has ever been.
+    #
+    # The newest are kept, since a trace is read backwards from whatever just
+    # went wrong. The response is still ordered oldest-first.
+    actions_over_limit = len(actions) > limit
+    if actions_over_limit:
+        actions = actions[-limit:]
+
+    # Actions can also age out, and the probe below only ever watched the
+    # device-log buffer. Actions come from `server_buffer`, a separate and
+    # much smaller RingBuffer that receives *every* server log record, not
+    # only action entries -- so on a busy server the start of a window can be
+    # gone while `log_window_truncated` says nothing, because it was never
+    # about that buffer. "Quern did nothing for two minutes" and "the entries
+    # aged out" then look identical.
+    actions_truncated = False
+    if server_buffer.size >= server_buffer.max_size:
+        oldest_server = await server_buffer.get_recent(count=server_buffer.size)
+        if oldest_server and oldest_server[0].timestamp > window_start:
+            actions_truncated = True
+
+    # Clamped, not multiplied blindly: LogQueryParams caps `limit` at 1000, so
+    # `limit * 10` raised a ValidationError inside the handler -- an uncaught
+    # HTTP 500 for any caller passing limit > 100.
+    #
+    # The multiplier exists because one action can produce many log lines, so
+    # asking for only `limit` entries would starve the attribution. Hitting the
+    # ceiling is itself worth reporting rather than silently returning less.
+    log_limit = min(limit * 10, _MAX_QUERY_LIMIT)
+    device_logs = await ring_buffer.filter_entries(
+        LogQueryParams(since=window_start, limit=log_limit),
+    )
+    # `filter_entries` returns everything that matches -- its docstring says
+    # "ALL matching entries (no pagination)" -- so the limit above only stops
+    # the query being rejected. Bounding the result is this slice.
+    #
+    # It is not only tidiness: attribution compares every log against every
+    # action, so 1,000 actions against a full 10,000-entry buffer is ten
+    # million comparisons on one request.
+    # Discard what the trace will not use *before* bounding, or the bound is
+    # spent on data that is then thrown away. `build_trace` keeps only
+    # APP_LOG_SOURCES, so slicing first let newer build, proxy and server
+    # entries push out older app logs and crash reports -- and the trace then
+    # looked empty for a reason that had nothing to do with the app.
+    device_logs = [e for e in device_logs if e.source in APP_LOG_SOURCES]
+    # And the caller's device, for the same reason. With `udid` set, bounding
+    # first spends the budget on other devices' lines -- which attribution
+    # then discards -- so a busy neighbour could empty this caller's trace.
+    if udid:
+        device_logs = [e for e in device_logs if not e.device_id or e.device_id == udid]
+    logs_over_limit = len(device_logs) > log_limit
+    if logs_over_limit:
+        device_logs = device_logs[-log_limit:]
+
+    # Did the window outlive the buffer?
+    #
+    # The ring buffer is a deque with a maxlen, shared by syslog, oslog,
+    # crash, build and proxy. Eviction is silent -- nothing counts drops -- so
+    # a trace asking for the last five minutes gets whatever survived and
+    # looks identical whether or not anything was lost. A busy device can turn
+    # over 10,000 entries in well under that.
+    #
+    # It is detectable without new bookkeeping: if the buffer is full and its
+    # oldest surviving entry starts after the window did, the beginning of the
+    # window has been evicted. Cheap, and a false negative at worst -- it
+    # cannot claim truncation that did not happen.
+    truncated = False
+    if ring_buffer.size >= ring_buffer.max_size:
+        oldest = await ring_buffer.get_recent(count=ring_buffer.size)
+        if oldest and oldest[0].timestamp > window_start:
+            truncated = True
+    # Flows get the same treatment the logs already had, for the same two
+    # reasons -- and they matter more here, because attribution compares every
+    # flow against every action. Measured on this branch: 1,000 actions
+    # against a full 5,000-flow store is ~0.95s of synchronous work inside an
+    # async handler with no await, which stalls the event loop for every other
+    # caller on the server.
+    # Read before the flow filter, not after: the filter needs it to resolve a
+    # physical device's flows at all.
+    ip_map = await asyncio.to_thread(_ip_map)
+
+    flows: list = []
+    flows_over_limit = False
+    flow_window_truncated = False
+    if flow_store is not None:
+        flows = await flow_store.get_since(window_start)
+        # Sorted, because the store is not. It is an OrderedDict in insertion
+        # order, and a flow is inserted when it *completes* while its
+        # `timestamp` is when the request *started* -- so any overlapping
+        # requests, which is the normal case for an app, come back out of
+        # order. Three things depended on the order being chronological and
+        # none of them said so: the slice below kept the most recently
+        # completed rather than the newest, the truncation probe read the
+        # first-inserted as though it were the oldest and claimed truncation
+        # that had not happened, and an endpoint whose premise is "one
+        # timeline" returned its flows out of sequence.
+        flows.sort(key=lambda f: f.timestamp)
+        if udid:
+            # Resolved the way attribution resolves it, via `device_of`, not
+            # by reading `simulator_udid` directly. Only simulators have that
+            # field; a physical device is identified by the `client_ip` its
+            # recorded proxy config names. Matching on `simulator_udid` alone
+            # made every physical-device flow on the server look unidentified,
+            # so all of them survived a filter whose whole job is to spend the
+            # bound on this caller -- and a second device on Wi-Fi could push
+            # this one's flows out of its own trace.
+            flows = [
+                f for f in flows
+                if owns(udid, device_of(f, ip_map)[0]) is not Ownership.FOREIGN
+            ]
+        flows_over_limit = len(flows) > log_limit
+        if flows_over_limit:
+            flows = flows[-log_limit:]
+        # The store evicts oldest-first and silently, exactly like the ring
+        # buffer, so the same probe applies: full, and nothing surviving from
+        # before the window, means the start of it is gone.
+        if flow_store.size >= flow_store.max_size:
+            everything = await flow_store.get_since(
+                datetime.min.replace(tzinfo=UTC),
+            )
+            # `min` rather than `[0]`, for the same reason.
+            if everything and min(f.timestamp for f in everything) > window_start:
+                flow_window_truncated = True
+
+    # In a thread. Attribution is pure CPU over plain data with nothing to
+    # await, and it compares every flow and every log against every action --
+    # measured at 0.25s for a full window even after bounding the inputs, and
+    # ~0.95s before. That is the whole server's event loop, shared by every
+    # other agent and device, stalled on one caller reading a trace.
+    attributions = await asyncio.to_thread(
+        build_trace, actions, flows, device_logs, ip_map=ip_map,
+    )
+
+    return {
+        "since": window_start.isoformat(),
+        "udid": udid,
+        # Read now, per export, rather than once at server start.
+        #
+        # Be careful what this claims. Wall and monotonic sit about 4.3s apart
+        # on this machine and that gap was *stable* across every reading taken
+        # -- no drift was observed, and an earlier note here asserting some
+        # was wrong. It came from comparing two measurements that parsed
+        # `kern.boottime` differently, one dropping its usec field: the
+        # 0.218s "movement" was exactly that fraction. A sleep/wake
+        # explanation was offered for it and is also unsupported.
+        #
+        # So this is not here because divergence was measured. It is here
+        # because a recorded anchor is wrong the moment the wall clock is
+        # stepped -- NTP correction, a manual change -- and a long-running
+        # server has no way to notice. That failure is unbounded and silent,
+        # and avoiding it costs two syscalls per export. A stable offset is
+        # served correctly by reading it per export as well.
+        "clock_anchor": {
+            "wall": datetime.now(UTC).isoformat(),
+            "monotonic": time.monotonic(),
+        },
+        "actions": [_serialise(a, ip_map) for a in attributions],
+        # Said rather than left to be inferred. An incomplete trace that looks
+        # complete is worse than one that admits it: the reader concludes the
+        # app logged nothing, when the entries were evicted.
+        "log_window_truncated": truncated,
+        # Deliberately separate from the above. That one means log lines were
+        # evicted from the buffer before this trace asked for them; this one
+        # means more matched than were returned. Same visible symptom --
+        # fewer logs than really existed -- and different causes, so folding
+        # them together would send a reader to the wrong fix.
+        "logs_over_limit": logs_over_limit,
+        # The flow path had none of these. A trace missing the requests that
+        # explain a failure, with nothing saying they were dropped, is the
+        # shape this whole file guards against -- and it was only guarded on
+        # one of the two inputs.
+        "actions_over_limit": actions_over_limit,
+        "action_window_truncated": actions_truncated,
+        "flows_over_limit": flows_over_limit,
+        "flow_window_truncated": flow_window_truncated,
+        # The adapter's own view, not "a flow store exists". The store is
+        # created at startup and outlives a stopped proxy, so the previous
+        # check reported True with capture off -- which is exactly the
+        # "empty and broken look alike" failure this field exists to prevent.
+        "proxy_running": _proxy_is_running(request),
+    }
+
+
+def _ip_map() -> dict[str, tuple[str, bool]]:
+    """Physical devices are identified by the address they came from.
+
+    Best effort: a cert state that cannot be read costs the trace its
+    physical-device attribution, which is worth less than failing the call.
+    """
+    try:
+        from server.proxy.cert_state import read_cert_state
+
+        return ip_to_udid(read_cert_state())
+    except Exception:
+        logger.debug("Could not read cert state for ip attribution", exc_info=True)
+        return {}
+
+
+def _proxy_is_running(request: Request) -> bool:
+    """Is capture actually on, rather than merely configured?
+
+    The flow store is created at startup and survives the proxy stopping, so
+    its existence says nothing. Asking the adapter is the difference between
+    "no flows because nothing was requested" and "no flows because nothing was
+    listening".
+    """
+    adapter = getattr(request.app.state, "proxy_adapter", None)
+    if adapter is None:
+        return False
+    running = getattr(adapter, "is_running", None)
+    if callable(running):
+        return bool(running())
+    if running is not None:
+        return bool(running)
+    return getattr(adapter, "_running", False) is True

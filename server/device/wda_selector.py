@@ -33,7 +33,7 @@ from server.models import WdaElementNotFoundError
 if TYPE_CHECKING:
     from server.device.wda_client import WdaBackend
 
-logger = logging.getLogger("quern-debug-server.wda-selector")
+logger = logging.getLogger(__name__)
 
 
 def _escape(val: str) -> str:
