@@ -506,24 +506,32 @@ class DeviceController(DeviceControllerUI):
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List all devices (simulators + physical + pre-iOS 17 USB + Android)."""
+        # OSError alongside DeviceError, on every one of these. The backends
+        # raise DeviceError for a tool that ran and refused; a tool that is not
+        # installed never runs, and asyncio.create_subprocess_exec raises
+        # FileNotFoundError -- an OSError, and not a DeviceError. So the handler
+        # that says "simctl unavailable" did not catch simctl being unavailable,
+        # which is the one case it names. On a Mac every binary is present and
+        # nothing noticed; a host without Xcode took the exception through
+        # resolve_udid and out of whatever call warmed the cache.
         try:
             sim_devices = await self.simctl.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("simctl list_devices failed (simctl unavailable)", exc_info=True)
             sim_devices = []
         try:
             physical_devices = await self.devicectl.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("devicectl list_devices failed", exc_info=True)
             physical_devices = []
         try:
             usbmux_devices = await self.usbmux.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("usbmux list_devices failed", exc_info=True)
             usbmux_devices = []
         try:
             android_devices = await self.adb.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("adb list_devices failed", exc_info=True)
             android_devices = []
 

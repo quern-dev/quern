@@ -426,12 +426,46 @@ The 44 failures are far more concentrated than a scattered-coupling scenario:
 |---|---|---|
 | `test_device_controller.py` | **39** | `FileNotFoundError: 'xcrun'` |
 | `test_resolution_protocol.py` | 2 | same |
-| `test_capture_env.py` | 1 | same |
+| `test_capture_env.py` | 1 | no `python3.9` on the runner |
 | `test_release_source.py` | 1 | menubar fetcher never runs, so the asserted URL list is empty |
 | `test_mcp_build.py` | 1 | expected failure at `npm run`, got it at `npm install` |
 
-42 of 44 are one cause — a real `xcrun` subprocess — and 39 of those sit in a
-single file.
+**41 of 44 are one cause** — a real `xcrun` subprocess — and 39 of those sit in
+a single file.
+
+### Green, and what that does and does not mean
+
+Fixing that one cause took it to 3, and the remaining three were test-side
+rather than product bugs. All of it landed together in #261:
+
+- `list_devices` catches `OSError` alongside `DeviceError`, so a tool that is
+  **absent** is handled by the branch that already said "unavailable".
+- `test_capture_env` no longer dies on a missing interpreter before it can
+  reach the `pytest.skip` written for that case — the same "ran and failed"
+  vs "is not there" confusion as the source bug.
+- `test_mcp_build` sets the install stamp explicitly ahead of the manifests.
+  `needs_install` compares `>=`, so a checkout landing both in one timestamp
+  tick read as stale. Timing, not platform.
+- `test_release_source` gained the suite's **first platform skip**, for a
+  menu-bar path that is macOS-only by construction.
+
+**What the job now buys.** A regression backstop for shared code: the moment a
+macOS assumption enters a shared path, CI says so on that commit rather than
+during the port. It is also, incidentally, the only check that catches a test
+reaching the real machine instead of mocking it — the 39 above were spawning a
+real `xcrun` each and passing regardless.
+
+**What it does not buy, and this matters.** Green does not mean quern runs on
+Linux. Most of the suite mocks its subprocesses, so what is proven is that the
+*Python* is portable, not the product. Every item in §1 and §2 of this document
+is still true: `__init__` builds all seven iOS backends, `_fix_developer_dir()`
+runs unconditionally at startup, `/tmp/quern/screenshots` is hardcoded, and the
+network introspection is BSD. None of it is reachable from a unit test, and the
+server has never been started on Linux — not once.
+
+Treat green as a **good start**: a known-good baseline to port *from*, not
+evidence the port is done. The next real step is standing up a Linux host and
+running the thing.
 
 ### What that actually exposes
 
@@ -459,9 +493,12 @@ skip (`test_setup.py:121,131,656,674,693,701`, `test_menubar_cli.py:586`,
 `test_service_health.py:352`), so the non-Darwin branches of `check_platform`,
 `check_vpn` and `configure_crash_reporter_dialog` are exercised today.
 
-This was the planned first move and it has now happened, as the non-blocking
-`test-linux` job in #261. Keep it `continue-on-error` until the 44 are cleared,
-then fold it into the `test` matrix as a real gate.
+This was the planned first move, and #261 went further than planned: it added
+the `test-linux` job, cleared all 44, and dropped `continue-on-error` in the
+same change, so the job is a **real gate** rather than the probe this section
+originally described. It stays its own job rather than a second axis on the
+`test` matrix — platform coupling does not vary by interpreter, so four more
+jobs would buy nothing.
 
 One caution from `CONTRIBUTING.md`: the suite has historically deleted the
 developer's real `~/.local/bin/quern`. The backstops are autouse fixtures in

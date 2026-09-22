@@ -1957,3 +1957,52 @@ class TestScreenshotNamesItsDevice:
         scope = await self._screenshot()
 
         assert scope.udid == "AAAA-1111"
+
+
+class TestAMissingToolIsNotAnError:
+    """`list_devices` names "simctl unavailable" in its own handler, and until
+    now did not catch it.
+
+    The backends raise `DeviceError` for a tool that ran and refused. A tool
+    that is not installed never runs: `create_subprocess_exec` raises
+    `FileNotFoundError`, which is an `OSError` and not a `DeviceError`, so it
+    went straight through. Every developer machine has Xcode, so nothing
+    noticed until the suite ran on a host without it -- where 42 tests failed
+    on an `xcrun` none of them were testing.
+
+    `usbmux` is the shape the others should have had: `_find_binary()` returns
+    None and the call degrades to `{}` rather than raising at all.
+    """
+
+    @staticmethod
+    def _ctrl(absent: str) -> DeviceController:
+        ctrl = DeviceController()
+        for name in ("simctl", "devicectl", "usbmux", "adb"):
+            mock = (
+                AsyncMock(side_effect=FileNotFoundError(2, "No such file or directory", name))
+                if name == absent
+                else AsyncMock(return_value=[])
+            )
+            getattr(ctrl, name).list_devices = mock
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        return ctrl
+
+    @pytest.mark.parametrize("absent", ["simctl", "devicectl", "usbmux", "adb"])
+    async def test_an_absent_backend_is_skipped_not_raised(self, absent):
+        assert await self._ctrl(absent).list_devices() == []
+
+    async def test_the_present_backends_still_report(self):
+        """Degrading is not the same as giving up: a missing simctl must not
+        cost us the Android devices adb can still see."""
+        ctrl = self._ctrl("simctl")
+        android = _device(udid="emulator-5554", name="Pixel 8")
+        ctrl.adb.list_devices = AsyncMock(return_value=[android])
+
+        assert await ctrl.list_devices() == [android]
+
+    async def test_resolve_udid_survives_a_missing_simctl(self):
+        """The path that actually carried the exception out. An unknown UDID
+        warms the type cache, and warming it lists devices -- so every call
+        taking a UDID raised, whatever it was really doing."""
+        ctrl = self._ctrl("simctl")
+        assert await ctrl.resolve_udid("AAAA-1111") == "AAAA-1111"

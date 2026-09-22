@@ -337,6 +337,27 @@ Give reviewers the failure mode to hunt, not just the diff. The briefs that foun
 real defects named this repo's habit — tests that pass for the wrong reason — and
 listed concrete recent examples to calibrate against.
 
+### The Linux job is a backstop, not a readiness signal
+
+CI runs the suite on `ubuntu-latest` as well as macOS. Two things to know, and
+the full reasoning is in the job's own comment in `.github/workflows/ci.yml`
+and in [`docs/linux-support-plan.md`](docs/linux-support-plan.md).
+
+**It catches tests that reach the real machine.** The first Linux run failed 44,
+and 41 were one bug: `list_devices` caught `DeviceError` but not the `OSError` a
+missing binary actually raises. On a Mac those tests shelled out to a real
+`xcrun`, got a list their fake UDID was not in, and passed regardless — the
+house habit, caught by a runner that simply does not have the tool. When this
+job goes red it is usually right, and usually about a macOS assumption that has
+just entered shared code. Fix the assumption. A platform skip is correct only
+when the thing under test is genuinely macOS-only; `tests/test_release_source.py`
+holds the one precedent and states the bar.
+
+**Green does not mean quern runs on Linux.** Most of the suite mocks its
+subprocesses, so a pass says the Python is portable, not the product. The server
+has never been started on Linux. Do not cite a green matrix as evidence the port
+works.
+
 ## Where the API is documented
 
 Deliberately not restated here. [`docs/api-reference.md`](docs/api-reference.md)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -203,6 +204,18 @@ class TestEveryFetcherUsesIt:
         setup_mod.fetch_menubar_app(tmp_path)
         assert seen == [LOCAL + "/releases/tags/v1.0.0"]
 
+    @pytest.mark.skipif(
+        sys.platform != "darwin",
+        # The suite's first platform skip, and deliberately narrow. `menubar`
+        # guards every entry point on platform.system() != "Darwin" and returns
+        # before fetching anything, so off a Mac this asserts on a URL list that
+        # nothing could have filled -- a failure that says the test cannot run
+        # here, not that the base resolution is wrong. Skipping is honest; the
+        # Linux job is a backstop for shared code, and the menu-bar app is not
+        # shared code. Do not reach for this marker to quiet a test that is
+        # merely inconvenient on Linux: what it covers has to be macOS-only.
+        reason="menubar is macOS-only and returns before fetching anywhere else",
+    )
     def test_menubar_install_resolves_through_the_base(self, monkeypatch, tmp_path):
         """The caller the module docstring names, and the one that was missed:
         it built the github.com URL itself, so a rehearsal fetched and verified
