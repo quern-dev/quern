@@ -330,13 +330,56 @@ block the port; they determine how good the product is when it lands.
 
 ## Testing and CI
 
-This is the part the original plan under-weighted, and it is the main unknown.
+The original plan under-weighted this, and it was the main unknown. **It is now
+measured, and the answer is far better than assumed** — see the result below.
 
-The suite is **106 files, ~53,180 lines, 2,273 collected tests**. It has **no
-platform skip markers of any kind** — the only markers in use are `asyncio`,
-`parametrize`, `release_download`, `integration` and `usefixtures`. It has
-**never executed on a non-Darwin host**: `.github/workflows/ci.yml` runs `test`
-and `menubar-build` on `macos-latest`, and only `mcp-build` on `ubuntu-latest`.
+The suite is **106 files, ~53,180 lines**. It has **no platform skip markers of
+any kind** — the only markers in use are `asyncio`, `parametrize`,
+`release_download`, `integration` and `usefixtures`. Until #261 it had **never
+executed on a non-Darwin host**: `.github/workflows/ci.yml` ran `test` and
+`menubar-build` on `macos-latest`, and only `mcp-build` on `ubuntu-latest`.
+
+### The first Linux run (#261)
+
+```
+44 failed, 3362 passed, 3 skipped, 15 deselected in 77.35s
+```
+
+**Zero collection errors, and `pip install -e ".[dev]"` succeeded.** Nothing in
+the tree fails to import on Linux, `fb-idb` and its grpcio/protobuf chain
+install cleanly, and a 98.7% pass rate says the server really is close to
+cross-platform for everything that is not an Apple tool. That materially
+de-risks the port; the earlier "~90% cross-platform" claim was, if anything,
+pessimistic.
+
+The 44 failures are far more concentrated than a scattered-coupling scenario:
+
+| File | Failures | Cause |
+|---|---|---|
+| `test_device_controller.py` | **39** | `FileNotFoundError: 'xcrun'` |
+| `test_resolution_protocol.py` | 2 | same |
+| `test_capture_env.py` | 1 | same |
+| `test_release_source.py` | 1 | menubar fetcher never runs, so the asserted URL list is empty |
+| `test_mcp_build.py` | 1 | expected failure at `npm run`, got it at `npm install` |
+
+42 of 44 are one cause — a real `xcrun` subprocess — and 39 of those sit in a
+single file.
+
+### What that actually exposes
+
+This is not Linux breakage. It is **`DeviceController.__init__` instantiating
+all seven iOS backends unconditionally** (`controller.py:48-56`), surfacing
+through tests that construct a real controller and let it shell out.
+
+`CONTRIBUTING.md` already forbids this — *"Mock subprocesses — never call real
+simctl/idb in tests."* The violation is invisible on macOS because `xcrun`
+exists there, so the call succeeds and the test passes for the wrong reason.
+**The Linux job is, incidentally, an unmocked-subprocess detector**, and worth
+keeping for that alone. The runner's own teardown log makes the same point from
+the other end: `Terminate orphan process: pid (2712) (adb)`.
+
+So the gating work in §1 and the test fixes are the same work. Fix the
+constructor and most of the 42 should follow.
 
 Rough composition: ~35% iOS-specific (~18,800 lines), ~16% install/delivery,
 ~45% device-agnostic, and **~2.4% Android (~1,296 lines)** — against ~18,800 for
@@ -348,10 +391,9 @@ skip (`test_setup.py:121,131,656,674,693,701`, `test_menubar_cli.py:586`,
 `test_service_health.py:352`), so the non-Darwin branches of `check_platform`,
 `check_vpn` and `configure_crash_reporter_dialog` are exercised today.
 
-**First move, before any code changes: add `ubuntu-latest` to the `test`
-matrix.** It is a few hours and it converts every estimate in this document into
-a concrete list of failures. Given ~45% of the suite is device-agnostic, a large
-fraction should pass unchanged, and what breaks becomes the real scope document.
+This was the planned first move and it has now happened, as the non-blocking
+`test-linux` job in #261. Keep it `continue-on-error` until the 44 are cleared,
+then fold it into the `test` matrix as a real gate.
 
 One caution from `CONTRIBUTING.md`: the suite has historically deleted the
 developer's real `~/.local/bin/quern`. The backstops are autouse fixtures in
@@ -362,7 +404,7 @@ them. Treat a first Linux run as untrusted.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Test suite has undiscovered Darwin coupling | **High** | Medium | CI matrix first, before code changes |
+| ~~Test suite has undiscovered Darwin coupling~~ | ~~High~~ → **Measured** | Low | Resolved by #261: 44 failures, 42 of one cause, 39 in one file. No longer a risk |
 | Android parity gaps read as "the Linux build is broken" | Medium | High | Document the supported surface explicitly at launch |
 | Two agents silently share a device | **High** on a shared server | High | #254 is a prerequisite, not a follow-up |
 | Emulator flows are indistinguishable in the store | **Certain** with >1 emulator | **High** | Listener-per-device + `sockname` tagging. Gates both target workflows |
@@ -375,9 +417,10 @@ them. Treat a first Linux run as untrusted.
 
 ## Sequencing
 
-1. **CI matrix** — add `ubuntu-latest`, collect failures. No code changes.
+1. ~~**CI matrix**~~ — **done** (#261). 3362 pass, 44 fail, no collection errors.
 2. **Platform module + gating** — `server/platform.py`, gate iOS routers, stop
-   instantiating iOS backends, delete the Out table.
+   instantiating iOS backends, delete the Out table. This is also the fix for
+   the 42 `xcrun` test failures, so the two are one job rather than two.
 3. **Defaults** — the table in §2. Mostly independent, parallelisable.
 4. **Headless** — MCP `headless` param, emulator classification, bind decision,
    `-y` setup path.
