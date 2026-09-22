@@ -333,6 +333,23 @@ and the Swift build cache under `CONFIG_DIR/bin` are shared from every checkout,
 so an agent that runs the app rather than the tests still needs
 `QUERN_STATE_DIR` and usually a sandboxed `HOME`.
 
+`QUERN_STATE_DIR` redirects `~/.quern` and **not** `~/.mitmproxy`. The proxy CA
+is shared from every checkout, which cuts both ways: live-testing capture from
+a worktree works against an already-trusted simulator without installing a
+second root CA, and a worktree cannot be assumed to have a CA of its own.
+
+**`git worktree remove` can half-succeed, and only its exit code says so.** It
+deregisters the worktree, deletes most of the tree, and then refuses a
+directory something else has written into -- a Finder `.DS_Store` is enough.
+What is left is files with no git record of them: `git worktree list` shows the
+worktree gone and `git worktree prune` finds nothing to do, because there is
+nothing left to prune. Measured once at 85 files and 6.7MB. So check the
+directory, not the registration:
+
+```sh
+git worktree remove --force "$d"; [ -d "$d" ] && echo "STILL THERE: $d"
+```
+
 Give reviewers the failure mode to hunt, not just the diff. The briefs that found
 real defects named this repo's habit — tests that pass for the wrong reason — and
 listed concrete recent examples to calibrate against.
