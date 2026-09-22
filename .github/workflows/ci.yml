@@ -45,20 +45,35 @@ jobs:
         run: .venv/bin/ruff check server/
 
   test-linux:
-    # Informational, not a gate. The suite has never run off Darwin -- there is
-    # not a single platform skip marker in tests/, and roughly a third of it
-    # exercises Apple toolchain paths. This job exists to enumerate that
-    # breakage, not to pass. docs/linux-support-plan.md sequences it before any
-    # porting work, so that the failure list becomes the scope document rather
-    # than something discovered halfway through.
+    # The suite on Linux. Read what this is for before changing it, because it
+    # is easy to over-read and easy to quiet.
     #
-    # continue-on-error so a red run never blocks a macOS-only change. Drop it,
-    # and fold this into the `test` matrix, once the suite is green here.
+    # WHAT IT IS. A regression backstop for shared code. Nothing here had ever
+    # run off Darwin until #261; the first run failed 44 and 41 of those were a
+    # single bug -- list_devices caught DeviceError but not the OSError a
+    # missing binary actually raises, so every call taking a UDID died on a
+    # host without Xcode. On a Mac that same call shells out to a real xcrun,
+    # gets a list the test's fake UDID is not in, and passes anyway. So this
+    # job also catches tests that reach the machine instead of mocking it,
+    # which CONTRIBUTING.md forbids and which nothing else here detects.
+    #
+    # WHAT IT IS NOT. Evidence that quern runs on Linux. Most of the suite
+    # mocks its subprocesses, so a green run says the *Python* is portable, not
+    # the product. Still true on the day this went green: __init__ builds all
+    # seven iOS backends, _fix_developer_dir() runs unconditionally at startup,
+    # /tmp/quern/screenshots is hardcoded, and networksetup/ifconfig/route are
+    # BSD. None of that is reachable from a unit test. The server has never
+    # been started on Linux. Green here is a good start, not a readiness
+    # signal -- see docs/linux-support-plan.md.
+    #
+    # WHEN IT GOES RED. It is usually right, and usually about a macOS
+    # assumption that just entered shared code. Fix the assumption. A
+    # platform skip is the answer only when the thing under test is genuinely
+    # macOS-only -- tests/test_release_source.py has the one precedent and
+    # spells out the bar. Skipping to get green forfeits the whole point.
     runs-on: ubuntu-latest
-    continue-on-error: true
-    # The suite has never been timed on Linux, and a subprocess that blocks
-    # forever on a missing Apple tool would otherwise burn the job's full
-    # six-hour default.
+    # A subprocess blocking on a missing Apple tool would otherwise burn the
+    # job's full six-hour default. The run takes ~80s.
     timeout-minutes: 30
 
     steps:
