@@ -337,6 +337,45 @@ Give reviewers the failure mode to hunt, not just the diff. The briefs that foun
 real defects named this repo's habit — tests that pass for the wrong reason — and
 listed concrete recent examples to calibrate against.
 
+### The primary checkout stays on `main`
+
+`/Volumes/Home/jham/Dev/quern` is the venv host and the reference tree. Branch
+work happens in worktrees -- there are usually a dozen -- and the primary is
+not one of them. Several sessions share this machine, and whoever checks a
+branch out there silently changes the ground under everyone else.
+
+The reason is not tidiness. `~/.local/bin/quern` is
+`exec <primary>/.venv/bin/python -m server "$@"`, and `-m` puts the *caller's*
+cwd ahead of the editable install on `sys.path`. So resolution follows the
+directory you are standing in:
+
+```text
+from /tmp                 -> <primary>/server/__init__.py
+from ~/Dev/quern-hid      -> ~/Dev/quern-hid/server/__init__.py
+```
+
+Two things follow, and they pull in opposite directions.
+
+**The primary is what `quern` means when you are not standing in a worktree**,
+which is where a person invokes it from -- their own terminal, their own
+daemon. A branch left checked out there is running on their machine, as the
+command they type and the server they have up. That is the state to avoid.
+
+**A worktree needs no exception for live-testing.** `cd <worktree> && quern
+start -f` runs *that* worktree's server on the primary's venv, no venv of its
+own. So "live-test before opening a PR" is satisfied without ever moving the
+primary, which is the objection this rule otherwise invites.
+
+**And the same command in two directories runs different code, with nothing
+to say so.** `quern status` from a worktree and from `~` are not the same
+program. That is this project's recurring shape -- working and broken look
+identical -- so when a result surprises you, check where you are standing
+before you believe it.
+
+The corollary for anything that is *not* source: a worktree isolates the tree
+and nothing else, so `~/.quern`, `~/.local/bin/quern` and the MCP
+registrations are still shared. See the worktree notes above.
+
 ### The Linux job is a backstop, not a readiness signal
 
 CI runs the suite on `ubuntu-latest` as well as macOS. Two things to know, and
