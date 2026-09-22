@@ -492,6 +492,11 @@ must be a sibling of the checkouts and never inside one, or a mutated copy
 turns up in someone's `git status`. Delete them when the review ends: outside
 /tmp they no longer expire on their own, and they run to ~12MB each.
 
+A harness built on `mktemp -d` defeats this without meaning to: it lands in
+`/var/folders`, so it is invisible to a sweep of `quern-scratch` *and* to one
+of `/tmp` -- three places to look instead of one. Point it at the single place
+with `TMPDIR=~/Dev/quern-scratch mktemp -d`.
+
 Give reviewers the failure mode to hunt, not just the diff. The briefs that found
 real defects named this repo's habit — tests that pass for the wrong reason — and
 listed concrete recent examples to calibrate against.
