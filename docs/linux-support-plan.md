@@ -493,9 +493,12 @@ skip (`test_setup.py:121,131,656,674,693,701`, `test_menubar_cli.py:586`,
 `test_service_health.py:352`), so the non-Darwin branches of `check_platform`,
 `check_vpn` and `configure_crash_reporter_dialog` are exercised today.
 
-This was the planned first move and it has now happened, as the non-blocking
-`test-linux` job in #261. Keep it `continue-on-error` until the 44 are cleared,
-then fold it into the `test` matrix as a real gate.
+This was the planned first move, and #261 went further than planned: it added
+the `test-linux` job, cleared all 44, and dropped `continue-on-error` in the
+same change, so the job is a **real gate** rather than the probe this section
+originally described. It stays its own job rather than a second axis on the
+`test` matrix — platform coupling does not vary by interpreter, so four more
+jobs would buy nothing.
 
 One caution from `CONTRIBUTING.md`: the suite has historically deleted the
 developer's real `~/.local/bin/quern`. The backstops are autouse fixtures in

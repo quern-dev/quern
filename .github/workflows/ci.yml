@@ -112,7 +112,7 @@ jobs:
         run: |
           set +e
           .venv/bin/python -m pytest tests/ \
-            --continue-on-collection-errors --tb=line -rf -q | tee /tmp/pytest.log
+            --continue-on-collection-errors --tb=line -rfE -q | tee /tmp/pytest.log
           status=${PIPESTATUS[0]}
           {
             echo "## Linux probe"
@@ -121,11 +121,16 @@ jobs:
             tail -n 1 /tmp/pytest.log
             echo '```'
             echo
-            echo "### Failures by file"
+            echo "### Failures and collection errors by file"
             echo
-            if grep -q '^FAILED ' /tmp/pytest.log; then
-              grep '^FAILED ' /tmp/pytest.log \
-                | sed 's/^FAILED //' | cut -d: -f1 \
+            # ERROR as well as FAILED. A module that cannot be imported is
+            # reported as an ERROR, never a FAILED, so a parser watching only
+            # for the latter drops exactly the thing
+            # --continue-on-collection-errors is here to surface -- and a run
+            # whose every module failed to import would summarise as "none".
+            if grep -qE '^(FAILED|ERROR) ' /tmp/pytest.log; then
+              grep -E '^(FAILED|ERROR) ' /tmp/pytest.log \
+                | sed -E 's/^(FAILED|ERROR) //' | sed 's/ - .*//' | cut -d: -f1 \
                 | sort | uniq -c | sort -rn | sed 's/^/    /'
             else
               echo "    none"
