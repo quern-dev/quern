@@ -31,6 +31,7 @@ docs/proposals/logging-spec.md.
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -108,6 +109,37 @@ class Attribution:
     @property
     def ambiguous(self) -> bool:
         return bool(self.overlaps)
+
+
+
+class Ownership(enum.Enum):
+    """Whether an action could own work seen on a given device.
+
+    One concept, in one place, deliberately. Today an action's scope is the
+    device it resolved. When sessions land (#254) it becomes the session that
+    reserved one or more devices -- and the attribution rules below do not
+    change, only what `owns` compares. Writing this as three inline udid
+    checks was how the device-less case went wrong in the first place.
+    """
+
+    #: Both sides name the same device. The firm case.
+    OWNS = "owns"
+    #: The flow's device is unknown, so only time connects them.
+    UNKNOWN_WORK = "unknown_work"
+    #: The *action* resolved no device. It may still have caused this, but it
+    #: cannot claim work that belongs to a device it never named.
+    UNSCOPED_ACTION = "unscoped_action"
+    #: Both known and different. Never the same work.
+    FOREIGN = "foreign"
+
+
+def owns(action_udid: str, work_udid: str | None) -> Ownership:
+    """Could an action scoped to `action_udid` own work seen on `work_udid`?"""
+    if action_udid and work_udid:
+        return Ownership.OWNS if action_udid == work_udid else Ownership.FOREIGN
+    if not work_udid:
+        return Ownership.UNKNOWN_WORK
+    return Ownership.UNSCOPED_ACTION
 
 
 def _interval(action: LogEntry) -> tuple[datetime, datetime]:
@@ -223,44 +255,67 @@ def build_trace(
             )
 
     for flow in flows:
-        udid, firm = device_of(flow, ip_map)
+        work_udid, firm = device_of(flow, ip_map)
 
-        # Which actions could own this flow: those it happened inside, and
-        # those it arrived shortly after. Preferring the first means a flow
-        # landing inside one action is not also blamed on the previous one
-        # merely for being close to it.
-        # Device first, then time. Choosing `during` over `after` before
-        # checking the device dropped flows entirely: a flow landing inside
-        # another device's action made `during` non-empty, so the grace
-        # window was never consulted, and the device check then rejected the
-        # only candidate. The flow belonged to an action on its own device
-        # and was attributed to nothing.
-        def _matches(i: int) -> bool:
-            owner = result[i].action.udid
-            return not (udid and owner and udid != owner)
+        def _window(i: int, at=flow.timestamp) -> str | None:
+            """Which time window, if any, this action could own `at` in.
 
-        # Half-open, `(start, end]`, so an instant shared by two actions has
-        # exactly one owner. With both ends inclusive, a flow landing where
-        # one action ends and the next begins satisfied both -- and because
-        # touching intervals are deliberately *not* treated as overlapping,
-        # neither attribution carried an ambiguity caveat. It was silently
-        # counted twice.
+            Half-open, `(start, end]`, so an instant shared by two adjacent
+            actions has exactly one owner -- the earlier, which had been
+            running up to it while the later had not yet done anything.
+            """
+            start_i, end_i = intervals[i]
+            if start_i < at <= end_i:
+                return "during"
+            if end_i < at <= end_i + grace:
+                return "after"
+            return None
+
+        # Scope first, then time, then strength of claim.
         #
-        # The earlier action wins the boundary: it had been running up to
-        # that instant, while the later one had not yet done anything.
-        during = [
-            i for i in range(len(result))
-            if _matches(i) and intervals[i][0] < flow.timestamp <= intervals[i][1]
-        ]
-        after = [
-            i for i in range(len(result))
-            if _matches(i)
-            and intervals[i][1] < flow.timestamp <= intervals[i][1] + grace
-        ]
-        candidates = during or after
+        # An action that resolved no device used to claim anything inside its
+        # interval, including a flow firmly identified as another device's --
+        # with no caveat, because the overlap pass skips pairs where one side
+        # has no device. `wait_for_flow` blocks for ten seconds by default and
+        # names no device, so this was the *likely* case, not a corner one.
+        #
+        # So an unscoped action is a fallback: it takes a flow only when no
+        # action that actually named that device could have, and says so.
+        claims: dict[Ownership, list[int]] = {k: [] for k in Ownership}
+        windows: dict[int, str] = {}
+        for i in range(len(result)):
+            verdict = owns(result[i].action.udid, work_udid)
+            if verdict is Ownership.FOREIGN:
+                continue
+            window = _window(i)
+            if window is None:
+                continue
+            windows[i] = window
+            claims[verdict].append(i)
+
+        scoped = claims[Ownership.OWNS] or claims[Ownership.UNKNOWN_WORK]
+        candidates = scoped or claims[Ownership.UNSCOPED_ACTION]
+        unscoped_fallback = not scoped and bool(candidates)
+
+        # Within the chosen set, an action this happened *inside* beats one it
+        # merely happened after -- otherwise every flow is also blamed on the
+        # previous action for being nearby.
+        during = [i for i in candidates if windows[i] == "during"]
+        chosen = during or candidates
         inferred = not during
 
-        for i in candidates:
+        # Two sequential actions can both have the flow in their grace window,
+        # and neither interval overlaps the other, so nothing else would say
+        # this was attributed more than once.
+        if len(chosen) > 1:
+            for i in chosen:
+                _note(
+                    result[i],
+                    "this flow is also attributed to another action; the "
+                    "trace cannot tell which caused it",
+                )
+
+        for i in chosen:
             attribution = result[i]
             if inferred:
                 _note(
@@ -268,9 +323,14 @@ def build_trace(
                     "some flows arrived after the action returned and are "
                     "attributed by timing rather than observed causation",
                 )
-            # With no device on either side, time is all there is. Say so
-            # rather than presenting it as a firm attribution.
-            if not udid:
+            if unscoped_fallback:
+                _note(
+                    attribution,
+                    f"this action resolved no device, so work from "
+                    f"{work_udid[:8] if work_udid else 'an unknown device'} is "
+                    "attributed to it on timing alone",
+                )
+            elif not work_udid:
                 _note(attribution, "some flows matched on time alone")
             elif not firm:
                 _note(

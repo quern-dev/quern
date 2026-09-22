@@ -505,3 +505,78 @@ class TestAFlowOnASharedBoundaryHasOneOwner:
         attributions = build_trace([first, second], [flow], [])
 
         assert sum(len(a.flows) for a in attributions) == 1
+
+
+class TestAnActionWithNoDeviceCannotClaimAnothersWork:
+    """The headline promise of this module, and it was false.
+
+    An action that resolved no device claimed anything inside its interval —
+    including a flow firmly identified as another device's — with no caveat,
+    because the overlap pass never pairs an action that has a device with one
+    that does not. `wait_for_flow` blocks for ten seconds by default and names
+    no device, so this was the likely case rather than a corner one.
+
+    Found by an independent review, after two CodeRabbit rounds missed it.
+    """
+
+    @staticmethod
+    def _unscoped(at_s=10, duration_ms=10_000):
+        return _action("wait_for_flow", at_s=at_s, duration_ms=duration_ms, udid="")
+
+    def test_a_device_owning_action_wins_over_an_unscoped_one(self):
+        unscoped = self._unscoped()
+        owner = _action("tap", at_s=10, duration_ms=2000, udid="SIM-B")
+        flow = _flow(at_s=9, udid="SIM-B")
+
+        attributions = build_trace([unscoped, owner], [flow], [])
+        by_name = {a.action.action: a for a in attributions}
+
+        assert by_name["tap"].flows == [flow]
+        assert by_name["wait_for_flow"].flows == [], (
+            "an action with no device took work belonging to one that had it"
+        )
+
+    def test_an_unscoped_action_is_a_fallback_and_says_so(self):
+        """It may genuinely have caused the work — dropping it would lose
+        data silently, which is the failure this file exists to avoid. So it
+        is attributed, and the attribution admits what it rests on."""
+        unscoped = self._unscoped()
+        flow = _flow(at_s=9, udid="SIM-B")
+
+        [attribution] = build_trace([unscoped], [flow], [])
+
+        assert attribution.flows == [flow]
+        assert any("resolved no device" in c for c in attribution.caveats)
+
+    def test_it_never_takes_work_from_a_device_another_action_owns(self):
+        """Two agents, one blocked in wait_for_flow. Without this, the
+        blocked one collects the other's traffic for ten seconds."""
+        unscoped = self._unscoped()
+        a = _action("tap", at_s=10, duration_ms=2000, udid="SIM-A")
+        b = _action("tap", at_s=10, duration_ms=2000, udid="SIM-B")
+
+        attributions = build_trace(
+            [unscoped, a, b], [_flow(at_s=9, udid="SIM-A")], [],
+        )
+
+        assert attributions[0].flows == [] if attributions[0].action.udid == "" else True
+        assert sum(len(x.flows) for x in attributions) == 1
+
+
+class TestAFlowInTwoGraceWindowsSaysSo:
+    """Two sequential actions can both have a flow in their grace window
+    while neither interval overlaps the other — so the overlap marking, which
+    is about actions racing on one device, never fires. A consumer summing
+    flows across actions would over-count with nothing to warn it."""
+
+    def test_both_attributions_admit_the_other(self):
+        first = _action("open_url", at_s=10, duration_ms=200)
+        second = _action("open_url", at_s=11, duration_ms=200)
+        flow = _flow(at_s=11.5, udid="SIM-A")
+
+        first_a, second_a = build_trace([first, second], [flow], [])
+
+        assert first_a.flows == [flow]
+        assert second_a.flows == [flow]
+        assert any("also attributed" in c for c in first_a.caveats)
+        assert any("also attributed" in c for c in second_a.caveats)

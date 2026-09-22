@@ -77,6 +77,13 @@ def action(
     success path.
     """
     scope = ActionScope(name, category)
+    # Set here rather than only in the decorator, so both forms behave the
+    # same. They did not: a `with action(...)` handler relying on
+    # `resolve_udid` to record the device got nothing, because the ContextVar
+    # was only ever set by `logged_action`. Block-form handlers happen to
+    # assign `act.udid` by hand, so the gap stayed invisible until a test
+    # asked the question directly.
+    token = set_current_action(scope)
     # The begin entry exists for one case the completion entry cannot cover:
     # an action that starts and never finishes. On a hang, a crash, or a
     # client that disconnects mid-sweep there is no completion entry at all,
@@ -109,6 +116,7 @@ def action(
         scope.outcome = "failed"
         raise
     finally:
+        reset_current_action(token)
         logging_ext.action(
             logger,
             scope.name,
@@ -147,12 +155,10 @@ def logged_action(
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                with action(name, category=category) as scope:
-                    token = set_current_action(scope)
-                    try:
-                        return await fn(*args, **kwargs)
-                    finally:
-                        reset_current_action(token)
+                # `action` owns the ContextVar, so both forms get it
+                # from one place.
+                with action(name, category=category):
+                    return await fn(*args, **kwargs)
             return wrapper
 
         # A sync handler is rarer here but FastAPI accepts them, and
@@ -162,11 +168,7 @@ def logged_action(
         # find out.
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with action(name, category=category) as scope:
-                token = set_current_action(scope)
-                try:
-                    return fn(*args, **kwargs)
-                finally:
-                    reset_current_action(token)
+            with action(name, category=category):
+                return fn(*args, **kwargs)
         return sync_wrapper
     return decorate

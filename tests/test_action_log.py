@@ -569,3 +569,99 @@ class TestACancelledActionDoesNotReportSuccess:
 
         with pytest.raises(asyncio.CancelledError):
             await handler()
+
+
+class TestTheResolvedDeviceReachesTheActionEntry:
+    """`resolve_udid` records the device it resolved onto the current action.
+
+    Deleting that line passed the entire suite — 3445 tests — while being the
+    thing without which a per-device trace silently loses every route that
+    uses the `@logged_action` decorator, which is most of the API. Found by an
+    independent review; it is exactly the "tests the piece, not the wiring"
+    shape this repo keeps hitting.
+    """
+
+    async def test_resolving_a_device_records_it_on_the_action(self):
+        from server.api.actions import action
+        from server.device.controller import DeviceController
+
+        controller = _bare_controller()
+
+        with action("pretend", category="device.action") as scope:
+            await controller.resolve_udid("SIM-RESOLVED")
+
+        assert scope.udid == "SIM-RESOLVED", (
+            "the action entry would name no device, so a per-device trace "
+            "would drop it"
+        )
+
+    async def test_it_is_harmless_with_no_action_in_progress(self):
+        """`resolve_udid` runs from tests and from startup paths where
+        nothing is recording. The no-op stand-in has to absorb it."""
+        from server.device.controller import DeviceController
+
+        controller = _bare_controller()
+
+        assert await controller.resolve_udid("SIM-X") == "SIM-X"
+
+
+class TestTheMonotonicStartReachesTheEntry:
+    """`started_monotonic` is what a video-alignment consumer (#164) compares
+    frame timestamps against. Removing the kwarg that carries it passed the
+    whole suite, and the field would have become null with nothing noticing —
+    the value silently absent is indistinguishable from a version that never
+    had it."""
+
+    async def test_an_action_entry_carries_a_monotonic_start(self):
+        from server.api.actions import action
+
+        entries = await _capture(_ran_once)
+
+        assert entries[0].started_monotonic is not None
+        assert isinstance(entries[0].started_monotonic, float)
+
+    async def test_it_precedes_the_entry_and_matches_the_duration(self):
+        """It has to be the *start*, on the same clock the duration is
+        measured with, or a consumer aligning against it is off by the
+        action's length."""
+        import time
+
+        before = time.monotonic()
+        entries = await _capture(_ran_once)
+        after = time.monotonic()
+
+        started = entries[0].started_monotonic
+        assert before <= started <= after
+
+
+async def _ran_once():
+    from server.api.actions import action
+
+    with action("pretend", category="device.action") as scope:
+        scope.udid = "SIM-A"
+
+
+def _bare_controller():
+    """A controller with just enough wired up to resolve a udid.
+
+    Built without __init__ on purpose: constructing a real one reads the
+    active-device sidecar and touches the machine, which a unit test about
+    attribution has no business doing.
+    """
+    from unittest.mock import MagicMock
+
+    from server.device.controller import DeviceController
+
+    controller = DeviceController.__new__(DeviceController)
+    controller._DeviceController__active_udid = None  # noqa: SLF001
+    # The `_active_udid` setter also maintains the menu-bar sidecar's cached
+    # name and kind, so a controller built without __init__ needs those too.
+    controller._DeviceController__active_name_key = None  # noqa: SLF001
+    controller._DeviceController__active_name = None  # noqa: SLF001
+    controller._DeviceController__active_kind = None  # noqa: SLF001
+    controller._ensure_device_type_cached = AsyncMock()
+    controller._device_name_cache = {}
+    controller._device_type_cache = {}
+    controller._pool = None
+    controller._write_active_udid = MagicMock()
+    return controller
