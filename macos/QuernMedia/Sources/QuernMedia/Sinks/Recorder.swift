@@ -16,6 +16,8 @@ public final class Recorder {
         case writerFailed(String)
         case finishTimedOut(TimeInterval)
         case neverStarted
+        case alreadyFinished
+        case wroteNothing
 
         public var description: String {
             switch self {
@@ -26,6 +28,10 @@ public final class Recorder {
                 return "AVAssetWriter did not finish writing within \(t)s"
             case .neverStarted:
                 return "no keyframe ever reached the recorder, so nothing was written"
+            case .alreadyFinished:
+                return "the recording was already finished"
+            case .wroteNothing:
+                return "the writer opened but every frame was refused"
             }
         }
     }
@@ -160,9 +166,16 @@ public final class Recorder {
             // there simply was not one. A second finish after a successful
             // one leaves whatever reason is already there alone.
             let neverStarted = !started && !finished
+            let repeatCall = finished
             finished = true
             lock.unlock()
+            // Both are nil, and a caller cannot act on a bare nil. Without
+            // .alreadyFinished a second finish after a *successful* one left
+            // no reason at all, and main.swift -- which dispatches on the
+            // reason -- reported "could not finish the recording: unknown"
+            // and exited 1 for a recording that was fine.
             if neverStarted { note(.neverStarted) }
+            else if repeatCall { note(.alreadyFinished) }
             return nil
         }
         finished = true
@@ -197,12 +210,37 @@ public final class Recorder {
             return nil
         }
 
+        // An .mp4 the writer opened and then wrote no samples into is not a
+        // short recording, it is an empty container. Reporting a Summary for
+        // it told the caller it had footage.
+        guard written > 0 else {
+            note(.wroteNothing)
+            return nil
+        }
+
+        // Not defaulted to 0. A real host time is hundreds of thousands of
+        // seconds, so 0 is not a plausible value -- it would silently shift
+        // every offset computed from it by the machine's entire uptime, which
+        // is precisely the subtraction this field exists for. Unlike
+        // `duration`, there is no harmless fallback, so it fails instead.
+        guard start.isFinite else {
+            note(.writerFailed("the first frame carried no usable timestamp"))
+            return nil
+        }
+
         return Summary(
             framesWritten: written, framesDropped: dropped,
             duration: duration.isFinite ? duration : 0,
-            startHostTime: start.isFinite ? start : 0,
+            startHostTime: start,
             url: url
         )
+    }
+
+    /// Test seam. The state this reproduces -- started, then every append
+    /// refused -- needs an AVAssetWriterInput that rejects samples, which a
+    /// test cannot manufacture.
+    func forceFramesWrittenToZeroForTesting() {
+        lock.lock(); framesWritten = 0; lock.unlock()
     }
 
     private func note(_ reason: Failure) {

@@ -88,15 +88,41 @@ if let path = options.recordPath {
     }
 }
 
-// Assigned once the source exists. The server is constructed first so the
-// pipeline can take it as a sink, so the attach handler cannot name `source`
-// directly yet.
-var onViewerAttached: (() -> Void)?
+/// Carries the source-priming call to the attach handler, which is built
+/// before the source exists.
+///
+/// A box with a lock rather than a bare `var`: the server invokes the handler
+/// on its own queue while this is assigned from the main thread, and an
+/// unsynchronized capture is a data race that Swift 6 would reject outright.
+final class AttachPrimer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var prime: (() -> Void)?
+
+    func install(_ body: @escaping () -> Void) {
+        lock.lock(); prime = body; lock.unlock()
+    }
+
+    func fire() {
+        lock.lock(); let body = prime; lock.unlock()
+        body?()
+    }
+}
+
+let attachPrimer = AttachPrimer()
 
 var server: HTTPStreamServer?
 if let port = options.servePort {
     let s = HTTPStreamServer(port: port, bindAll: options.bindAll, codec: options.codec) {
-        onViewerAttached?()
+        // Unconditional, and deliberately not routed through the box. The
+        // server starts accepting the moment it binds, while the source is
+        // still being brought up -- dlopen, device resolution, callback
+        // registration, and for a USB device a blocking wait on enumeration.
+        // preview.py dials the port as soon as it is listening, so the first
+        // viewer lands squarely in that window. Making this wait on the source
+        // silently dropped the keyframe request that used to be live from the
+        // moment the port bound.
+        pipeline.requestKeyframe()
+        attachPrimer.fire()
     }
     do { try s.start() } catch { fail("cannot bind port \(port): \(error)") }
     pipeline.add(s)
@@ -133,10 +159,10 @@ case .device(let match):
 // composites nothing, so the window stayed black until the screen happened to
 // change. Asking the source to re-deliver what is already on screen costs one
 // encode and removes the wait.
-onViewerAttached = {
-    pipeline.requestKeyframe()
-    source.requestCurrentFrame()
-}
+// A viewer attaching before this point still gets a picture: `start()` primes
+// the framebuffer itself, so the frame it delivers reaches the sink that just
+// attached. This only covers viewers arriving after the source settles.
+attachPrimer.install { source.requestCurrentFrame() }
 
 // MARK: - lifetime
 
@@ -153,6 +179,8 @@ let shutdownOnce = ShutdownGuard { () -> Int32 in
                 summary.framesWritten, summary.duration, summary.startHostTime,
                 summary.framesDropped, summary.url.path
             ))
+        } else if case .alreadyFinished? = recording.failure {
+            // Nothing to say: a previous finish already reported the outcome.
         } else if case .neverStarted? = recording.failure {
             // Not a failure. No keyframe ever reached the recorder, so there
             // is no file -- reporting that as a broken recording, and exiting

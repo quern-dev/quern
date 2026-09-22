@@ -114,15 +114,34 @@ func laterFramesAreSmallerThanKeyframes() throws {
             "expected a small residual, got \(smallest) against a \(key.annexB.count) keyframe")
 }
 
-@Test("an encoder built with an absurd frame rate does not trap", arguments: [
-    Double.infinity, -Double.infinity, Double.nan, 1e308, 0, -5,
+@Test("an absurd frame rate is normalized, not merely survived", arguments: [
+    // Non-finite is not a rate at all, so it falls back to the default.
+    // Finite-but-absurd is a rate the caller meant, so it clamps.
+    (Double.infinity, 30.0),
+    (-Double.infinity, 30.0),
+    (Double.nan, 30.0),
+    (1e308, 600.0),
+    (0.0, 1.0),
+    (-5.0, 1.0),
 ])
-func encoderSurvivesAbsurdExpectedFPS(fps: Double) throws {
-    // The parser rejects these, but this initialiser is public and a library
-    // caller bypasses it. `Int(infinity)` traps rather than failing, which is
-    // a crash in a dependency's process, not a diagnosable error.
+func absurdExpectedFPSIsNormalized(input: Double, expected: Double) {
+    // Asserts the normalization, not the absence of a crash. The earlier
+    // version of this test had no #expect at all and passed against the
+    // pre-fix initialiser, because the `Int(infinity)` trap it named is
+    // already caught further down where the keyframe interval is computed.
+    // What this initialiser fixes is nan reaching
+    // kVTCompressionPropertyKey_ExpectedFrameRate, whose result nothing
+    // checks -- silent acceptance, which no crash test can see.
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 400_000, expectedFPS: input)
+    defer { encoder.invalidate() }
+    #expect(encoder.expectedFPS == expected)
+    #expect(encoder.expectedFPS.isFinite)
+}
+
+@Test("an absurd frame rate still does not trap when a frame goes through")
+func encoderSurvivesAbsurdExpectedFPS() throws {
     let surface = try #require(TestSurface.make(width: 64, height: 64))
-    let encoder = H264Encoder(maxDimension: 0, bitrate: 400_000, expectedFPS: fps)
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 400_000, expectedFPS: .nan)
     defer { encoder.invalidate() }
     _ = encoder.encode(
         CapturedFrame(surface: surface, time: .zero, timeAccuracy: .reported)

@@ -86,15 +86,85 @@ struct LogHandlerTests {
         #expect(missing == nil)
     }
 
-    @Test("asking an unstarted or stopped source for a frame is safe")
+    @Test("a source recognises only its own capture queue")
+    func captureQueueIdentityIsPerInstance() {
+        // The fix this pins: the specific key carries an identity, not merely
+        // a presence. Shared and Void-valued, this answered "yes, you are on
+        // my queue" while standing on any *other* instance's queue — so
+        // stopping A from inside B's frame callback ran A's cleanup inline on
+        // B's queue, mutating A's descriptors while A's own queue iterated
+        // them. That is the race the queue hop exists to prevent.
+        let a = SimulatorFramebuffer(udid: "udid-a") { _ in }
+        let b = SimulatorFramebuffer(udid: "udid-b") { _ in }
+
+        #expect(!a.isOnCaptureQueue, "the main thread is nobody's capture queue")
+        #expect(a.onCaptureQueue { a.isOnCaptureQueue })
+        #expect(b.onCaptureQueue { b.isOnCaptureQueue })
+        #expect(b.onCaptureQueue { !a.isOnCaptureQueue },
+                "A claimed B's queue as its own")
+        #expect(a.onCaptureQueue { !b.isOnCaptureQueue },
+                "B claimed A's queue as its own")
+    }
+
+    @Test("asking an unstarted or stopped source for a frame delivers nothing")
     func requestCurrentFrameIsSafeWhenNotRunning() {
         // Called from the HTTP server's attach handler, which can fire while
-        // the source is being torn down. It must not touch the descriptors
-        // that stop() is clearing.
-        let source = SimulatorFramebuffer(udid: "not-a-real-udid") { _ in }
+        // the source is being torn down. Asserts no frame is delivered rather
+        // than merely not crashing — the previous version had no assertions
+        // and passed with the method gutted to a no-op.
+        let delivered = Counter()
+        let source = SimulatorFramebuffer(udid: "not-a-real-udid") { _ in
+            delivered.bump()
+        }
         source.requestCurrentFrame()
         source.stop()
         source.requestCurrentFrame()
+        _ = source.onCaptureQueue { }   // drain anything queued
+        #expect(delivered.value == 0)
+    }
+
+    /// Lock-backed so the frame callback can be `@Sendable`.
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
+    @Test("both SimulatorKit layouts are found, and absence is reported", arguments: [
+        "Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit",  // <= 26
+        "../SharedFrameworks/SimulatorKit.framework/SimulatorKit",        // 27+
+    ])
+    func simulatorKitPathFindsEitherLayout(relative: String) throws {
+        // Driven against a fabricated directory rather than this machine's
+        // Xcode. The test next to this one passes on an Xcode 26 host with the
+        // Xcode 27 path deleted, because the old layout is still there -- its
+        // discriminating power is a property of the runner, not the test.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("simkit-\(UUID().uuidString)")
+        let dev = root.appendingPathComponent("Contents/Developer")
+        let binary = URL(fileURLWithPath: (dev.path as NSString)
+            .appendingPathComponent(relative)).standardizedFileURL
+        try FileManager.default.createDirectory(
+            at: binary.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: binary.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let found = try #require(
+            PrivateFrameworks.simulatorKitPath(at: dev.path),
+            "layout not found: \(relative)"
+        )
+        #expect(URL(fileURLWithPath: found).standardizedFileURL == binary)
+    }
+
+    @Test("a developer directory with no SimulatorKit reports nil")
+    func simulatorKitPathReportsAbsence() throws {
+        let empty = FileManager.default.temporaryDirectory
+            .appendingPathComponent("simkit-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: empty) }
+        #expect(PrivateFrameworks.simulatorKitPath(at: empty.path) == nil)
     }
 
     @Test("SimulatorKit is found wherever this Xcode keeps it")

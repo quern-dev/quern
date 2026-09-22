@@ -187,9 +187,15 @@ func successLeavesNoFailure() throws {
     _ = try #require(recorder.finish())
     #expect(recorder.failure == nil)
 
-    // And a second finish does not invent one.
+    // A second finish says why it returned nil, rather than leaving a bare
+    // one. main.swift dispatches on the reason, and with none it reported
+    // "could not finish the recording: unknown" and exited 1 for a recording
+    // that had succeeded.
     #expect(recorder.finish() == nil)
-    #expect(recorder.failure == nil, "a repeat finish overwrote a clean result")
+    guard case .alreadyFinished = try #require(recorder.failure) else {
+        Issue.record("expected alreadyFinished, got \(String(describing: recorder.failure))")
+        return
+    }
 }
 
 @Test("the summary reports the first frame's host time, so offsets can be computed")
@@ -221,4 +227,30 @@ func summaryPublishesStartHostTime() throws {
     #expect(abs(summary.startHostTime - start) < 0.01,
             "expected the first frame's PTS, got \(summary.startHostTime)")
     #expect(summary.startHostTime != summary.duration)
+}
+
+
+@Test("a writer that opened but wrote nothing is a failure, not a short recording")
+func startedButWroteNothingIsAFailure() throws {
+    // `.neverStarted` covers "no keyframe arrived". This is the other empty
+    // case: the writer opened on a keyframe and then every frame was refused,
+    // leaving an .mp4 with no samples. A Summary for that told the caller it
+    // had footage.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let out = try #require(encoder.encode(captured(surface, at: 0)))
+    #expect(recorder.append(out.frame))
+    // Force the written count back to zero, the state a refused append leaves.
+    recorder.forceFramesWrittenToZeroForTesting()
+
+    #expect(recorder.finish() == nil)
+    guard case .wroteNothing = try #require(recorder.failure) else {
+        Issue.record("expected wroteNothing, got \(String(describing: recorder.failure))")
+        return
+    }
 }

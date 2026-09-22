@@ -794,10 +794,17 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
     ) {
         guard !isStopped else { return }
         for jpeg in framing.append(data) {
-            if let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
-               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                onFrame(image)
+            guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                // Dropped silently before. A frame that will not decode --
+                // two SOIs with no EOI between them produce one, since marker
+                // scanning cannot tell them apart -- looked identical to a
+                // screen that had not changed.
+                fputs("  stream \(url.absoluteString): dropped a frame that "
+                    + "would not decode (\(jpeg.count) bytes)\n", stderr)
+                continue
             }
+            onFrame(image)
         }
     }
 

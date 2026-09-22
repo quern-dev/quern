@@ -31,10 +31,20 @@ class TestBuildBundle:
         os.utime(source, (1, 1))  # older than the binary
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
-        # Pinned empty: otherwise freshness is compared against the real
-        # JPEGFraming.swift, and these tests pass or fail on its mtime.
+        # Pinned empty so freshness is not compared against the real
+        # JPEGFraming.swift. Unpinned, this does not fail on its mtime -- it
+        # falls off the fast path and invokes the real /usr/bin/swiftc, which
+        # succeeds on a comment-only source and passes. Quietly running a
+        # compiler is worse than failing.
         monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
         monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+
+        # This test is about the fast path, so reaching a compiler at all is a
+        # failure of the test rather than a slower route to the same answer.
+        def no_compiler(*a, **kw):  # noqa: ANN002, ANN003
+            raise AssertionError("the fast path shelled out to a compiler")
+
+        monkeypatch.setattr(preview.subprocess, "run", no_compiler)
 
         assert not (bundle / "Contents" / "Info.plist").exists()
         preview.build_preview_bundle()
@@ -51,8 +61,11 @@ class TestBuildBundle:
         source.write_text("// source")
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
-        # Pinned empty: otherwise freshness is compared against the real
-        # JPEGFraming.swift, and these tests pass or fail on its mtime.
+        # Pinned empty so freshness is not compared against the real
+        # JPEGFraming.swift. Unpinned, this does not fail on its mtime -- it
+        # falls off the fast path and invokes the real /usr/bin/swiftc, which
+        # succeeds on a comment-only source and passes. Quietly running a
+        # compiler is worse than failing.
         monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
         monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
         monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
@@ -83,8 +96,11 @@ class TestBuildBundle:
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
-        # Pinned empty: otherwise freshness is compared against the real
-        # JPEGFraming.swift, and these tests pass or fail on its mtime.
+        # Pinned empty so freshness is not compared against the real
+        # JPEGFraming.swift. Unpinned, this does not fail on its mtime -- it
+        # falls off the fast path and invokes the real /usr/bin/swiftc, which
+        # succeeds on a comment-only source and passes. Quietly running a
+        # compiler is worse than failing.
         monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
         monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
         monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
@@ -670,3 +686,25 @@ class TestSharedSourceFreshness:
         assert compiled, "a newer shared source did not trigger a rebuild"
         assert str(shared) in compiled[0], "the shared source was not compiled in"
         assert str(source) in compiled[0]
+
+
+class TestSharedSourcesAreRequired:
+    def test_a_missing_shared_source_names_itself(self, tmp_path, monkeypatch):
+        """Filtering to the files that exist compiled the script alone, and
+        swiftc then blamed main.swift for a symbol whose file was gone —
+        sending the reader to the one file that was fine."""
+        from server.device import preview
+
+        missing = tmp_path / "JPEGFraming.swift"  # never created
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [missing])
+
+        with pytest.raises(RuntimeError, match="JPEGFraming.swift"):
+            preview._shared_sources()
+
+    def test_the_real_shared_sources_all_exist(self):
+        """The paths are hardcoded, so a rename inside the Swift package
+        breaks the app build. Nothing else in CI compiles that combination."""
+        from server.device import preview
+
+        for path in preview._SHARED_SOURCE_CANDIDATES:
+            assert path.exists(), f"{path} is referenced by the build but absent"

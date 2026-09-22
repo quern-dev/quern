@@ -200,6 +200,19 @@ jobs:
         # while the same suite passed in 0.3s on a developer machine.
         run: swift test --no-parallel
 
+      - name: Compile ios-preview
+        working-directory: .
+        # Nothing else builds this. It is a two-file swiftc invocation outside
+        # SwiftPM -- the script plus the frame parser that lives in the package
+        # -- so `swift build` and `swift test` stay green while an edit to
+        # JPEGFraming.swift breaks `quern setup` for every user. Mirrors the
+        # command in build_preview_bundle.
+        run: |
+          swiftc -o /tmp/ios-preview \
+            tools/ios-preview/main.swift \
+            macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
+            -framework AVFoundation -framework CoreMediaIO -framework AppKit
+
   mcp-build:
     runs-on: ubuntu-latest
 

@@ -125,6 +125,20 @@ public final class SimulatorFramebuffer: FrameSource {
         queue.async { [weak self] in self?.captureLatest() }
     }
 
+    /// Whether the caller is standing on *this instance's* capture queue.
+    ///
+    /// The distinction `stop()` turns on, and the reason the specific key
+    /// carries an identity rather than being merely present: with a shared
+    /// key and a `Void` value this answered yes on any instance's queue.
+    var isOnCaptureQueue: Bool {
+        DispatchQueue.getSpecific(key: Self.queueKey) == ObjectIdentifier(self)
+    }
+
+    /// Runs `body` on this instance's capture queue. Test seam for the above.
+    func onCaptureQueue<T>(_ body: () -> T) -> T {
+        queue.sync(execute: body)
+    }
+
     /// Safe from any thread, including from inside `onFrame`.
     public func stop() {
         // The flag goes up first, so a `captureLatest` already sitting in the
@@ -155,7 +169,7 @@ public final class SimulatorFramebuffer: FrameSource {
         // `onFrame` runs on this queue, so a consumer that stops the source
         // from inside its own frame callback is already here -- and
         // `queue.sync` onto the serial queue you are standing on deadlocks.
-        if DispatchQueue.getSpecific(key: Self.queueKey) == ObjectIdentifier(self) {
+        if isOnCaptureQueue {
             cleanup()
         } else {
             queue.sync(execute: cleanup)

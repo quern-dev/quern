@@ -159,7 +159,14 @@ def build_preview_bundle() -> Path:
     # rebuilds too. Comparing against the script alone would leave a stale app
     # behind an edit that never appeared to take.
     sources = [source, *_shared_sources()]
-    newest_source = max(p.stat().st_mtime for p in sources)
+    try:
+        newest_source = max(p.stat().st_mtime for p in sources)
+    except OSError as exc:
+        # A source vanished between the existence check and here -- a branch
+        # switch mid-build. The documented contract of this function is
+        # RuntimeError; an OSError escaping reaches the preview API as an
+        # unhandled 500 instead of an actionable message.
+        raise RuntimeError(f"ios-preview source disappeared while building: {exc}") from exc
 
     bundle, binary = bundle_paths()
     if binary.exists() and binary.stat().st_mtime >= newest_source:
@@ -222,8 +229,26 @@ def _find_source() -> Path | None:
 
 
 def _shared_sources() -> list[Path]:
-    """Extra files compiled into the app, those that exist."""
-    return [p for p in _SHARED_SOURCE_CANDIDATES if p.exists()]
+    """Extra files compiled into the app. Required, not best-effort.
+
+    Returning only the ones that happen to exist meant a missing parser
+    compiled the script alone, and swiftc then reported `cannot find
+    'JPEGFraming' in scope` against main.swift -- naming the file that is fine
+    rather than the one that is gone.
+
+    Raises:
+        RuntimeError: naming every missing path.
+    """
+    missing = [p for p in _SHARED_SOURCE_CANDIDATES if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "ios-preview cannot be built: missing "
+            + ", ".join(str(p) for p in missing)
+            + ". The app compiles from tools/ios-preview/main.swift together "
+            "with these, so a checkout without macos/QuernMedia cannot "
+            "produce it."
+        )
+    return list(_SHARED_SOURCE_CANDIDATES)
 
 
 @dataclass

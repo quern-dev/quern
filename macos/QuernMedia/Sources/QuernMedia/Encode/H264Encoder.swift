@@ -29,7 +29,10 @@ public struct H264Output {
 public final class H264Encoder {
     private let maxDimension: Int
     private let bitrate: Int
-    private let expectedFPS: Double
+    /// Normalized at init. Readable so a test can assert the normalization
+    /// itself: the trap on `Int(infinity)` is caught further down anyway, so
+    /// asserting "does not crash" proves nothing about this.
+    let expectedFPS: Double
 
     private var session: VTCompressionSession?
     private var sessionSize: (width: Int, height: Int) = (0, 0)

@@ -1,5 +1,18 @@
 import Foundation
 
+// NOTHING MAY BE IMPORTED HERE BUT FOUNDATION, and nothing from the rest of
+// this package may be referenced.
+//
+// `tools/ios-preview/main.swift` compiles this file directly, outside SwiftPM
+// and without the rest of the module, so a reference to anything else here
+// breaks `quern setup` for every user. It does not break `swift build`,
+// `swift test`, or any test in this package — all of which keep this file
+// company inside the module and stay green.
+//
+// Measured, not theorised: adding a single `MediaLog.log` call to the cap
+// below left all 106 package tests passing and broke the app build. The
+// "Compile ios-preview" step in CI exists to catch exactly that, and did.
+
 /// Pulls complete JPEGs out of a byte stream by their markers.
 ///
 /// The consumer half of MJPEG, and deliberately the *only* part of the preview
@@ -30,8 +43,18 @@ public struct JPEGFraming {
     private var buffer = Data()
     private let maxBuffer: Int
 
+    /// How many times the cap has discarded a buffer. A parser that never
+    /// completes a frame looks exactly like a screen that never sends one, so
+    /// the discard is counted rather than merely happening.
+    public private(set) var timesCapped = 0
+
+    /// - Parameter maxBuffer: bytes to hold before giving up on finding a
+    ///   frame. Clamped to at least one marker pair, because a cap smaller
+    ///   than a frame starves every frame that spans a chunk — and the public
+    ///   initialiser is reachable with 0 or a negative.
     public init(maxBuffer: Int = JPEGFraming.defaultMaxBuffer) {
-        self.maxBuffer = maxBuffer
+        self.maxBuffer = max(maxBuffer, JPEGFraming.startOfImage.count
+            + JPEGFraming.endOfImage.count)
     }
 
     /// Bytes held pending a complete frame. Exposed so a test can assert the
@@ -48,8 +71,13 @@ public struct JPEGFraming {
 
         while true {
             guard let start = buffer.range(of: Self.startOfImage) else {
-                // Nothing that could begin a frame; none of it is worth keeping.
+                // Nothing that could begin a frame. Keep a trailing 0xFF: a
+                // chunk can end between the two bytes of an SOI, and throwing
+                // that byte away resynced at the *following* frame instead —
+                // one whole frame lost, silently, per unlucky split.
+                let keepTrailingMarkerByte = buffer.last == Self.startOfImage.first
                 buffer.removeAll(keepingCapacity: true)
+                if keepTrailingMarkerByte { buffer.append(Self.startOfImage.first!) }
                 break
             }
             guard let end = buffer.range(
@@ -67,6 +95,7 @@ public struct JPEGFraming {
         }
 
         if buffer.count > maxBuffer {
+            timesCapped += 1
             buffer.removeAll(keepingCapacity: false)
         }
         return frames
