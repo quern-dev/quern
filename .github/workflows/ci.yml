@@ -44,6 +44,52 @@ jobs:
       - name: Lint
         run: .venv/bin/ruff check server/
 
+  test-linux:
+    # Informational, not a gate. The suite has never run off Darwin -- there is
+    # not a single platform skip marker in tests/, and roughly a third of it
+    # exercises Apple toolchain paths. This job exists to enumerate that
+    # breakage, not to pass. docs/linux-support-plan.md sequences it before any
+    # porting work, so that the failure list becomes the scope document rather
+    # than something discovered halfway through.
+    #
+    # continue-on-error so a red run never blocks a macOS-only change. Drop it,
+    # and fold this into the `test` matrix, once the suite is green here.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # The suite has never been timed on Linux, and a subprocess that blocks
+    # forever on a missing Apple tool would otherwise burn the job's full
+    # six-hour default.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Same reason as the macOS job.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # One version, deliberately. This probes platform coupling, which
+          # does not vary by interpreter -- the full matrix would quadruple the
+          # cost to learn the same thing.
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Worth watching in its own right: fb-idb is an unconditional dependency
+        # that exists only to supply an iOS binary, and it pulls grpcio and
+        # protobuf. If this step is what fails, that is a finding.
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Run tests
+        # --continue-on-collection-errors because a module that imports an
+        # Apple-only path fails at collection, and the default is to abort the
+        # entire run on the first one -- reporting a single error where this job
+        # needs the whole list. --tb=line keeps that list scannable.
+        run: .venv/bin/python -m pytest tests/ --continue-on-collection-errors --tb=line -rf -q
+
   menubar-build:
     # The Swift menu-bar app is not covered by the Python suite, and nothing
     # else here compiles it -- a syntax error in it would pass every other
