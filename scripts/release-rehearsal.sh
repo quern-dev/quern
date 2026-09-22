@@ -1227,8 +1227,19 @@ case_menubar_app_left_running() {
 EOF
   cat > "$app/Contents/MacOS/QuernMenuBar" <<'EOF'
 #!/bin/sh
-# Stands in for the app: what matters is the path and that it stays up.
-sleep 900
+# Stands in for the app: what matters is that the *bundle path* is in the
+# argv pgrep matches, and that it stays up.
+#
+# The sleep is a child, and killing this shell orphans it -- fifteen minutes
+# of a stray `sleep` on the developer's machine, which is exactly the litter
+# that made an unrelated test kill a bystander. So the child's pid is
+# recorded for the case to clean up, and this traps the signals it might be
+# stopped with so it usually tidies up after itself first.
+sleep 900 &
+child=$!
+echo "$child" > "${0}.child"
+trap 'kill "$child" 2>/dev/null; exit 0' TERM INT HUP
+wait "$child"
 EOF
   chmod +x "$app/Contents/MacOS/QuernMenuBar"
 
@@ -1283,6 +1294,16 @@ EOF
 
   kill "$app_pid" 2>/dev/null || true
   wait "$app_pid" 2>/dev/null || true
+  # Belt as well as braces: if the shell was killed before its trap ran, the
+  # sleep is orphaned and `wait` above cannot see it.
+  local stray
+  stray="$(cat "$app/Contents/MacOS/QuernMenuBar.child" 2>/dev/null || true)"
+  [[ -n "$stray" ]] && kill "$stray" 2>/dev/null
+  if [[ -n "$stray" ]] && kill -0 "$stray" 2>/dev/null; then
+    bad "the stand-in left $stray running"
+  else
+    ok "the stand-in left nothing behind"
+  fi
   return "$failures"
 }
 

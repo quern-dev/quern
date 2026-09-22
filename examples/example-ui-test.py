@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
 import httpx
@@ -39,7 +40,26 @@ def _discover_server_url() -> str:
             f"{state_path} records an unusable port ({port!r}).\n"
             "Start the server with `quern start`, or set QUERN_SERVER_URL."
         )
+    # A recorded port is not a running server: a crash or a SIGKILL leaves
+    # the file behind. Without this the requests below go to whatever is on
+    # that port, or to nothing, and fail somewhere far from the cause.
+    if not _server_is_up(port):
+        raise SystemExit(
+            f"{state_path} says port {port}, but nothing is answering there.\n"
+            "Start the server with `quern start`, or set QUERN_SERVER_URL."
+        )
     return f"http://127.0.0.1:{port}"
+
+
+def _server_is_up(port: int, timeout: float = 2.0) -> bool:
+    """Whether something answers /health on the loopback port."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/health", timeout=timeout
+        ) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 async def run_test(device_udid: str, device_name: str, device_index: int):
