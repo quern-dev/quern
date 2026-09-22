@@ -232,6 +232,55 @@ since the owning device becomes known before the mock decision rather than
 after it. That is the fix for the global-mock problem above, and it is a
 prerequisite for parallel agents rather than a refinement.
 
+### #259 already builds the frame this plugs into
+
+Do not design an attribution model — **one exists**, on `feat/logging-trace-export`
+(#259, mergeable and green at the time of writing). It supplies the hard part:
+
+- `Ownership` (`trace.py:115-142`) as an explicit four-value enum —
+  `OWNS` / `FOREIGN` / `UNKNOWN_WORK` / `UNSCOPED_ACTION` — with `owns()` as a
+  predicate rather than three inline udid comparisons.
+- **"Ambiguity is marked, never guessed."** Overlapping intervals yield a
+  caveat, not a claim. This is what makes an unattributable Android flow *safe*
+  today: it is reported as unknown rather than assigned to whoever was nearest.
+- Staleness carried through `ip_to_udid` (`trace.py:157-198`), so an aged
+  `client_ip` mapping is flagged rather than trusted.
+- 698 lines of `test_trace.py` behind it.
+
+The seam is a single function, `device_of` (`trace.py:207-219`):
+
+```python
+if flow.simulator_udid:                              # iOS local capture only
+    return flow.simulator_udid, True
+if flow.client_ip and flow.client_ip in ip_map:      # physical, Wi-Fi proxy
+    return ip_map[flow.client_ip]
+return None, False                                   # every Android emulator
+```
+
+An Android emulator has no `simulator_udid` and a `client_ip` of `127.0.0.1`,
+which is never in `ip_map` — that map is built from recorded Wi-Fi proxy
+configs. So it returns `(None, False)`. The module's own regime table
+(`trace.py:16-19`) lists three regimes and has no Android row; the emulator
+falls into the third, *"nothing; interval only"*.
+
+**Note which regime Linux loses.** The only row that "tells apps apart" is
+*simulator + local capture*, and `simulator_udid` comes from the macOS System
+Extension. A headless Linux build cannot have it at all — so Linux needs the
+port-based branch more than macOS does, not less.
+
+Adding it is one branch in `device_of`, plus a `listener_port` on `FlowRecord`
+populated from `sockname` in `_serialize_flow`:
+
+```python
+if flow.listener_port and flow.listener_port in port_map:
+    return port_map[flow.listener_port], True
+```
+
+That branch is **exact rather than inferential** — the port is a property of the
+connection, not a time-window guess — so it ranks with `simulator_udid` above
+`client_ip`, not below it. Worth adding the Android row to that table at the
+same time; its absence currently reads as an oversight rather than a known gap.
+
 ### Routing coupling to unpick
 
 One mechanism is implemented, and it is wired oddly
@@ -327,6 +376,25 @@ roadmap — listed here so the port is not blamed for them:
 
 A Linux build ships whatever Android parity exists at the time. These do not
 block the port; they determine how good the product is when it lands.
+
+**The pattern behind the list is worth naming, because it predicts where the
+next gap will be.** Features here are built for iOS first and extended to
+Android afterwards — sometimes thoroughly, sometimes not. So the reliable place
+to look for a gap is any feature whose iOS implementation came first, which is
+nearly all of them. Three shapes recur:
+
+- **Silently absent.** Crash reporting and Gradle have no Android code at all —
+  not a stub, not an error, simply nothing to find.
+- **Present but unguarded.** `_require_simulator` tests only `_is_physical`, so
+  Android UDIDs fall through to `simctl` rather than hitting the clear refusal
+  the guard exists to give (see §2).
+- **Present but iOS-shaped.** Errors from the Android UI path are labelled
+  `[idb]` (#186); `/proxy/cert/verify` routes Android through `_verify_simulator`
+  and reports `status: "never_booted"` for a device whose cert is installed.
+
+An Android-only build removes the iOS implementation that was masking each of
+these, so it converts "works on my Mac" into the whole product surface. Budget
+for finding more of them than this list names.
 
 ## Testing and CI
 
