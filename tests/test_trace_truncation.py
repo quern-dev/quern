@@ -80,8 +80,8 @@ class TestTheLimitDoesNotCrashTheEndpoint:
         assert "actions" in result
 
     async def test_the_limit_bounds_what_comes_back(self):
-        """Applying it only to the buffer query bounded the wrong thing: the
-        udid filter runs afterwards."""
+        """The slice is the only bound: `filter_entries` ignores the query
+        limit, so nothing before it was ever bounding the result."""
         server = RingBuffer(max_size=100)
         for i in range(10):
             await server.append(_action_entry(i))
@@ -148,3 +148,73 @@ class TestMoreLogsThanAskedFor:
 
         assert result["logs_over_limit"] is True
         assert result["log_window_truncated"] is False
+
+
+class TestEveryLossIsReported:
+    """The log path reported both of its losses; the flow and action paths
+    reported neither. A trace missing the requests that explain a failure,
+    with nothing saying they were dropped, is the exact shape the rest of
+    this file guards against — it was only guarded on one of three inputs."""
+
+    async def test_flows_over_the_limit_are_reported(self):
+        store = _FakeFlowStore([_flow(i) for i in range(50)])
+        result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=1)
+
+        assert result["flows_over_limit"] is True
+
+    async def test_flows_within_the_limit_are_not(self):
+        store = _FakeFlowStore([_flow(1)])
+        result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=100)
+
+        assert result["flows_over_limit"] is False
+
+    async def test_actions_over_the_limit_are_reported(self):
+        server = RingBuffer(max_size=100)
+        for i in range(10):
+            await server.append(_action_entry(i))
+
+        result = await _call_full(
+            ring=RingBuffer(max_size=10), flows=None, limit=3, server=server,
+        )
+
+        assert result["actions_over_limit"] is True
+        assert len(result["actions"]) == 3
+
+    async def test_a_quiet_server_is_not_reported_as_truncated(self):
+        result = await _call_full(ring=RingBuffer(max_size=10), flows=None, limit=100)
+
+        assert result["actions_over_limit"] is False
+        assert result["action_window_truncated"] is False
+
+
+class _FakeFlowStore:
+    """Enough of FlowStore to exercise the bounding, without a proxy."""
+
+    def __init__(self, flows):
+        self._flows = flows
+        self.max_size = 5000
+
+    @property
+    def size(self):
+        return len(self._flows)
+
+    async def get_since(self, since):
+        return [f for f in self._flows if f.timestamp >= since]
+
+
+def _flow(i):
+    from server.models import FlowRecord, FlowRequest
+
+    return FlowRecord(
+        id=uuid.uuid4().hex,
+        timestamp=BASE + timedelta(seconds=i),
+        request=FlowRequest(method="GET", url="https://x/", host="x", path="/"),
+    )
+
+
+async def _call_full(*, ring, flows, limit, server=None):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        server_buffer=server or RingBuffer(max_size=10),
+        ring_buffer=ring, flow_store=flows, proxy_adapter=None,
+    )))
+    return await get_trace(request=request, since=BASE, udid=None, limit=limit)

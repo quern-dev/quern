@@ -583,7 +583,6 @@ class TestTheResolvedDeviceReachesTheActionEntry:
 
     async def test_resolving_a_device_records_it_on_the_action(self):
         from server.api.actions import action
-        from server.device.controller import DeviceController
 
         controller = _bare_controller()
 
@@ -598,7 +597,6 @@ class TestTheResolvedDeviceReachesTheActionEntry:
     async def test_it_is_harmless_with_no_action_in_progress(self):
         """`resolve_udid` runs from tests and from startup paths where
         nothing is recording. The no-op stand-in has to absorb it."""
-        from server.device.controller import DeviceController
 
         controller = _bare_controller()
 
@@ -613,7 +611,6 @@ class TestTheMonotonicStartReachesTheEntry:
     had it."""
 
     async def test_an_action_entry_carries_a_monotonic_start(self):
-        from server.api.actions import action
 
         entries = await _capture(_ran_once)
 

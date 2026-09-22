@@ -580,3 +580,68 @@ class TestAFlowInTwoGraceWindowsSaysSo:
         assert second_a.flows == [flow]
         assert any("also attributed" in c for c in first_a.caveats)
         assert any("also attributed" in c for c in second_a.caveats)
+
+
+class TestLateLogOutputIsAttributedToo:
+    """The grace window applied to flows and not to logs.
+
+    This module's central argument — that most actions return before the work
+    they cause happens — is as true of an app's log output as of its HTTP
+    requests. Without it the trace could show the request an action caused but
+    not the NSLog beside it, which is the common debugging case. Measured: an
+    `open_url` finishing in 150ms, with both a flow and a log line 300ms
+    after, attributed the flow and dropped the line.
+    """
+
+    @staticmethod
+    def _line(at_s, device="SIM-A"):
+        return LogEntry(
+            id=uuid.uuid4().hex,
+            timestamp=BASE + timedelta(seconds=at_s),
+            device_id=device,
+            process="MyApp",
+            level=LogLevel.INFO,
+            message="late",
+            source=LogSource.SIMULATOR,
+        )
+
+    def test_a_line_just_after_the_action_is_attributed(self):
+        action = _action("open_url", at_s=10, duration_ms=150)
+        line = self._line(11)
+
+        [attribution] = build_trace([action], [], [line])
+
+        assert attribution.logs == [line]
+
+    def test_it_is_marked_as_inferred(self):
+        action = _action("open_url", at_s=10, duration_ms=150)
+
+        [attribution] = build_trace([action], [], [self._line(11)])
+
+        assert any("after the action returned" in c for c in attribution.caveats)
+
+    def test_a_line_during_the_action_is_not_marked(self):
+        action = _action("tap", at_s=10, duration_ms=2000)
+
+        [attribution] = build_trace([action], [], [self._line(9)])
+
+        assert attribution.logs
+        assert not any("after the action returned" in c for c in attribution.caveats)
+
+    def test_a_line_beyond_the_window_is_not_attributed(self):
+        action = _action("open_url", at_s=10, duration_ms=150)
+
+        [attribution] = build_trace([action], [], [self._line(60)])
+
+        assert attribution.logs == []
+
+    def test_a_line_on_a_shared_boundary_has_one_owner(self):
+        """The flow path was made half-open; this loop was still closed, so a
+        line at the instant one action ended and the next began went to both
+        with nothing saying so."""
+        first = _action("tap", at_s=10, duration_ms=2000)
+        second = _action("swipe", at_s=12, duration_ms=2000)
+
+        first_a, second_a = build_trace([first, second], [], [self._line(10)])
+
+        assert len(first_a.logs) + len(second_a.logs) == 1

@@ -343,32 +343,53 @@ def build_trace(
     for entry in device_logs:
         if entry.source not in APP_LOG_SOURCES:
             continue
+
+        # Logs get the grace window too. This module's central argument --
+        # that most actions return before the work they cause happens -- is
+        # as true of an app's log output as of its HTTP requests, and without
+        # it the trace could show the request an action caused but not the
+        # NSLog beside it. Measured: an `open_url` finishing in 150ms with
+        # both a flow and a log line 300ms later attributed the flow and
+        # dropped the line.
+        candidates: list[int] = []
+        inferred_log = False
         for i, attribution in enumerate(result):
-            start, end = intervals[i]
-            if not (start <= entry.timestamp <= end):
-                continue
-            # Device logs carry the udid they came from in `device_id`, and
-            # one server can be driving several devices for several callers at
-            # once. Matching on time alone hands one caller another's log
-            # lines -- which is worse than no trace, because it reads as
-            # evidence about their own run.
             if (
                 entry.device_id
                 and attribution.action.udid
                 and entry.device_id != attribution.action.udid
             ):
                 continue
+            start, end = intervals[i]
+            if start < entry.timestamp <= end:
+                candidates.append(i)
+        if not candidates:
+            for i, attribution in enumerate(result):
+                if (
+                    entry.device_id
+                    and attribution.action.udid
+                    and entry.device_id != attribution.action.udid
+                ):
+                    continue
+                _, end = intervals[i]
+                if end < entry.timestamp <= end + grace:
+                    candidates.append(i)
+                    inferred_log = True
+
+        for i in candidates:
+            attribution = result[i]
+            if inferred_log:
+                _note(
+                    attribution,
+                    "some log lines arrived after the action returned and are "
+                    "attributed by timing rather than observed causation",
+                )
             # Clock mismatch, stated rather than silently compared. An action
             # interval is on the host clock; a device log line is stamped by
             # OSLog on the *device's* clock. A simulator shares the host's, so
             # there is nothing to reconcile. A physical device does not, and
             # quern applies no offset -- so an attribution near an interval
             # boundary may be on the wrong side of it.
-            #
-            # Measurable, just not measured here: alignment under a
-            # millisecond has been observed over a held lockdown connection,
-            # but only while it is held, so it is a live reading rather than a
-            # constant a trace could cache.
             if entry.source in _DEVICE_CLOCK_SOURCES:
                 _note(
                     attribution,

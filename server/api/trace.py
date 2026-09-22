@@ -11,6 +11,7 @@ per regime -- is a pure function that can be tested without a server.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -117,13 +118,32 @@ async def get_trace(
         if e.action and e.outcome != "started"
         and (not udid or e.udid == udid)
     ]
-    # `limit` bounds what the caller gets back. Applying it only to the buffer
-    # query bounded the wrong thing: the udid filter runs afterwards, so a
-    # busy server could return far fewer actions than asked for, or -- with no
-    # udid filter -- more work than the caller sized for. Newest first, since
-    # a trace is read backwards from the thing that just went wrong.
-    if len(actions) > limit:
+    # `limit` bounds what the caller gets back.
+    #
+    # An earlier version of this comment said the buffer query had bounded
+    # "the wrong thing" because the udid filter runs afterwards. That was
+    # wrong: `filter_entries` ignores `params.limit` entirely, so the query
+    # never bounded anything at all -- as this file says correctly a few
+    # lines below. The slice is the only bound there has ever been.
+    #
+    # The newest are kept, since a trace is read backwards from whatever just
+    # went wrong. The response is still ordered oldest-first.
+    actions_over_limit = len(actions) > limit
+    if actions_over_limit:
         actions = actions[-limit:]
+
+    # Actions can also age out, and the probe below only ever watched the
+    # device-log buffer. Actions come from `server_buffer`, a separate and
+    # much smaller RingBuffer that receives *every* server log record, not
+    # only action entries -- so on a busy server the start of a window can be
+    # gone while `log_window_truncated` says nothing, because it was never
+    # about that buffer. "Quern did nothing for two minutes" and "the entries
+    # aged out" then look identical.
+    actions_truncated = False
+    if server_buffer.size >= server_buffer.max_size:
+        oldest_server = await server_buffer.get_recent(count=server_buffer.size)
+        if oldest_server and oldest_server[0].timestamp > window_start:
+            actions_truncated = True
 
     # Clamped, not multiplied blindly: LogQueryParams caps `limit` at 1000, so
     # `limit * 10` raised a ValidationError inside the handler -- an uncaught
@@ -164,10 +184,35 @@ async def get_trace(
         oldest = await ring_buffer.get_recent(count=ring_buffer.size)
         if oldest and oldest[0].timestamp > window_start:
             truncated = True
-    flows = await flow_store.get_since(window_start) if flow_store else []
+    # Flows get the same treatment the logs already had, for the same two
+    # reasons -- and they matter more here, because attribution compares every
+    # flow against every action. Measured on this branch: 1,000 actions
+    # against a full 5,000-flow store is ~0.95s of synchronous work inside an
+    # async handler with no await, which stalls the event loop for every other
+    # caller on the server.
+    flows: list = []
+    flows_over_limit = False
+    flow_window_truncated = False
+    if flow_store is not None:
+        flows = await flow_store.get_since(window_start)
+        flows_over_limit = len(flows) > log_limit
+        if flows_over_limit:
+            flows = flows[-log_limit:]
+        # The store evicts oldest-first and silently, exactly like the ring
+        # buffer, so the same probe applies: full, and nothing surviving from
+        # before the window, means the start of it is gone.
+        if flow_store.size >= flow_store.max_size:
+            oldest = await flow_store.get_since(datetime.min.replace(tzinfo=UTC))
+            if oldest and oldest[0].timestamp > window_start:
+                flow_window_truncated = True
 
-    attributions = build_trace(
-        actions, flows, device_logs, ip_map=_ip_map(),
+    # In a thread. Attribution is pure CPU over plain data with nothing to
+    # await, and it compares every flow and every log against every action --
+    # measured at 0.25s for a full window even after bounding the inputs, and
+    # ~0.95s before. That is the whole server's event loop, shared by every
+    # other agent and device, stalled on one caller reading a trace.
+    attributions = await asyncio.to_thread(
+        build_trace, actions, flows, device_logs, ip_map=_ip_map(),
     )
 
     return {
@@ -204,6 +249,14 @@ async def get_trace(
         # fewer logs than really existed -- and different causes, so folding
         # them together would send a reader to the wrong fix.
         "logs_over_limit": logs_over_limit,
+        # The flow path had none of these. A trace missing the requests that
+        # explain a failure, with nothing saying they were dropped, is the
+        # shape this whole file guards against -- and it was only guarded on
+        # one of the two inputs.
+        "actions_over_limit": actions_over_limit,
+        "action_window_truncated": actions_truncated,
+        "flows_over_limit": flows_over_limit,
+        "flow_window_truncated": flow_window_truncated,
         # The adapter's own view, not "a flow store exists". The store is
         # created at startup and outlives a stopped proxy, so the previous
         # check reported True with capture off -- which is exactly the
