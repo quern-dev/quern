@@ -1296,9 +1296,16 @@ EOF
   wait "$app_pid" 2>/dev/null || true
   # Belt as well as braces: if the shell was killed before its trap ran, the
   # sleep is orphaned and `wait` above cannot see it.
+  # An `if`, not `[[ ... ]] && kill ...`: under `set -e` that one-liner's
+  # status is the whole list's, so an empty $stray ended the case there --
+  # silently, with the parent adding a failure nobody had printed. Exactly
+  # the shape the per-case exit status was introduced to carry, biting the
+  # case that reports it.
   local stray
   stray="$(cat "$app/Contents/MacOS/QuernMenuBar.child" 2>/dev/null || true)"
-  [[ -n "$stray" ]] && kill "$stray" 2>/dev/null
+  if [[ -n "$stray" ]]; then
+    kill "$stray" 2>/dev/null || true
+  fi
   if [[ -n "$stray" ]] && kill -0 "$stray" 2>/dev/null; then
     bad "the stand-in left $stray running"
   else
