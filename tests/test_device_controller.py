@@ -703,6 +703,10 @@ class TestNoIdentifierIsTappedFromAConstant:
         ctrl._active_udid = "AAAA-1111"
         ctrl.idb.describe_all = AsyncMock(return_value=[])
         ctrl.idb.tap = AsyncMock()
+        # The miss path grabs a screenshot for context, which was never
+        # mocked here -- so it shelled out to a real `simctl io` against a
+        # udid that does not exist, and swallowed the error (#272).
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
 
         result = await ctrl.tap_element(
             identifier=identifier, scroll_to_find=False,
@@ -744,6 +748,10 @@ class TestTapElement:
         # iOS taps now scroll-to-find on a miss; simulate the scroll also
         # failing to surface the element so we exercise the not_found path.
         ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+        # The miss path grabs a screenshot for context, which was never
+        # mocked here -- so it shelled out to a real `simctl io` against a
+        # udid that does not exist, and swallowed the error (#272).
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
 
         result = await ctrl.tap_element(label="Nonexistent", scroll_to_find=True)
         assert result["status"] == "not_found"
