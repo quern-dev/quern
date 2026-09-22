@@ -224,6 +224,9 @@ each emulator's `http_proxy` at its own port, and tag each flow by
 `flow.client_conn.sockname[1]`. Physical devices keep working through
 `client_ip`. `FlowRecord` needs a device field and the store a filter on it.
 
+At the scale this targets — a handful of devices, one owner — that is a small
+contiguous port range and a dict, not a port allocator. Size it accordingly.
+
 This is also what makes **per-device mock and intercept scoping** possible,
 since the owning device becomes known before the mock decision rather than
 after it. That is the fix for the global-mock problem above, and it is a
@@ -273,8 +276,22 @@ usable, and it is a small change.
 
 ## Multi-agent is a dependency, not a nice-to-have
 
-A headless server exists to be shared. That promotes **#254 (device sessions)**
-from a roadmap item to a prerequisite for the deployment model.
+**Scope bound first, because it decides how much machinery this deserves: the
+target is several agents belonging to one owner, working on one project, across
+a handful of devices. It is not a click-farm host.** No tenant isolation, no
+quotas, no per-user state directories, no dynamic device-pool leasing across
+untrusting parties. "Shared" here means *concurrent*, not *multi-tenant* — and
+the difference is roughly an afternoon against a subsystem.
+
+With that bound, the concurrency problems below are still real, because they
+bite at two agents, not at fifty.
+
+`_active_udid` is a single value on the controller (`controller.py:81`),
+persisted to a sidecar. `resolve_udid(explicit)` sets it, so with two agents it
+is last-writer-wins: agent A can tap agent B's device and nothing says so. On a
+developer's Mac that is an edge case. On a shared headless server it is the
+normal case. This promotes **#254 (device sessions)** from a roadmap item to a
+prerequisite for the deployment model.
 
 `_active_udid` is a single value on the controller (`controller.py:81`),
 persisted to a sidecar. `resolve_udid(explicit)` sets it, so with two agents it
