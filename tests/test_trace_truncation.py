@@ -96,12 +96,12 @@ class TestTheLimitDoesNotCrashTheEndpoint:
         assert len(result["actions"]) == 3
 
 
-def _action_entry(i):
+def _action_entry(i, duration_ms=10):
     return LogEntry(
         id=uuid.uuid4().hex, timestamp=BASE + timedelta(seconds=i),
         device_id="server", process="server.api.actions", category="device.action",
         level=LogLevel.INFO, message="x", source=LogSource.SERVER,
-        action="tap", udid="SIM-A", duration_ms=10, outcome="ok",
+        action="tap", udid="SIM-A", duration_ms=duration_ms, outcome="ok",
     )
 
 
@@ -202,22 +202,23 @@ class _FakeFlowStore:
         return [f for f in self._flows if f.timestamp >= since]
 
 
-def _flow(i):
+def _flow(i, **kw):
     from server.models import FlowRecord, FlowRequest
 
     return FlowRecord(
         id=uuid.uuid4().hex,
         timestamp=BASE + timedelta(seconds=i),
         request=FlowRequest(method="GET", url="https://x/", host="x", path="/"),
+        **kw,
     )
 
 
-async def _call_full(*, ring, flows, limit, server=None):
+async def _call_full(*, ring, flows, limit, server=None, udid=None):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         server_buffer=server or RingBuffer(max_size=10),
         ring_buffer=ring, flow_store=flows, proxy_adapter=None,
     )))
-    return await get_trace(request=request, since=BASE, udid=None, limit=limit)
+    return await get_trace(request=request, since=BASE, udid=udid, limit=limit)
 
 
 class TestTheBoundIsSpentOnUsableLogs:
@@ -236,10 +237,23 @@ class TestTheBoundIsSpentOnUsableLogs:
         for i in range(2, 60):
             await ring.append(_entry(i, source=LogSource.BUILD))
 
-        result = await _call_with_limit(ring, BASE, limit=1)  # log_limit == 10
+        # With an action to attribute to, so the assertion can be about the
+        # line surviving rather than about a flag. The previous version
+        # asserted only `logs_over_limit is False`, which stayed true when the
+        # whole source filter was deleted -- it guarded the flag, not the
+        # behaviour its name describes.
+        # An action whose window actually spans the app line at t=1, so the
+        # assertion is about the line surviving the bound rather than about
+        # the fixture.
+        server = RingBuffer(max_size=100)
+        await server.append(_action_entry(2, duration_ms=3000))
 
-        assert result["actions"] is not None
-        # The app line survived the bound rather than being crowded out.
+        result = await _call_full(
+            ring=ring, flows=None, limit=1, server=server,
+        )
+
+        [attributed] = result["actions"]
+        assert attributed["logs"], "the app line was crowded out by discarded noise"
         assert result["logs_over_limit"] is False
 
     async def test_the_flag_counts_usable_logs_only(self):
@@ -253,4 +267,197 @@ class TestTheBoundIsSpentOnUsableLogs:
 
         assert result["logs_over_limit"] is False, (
             "discarded sources were counted against the caller's limit"
+        )
+
+
+class TestTheTruncationProbesFireWhenTheyShould:
+    """Two signals were asserted only in the `False` direction, so hardwiring
+    them off passed the entire 3474-test suite. A loss signal that can never
+    be true is worse than none — it reads as a guarantee."""
+
+    async def test_actions_lost_from_the_server_buffer_are_reported(self):
+        server = RingBuffer(max_size=3)
+        # More than fits, all after the requested window start.
+        for i in range(10, 14):
+            await server.append(_action_entry(i))
+
+        result = await _call_full(
+            ring=RingBuffer(max_size=10), flows=None, limit=100, server=server,
+        )
+
+        assert result["action_window_truncated"] is True
+
+    async def test_flows_lost_from_the_store_are_reported(self):
+        store = _FakeFlowStore([_flow(i) for i in range(10, 14)])
+        store.max_size = 4  # full
+
+        result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=100)
+
+        assert result["flow_window_truncated"] is True
+
+    async def test_a_store_reaching_back_past_the_window_is_not(self):
+        """Full is not truncated. The probe has to find the true oldest, and
+        the store is in completion order rather than timestamp order — so
+        reading its first entry claimed truncation that had not happened."""
+        store = _FakeFlowStore([_flow(10), _flow(-5), _flow(11)])
+        store.max_size = 3
+
+        result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=100)
+
+        assert result["flow_window_truncated"] is False
+
+
+class TestTheDeviceFilterKeepsTheCallersLogs:
+    """The `udid` pre-filter on device logs had no coverage. It is also the
+    mechanism behind the `device_id` sentinel bug: it discarded every log
+    line, because `"default"` is truthy and never equal to a udid.
+
+    As with the flow filter, the assertion has to be about the *bound*.
+    Attribution rejects a foreign line on its own, so a test that only counts
+    attributed logs stays green with the filter deleted -- measured."""
+
+    async def test_a_neighbour_cannot_crowd_out_the_callers_own_logs(self):
+        from server.models import LogSource
+
+        ring = RingBuffer(max_size=100)
+        await ring.append(_entry(1))  # device_id="SIM-A", oldest
+        for i in range(15):           # another device, newer
+            ring_entry = LogEntry(
+                id=uuid.uuid4().hex, timestamp=BASE + timedelta(seconds=2 + i),
+                device_id="SIM-B", process="MyApp", level=LogLevel.INFO,
+                message="theirs", source=LogSource.SIMULATOR,
+            )
+            await ring.append(ring_entry)
+        server = RingBuffer(max_size=100)
+        await server.append(_action_entry(2, duration_ms=4000))
+
+        # limit=1 bounds device logs at 10, fewer than the neighbour sent.
+        result = await _call_full(
+            ring=ring, flows=None, limit=1, server=server, udid="SIM-A",
+        )
+
+        [attributed] = result["actions"]
+        assert attributed["logs"], "the caller's own log line was crowded out"
+
+    async def test_a_line_with_no_device_is_kept(self):
+        """Unknown is not foreign, here too."""
+        from server.models import LogSource
+
+        ring = RingBuffer(max_size=100)
+        await ring.append(LogEntry(
+            id=uuid.uuid4().hex, timestamp=BASE + timedelta(seconds=1),
+            device_id="", process="MyApp", level=LogLevel.INFO,
+            message="unscoped", source=LogSource.SIMULATOR,
+        ))
+        server = RingBuffer(max_size=100)
+        await server.append(_action_entry(2, duration_ms=3000))
+
+        result = await _call_full(
+            ring=ring, flows=None, limit=100, server=server, udid="SIM-A",
+        )
+
+        [attributed] = result["actions"]
+        assert attributed["logs"]
+
+
+class TestTheFlowFilterSeesPhysicalDevices:
+    """The pre-filter exists to spend the bound on the caller's own flows. It
+    read `simulator_udid`, which only a simulator has -- so every
+    physical-device flow read as unidentified and survived it, including
+    another device's. On a Wi-Fi-proxied device the filter did nothing at all.
+
+    Note what these assert on. Attribution drops a foreign flow anyway, so a
+    test counting attributed flows is green with the filter deleted. The only
+    observable effect is the *bound*: a busy neighbour's flows, kept through
+    the filter, fill the slice and push this caller's own flow out of its own
+    trace before attribution ever sees it."""
+
+    @pytest.fixture
+    def ip_map(self, monkeypatch):
+        mapping = {}
+        monkeypatch.setattr("server.api.trace._ip_map", lambda: mapping)
+        return mapping
+
+    async def _trace_of(self, store, udid):
+        server = RingBuffer(max_size=100)
+        await server.append(_action_entry(2, duration_ms=4000))
+        result = await _call_full(
+            ring=RingBuffer(max_size=10), flows=store, limit=1,
+            server=server, udid=udid,
+        )
+        [action] = result["actions"]
+        return action["flows"]
+
+    async def test_a_neighbour_cannot_crowd_out_the_callers_own_flow(self, ip_map):
+        ip_map["10.0.0.1"] = ("SIM-A", True)
+        ip_map["10.0.0.9"] = ("PHONE-B", True)
+        # limit=1 bounds flows at 10. The caller's own is the oldest, so
+        # without the filter the slice keeps ten of the neighbour's instead.
+        store = _FakeFlowStore(
+            [_flow(1, client_ip="10.0.0.1")]
+            + [_flow(2 + i, client_ip="10.0.0.9") for i in range(15)],
+        )
+
+        flows = await self._trace_of(store, "SIM-A")
+
+        assert len(flows) == 1, "the caller's own flow was crowded out"
+
+    async def test_an_unidentifiable_flow_still_reaches_attribution(self, ip_map):
+        """Unknown is not foreign. Attribution can claim it on time alone,
+        with a caveat, so the filter must not decide for it."""
+        store = _FakeFlowStore([_flow(1)])
+
+        flows = await self._trace_of(store, "SIM-A")
+
+        assert len(flows) == 1
+
+    async def test_a_simulator_flow_is_still_matched(self, ip_map):
+        """`device_of` prefers `simulator_udid`; the old path must keep
+        working."""
+        store = _FakeFlowStore(
+            [_flow(1, simulator_udid="SIM-A")]
+            + [_flow(2 + i, simulator_udid="SIM-B") for i in range(15)],
+        )
+
+        flows = await self._trace_of(store, "SIM-A")
+
+        assert len(flows) == 1
+
+
+class TestTheTimelineIsInOrder:
+    """The store is an OrderedDict in *completion* order while `timestamp` is
+    when the request started, so overlapping requests -- the normal case --
+    come back shuffled. An endpoint whose premise is one timeline has to sort
+    them, and the slice below it has to bound by time rather than by whichever
+    finished last."""
+
+    async def _flows_of(self, store, limit=100):
+        server = RingBuffer(max_size=100)
+        await server.append(_action_entry(20, duration_ms=30000))
+        result = await _call_full(
+            ring=RingBuffer(max_size=10), flows=store, limit=limit, server=server,
+        )
+        [action] = result["actions"]
+        return action["flows"]
+
+    async def test_flows_come_back_chronological(self):
+        store = _FakeFlowStore([_flow(5), _flow(1), _flow(9), _flow(3)])
+
+        flows = await self._flows_of(store)
+
+        stamps = [f["timestamp"] for f in flows]
+        assert stamps == sorted(stamps)
+
+    async def test_the_bound_keeps_the_newest_not_the_last_completed(self):
+        """A slow request that started first but finished last is at the end
+        of the store. Unsorted, the slice keeps it and discards a newer one."""
+        store = _FakeFlowStore([_flow(i) for i in range(2, 14)] + [_flow(1)])
+
+        flows = await self._flows_of(store, limit=1)   # bounds flows at 10
+
+        stamps = [f["timestamp"] for f in flows]
+        assert len(stamps) == 10
+        oldest_kept = min(stamps)
+        assert oldest_kept > (BASE + timedelta(seconds=1)).isoformat(), (
+            "the oldest flow survived the bound while a newer one was dropped"
         )

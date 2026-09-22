@@ -19,7 +19,15 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Query, Request
 
 from server.models import LogQueryParams, LogSource, TraceResponse
-from server.trace import APP_LOG_SOURCES, Attribution, build_trace, ip_to_udid
+from server.trace import (
+    APP_LOG_SOURCES,
+    Attribution,
+    Ownership,
+    build_trace,
+    device_of,
+    ip_to_udid,
+    owns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,15 +209,38 @@ async def get_trace(
     # against a full 5,000-flow store is ~0.95s of synchronous work inside an
     # async handler with no await, which stalls the event loop for every other
     # caller on the server.
+    # Read before the flow filter, not after: the filter needs it to resolve a
+    # physical device's flows at all.
+    ip_map = await asyncio.to_thread(_ip_map)
+
     flows: list = []
     flows_over_limit = False
     flow_window_truncated = False
     if flow_store is not None:
         flows = await flow_store.get_since(window_start)
+        # Sorted, because the store is not. It is an OrderedDict in insertion
+        # order, and a flow is inserted when it *completes* while its
+        # `timestamp` is when the request *started* -- so any overlapping
+        # requests, which is the normal case for an app, come back out of
+        # order. Three things depended on the order being chronological and
+        # none of them said so: the slice below kept the most recently
+        # completed rather than the newest, the truncation probe read the
+        # first-inserted as though it were the oldest and claimed truncation
+        # that had not happened, and an endpoint whose premise is "one
+        # timeline" returned its flows out of sequence.
+        flows.sort(key=lambda f: f.timestamp)
         if udid:
+            # Resolved the way attribution resolves it, via `device_of`, not
+            # by reading `simulator_udid` directly. Only simulators have that
+            # field; a physical device is identified by the `client_ip` its
+            # recorded proxy config names. Matching on `simulator_udid` alone
+            # made every physical-device flow on the server look unidentified,
+            # so all of them survived a filter whose whole job is to spend the
+            # bound on this caller -- and a second device on Wi-Fi could push
+            # this one's flows out of its own trace.
             flows = [
                 f for f in flows
-                if not f.simulator_udid or f.simulator_udid == udid
+                if owns(udid, device_of(f, ip_map)[0]) is not Ownership.FOREIGN
             ]
         flows_over_limit = len(flows) > log_limit
         if flows_over_limit:
@@ -218,8 +249,11 @@ async def get_trace(
         # buffer, so the same probe applies: full, and nothing surviving from
         # before the window, means the start of it is gone.
         if flow_store.size >= flow_store.max_size:
-            oldest = await flow_store.get_since(datetime.min.replace(tzinfo=UTC))
-            if oldest and oldest[0].timestamp > window_start:
+            everything = await flow_store.get_since(
+                datetime.min.replace(tzinfo=UTC),
+            )
+            # `min` rather than `[0]`, for the same reason.
+            if everything and min(f.timestamp for f in everything) > window_start:
                 flow_window_truncated = True
 
     # In a thread. Attribution is pure CPU over plain data with nothing to
@@ -227,9 +261,6 @@ async def get_trace(
     # measured at 0.25s for a full window even after bounding the inputs, and
     # ~0.95s before. That is the whole server's event loop, shared by every
     # other agent and device, stalled on one caller reading a trace.
-    # `_ip_map` reads the cert state file, so it goes off the loop with the
-    # attribution rather than blocking it just before.
-    ip_map = await asyncio.to_thread(_ip_map)
     attributions = await asyncio.to_thread(
         build_trace, actions, flows, device_logs, ip_map=ip_map,
     )

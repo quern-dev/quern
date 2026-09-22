@@ -189,24 +189,45 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
             ip = config.get("client_ip")
             if not ip:
                 continue
-            fresh = True
+            # Bound every iteration. It was only assigned inside the
+            # `if set_at:` branch, so a config with a `client_ip` and no
+            # `set_at` -- which the schema permits -- raised UnboundLocalError.
+            # `_ip_map` swallows that with a bare except and returns {}, so a
+            # single malformed record silently disabled *all* physical-device
+            # attribution with no signal at all.
+            #
+            # Worse, it leaked: an undated entry kept the previous loop's
+            # timestamp, so it could win the tie-break below on a date that
+            # belonged to another device and be reported as firmly fresh.
+            recorded: datetime | None = None
             set_at = config.get("set_at")
             if set_at:
                 try:
                     recorded = datetime.fromisoformat(set_at)
                 except ValueError:
                     recorded = None
-                if recorded is not None:
-                    fresh = (now - recorded) <= IP_MAPPING_TRUSTED_FOR
+            # Unknown age is not freshness. Claiming it would be the exact
+            # thing the caveat exists to prevent -- a stale mapping presented
+            # as trustworthy attributes another device's traffic to this one.
+            fresh = recorded is not None and (now - recorded) <= IP_MAPPING_TRUSTED_FOR
             # Two devices can hold the same address over time -- DHCP
             # reuses them. Keeping whichever the dict happened to reach last
             # would attribute a flow to an arbitrary one of them, so the most
             # recently recorded wins.
-            previous = recorded_at.get(ip)
-            if previous is not None and recorded is not None and recorded < previous:
-                continue
-            if previous is not None and recorded is None:
-                continue
+            # A dated record beats an undated one: knowing something beats
+            # knowing nothing. Between two dated records the later wins.
+            # Between two undated ones there is no basis to choose, so the
+            # last read stands.
+            if ip in recorded_at:
+                previous = recorded_at[ip]
+                if recorded is None and previous is not None:
+                    continue
+                if (
+                    recorded is not None
+                    and previous is not None
+                    and recorded < previous
+                ):
+                    continue
             recorded_at[ip] = recorded
             mapping[ip] = (udid, fresh)
     return mapping
@@ -389,8 +410,14 @@ def _attribute(
                 )
             elif not work_udid:
                 _note(attribution, f"some {noun} matched on time alone")
-            else:
-                extra_caveat(attribution, item, firm)
+            # Not `elif`. The per-kind caveat is a different fact from how
+            # firmly the item was attributed, and chaining them meant a
+            # physical-device log line attributed to an unscoped action said
+            # the attribution was weak but not that the two timestamps come
+            # from different clocks -- the one case where that matters most.
+            # The consolidation lost this; it is the only rule from the old
+            # log loop that did not survive.
+            extra_caveat(attribution, item, firm)
             sink(attribution, item)
 
 
