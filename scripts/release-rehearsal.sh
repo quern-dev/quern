@@ -836,9 +836,21 @@ case_fresh_install() {
   #
   # The caller's PATH, since `quern mcp-install` is run from the user's shell
   # and may rebuild the wrapper, which needs their node.
+  set +e
   ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
       PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
-      "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1 || true
+      "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1
+  local mcp_rc=$?
+  set -e
+  # The status, not just the file it should have written. A command that
+  # half-ran can leave a plausible-looking result behind, and then the
+  # assertion below reports on it as though the step had succeeded.
+  if [[ $mcp_rc -eq 0 ]]; then
+    ok "mcp-install completed"
+  else
+    bad "mcp-install exited $mcp_rc"
+    tail -n 6 "$sb/mcp-install.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
 
   # The MCP registration the installer writes, checked for *where it points*.
   # This project has twice written a path into another tool's config that was
@@ -1239,7 +1251,19 @@ EOF
   ( cd "$install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
       PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
       "$install/quern" setup ) > "$sb/setup.log" 2>&1
+  local setup_rc=$?
   set -e
+
+  # Evidence that setup reached the menu-bar decision at all. Without this,
+  # a setup that died early leaves the app running for the most boring
+  # reason available -- it never got there -- and "setup left it running"
+  # passes on that.
+  if grep -qi "Quern app" "$sb/setup.log"; then
+    ok "setup reached the menu-bar check (rc $setup_rc)"
+  else
+    bad "setup never reported on the Quern app, so the check below proves nothing (rc $setup_rc)"
+    tail -n 8 "$sb/setup.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
 
   if kill -0 "$app_pid" 2>/dev/null; then
     ok "setup left it running"

@@ -2786,6 +2786,9 @@ class TestUrlAndEnv:
         monkeypatch.setattr(
             "server.lifecycle.state.read_state", lambda: state,
         )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda port, **kw: True,
+        )
         if key is not None:
             import tempfile
             from pathlib import Path
@@ -2802,6 +2805,47 @@ class TestUrlAndEnv:
         code = self._run(monkeypatch, ["url"], state={"server_port": 9137})
         assert code == 0
         assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_a_stale_state_file_is_not_a_running_server(self, monkeypatch, capsys):
+        """A crash or a SIGKILL leaves state.json behind. Without a health
+        check `quern url` exits 0 and hands a script a URL that refuses
+        connections — worse than the hardcoded 9100 it replaced, because it
+        looks authoritative."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: {"server_port": 9137},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda port, **kw: False,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "a script would have used this URL"
+        assert "quern start" in err
+
+    @pytest.mark.parametrize("port", [True, False, 0, 70000, -1, "9100", None, 3.5])
+    def test_an_unusable_port_is_refused(self, monkeypatch, capsys, port):
+        """`isinstance(port, int)` was the test, and `True` passes it —
+        bool subclasses int — as do 0 and 70000."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: {"server_port": port},
+        )
+        # Would pass the health check if it were ever reached, so a failure
+        # here is the validation and nothing else.
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1, f"{port!r} was accepted as a port"
+        assert capsys.readouterr().out == ""
 
     def test_url_says_so_when_nothing_is_running(self, monkeypatch, capsys):
         code = self._run(monkeypatch, ["url"], state=None)

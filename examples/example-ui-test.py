@@ -31,6 +31,14 @@ def _discover_server_url() -> str:
             f"No running server found via {state_path} ({exc}).\n"
             "Start it with `quern start`, or set QUERN_SERVER_URL."
         ) from exc
+    # The file can hold anything, including the remains of a server that is
+    # gone. `isinstance(port, int)` would not do: True passes it, and so do
+    # 0 and 70000.
+    if type(port) is not int or not (1 <= port <= 65535):
+        raise SystemExit(
+            f"{state_path} records an unusable port ({port!r}).\n"
+            "Start the server with `quern start`, or set QUERN_SERVER_URL."
+        )
     return f"http://127.0.0.1:{port}"
 
 

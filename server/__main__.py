@@ -766,6 +766,20 @@ def _check_args(
     return ops
 
 
+def _valid_port(value: object) -> int | None:
+    """`value` if it is a usable TCP port, else None.
+
+    `state.json` is a file on disk and can hold anything, including the
+    remains of a server that is long gone. `isinstance(v, int)` is not the
+    test: `True` passes it, because bool subclasses int, and so do 0 and
+    70000. A port nothing can connect to must not reach a URL a script is
+    about to trust.
+    """
+    if type(value) is not int or not (1 <= value <= 65535):
+        return None
+    return value
+
+
 def _server_base_url() -> str | None:
     """Where a client on this machine should talk to the running server.
 
@@ -773,17 +787,19 @@ def _server_base_url() -> str | None:
     and a script on this machine should not be sent out to the network and
     back. The MCP wrapper builds its URL the same way.
 
-    None when no server is running, or when the state file says nothing
-    usable. Callers report that rather than guessing a port, which is the
-    habit these commands exist to end.
+    None when nothing is actually answering. A readable state file is not a
+    running server: a crash or a SIGKILL leaves the file behind, and without
+    the health check `quern url` would exit 0 and hand a script a URL that
+    refuses connections -- which is worse than the hardcoded 9100 these
+    commands replaced, because it looks authoritative.
     """
-    from server.lifecycle.state import read_state
+    from server.lifecycle.state import is_server_healthy, read_state
 
     state = read_state()
     if not state:
         return None
-    port = state.get("server_port")
-    if not isinstance(port, int):
+    port = _valid_port(state.get("server_port"))
+    if port is None or not is_server_healthy(port):
         return None
     return f"http://127.0.0.1:{port}"
 
@@ -799,7 +815,7 @@ def _url_usage() -> None:
 def _cmd_url() -> int:
     url = _server_base_url()
     if url is None:
-        print("No server running — start it with `quern start`.", file=sys.stderr)
+        print("No server answering — start it with `quern start`.", file=sys.stderr)
         return 1
     print(url)
     return 0
@@ -830,7 +846,7 @@ def _cmd_env() -> int:
 
     url = _server_base_url()
     if url is None:
-        print("No server running — start it with `quern start`.", file=sys.stderr)
+        print("No server answering — start it with `quern start`.", file=sys.stderr)
         return 1
 
     try:

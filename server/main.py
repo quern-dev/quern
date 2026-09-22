@@ -778,13 +778,15 @@ def _keep_running_ports(args: argparse.Namespace) -> argparse.Namespace:
     state = read_state()
     if not state:
         return args
+    from server.__main__ import _valid_port
+
     if getattr(args, "port", None) is None:
-        port = state.get("server_port")
-        if isinstance(port, int):
+        port = _valid_port(state.get("server_port"))
+        if port is not None:
             args.port = port
     if getattr(args, "proxy_port", None) is None:
-        proxy_port = state.get("proxy_port")
-        if isinstance(proxy_port, int):
+        proxy_port = _valid_port(state.get("proxy_port"))
+        if proxy_port is not None:
             args.proxy_port = proxy_port
     return args
 
