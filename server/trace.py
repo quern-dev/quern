@@ -254,41 +254,90 @@ def build_trace(
                 "belong to either",
             )
 
-    for flow in flows:
-        work_udid, firm = device_of(flow, ip_map)
+    _attribute(
+        flows, result, intervals, grace,
+        device_of_item=lambda f: device_of(f, ip_map),
+        sink=lambda a, f: a.flows.append(f),
+        noun="flows",
+        extra_caveat=_flow_caveat,
+    )
+    _attribute(
+        [e for e in device_logs if e.source in APP_LOG_SOURCES],
+        result, intervals, grace,
+        # A device log line names its device outright and does not need
+        # resolving, so it is always firmly known.
+        device_of_item=lambda e: (e.device_id or None, True),
+        sink=lambda a, e: a.logs.append(e),
+        noun="log lines",
+        extra_caveat=_log_caveat,
+    )
 
-        def _window(i: int, at=flow.timestamp) -> str | None:
-            """Which time window, if any, this action could own `at` in.
+    return result
 
-            Half-open, `(start, end]`, so an instant shared by two adjacent
-            actions has exactly one owner -- the earlier, which had been
-            running up to it while the later had not yet done anything.
-            """
-            start_i, end_i = intervals[i]
-            if start_i < at <= end_i:
-                return "during"
-            if end_i < at <= end_i + grace:
-                return "after"
-            return None
 
-        # Scope first, then time, then strength of claim.
-        #
-        # An action that resolved no device used to claim anything inside its
-        # interval, including a flow firmly identified as another device's --
-        # with no caveat, because the overlap pass skips pairs where one side
-        # has no device. `wait_for_flow` blocks for ten seconds by default and
-        # names no device, so this was the *likely* case, not a corner one.
-        #
-        # So an unscoped action is a fallback: it takes a flow only when no
-        # action that actually named that device could have, and says so.
+def _flow_caveat(attribution: Attribution, flow: FlowRecord, firm: bool) -> None:
+    if not firm:
+        _note(
+            attribution,
+            "device identified from a client_ip recorded over "
+            f"{IP_MAPPING_TRUSTED_FOR.days} days ago; it may have moved",
+        )
+
+
+def _log_caveat(attribution: Attribution, entry: LogEntry, firm: bool) -> None:
+    # An action interval is on the host clock; a device log line is stamped by
+    # OSLog on the *device's* clock. A simulator shares the host's, so there
+    # is nothing to reconcile. A physical device does not, and quern applies
+    # no offset -- so an attribution near an interval boundary may be on the
+    # wrong side of it.
+    if entry.source in _DEVICE_CLOCK_SOURCES:
+        _note(
+            attribution,
+            "device log times come from the device's own clock and are "
+            "compared against host-clock intervals with no offset",
+        )
+
+
+def _attribute(
+    items: list,
+    result: list[Attribution],
+    intervals: list[tuple[datetime, datetime]],
+    grace: timedelta,
+    *,
+    device_of_item,
+    sink,
+    noun: str,
+    extra_caveat,
+) -> None:
+    """Attach each item to the action that owns it.
+
+    One function for flows and log lines, deliberately. They were two loops
+    with the same rules, and the rules drifted three separate times: half-open
+    intervals, the grace window and the ownership check were each fixed for
+    flows and left wrong for logs, every time under a comment that read as
+    though it covered both. Parameterising the two differences -- how an item
+    names its device, and what caveat it carries -- is what stops the next fix
+    landing on half the problem.
+    """
+    for item in items:
+        work_udid, firm = device_of_item(item)
+
         claims: dict[Ownership, list[int]] = {k: [] for k in Ownership}
         windows: dict[int, str] = {}
         for i in range(len(result)):
             verdict = owns(result[i].action.udid, work_udid)
             if verdict is Ownership.FOREIGN:
                 continue
-            window = _window(i)
-            if window is None:
+            start, end = intervals[i]
+            at = item.timestamp
+            # Half-open, `(start, end]`, so an instant shared by two adjacent
+            # actions has exactly one owner -- the earlier, which had been
+            # running up to it while the later had not yet done anything.
+            if start < at <= end:
+                window = "during"
+            elif end < at <= end + grace:
+                window = "after"
+            else:
                 continue
             windows[i] = window
             claims[verdict].append(i)
@@ -297,22 +346,16 @@ def build_trace(
         candidates = scoped or claims[Ownership.UNSCOPED_ACTION]
         unscoped_fallback = not scoped and bool(candidates)
 
-        # Within the chosen set, an action this happened *inside* beats one it
-        # merely happened after -- otherwise every flow is also blamed on the
-        # previous action for being nearby.
         during = [i for i in candidates if windows[i] == "during"]
         chosen = during or candidates
         inferred = not during
 
-        # Two sequential actions can both have the flow in their grace window,
-        # and neither interval overlaps the other, so nothing else would say
-        # this was attributed more than once.
         if len(chosen) > 1:
             for i in chosen:
                 _note(
                     result[i],
-                    "this flow is also attributed to another action; the "
-                    "trace cannot tell which caused it",
+                    f"some {noun} here are also attributed to another action; "
+                    "the trace cannot tell which caused them",
                 )
 
         for i in chosen:
@@ -320,85 +363,21 @@ def build_trace(
             if inferred:
                 _note(
                     attribution,
-                    "some flows arrived after the action returned and are "
+                    f"some {noun} arrived after the action returned and are "
                     "attributed by timing rather than observed causation",
                 )
             if unscoped_fallback:
                 _note(
                     attribution,
-                    f"this action resolved no device, so work from "
-                    f"{work_udid[:8] if work_udid else 'an unknown device'} is "
-                    "attributed to it on timing alone",
+                    "this action resolved no device, so work from "
+                    f"{work_udid[:8] if work_udid else 'an unknown device'} "
+                    "is attributed to it on timing alone",
                 )
             elif not work_udid:
-                _note(attribution, "some flows matched on time alone")
-            elif not firm:
-                _note(
-                    attribution,
-                    "device identified from a client_ip recorded over "
-                    f"{IP_MAPPING_TRUSTED_FOR.days} days ago; it may have moved",
-                )
-            attribution.flows.append(flow)
-
-    for entry in device_logs:
-        if entry.source not in APP_LOG_SOURCES:
-            continue
-
-        # Logs get the grace window too. This module's central argument --
-        # that most actions return before the work they cause happens -- is
-        # as true of an app's log output as of its HTTP requests, and without
-        # it the trace could show the request an action caused but not the
-        # NSLog beside it. Measured: an `open_url` finishing in 150ms with
-        # both a flow and a log line 300ms later attributed the flow and
-        # dropped the line.
-        candidates: list[int] = []
-        inferred_log = False
-        for i, attribution in enumerate(result):
-            if (
-                entry.device_id
-                and attribution.action.udid
-                and entry.device_id != attribution.action.udid
-            ):
-                continue
-            start, end = intervals[i]
-            if start < entry.timestamp <= end:
-                candidates.append(i)
-        if not candidates:
-            for i, attribution in enumerate(result):
-                if (
-                    entry.device_id
-                    and attribution.action.udid
-                    and entry.device_id != attribution.action.udid
-                ):
-                    continue
-                _, end = intervals[i]
-                if end < entry.timestamp <= end + grace:
-                    candidates.append(i)
-                    inferred_log = True
-
-        for i in candidates:
-            attribution = result[i]
-            if inferred_log:
-                _note(
-                    attribution,
-                    "some log lines arrived after the action returned and are "
-                    "attributed by timing rather than observed causation",
-                )
-            # Clock mismatch, stated rather than silently compared. An action
-            # interval is on the host clock; a device log line is stamped by
-            # OSLog on the *device's* clock. A simulator shares the host's, so
-            # there is nothing to reconcile. A physical device does not, and
-            # quern applies no offset -- so an attribution near an interval
-            # boundary may be on the wrong side of it.
-            if entry.source in _DEVICE_CLOCK_SOURCES:
-                _note(
-                    attribution,
-                    "device log times come from the device's own clock and "
-                    "are compared against host-clock intervals with no offset",
-                )
-            attribution.logs.append(entry)
-
-    return result
+                _note(attribution, f"some {noun} matched on time alone")
+            else:
+                extra_caveat(attribution, item, firm)
+            sink(attribution, item)
 
 
 def _note(attribution: Attribution, text: str) -> None:

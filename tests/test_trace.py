@@ -645,3 +645,54 @@ class TestLateLogOutputIsAttributedToo:
         first_a, second_a = build_trace([first, second], [], [self._line(10)])
 
         assert len(first_a.logs) + len(second_a.logs) == 1
+
+
+class TestTheLogPathObeysTheSameRulesAsFlows:
+    """Three fixes on this branch landed on flows and not on logs: half-open
+    intervals, the grace window, and the ownership check. Each time the
+    comment read as though it covered both loops.
+
+    The loops are one function now, so these assert the shared rules through
+    the log path specifically — if the two ever diverge again, this is what
+    notices.
+    """
+
+    @staticmethod
+    def _line(at_s, device="SIM-A"):
+        return LogEntry(
+            id=uuid.uuid4().hex,
+            timestamp=BASE + timedelta(seconds=at_s),
+            device_id=device,
+            process="MyApp",
+            level=LogLevel.INFO,
+            message="x",
+            source=LogSource.SIMULATOR,
+        )
+
+    def test_an_unscoped_action_does_not_take_another_devices_log(self):
+        """The headline bug, in the loop it was not fixed in."""
+        unscoped = _action("wait_for_flow", at_s=10, duration_ms=10_000, udid="")
+        owner = _action("tap", at_s=10, duration_ms=2000, udid="SIM-B")
+        line = self._line(9, device="SIM-B")
+
+        attributions = build_trace([unscoped, owner], [], [line])
+        by_name = {a.action.action: a for a in attributions}
+
+        assert by_name["tap"].logs == [line]
+        assert by_name["wait_for_flow"].logs == []
+
+    def test_a_line_in_two_grace_windows_says_so(self):
+        first = _action("open_url", at_s=10, duration_ms=200)
+        second = _action("open_url", at_s=11, duration_ms=200)
+
+        first_a, second_a = build_trace([first, second], [], [self._line(11.5)])
+
+        assert first_a.logs and second_a.logs
+        assert any("also attributed" in c for c in first_a.caveats)
+
+    def test_a_foreign_device_line_is_never_attributed(self):
+        action = _action("tap", at_s=10, duration_ms=2000, udid="SIM-A")
+
+        [attribution] = build_trace([action], [], [self._line(9, device="SIM-B")])
+
+        assert attribution.logs == []

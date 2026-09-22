@@ -169,6 +169,11 @@ async def get_trace(
     # entries push out older app logs and crash reports -- and the trace then
     # looked empty for a reason that had nothing to do with the app.
     device_logs = [e for e in device_logs if e.source in APP_LOG_SOURCES]
+    # And the caller's device, for the same reason. With `udid` set, bounding
+    # first spends the budget on other devices' lines -- which attribution
+    # then discards -- so a busy neighbour could empty this caller's trace.
+    if udid:
+        device_logs = [e for e in device_logs if not e.device_id or e.device_id == udid]
     logs_over_limit = len(device_logs) > log_limit
     if logs_over_limit:
         device_logs = device_logs[-log_limit:]
@@ -201,6 +206,11 @@ async def get_trace(
     flow_window_truncated = False
     if flow_store is not None:
         flows = await flow_store.get_since(window_start)
+        if udid:
+            flows = [
+                f for f in flows
+                if not f.simulator_udid or f.simulator_udid == udid
+            ]
         flows_over_limit = len(flows) > log_limit
         if flows_over_limit:
             flows = flows[-log_limit:]
@@ -217,8 +227,11 @@ async def get_trace(
     # measured at 0.25s for a full window even after bounding the inputs, and
     # ~0.95s before. That is the whole server's event loop, shared by every
     # other agent and device, stalled on one caller reading a trace.
+    # `_ip_map` reads the cert state file, so it goes off the loop with the
+    # attribution rather than blocking it just before.
+    ip_map = await asyncio.to_thread(_ip_map)
     attributions = await asyncio.to_thread(
-        build_trace, actions, flows, device_logs, ip_map=_ip_map(),
+        build_trace, actions, flows, device_logs, ip_map=ip_map,
     )
 
     return {
