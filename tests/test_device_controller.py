@@ -1914,15 +1914,19 @@ class TestALaunchThatNeverCameUp:
 
 class TestScreenshotNamesItsDevice:
     """`resolve_udid` is what tells the action log which device a call went
-    to. `screenshot` short-circuits past it when the caller names one -- to
-    avoid changing the active device -- and so the *explicitly scoped* call
-    was the one that recorded no device at all.
+    to, and `screenshot` used to short-circuit past it when the caller named
+    one -- so the *explicitly scoped* call was the one that recorded no device.
 
     Found by running it, not by reading it: `GET
     /api/v1/device/screenshot?udid=<sim>` against a live server logged
     `udid: ""`, so `GET /api/v1/trace?udid=<sim>` returned zero actions for a
-    screenshot that had just been taken of that exact simulator, and its app
-    logs fell back to matching on time alone. Every unit test here passed.
+    screenshot just taken of that exact simulator. Every unit test here passed.
+
+    The first fix repeated the assignment inside the bypass, which left the
+    bypass in place -- and it then cost physical devices their canonical
+    identifier too (#270). `screenshot` now goes through `resolve_udid` with
+    `set_active=False`, so these tests no longer mock `_resolve_udid`: mocking
+    the thing that does the work would leave nothing under test.
     """
 
     async def _screenshot(self, **kwargs):
@@ -1932,10 +1936,10 @@ class TestScreenshotNamesItsDevice:
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
+        # Deep enough to keep the real resolution running, shallow enough not
+        # to enumerate the developer's actual hardware (#272).
         ctrl._ensure_device_type_cached = AsyncMock()
-        # `_resolve_udid`, not `resolve_udid`: the public one is what records
-        # the udid, so mocking it is what the test is here to exercise.
-        ctrl._resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl.list_devices = AsyncMock(return_value=[])
 
         scope = ActionScope("take_screenshot", "device.read")
         token = set_current_action(scope)
@@ -1945,19 +1949,25 @@ class TestScreenshotNamesItsDevice:
                 await ctrl.screenshot(**kwargs)
         finally:
             reset_current_action(token)
-        return scope
+        return ctrl, scope
 
     async def test_an_explicit_udid_reaches_the_action_log(self):
-        scope = await self._screenshot(udid="BBBB-2222")
+        _, scope = await self._screenshot(udid="BBBB-2222")
 
         assert scope.udid == "BBBB-2222"
 
     async def test_the_fallback_path_still_names_it(self):
         """The branch that did work must keep working."""
-        scope = await self._screenshot()
+        _, scope = await self._screenshot()
 
         assert scope.udid == "AAAA-1111"
 
+    async def test_it_leaves_the_active_device_alone(self):
+        """Why the bypass existed. Routing through `resolve_udid` must not
+        make a read of one device silently retarget every later call."""
+        ctrl, _ = await self._screenshot(udid="BBBB-2222")
+
+        assert ctrl._active_udid == "AAAA-1111"
 
 class TestAMissingToolIsNotAnError:
     """`list_devices` names "simctl unavailable" in its own handler, and until

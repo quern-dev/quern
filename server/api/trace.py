@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Query, Request
 
+from server.device.devicectl import canonical_device_id
 from server.models import LogQueryParams, LogSource, TraceResponse
 from server.trace import (
     APP_LOG_SOURCES,
@@ -115,6 +116,16 @@ async def get_trace(
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> dict:
     """Actions in a window, each with the flows and log lines it caused."""
+    # Canonicalised, because the caller may name a physical device by either
+    # of its two identifiers while the action log stores only one. Comparing
+    # the raw parameter returned an empty trace for a device that had just
+    # been driven -- and an empty trace is indistinguishable from a quiet one,
+    # which is the failure this whole endpoint exists to avoid. Measured:
+    # `?udid=00008030-...` returned 0 actions for a phone whose two
+    # screenshots were both in the buffer under `B34C4EE9-...`. See #270.
+    if udid:
+        udid = canonical_device_id(udid)
+
     window_start = since or datetime.now(UTC) - DEFAULT_WINDOW
     # `?since=2026-09-21T12:00:00` is a valid ISO 8601 timestamp and FastAPI
     # parses it into a naive datetime. Every timestamp it is then compared
