@@ -28,8 +28,9 @@ _SERVER = pathlib.Path(__file__).resolve().parents[1] / "server"
 def _default_value(node):
     """The literal a default expression settles on, or `_UNREADABLE`.
 
-    Handles the two spellings pydantic allows -- a bare literal and
-    `Field(default=...)` / `Field("...")`. The first version of this only
+    Handles the spellings pydantic allows -- a bare literal,
+    `Field(default=...)`, `Field("...")` -- and refuses the one it cannot
+    evaluate, `Field(default_factory=...)`. The first version of this only
     understood bare literals, so it walked straight past
     `LogEntry.device_id`, which is a `Field(default="")` -- the single field
     whose sentinel caused the bug this whole file exists to prevent. A guard
@@ -41,13 +42,22 @@ def _default_value(node):
         func = node.func
         name = getattr(func, "id", None) or getattr(func, "attr", None)
         if name == "Field":
+            keywords = {kw.arg for kw in node.keywords}
+            # A factory is computed at runtime and cannot be read here. It
+            # must fail rather than fall through to the "required" branch
+            # below, which would call `Field(default_factory=lambda:
+            # "default")` clean -- the sentinel reintroduced through the one
+            # spelling the guard could not see. Unreadable is the honest
+            # answer; a hole is not a pass.
+            if "default_factory" in keywords:
+                return _UNREADABLE
             for kw in node.keywords:
                 if kw.arg == "default":
                     return _default_value(kw.value)
             if node.args:
                 return _default_value(node.args[0])
-            # No default at all: the field is required, which cannot be a
-            # sentinel. Report it as fine rather than unreadable.
+            # No default and no factory: the field is required, which cannot
+            # carry a sentinel.
             return ""
     return _UNREADABLE
 
@@ -123,3 +133,41 @@ def test_the_scan_reaches_the_field_that_caused_the_bug():
         "`Field(default=...)`, which is how LogEntry spells it"
     )
     assert len(found) >= 8, f"only found {len(found)} device_id defaults; scan is broken"
+
+
+class TestAnUnreadableDefaultIsNotAPass:
+    """`_default_value` returning "looks fine" for a form it cannot evaluate
+    is the hole this file exists to close, reopened one level up.
+
+    `Field(default_factory=...)` is computed at runtime. Reading it statically
+    is not possible, so the only honest answers are "fail" or "teach the
+    scanner" -- never "fine"."""
+
+    def _value_of(self, source: str):
+        import ast as _ast
+
+        tree = _ast.parse(source)
+        [node] = [n for n in _ast.walk(tree) if isinstance(n, _ast.AnnAssign)]
+        return _default_value(node.value)
+
+    def test_a_factory_is_unreadable(self):
+        got = self._value_of('device_id: str = Field(default_factory=lambda: "default")')
+
+        assert got is _UNREADABLE
+
+    def test_a_plain_field_default_still_reads(self):
+        assert self._value_of('device_id: str = Field(default="")') == ""
+
+    def test_a_positional_field_default_still_reads(self):
+        assert self._value_of('device_id: str = Field("")') == ""
+
+    def test_a_required_field_is_fine(self):
+        """No default at all cannot be a sentinel."""
+        assert self._value_of('device_id: str = Field(description="x")') == ""
+
+    def test_an_unreadable_default_fails_the_guard(self):
+        """The verdict has to reach an assertion, not just the helper."""
+        with pytest.raises(AssertionError, match="cannot evaluate"):
+            test_no_device_id_default_is_a_fake_udid(
+                pathlib.Path("models.py"), 1, _UNREADABLE,
+            )
