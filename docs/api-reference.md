@@ -32,6 +32,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 |---|---|---|---|
 | `tail_logs` | GET | `/api/v1/logs/query` | Query logs with filters and pagination |
 | `query_logs` | GET | `/api/v1/logs/query` | Query logs with filters and pagination |
+| `get_trace` | GET | `/api/v1/trace` | Quern's actions with the flows and log lines each one caused |
 | `get_log_summary` | GET | `/api/v1/logs/summary` | LLM-optimized summary with cursor support |
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |

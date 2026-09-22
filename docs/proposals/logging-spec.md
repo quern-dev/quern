@@ -580,6 +580,32 @@ on `(udid, interval)`, marking overlaps.
 *Done when:* a scripted API test yields one timeline, and an export with two
 overlapping actions on one device marks them rather than guessing.
 
+**Verified so far**, against a live iOS 27 and iOS 18.6 simulator:
+
+- Actions, their resolved device, outcome and duration appear on one timeline,
+  including genuine failures rather than only the happy path.
+- Device log lines attribute to the action whose interval contains them, and
+  only from the device that action ran against.
+- A flow driven through the proxy inside an action's interval is attributed to
+  that action, and carries the caveat *"some flows matched on time alone"* --
+  correctly, because it had no `simulator_udid`.
+
+- **The strong regime works.** Under local capture a flow arrives carrying
+  `simulator_udid` resolved from the client's pid, and the trace joins on it:
+
+      open_url ok 139ms udid=2B272789
+        FLOW GET https://neverssl.com/?fin=... proc=com.apple.WebKit.Networking
+        caveat: some flows arrived after the action returned ...
+
+Getting there found the thing that matters most about this design. **Most
+actions return before the work they cause happens.** `open_url` finished in
+143ms and the request it caused arrived 174ms later; a tap that triggers a
+fetch and a launch that makes startup requests are the same shape. Attributing
+only what happens *during* an action therefore answers almost nothing, so a
+bounded grace window after the action closes is part of the model rather than
+a refinement of it -- and anything attributed that way is marked, because
+inferring causation from timing is not the same as observing it.
+
 Steps 1–3 are worth doing regardless of whether step 4 ever happens.
 
 ## What this does not propose

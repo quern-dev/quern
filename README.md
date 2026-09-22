@@ -462,13 +462,13 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-110 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+111 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
 | Updates | `update_quern`, `set_update_channel` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
+| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `get_trace`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
 | Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `set_bypass`, `clear_bypass` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |

@@ -611,7 +611,7 @@ async def query_flows(
     has_error: bool | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
-    device_id: str = "default",
+    device_id: str = "",
     simulator_udid: str | None = None,
     client_ip: str | None = None,
     detail: str = Query(default="full", pattern=r"^(full|summary)$"),

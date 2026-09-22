@@ -19,6 +19,7 @@ from server.device.u2_client import U2Backend
 from server.device.usbmux import UsbmuxBackend
 from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
+from server.logging_ext import current_action
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
 logger = logging.getLogger(__name__)
@@ -396,6 +397,22 @@ class DeviceController(DeviceControllerUI):
             await self.list_devices()
 
     async def resolve_udid(self, udid: str | None = None) -> str:
+        """Resolve which device to target, and tell the action log about it.
+
+        This is the one place that *decides* which device a call goes to, so
+        it is where the action entry learns its udid. Recording it in each
+        handler instead was tried and left most of them blank: the handlers
+        wrapped in a `with action(...)` block set it, and the ~78 decorated
+        with `@logged_action` did not, so a per-device trace silently lost
+        every one of them and their flows fell back to matching on time alone.
+
+        The assignment is a no-op when no action is being recorded.
+        """
+        resolved = await self._resolve_udid(udid)
+        current_action().udid = resolved
+        return resolved
+
+    async def _resolve_udid(self, udid: str | None = None) -> str:
         """Resolve which device to target.
 
         If a DevicePool is attached, attempts pool-based resolution for
@@ -927,6 +944,14 @@ class DeviceController(DeviceControllerUI):
         if udid:
             await self._ensure_device_type_cached(udid)
             resolved = udid
+            # Named here too, not only on the fallback path. `resolve_udid`
+            # is what tells the action log which device a call went to, and
+            # short-circuiting past it meant the *explicitly scoped* call was
+            # the one that recorded no device -- backwards from any reading of
+            # it. Live: `GET /device/screenshot?udid=<sim>` logged `udid: ""`,
+            # so a per-device trace dropped it and its logs fell back to
+            # matching on time alone.
+            current_action().udid = resolved
         else:
             resolved = await self.resolve_udid(None)
         raw_png = await self.raw_screenshot(resolved)

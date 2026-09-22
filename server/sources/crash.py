@@ -36,7 +36,7 @@ class CrashAdapter(BaseSourceAdapter):
 
     def __init__(
         self,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         watch_dir: Path | None = None,
         poll_interval: float = POLL_INTERVAL,

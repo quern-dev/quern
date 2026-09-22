@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import functools
 import inspect
 import logging
@@ -28,6 +27,10 @@ from typing import Any
 from fastapi import HTTPException
 
 from server import logging_ext
+from server.logging_ext import (
+    reset_current_action,
+    set_current_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,10 @@ class ActionScope:
     as the thing it describes, which is what `[PERF]` did.
     """
 
-    __slots__ = ("name", "category", "udid", "outcome", "detail", "_start")
+    __slots__ = (
+        "name", "category", "udid", "outcome", "detail", "_start",
+        "started_monotonic",
+    )
 
     def __init__(self, name: str, category: str) -> None:
         self.name = name
@@ -49,6 +55,11 @@ class ActionScope:
         self.outcome = "ok"
         self.detail = ""
         self._start = time.perf_counter()
+        # Recorded as well as the perf_counter, because this one is published.
+        # Same base on this platform, but perf_counter is documented only as
+        # "a clock with the highest resolution", and a consumer aligning video
+        # against it deserves the clock that is actually specified.
+        self.started_monotonic = time.monotonic()
 
     @property
     def duration_ms(self) -> int:
@@ -66,6 +77,13 @@ def action(
     success path.
     """
     scope = ActionScope(name, category)
+    # Set here rather than only in the decorator, so both forms behave the
+    # same. They did not: a `with action(...)` handler relying on
+    # `resolve_udid` to record the device got nothing, because the ContextVar
+    # was only ever set by `logged_action`. Block-form handlers happen to
+    # assign `act.udid` by hand, so the gap stayed invisible until a test
+    # asked the question directly.
+    token = set_current_action(scope)
     # The begin entry exists for one case the completion entry cannot cover:
     # an action that starts and never finishes. On a hang, a crash, or a
     # client that disconnects mid-sweep there is no completion entry at all,
@@ -98,6 +116,7 @@ def action(
         scope.outcome = "failed"
         raise
     finally:
+        reset_current_action(token)
         logging_ext.action(
             logger,
             scope.name,
@@ -106,6 +125,7 @@ def action(
             outcome=scope.outcome,
             duration_ms=scope.duration_ms,
             detail=scope.detail,
+            started_monotonic=scope.started_monotonic,
         )
 
 logger = logging.getLogger(__name__)
@@ -116,37 +136,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-
-
-#: The action currently being recorded on this task, so a handler deep in a
-#: long function can name the device it resolved without threading a parameter
-#: through. A ContextVar rather than a global: requests interleave on one
-#: event loop, and a global would let two boots overwrite each other's udid.
-_CURRENT: contextvars.ContextVar[ActionScope | None] = contextvars.ContextVar(
-    "quern_current_action", default=None,
-)
-
-
-class _NoAction:
-    """Stand-in when nothing is recording, so call sites need no guard.
-
-    Assigning to a field on this is deliberately a no-op rather than an
-    error: a handler that sets `udid` should not break when it is called
-    from a test, or from a path that does not log.
-    """
-
-    __slots__ = ()
-
-    def __setattr__(self, name: str, value: object) -> None:
-        return
-
-
-_NO_ACTION = _NoAction()
-
-
-def current_action() -> ActionScope | _NoAction:
-    """The action being recorded, or a no-op stand-in."""
-    return _CURRENT.get() or _NO_ACTION
 
 
 def logged_action(
@@ -166,12 +155,10 @@ def logged_action(
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                with action(name, category=category) as scope:
-                    token = _CURRENT.set(scope)
-                    try:
-                        return await fn(*args, **kwargs)
-                    finally:
-                        _CURRENT.reset(token)
+                # `action` owns the ContextVar, so both forms get it
+                # from one place.
+                with action(name, category=category):
+                    return await fn(*args, **kwargs)
             return wrapper
 
         # A sync handler is rarer here but FastAPI accepts them, and
@@ -181,11 +168,7 @@ def logged_action(
         # find out.
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with action(name, category=category) as scope:
-                token = _CURRENT.set(scope)
-                try:
-                    return fn(*args, **kwargs)
-                finally:
-                    _CURRENT.reset(token)
+            with action(name, category=category):
+                return fn(*args, **kwargs)
         return sync_wrapper
     return decorate

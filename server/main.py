@@ -45,6 +45,7 @@ from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.system import router as system_router
+from server.api.trace import router as trace_router
 from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
 from server.config import ServerConfig, get_local_capture_processes, set_local_capture_processes
@@ -580,6 +581,7 @@ def create_app(
 
     # Routes
     app.include_router(logs_router)
+    app.include_router(trace_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
