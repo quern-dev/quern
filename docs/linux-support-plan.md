@@ -155,6 +155,122 @@ Linux for an unrecognised `$SHELL`, silently dropping the PATH offer; and
 it "a real gap … the one fetcher no test here can reach." Port work needs that
 repo checked out alongside.
 
+## The proxy: control transfers, attribution does not
+
+The proxy is the most portable subsystem here and simultaneously holds the one
+gate that blocks the target deployment. Those are different halves and worth
+keeping apart.
+
+### What transfers unchanged
+
+`mitmproxy` 12.2.3 declares `MacOS`, `POSIX` and `Microsoft :: Windows`; the
+only Apple-bound piece is the separate `mitmproxy-macos` package behind local
+capture, which we are dropping anyway. Linux additionally offers transparent
+mode (iptables/nftables) and WireGuard mode, which macOS does not.
+
+**Mock, intercept, replay and bypass have zero device coupling.** They operate
+on mitmproxy flow objects and `flowfilter` patterns: mock at `addon.py:528-557`,
+intercept at `addon.py:559-570` and `767-821`, bypass by `fnmatch` on hostname
+at `addon.py:431-451`. `server/api/proxy_intercept.py` contains no reference to
+a udid, serial, client IP or device type. The whole programmable surface works
+on Android as-is.
+
+The corollary matters for this target: because nothing is device-scoped, **a
+mock applies to every device and to host traffic at once.** On a single-device
+Mac that is invisible. On a headless box serving several agents it means one
+agent's mock silently rewrites another's traffic.
+
+### The gate: per-device flow attribution
+
+`FlowStore._filter` (`proxy/flow_store.py:128-130`) offers exactly two
+discriminators, and Android populates neither usefully:
+
+- `simulator_udid` comes from a PID walk to a `launchd_sim` ancestor
+  (`addon.py:145-191`), fed by process info that only exists in macOS
+  local-capture mode. Android always emits `None`, so
+  **`query_flows(simulator_udid=<serial>)` returns zero flows, always.**
+- `client_ip` is the peer address (`addon.py:624-628`). Emulator traffic
+  arrives through NAT via `10.0.2.2`, so **every emulator on a host presents as
+  `127.0.0.1`** — indistinguishable from each other and from host traffic. The
+  code already records this for simulators (`addon.py:497-499`); it holds for
+  emulators and is undocumented.
+
+Consequences: per-device capture sessions do not work for emulators
+(`capture_session.py:23-26`), summaries cannot be filtered by device
+(`summary.py:44-46`), and TLS-rejection reporting collapses every emulator into
+one bucket (`sources/proxy.py:596-638`).
+
+Physical Android devices on Wi-Fi do get distinct LAN IPs, so `client_ip`
+attribution works there.
+
+This blocks both target workflows. Agents doing realtime debug each need their
+own device and their own flows; API scripts sharding tests across devices need
+per-device traffic. Neither survives a shared flow store that cannot say which
+emulator a request came from.
+
+### The fix: one listener per device
+
+Verified against the installed mitmproxy 12.2.3:
+
+- `options.mode` is `Sequence[str]` — *"The proxy server type(s) to spawn. Can
+  be passed multiple times."* One `mitmdump` can serve many listeners; no extra
+  processes.
+- `mitmproxy.connection.Client` has both `peername` and **`sockname`**, the
+  local address the client connected to. Quern captures `peername` and never
+  `sockname`.
+
+So: allocate a port per device, spawn `--mode regular@<port>` per device, point
+each emulator's `http_proxy` at its own port, and tag each flow by
+`flow.client_conn.sockname[1]`. Physical devices keep working through
+`client_ip`. `FlowRecord` needs a device field and the store a filter on it.
+
+This is also what makes **per-device mock and intercept scoping** possible,
+since the owning device becomes known before the mock decision rather than
+after it. That is the fix for the global-mock problem above, and it is a
+prerequisite for parallel agents rather than a refinement.
+
+### Routing coupling to unpick
+
+One mechanism is implemented, and it is wired oddly
+(`proxy/cert_manager.py:389-395`):
+
+- **Port `9101` is hardcoded**, not read from the adapter's listen port.
+- **It is a side-effect of a successful system-cert install.** A non-rootable
+  emulator raises first, so it gets no proxy configuration at all — not even
+  for plaintext HTTP.
+- **Physical Android devices are type-gated out**, though
+  `settings put global http_proxy` works over USB on many of them.
+- **There is no unset path.** The proxy setting persists across reboot while a
+  tmpfs-mounted cert does not, so a rebooted device points at a proxy it no
+  longer trusts and every HTTPS request fails, undetected.
+
+### Certificates, given the debug-build assumption
+
+Quern's implemented path installs to the **system** trust store —
+`/system/etc/security/cacerts/` via remount, tmpfs overlay, or API-34 `nsenter`
+APEX injection (`device/adb.py:559-697`). That needs `adb root`, hence Google
+APIs images and not Google Play ones. It is the strongest option because it
+works against any app without app changes.
+
+Quern's target case is narrower and easier: the app under test is the owner's,
+in development, and its debug build can be configured to trust the CA. That
+removes root from the critical path and admits Google Play images and physical
+unrooted devices:
+
+1. **Bundle the CA in the debug build** — `<certificates src="@raw/...">` in
+   `network_security_config.xml`. No device-side install at all, works on every
+   configuration. Costs a rebuild when the CA rotates.
+2. **`<certificates src="user">` plus a user-store install.** Quern has **no
+   user-CA install path** today — there is no `INSTALL_CA_CERTIFICATE` intent
+   anywhere in the tree, contrary to what the previous revision of this document
+   claimed. Worth noting Quern could drive the Settings flow with its own
+   uiautomator2 backend.
+3. **System store**, as implemented, for the rootable-emulator case and for
+   third-party apps nobody controls.
+
+Routing is gated behind (3) today. Decoupling it is what makes (1) and (2)
+usable, and it is a small change.
+
 ## Multi-agent is a dependency, not a nice-to-have
 
 A headless server exists to be shared. That promotes **#254 (device sessions)**
@@ -232,6 +348,9 @@ them. Treat a first Linux run as untrusted.
 | Test suite has undiscovered Darwin coupling | **High** | Medium | CI matrix first, before code changes |
 | Android parity gaps read as "the Linux build is broken" | Medium | High | Document the supported surface explicitly at launch |
 | Two agents silently share a device | **High** on a shared server | High | #254 is a prerequisite, not a follow-up |
+| Emulator flows are indistinguishable in the store | **Certain** with >1 emulator | **High** | Listener-per-device + `sockname` tagging. Gates both target workflows |
+| One agent's mock rewrites another agent's traffic | **High** on a shared server | High | Falls out of the same fix — device known before the mock decision |
+| Rebooted device keeps a proxy setting whose cert is gone | High | Medium | Clear the proxy on teardown; detect the missing cert rather than trusting the record |
 | Remote emulators misclassified as physical | High if `adb connect` is used | Medium | Property probe instead of serial prefix |
 | Network-exposed server with device control | Medium | High | Deliberate bind/firewall decision; do not inherit `0.0.0.0` |
 | Android tools behave differently on Linux | Low | Medium | adb and uiautomator2 are well-tested cross-platform |
@@ -246,10 +365,21 @@ them. Treat a first Linux run as untrusted.
 4. **Headless** — MCP `headless` param, emulator classification, bind decision,
    `-y` setup path.
 5. **Linux setup + install.sh** — needs the `quern.dev` repo alongside.
-6. **Multi-agent (#254)** — sequenced before shared deployment, not after.
+6. **Per-device flow attribution** — listener per device, `sockname` tagging,
+   a device field on `FlowRecord`, and decoupling the proxy setting from the
+   system-cert install.
+7. **Multi-agent (#254)** — sequenced before shared deployment, not after.
 
 Steps 2–5 are close to the original 3–5 day estimate; the drift added surface
 (`vision_ocr.py`, `proxy/extension.py`, `lifecycle/menubar.py`,
 `webinspector.py`, `_xcode.py`) but all of it falls in the delete column. Step 1
-sizes step 2. Step 6 is the one that is genuinely new work, and it is not
-Linux-specific.
+sizes step 2.
+
+Steps 6 and 7 are the genuinely new work, and neither is Linux-specific — both
+are latent on macOS today and merely invisible there, because one developer with
+one device never collides with themselves. The headless target is what promotes
+them from roadmap to gate. **6 is a hard prerequisite:** an agent doing realtime
+debug needs its own flows, and an API script sharding tests across devices needs
+per-device traffic; a shared store that cannot name the originating emulator
+defeats both. It should be scheduled against the deployment model rather than
+against the port.
