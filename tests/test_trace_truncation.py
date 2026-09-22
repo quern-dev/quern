@@ -14,11 +14,11 @@ from server.storage.ring_buffer import RingBuffer
 BASE = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
 
 
-def _entry(at_s):
+def _entry(at_s, source=LogSource.SIMULATOR):
     return LogEntry(
         id=uuid.uuid4().hex, timestamp=BASE + timedelta(seconds=at_s),
         device_id="SIM-A", process="MyApp", level=LogLevel.INFO,
-        message="x", source=LogSource.SIMULATOR,
+        message="x", source=source,
     )
 
 
@@ -218,3 +218,39 @@ async def _call_full(*, ring, flows, limit, server=None):
         ring_buffer=ring, flow_store=flows, proxy_adapter=None,
     )))
     return await get_trace(request=request, since=BASE, udid=None, limit=limit)
+
+
+class TestTheBoundIsSpentOnUsableLogs:
+    """`build_trace` keeps only APP_LOG_SOURCES, so slicing before that
+    filter spent the bound on entries that were then discarded — newer build,
+    proxy and server records pushing out older app logs and crash reports.
+    The trace then looked empty for a reason that had nothing to do with the
+    app."""
+
+    async def test_noise_does_not_push_out_app_logs(self):
+        from server.models import LogSource
+
+        ring = RingBuffer(max_size=5000)
+        # One app line, then a flood of entries the trace will discard.
+        await ring.append(_entry(1))
+        for i in range(2, 60):
+            await ring.append(_entry(i, source=LogSource.BUILD))
+
+        result = await _call_with_limit(ring, BASE, limit=1)  # log_limit == 10
+
+        assert result["actions"] is not None
+        # The app line survived the bound rather than being crowded out.
+        assert result["logs_over_limit"] is False
+
+    async def test_the_flag_counts_usable_logs_only(self):
+        from server.models import LogSource
+
+        ring = RingBuffer(max_size=5000)
+        for i in range(60):
+            await ring.append(_entry(i, source=LogSource.BUILD))
+
+        result = await _call_with_limit(ring, BASE, limit=1)
+
+        assert result["logs_over_limit"] is False, (
+            "discarded sources were counted against the caller's limit"
+        )

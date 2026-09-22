@@ -612,6 +612,74 @@ class TlsRejection(BaseModel):
     last_at: str | None = None
 
 
+class TraceFlow(BaseModel):
+    """A request attributed to an action."""
+
+    id: str
+    timestamp: str
+    method: str
+    url: str
+    status: int | None = None
+    source_process: str | None = None
+
+
+class TraceLogLine(BaseModel):
+    """A log line attributed to an action."""
+
+    timestamp: str
+    level: str
+    process: str
+    message: str
+
+
+class TracedAction(BaseModel):
+    """One action, and what it caused."""
+
+    action: str
+    udid: str
+    outcome: str
+    duration_ms: int | None = None
+    category: str
+    started_at: str
+    finished_at: str
+    started_monotonic: float | None = None
+    detail: str
+    flows: list[TraceFlow] = []
+    logs: list[TraceLogLine] = []
+    overlaps: list[str] = []
+    caveats: list[str] = []
+
+
+class ClockAnchor(BaseModel):
+    """Wall and monotonic read together, so a recording made alongside this
+    trace can be aligned against it."""
+
+    wall: str
+    monotonic: float
+
+
+class TraceResponse(BaseModel):
+    """Response from GET /api/v1/trace.
+
+    The four `*_over_limit` / `*_truncated` fields are the point of having a
+    model at all: they are how a caller tells an incomplete answer from a
+    quiet one, and leaving them to an untyped dict is how one of them would
+    quietly stop being returned.
+    """
+
+    since: str
+    udid: str | None = None
+    clock_anchor: ClockAnchor
+    actions: list[TracedAction] = []
+    proxy_running: bool
+    log_window_truncated: bool
+    logs_over_limit: bool
+    actions_over_limit: bool
+    action_window_truncated: bool
+    flows_over_limit: bool
+    flow_window_truncated: bool
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 

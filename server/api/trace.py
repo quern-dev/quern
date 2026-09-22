@@ -18,8 +18,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Query, Request
 
-from server.models import LogQueryParams, LogSource
-from server.trace import Attribution, build_trace, ip_to_udid
+from server.models import LogQueryParams, LogSource, TraceResponse
+from server.trace import APP_LOG_SOURCES, Attribution, build_trace, ip_to_udid
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def _serialise(attribution: Attribution) -> dict:
     }
 
 
-@router.get("/trace")
+@router.get("/trace", response_model=TraceResponse)
 async def get_trace(
     request: Request,
     since: datetime | None = None,
@@ -163,6 +163,12 @@ async def get_trace(
     # It is not only tidiness: attribution compares every log against every
     # action, so 1,000 actions against a full 10,000-entry buffer is ten
     # million comparisons on one request.
+    # Discard what the trace will not use *before* bounding, or the bound is
+    # spent on data that is then thrown away. `build_trace` keeps only
+    # APP_LOG_SOURCES, so slicing first let newer build, proxy and server
+    # entries push out older app logs and crash reports -- and the trace then
+    # looked empty for a reason that had nothing to do with the app.
+    device_logs = [e for e in device_logs if e.source in APP_LOG_SOURCES]
     logs_over_limit = len(device_logs) > log_limit
     if logs_over_limit:
         device_logs = device_logs[-log_limit:]
