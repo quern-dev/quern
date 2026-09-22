@@ -395,6 +395,11 @@ not, which is worth not teaching.
 ~/Dev/quern-scratch/<session>-<what>/ mutation copies, which are not worktrees
 ```
 
+`<session>` carries no hyphen of its own: `quern-dev69-...`, not
+`quern-dev-69-...`, which reads as a double hyphen and leaves the field
+ambiguous to parse. `ListAgents` reports the name *with* the hyphen, so this
+needs saying or the two forms both get produced.
+
 **The session prefix is the point, and its beneficiary is never the author.**
 Nobody is unsure which trees are theirs; the prefix exists for whoever is doing
 a sweep, who by definition is someone else. So "it reads fine without one" is
@@ -428,7 +433,10 @@ new route. So:
 - `git log -1 --format='%cr' <branch>` (or the directory's mtime) says whether
   it is worth asking.
 
-Never the name alone. Re-homing a tree you have adopted is allowed and cheap.
+Never the name alone. **Re-homing a tree you have adopted is explicitly
+allowed** -- a stale prefix is not somebody's claim on a tree you are the one
+using, and leaving it there to be polite is how it ages into the confusion the
+prefix exists to remove.
 
 **`<what>` is one field with two uses, not two rules.** A branch slug for
 branch work, `pr<N>` for a review. Two naming rules would make a reader
@@ -454,6 +462,28 @@ worktree whose contents have gone still passes `worktree list` and `prune`, and
 a suite run inside it reports on files that are no longer there. "103 tests
 passed" from a tree missing half its suite is the house failure shape, arriving
 as what looks like a git problem.
+
+**Moving an existing worktree needs more than `git worktree move`.** That is
+`rename(2)`, so it cannot cross filesystems -- and `/tmp` (`disk3s5` here) and
+`~/Dev` (`disk7s1`) are different ones, which is precisely the migration this
+section asks for:
+
+```text
+fatal: failed to move ... : Cross-device link
+```
+
+When the tree is clean and pushed -- check `git status --porcelain` is empty
+and `git rev-list --count origin/<branch>..HEAD` is 0, because this discards
+the tree rather than moving it:
+
+```sh
+git worktree remove --force "$src"
+[ -d "$src" ] && rm -rf "$src"          # the half-success check, which does fire
+git worktree add "$dst" "$branch"
+```
+
+With uncommitted work, `cp -r` and then `git worktree repair "$dst"` instead;
+it preserves the tree. (Removals that left debris behind: twice in about ten.)
 
 **Scratch copies need the parent directory, not a name.** Mutation testing
 works from `git archive` extracts, which no worktree check will ever report --
