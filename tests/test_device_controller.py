@@ -1910,3 +1910,50 @@ class TestALaunchThatNeverCameUp:
         ctrl = self._ctrl(frontmost=False, alive=False, name=None)
         with pytest.raises(DeviceError, match="was launched and is not running"):
             await ctrl.launch_app("com.example.App")
+
+
+class TestScreenshotNamesItsDevice:
+    """`resolve_udid` is what tells the action log which device a call went
+    to. `screenshot` short-circuits past it when the caller names one -- to
+    avoid changing the active device -- and so the *explicitly scoped* call
+    was the one that recorded no device at all.
+
+    Found by running it, not by reading it: `GET
+    /api/v1/device/screenshot?udid=<sim>` against a live server logged
+    `udid: ""`, so `GET /api/v1/trace?udid=<sim>` returned zero actions for a
+    screenshot that had just been taken of that exact simulator, and its app
+    logs fell back to matching on time alone. Every unit test here passed.
+    """
+
+    async def _screenshot(self, **kwargs):
+        from server.api.actions import ActionScope
+        from server.logging_ext import reset_current_action, set_current_action
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
+        ctrl._ensure_device_type_cached = AsyncMock()
+        # `_resolve_udid`, not `resolve_udid`: the public one is what records
+        # the udid, so mocking it is what the test is here to exercise.
+        ctrl._resolve_udid = AsyncMock(return_value="AAAA-1111")
+
+        scope = ActionScope("take_screenshot", "device.read")
+        token = set_current_action(scope)
+        try:
+            with patch("server.device.controller.process_screenshot") as proc:
+                proc.return_value = (b"processed", "image/png")
+                await ctrl.screenshot(**kwargs)
+        finally:
+            reset_current_action(token)
+        return scope
+
+    async def test_an_explicit_udid_reaches_the_action_log(self):
+        scope = await self._screenshot(udid="BBBB-2222")
+
+        assert scope.udid == "BBBB-2222"
+
+    async def test_the_fallback_path_still_names_it(self):
+        """The branch that did work must keep working."""
+        scope = await self._screenshot()
+
+        assert scope.udid == "AAAA-1111"

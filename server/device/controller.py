@@ -944,6 +944,14 @@ class DeviceController(DeviceControllerUI):
         if udid:
             await self._ensure_device_type_cached(udid)
             resolved = udid
+            # Named here too, not only on the fallback path. `resolve_udid`
+            # is what tells the action log which device a call went to, and
+            # short-circuiting past it meant the *explicitly scoped* call was
+            # the one that recorded no device -- backwards from any reading of
+            # it. Live: `GET /device/screenshot?udid=<sim>` logged `udid: ""`,
+            # so a per-device trace dropped it and its logs fell back to
+            # matching on time alone.
+            current_action().udid = resolved
         else:
             resolved = await self.resolve_udid(None)
         raw_png = await self.raw_screenshot(resolved)
