@@ -28,6 +28,12 @@ def _discover_server_url() -> str:
     state_path = Path.home() / ".quern" / "state.json"
     try:
         state = json.loads(state_path.read_text())
+        if not isinstance(state, dict):
+            # `[]` is valid JSON. Indexing it raises TypeError, which this
+            # handler does not catch, so the script would traceback where it
+            # has a perfectly good message to print. The server normalises
+            # the same case in `read_state`.
+            raise ValueError(f"expected a JSON object, got {type(state).__name__}")
         port = state["server_port"]
     except (OSError, ValueError, KeyError) as exc:
         raise SystemExit(
