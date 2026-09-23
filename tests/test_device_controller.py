@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -745,7 +745,7 @@ class TestTapElement:
         # failing to surface the element so we exercise the not_found path.
         ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
 
-        result = await ctrl.tap_element(label="Nonexistent")
+        result = await ctrl.tap_element(label="Nonexistent", scroll_to_find=True)
         assert result["status"] == "not_found"
         assert "No element found" in result["detail"]
         ctrl._ios_scroll_to_element.assert_awaited_once()
@@ -1655,8 +1655,12 @@ class TestTapElementIosScroll:
         ctrl.get_ui_elements = AsyncMock(return_value=([], "AAAA-1111"))
         ctrl._ios_scroll_to_element = AsyncMock(return_value=self._target())
 
+        # `scroll_to_find=True` explicitly: the default is now to ask the
+        # knowledge base and sweep only on a screen recorded as scrolling
+        # (#274). This test is about the sweep, so it opts in.
         result = await ctrl.tap_element(
             identifier="_SignOut button", skip_stability_check=True,
+            scroll_to_find=True,
         )
         assert result["status"] == "ok"
         assert result["tapped"]["identifier"] == "_SignOut button"
@@ -1665,6 +1669,10 @@ class TestTapElementIosScroll:
             # tap_element has already established the element is absent, so the
             # scroll loop skips its own opening lookup — a full tree read.
             target_known_absent=True,
+            # An out-parameter: the sweep fills it in with how many swipes it
+            # ran and whether anything moved, so not_found can tell the caller
+            # the screen was touched (#274).
+            report=ANY,
         )
         backend.tap.assert_awaited_once()
 
@@ -1696,7 +1704,10 @@ class TestTapElementIosScroll:
             "server.device.controller_ui._capture_screenshot",
             AsyncMock(return_value=None),
         ):
-            result = await ctrl.tap_element(label="Nope")
+            # Explicit, because the default is now to ask the knowledge base
+            # and sweep only on a screen recorded as scrolling (#274).
+            # This test is about the sweep itself, so it opts in.
+            result = await ctrl.tap_element(label="Nope", scroll_to_find=True)
         assert result["status"] == "not_found"
         ctrl._ios_scroll_to_element.assert_awaited_once()
         backend.tap.assert_not_called()

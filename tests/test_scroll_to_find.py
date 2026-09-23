@@ -42,6 +42,7 @@ def controller(monkeypatch):
                                         # swipe reveals anything
             self.controlled = True      # False models idb, whose swipes fling
             self.holds: list[float] = []
+            self.extra: list[UIElement] = []   # elements beyond the three rows
 
         def __post_init__(self):  # pragma: no cover - not a dataclass
             pass
@@ -68,7 +69,14 @@ def controller(monkeypatch):
                     type="Application", identifier="", label="App",
                     frame={"x": 0, "y": 0, "width": 393, "height": 852},
                 )], "SIM")
-            return _screen(self.offset), "SIM"
+            extra = [
+                UIElement(
+                    type=e.type, label=e.label, identifier=e.identifier,
+                    frame={**e.frame, "y": e.frame["y"] + self.offset},
+                )
+                for e in getattr(self, "extra", [])
+            ]
+            return _screen(self.offset) + extra, "SIM"
 
         def _invalidate_ui_cache(self, _udid):
             pass
@@ -366,4 +374,90 @@ async def test_a_fast_success_stays_quiet(controller, caplog):
     assert found is not None
     assert not any("slower than expected" in r.message for r in caplog.records), (
         "a fast sweep logged its trace; only slow ones should"
+    )
+
+
+async def test_the_sweep_reports_what_it_did_to_the_screen(controller):
+    """Every swipe is a real gesture, and the caller has to be able to see it.
+
+    `tap_element` puts this in its `not_found` response: the upward half of the
+    sweep is the pull-to-refresh and sheet-dismiss drag, so an agent told only
+    "not found" acts next against a screen it does not know has moved (#274).
+
+    Asserted against the harness's own count rather than a constant. A test
+    that fixed the number would have to be rewritten whenever the budget
+    changes, and would pass while reporting a number that had stopped tracking
+    the swipes actually made -- which is the failure this report exists to
+    prevent, one level up.
+    """
+    controller.scrolls = False
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=10,
+        report=report,
+    )
+
+    assert report["swipes"] == controller.swipes
+    assert report["swipes"] > 0, "the sweep swiped but reported nothing"
+    assert report["moved"] is False
+
+
+async def test_the_report_says_when_the_screen_moved(controller):
+    """The other half. 'Swiped and nothing happened' and 'swiped and the list
+    scrolled' leave the caller's screen in very different states."""
+    controller.scrolls = True
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=10,
+        report=report,
+    )
+
+    assert report["moved"] is True
+
+
+async def test_a_report_is_filled_in_even_when_nothing_is_found(controller):
+    """The seeding, not the incrementing. Every exit from the sweep has to
+    leave the caller able to say what happened -- including the ones that
+    return before any swipe."""
+    controller.scrolls = False
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="never_exists", max_swipes=0, report=report,
+    )
+
+    assert "swipes" in report and "moved" in report
+
+
+async def test_the_report_says_the_screen_moved_even_when_the_target_is_found(
+    controller,
+):
+    """`moved` was recorded only in the branch taken when the target was still
+    absent, so a sweep that located it and kept scrolling toward it reported
+    "nothing moved". Measured before the fix: 3 swipes, 150pt of travel,
+    `{'swipes': 3, 'moved': False}`.
+
+    Telling a caller the screen did not move when it did is worse than saying
+    nothing -- they act next against a screen they believe is unchanged."""
+    controller.scrolls = True
+    # Present in the tree and off-screen below the fold, so the sweep *locates*
+    # it and keeps scrolling toward it. Naming an identifier that is not in the
+    # tree -- as this first did -- exercises the target-absent branch instead,
+    # which is the one that was already instrumented, so the test read as
+    # covering the fix while testing the other path.
+    controller.extra = [UIElement(
+        type="StaticText", label="_Target", identifier="_Target",
+        frame={"x": 0, "y": 4000, "width": 300, "height": 40},
+    )]
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="_Target", max_swipes=1, report=report,
+    )
+
+    assert report["swipes"] > 0
+    assert report["moved"] is True, (
+        f"swiped {report['swipes']} times and reported the screen unmoved"
     )

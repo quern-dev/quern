@@ -1309,6 +1309,24 @@ class ScreenLandmarks(BaseModel):
 
     screen: str  # screen name
     landmarks: list[Landmark]
+    #: Whether this screen can scroll. `None` means nobody has said.
+    #:
+    #: Recorded rather than detected because it cannot be detected: the
+    #: accessibility tree quern reads exposes interactive leaves, not
+    #: containers. Measured on a simulator, Settings and Safari both scroll
+    #: and both report zero scroll containers in `type` and in `role`. So
+    #: `tap_element` had to *swipe* to find out, which is two real gestures on
+    #: a screen that cannot scroll -- and the second of them is the
+    #: pull-to-refresh and sheet-dismiss gesture. See #274.
+    #:
+    #: Tri-state on purpose. `False` is not a synonym for unknown: it lets a
+    #: miss say "this screen does not scroll, the element is not here" instead
+    #: of suggesting a retry that cannot help.
+    #:
+    #: A hint, never a gate -- an explicit `scroll_to_find=True` overrides it,
+    #: so a wrong entry costs a slowdown rather than making an element
+    #: unreachable.
+    scrollable: bool | None = None
 
 
 class LoadLandmarksRequest(BaseModel):
@@ -1316,7 +1334,20 @@ class LoadLandmarksRequest(BaseModel):
 
     app: str  # app identifier (e.g. bundle ID)
     source: str | None = None  # path to knowledge base directory
-    landmarks: dict[str, list[dict]] | None = None  # inline: screen_name -> landmarks
+    #: Inline knowledge: screen_name -> landmarks.
+    #:
+    #: Either a bare list of landmarks, or a mapping carrying the screen's own
+    #: properties alongside them:
+    #:
+    #:     {"Home": [{"element": "Button", "label": "OK"}]}
+    #:     {"Home": {"scrollable": true, "landmarks": [...]}}
+    #:
+    #: The second form exists because a screen has properties that are not
+    #: landmarks -- `scrollable` first -- and the list form has nowhere to put
+    #: them. Both are accepted: the list form is what every existing caller
+    #: sends, and a knowledge base that could express scrollability in a file
+    #: but not inline would be an asymmetry found later and by surprise.
+    landmarks: dict[str, list[dict] | dict] | None = None
 
 
 class IdentifyRequest(BaseModel):
@@ -1355,7 +1386,11 @@ class TapElementRequest(BaseModel):
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
     value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
-    scroll_to_find: bool = True  # Scroll an off-screen target into view, then tap
+    #: Tri-state. `True` always sweeps, `False` never, and unset (the default)
+    #: asks the knowledge base and sweeps only on a screen recorded as
+    #: `scrollable: true`. Previously defaulted to `True`, which swiped screens
+    #: that cannot scroll -- see #274 and `ScreenLandmarks.scrollable`.
+    scroll_to_find: bool | None = None
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

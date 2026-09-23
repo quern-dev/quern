@@ -406,7 +406,7 @@ Label matching modes (mutually exclusive — use only one):
 - label_contains: substring match (case-insensitive) — useful for elements with long, dynamic labels
 - label_prefix: prefix match (case-insensitive) — useful when the label starts with a stable string but has variable content after
 
-With scroll_to_find (the default) an absent target is swept for, which can take a while. Abandoning the call stops that: if your client times out and disconnects, the server stops driving the device instead of sweeping on for a caller that has gone, so the device is free for your next call.`,
+When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen is recorded as scrollable, or (on Android) you did not pass false — an absent target is swept for, which can take a while. Abandoning the call stops that: if your client times out and disconnects, the server stops driving the device instead of sweeping on for a caller that has gone, so the device is free for your next call.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -444,8 +444,8 @@ With scroll_to_find (the default) an absent target is swept for, which can take 
         .describe('For switches/toggles: desired value ("1" = on, "0" = off). Checks current state first and skips the tap if already set. Returns status "already_set" if no tap was needed.'),
       scroll_to_find: z
         .boolean()
-        .default(true)
-        .describe("If the element isn't in the current view, scroll it into view (the same swipe loop as scroll_to_element) and then tap. Supported on Android and iOS. Set false to fail fast without scrolling. Note the cost of leaving this on: asking for an element that does not exist at all is indistinguishable from one that is merely off-screen, so the search sweeps the whole list before giving up, which on a long list or a physical device can take a minute and reads like a hung server rather than a missing element. When you are checking whether something is present, pass false."),
+        .optional()
+        .describe("If the element isn't in the current view, scroll it into view (the same swipe loop as scroll_to_element) and then tap. On iOS, leave unset and quern decides from the knowledge base: it sweeps only on a screen recorded as `scrollable: true`, and otherwise fails fast. On Android unset still sweeps — the selector path scrolls without consulting the knowledge base, which is unchanged behaviour. Pass true to force the sweep on an unrecorded screen, false to never sweep. On iOS the default was previously true, which swept screens that cannot scroll at all — two real gestures, the second of them the pull-to-refresh and sheet-dismiss drag. Note the cost of forcing it on: an element that does not exist is indistinguishable from one merely off-screen, so the search sweeps the whole list before giving up, which on a long list or a physical device can take a minute and reads like a hung server. The not_found response carries a `scroll` object saying which of these happened and whether the screen was touched."),
       include_screen_context: z
         .boolean()
         .default(false)
@@ -472,7 +472,14 @@ With scroll_to_find (the default) an absent target is swept for, which can take 
       if (udid) body.udid = udid;
       if (source_timeout) body.source_timeout = source_timeout;
       if (value !== undefined) body.value = value;
-      if (scroll_to_find === false) body.scroll_to_find = false;
+      // Both values forwarded, and undefined deliberately omitted. This read
+      // `=== false` while the schema had `.default(true)`, when omitting true
+      // was right because true *was* the server default. With the schema now
+      // optional, unset and true produced an identical body -- so
+      // `scroll_to_find: true` never reached the server, and the retry quern
+      // itself recommends ("retry with scroll_to_find=true") returned a
+      // byte-identical response and looped.
+      if (scroll_to_find !== undefined) body.scroll_to_find = scroll_to_find;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;

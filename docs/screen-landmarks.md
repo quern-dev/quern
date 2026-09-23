@@ -65,6 +65,50 @@ Matching rules:
 - If multiple fields are specified, all must match (AND)
 - All landmarks for a screen must match (AND across the list)
 
+### Screen properties: `scrollable`
+
+Alongside its landmarks, a screen may record whether it scrolls:
+
+```yaml
+---
+screen: OrderHistory
+scrollable: true      # false = known not to; omit = nobody has said
+landmarks:
+  - element: "navigationBar"
+    label: "Orders"
+---
+```
+
+**Why it is recorded rather than detected.** It cannot be detected. The
+accessibility tree quern reads exposes interactive leaves, not containers:
+measured on a simulator, Settings and Safari both scroll and both report zero
+scroll containers in `type` and in `role`. So `tap_element` had to *swipe* to
+find out, which on a screen that cannot scroll is two real gestures — and the
+second is the pull-to-refresh and sheet-dismiss drag.
+
+**What each value does.** `tap_element`'s `scroll_to_find` is tri-state:
+
+| `scroll_to_find` | behaviour |
+|---|---|
+| `true` | always sweeps, knowledge base not consulted |
+| `false` | never sweeps |
+| unset (default) | identifies the screen and sweeps only on `scrollable: true` |
+
+`false` and "nobody has said" both skip the sweep and **read differently**:
+only `false` lets a miss say *"this screen does not scroll, the element is not
+here"* and save a pointless retry. That is why the field is tri-state rather
+than a boolean.
+
+It is a hint, never a gate — an explicit `scroll_to_find=true` overrides it, so
+a wrong entry costs a slowdown rather than making an element unreachable.
+
+**Write an unquoted boolean.** `scrollable: "true"` is a string, and anything
+that is not a literal boolean is read as "nobody has said" — a typo must never
+be read as consent to swipe someone's screen. Note that the coercion is
+currently **silent**: nothing reports it, so a quoted boolean simply does
+nothing. Reporting it is proposed in
+[`proposals/knowledge-base-health.md`](proposals/knowledge-base-health.md).
+
 ## Integration with the knowledge base
 
 ### Template change

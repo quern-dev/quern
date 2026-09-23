@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 from pydantic import ValidationError
@@ -20,6 +20,21 @@ from server.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ScrollHint(NamedTuple):
+    """What the knowledge base can say about a screen's scrollability.
+
+    `reason` exists so the caller can tell four different silences apart:
+    nothing loaded, nothing matched, two things matched, or a match that says
+    nothing about scrolling. They all produce `scrollable=None` and they ask
+    the reader to do different things about it.
+    """
+
+    scrollable: bool | None
+    screen: str | None
+    reason: str
+    candidates: list[str] | None = None
 
 
 @dataclass
@@ -408,8 +423,16 @@ def parse_screen_landmarks(
             file=label, screen=screen_name, reason="invalid_entries",
         ), web_content=hints)
 
+    # Anything other than a literal bool reads as unset. A typo must mean
+    # "nobody has said" rather than silently asserting one of the two answers
+    # -- the same rule `auto_install_cert` follows for the same reason.
+    raw_scrollable = data.get("scrollable")
+    scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
+
     return ParseResult(
-        screen=ScreenLandmarks(screen=screen_name, landmarks=landmarks),
+        screen=ScreenLandmarks(
+            screen=screen_name, landmarks=landmarks, scrollable=scrollable,
+        ),
         web_content=hints,
     )
 
@@ -522,6 +545,154 @@ class LandmarkRegistry:
     def list_sets(self) -> dict[str, int]:
         """Return app -> screen count mapping."""
         return {app: len(screens) for app, screens in self._sets.items()}
+
+    def scrollable_for(
+        self,
+        elements: list[UIElement],
+        app: str | None = None,
+        page_urls: Sequence[Mapping[str, str | None]] | None = None,
+    ) -> ScrollHint:
+        """Does the screen these elements came from scroll? And which screen?
+
+        **Only an exact identification counts.** `ambiguous` means two screens
+        matched, and they can disagree about scrolling; taking either would be
+        a guess presented as knowledge, which is the failure the whole
+        knowledge base exists to avoid.
+
+        But ambiguous is reported as itself rather than folded into "nobody has
+        said", because the two need different things from the reader. Unknown
+        means *record it*; ambiguous means *the recording is there and cannot
+        be used*, and the usual cause is mundane -- landmarks loaded for two
+        apps at once, where one screen matches both. Measured: load a second
+        app whose screen shares a landmark and a working `scrollable: true`
+        silently stops being consulted. Scope with `app` to avoid it.
+
+        Pure: no device read. `identify_screen` works off the element list the
+        caller already has, at ~0.26ms against a 200-screen base.
+        """
+        screens = self.all_screens(app)
+        if not screens:
+            return ScrollHint(None, None, "no_knowledge")
+        result = identify_screen(elements, screens, page_urls=page_urls)
+        confidence = result.get("confidence")
+        if confidence == "none" and needs_page_urls(screens) and page_urls is None:
+            # Only when nothing matched, and only then.
+            #
+            # A `web_url_contains` landmark matches nothing when the page
+            # listing is absent (`match_landmark` returns False outright), so a
+            # screen identified by URL is unrecognisable here and its recorded
+            # `scrollable` would read as "nobody has said" -- the "told to
+            # record what you already recorded" failure this type exists to
+            # avoid. Saying so needs its own reason.
+            #
+            # Checking it *before* identifying was a regression: the lookup
+            # passes no `app`, so `all_screens(None)` spans every loaded app,
+            # and one URL-identified screen anywhere turned off recorded
+            # scrollability for all of them. A native screen that identifies
+            # perfectly well must not be refused because some other app has a
+            # web screen.
+            return ScrollHint(None, None, "needs_page_urls")
+        if confidence == "ambiguous":
+            # `matched` plus `ambiguous_with`, which is where identify_screen
+            # puts the rest. `partial_matches` holds the screens that did *not*
+            # fully match, so reading candidates from it returned an empty list
+            # -- which says "no candidates" rather than "several", and is the
+            # one answer that is certainly wrong.
+            candidates = [result.get("matched"), *result.get("ambiguous_with", [])]
+            return ScrollHint(
+                None, None, "ambiguous", candidates=[c for c in candidates if c],
+            )
+        # No second "is it exact?" test. Ambiguous has already returned above,
+        # and a no-match leaves `matched` None, so the lookup below answers
+        # both. Two earlier shapes each carried a redundant guard that mutation
+        # testing showed to be equivalent -- a rule spelled twice is a pair
+        # that drifts apart later, and an unkillable mutant is how you find it.
+        # The screen that *matched*, not the last one loaded under that name.
+        # `identify_screen` returns a name, and a name is not unique across
+        # loaded apps -- `{s.screen: s}` kept whichever app loaded last, so the
+        # hint could come from a screen that did not match, arriving with
+        # `reason="recorded"`, the most confident thing this type says. That is
+        # the same collision `_url_rival_in_same_app` is built to avoid, one
+        # line below. `Home`, `Login` and `Settings` repeat across apps.
+        #
+        # Exactly one screen fully matched -- `ambiguous` has already returned
+        # -- so this finds it or nothing. The extra `match_landmarks` pass runs
+        # only over screens sharing the matched name, and reads no device.
+        #
+        # That exactness also makes `screen.screen == matched_name` redundant,
+        # and mutation testing duly cannot kill it: the match test alone picks
+        # the same screen. It stays because it says which screen we are looking
+        # for, where the match test only says how we recognise it -- and it is
+        # what keeps this honest if `identify_screen` ever reports a best
+        # candidate rather than a sole one.
+        matched_name = result.get("matched")
+        found = next(
+            (
+                screen for screen in screens
+                if screen.screen == matched_name and screen.landmarks
+                and match_landmarks(elements, screen.landmarks, page_urls)[0]
+            ),
+            None,
+        )
+        if found is None:
+            return ScrollHint(None, None, "no_match")
+        if page_urls is None and self._url_rival_in_same_app(found, elements):
+            # A screen in the *same* app whose only unmet landmark is its URL.
+            # Without the page listing that landmark cannot match, so
+            # `identify_screen` reports the native screen as "exact" when the
+            # honest answer is "one of two". Using its `scrollable` would be a
+            # guess wearing an exact match's clothes.
+            #
+            # Same app only: a URL screen belonging to a different app is not a
+            # rival for this one, and treating it as one is the regression that
+            # disabled recorded scrollability everywhere.
+            return ScrollHint(None, None, "needs_page_urls")
+        reason = "recorded" if found.scrollable is not None else "screen_silent"
+        return ScrollHint(found.scrollable, found.screen, reason)
+
+    def _url_rival_in_same_app(
+        self, matched: ScreenLandmarks, elements: list[UIElement],
+    ) -> bool:
+        """Could a URL-identified screen beside `matched` also be on screen?
+
+        Only its app's screens are considered, and only those whose *non-URL*
+        landmarks all matched -- a screen that failed on something native is
+        not a rival, whatever its URL says.
+
+        This walks the app's own `ScreenLandmarks` rather than filtering
+        `identify_screen`'s `partial_matches`, because those carry a screen
+        name and no app. Joining on the name let `Login` in another app count
+        as a rival for `Login` here, which is the precise regression this
+        method exists to prevent -- and the names that repeat across apps are
+        exactly the common ones. The first test written for this used the name
+        `OtherWeb`, which collides with nothing, so it passed against the bug.
+
+        Pure: `match_landmark` reads the element list the caller already has,
+        and the pass is over one app's screens.
+        """
+        app = next(
+            (name for name, screens in self._sets.items() if matched in screens),
+            None,
+        )
+        if app is None:
+            return False
+        for sibling in self._sets[app]:
+            # `sibling is matched` is unreachable today and kept deliberately:
+            # this runs only when `page_urls is None`, a URL landmark cannot
+            # match without the listing, so an exactly-matched screen holds no
+            # URL landmark and the `needs_page_urls` filter already excludes
+            # it. Mutation testing cannot kill it, which by this repo's usual
+            # rule argues for deleting it -- but the rule it encodes is "a
+            # screen is not its own rival", and it stops being redundant the
+            # moment this is called with a listing in hand.
+            if sibling is matched or not needs_page_urls([sibling]):
+                continue
+            # `page_urls` is None on this path by construction, so a URL
+            # landmark cannot match and is excluded rather than evaluated.
+            native = [lm for lm in sibling.landmarks if lm.web_url_contains is None]
+            if all(match_landmark(elements, lm) for lm in native):
+                return True
+        return False
 
     def all_screens(self, app: str | None = None) -> list[ScreenLandmarks]:
         """Get all screens, optionally filtered by app."""
