@@ -265,11 +265,26 @@ NOTARY_PROFILE="your-notarytool-profile" \
 That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
 `--publish` command to run at step 6.
 
-**Step 0b, also before any of the above.** Rehearse the update:
+**Step 0b. Bump the version first, then rehearse** — *after* step 1's edits are
+committed, and before the tag in step 2:
 
 ```sh
 scripts/release-rehearsal.sh            # candidate HEAD, from the published release
 ```
+
+The bump has to come first because the rehearsal compares the candidate's
+version against the previous release's and refuses when they match:
+
+    error: candidate and previous are both 0.20.0 — bump first
+
+That guard is right — rehearsing a candidate that claims the version already
+published tests nothing, since the updater decides what to do by comparing
+those two numbers. An earlier wording of this step said "also before any of the
+above", which cannot work; it was found by running it during the 0.21.0 cut.
+
+So the real order is: **doc pass → step 0 (notarize) → step 1 (bump, commit) →
+step 0b (rehearse) → step 2 (tag)**. The step numbering is historical; the
+dependency is not.
 
 Nothing gets tagged unless this passes. `release-verify.sh` checks a release
 after it is published; this checks the thing that actually breaks, which is

@@ -5,7 +5,7 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.21.0] - 2026-09-23
 
 ### Added
 - **`quern url` and `quern env`, so a script never writes a port down.** They answer only when the *recorded* server answers -- the port is health-checked, and the process listening on it must be the pid `state.json` records, since `quern env` prints the API key and quern runs on whatever port was free. Otherwise: a readable `state.json` is not a running server, since a crash or a `SIGKILL` leaves the file behind, and a URL that looks authoritative and refuses connections is worse than the hardcoded port it replaced. `quern url` prints the running server's base URL; `eval "$(quern env)"` exports `QUERN_SERVER_URL` and `QUERN_API_KEY`, the way `fnm env` and `docker-machine env` do. Computed when asked for, so they cannot go stale the way a file written at start-up would once the server moved to another port. Neither prints anything to stdout when no server is running — a partial environment is worse than none, since `eval` would set half of it and the script would fail later, somewhere unrelated. `~/.quern/state.json` remains the contract for anything that would rather read it directly.
@@ -586,7 +586,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.20.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.21.0...main
+[0.21.0]: https://github.com/quern-dev/quern/releases/tag/v0.21.0
 [0.20.0]: https://github.com/quern-dev/quern/releases/tag/v0.20.0
 [0.19.0]: https://github.com/quern-dev/quern/releases/tag/v0.19.0
 [0.18.4]: https://github.com/quern-dev/quern/releases/tag/v0.18.4
