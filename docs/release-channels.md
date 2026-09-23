@@ -136,12 +136,12 @@ For each item, ask "did this release change what this file asserts?" — not
       sync to quern.dev, so a stale guide is a stale public page.
 - [ ] **`macos/QuernMenuBar/README.md`** — build and release steps for the app.
 - [ ] **`CHANGELOG.md`** — rename `Unreleased`, date it, add the link ref.
-- [ ] **Run the sync** — `python3 scripts/sync-docs.py --repo <quern>` in the
-      quern.dev checkout, then commit **and push** it. A guide corrected in this
-      repo and never synced leaves the site serving the old text; that happened
-      once for a week. Pushing is the deploy, so an unpushed sync is the same
-      as no sync. `--check` exits 1 on drift and names the pages, which is the
-      quick way to see whether this step is needed at all.
+- [ ] **Run the sync** — see step 9 of the cut procedure below, which is where
+      it is actually done. Listing it here as well is deliberate: the edits are
+      made during this pass, so this is where you notice it is needed. Run
+      `python3 scripts/sync-docs.py --repo <quern> --check` in the quern.dev
+      checkout now — it exits 1 on drift and names the pages — then do the
+      sync itself at step 9.
 - [ ] **Commit and push the doc pass itself.** Easy to skip, because the
       checklist above produces edits and says nothing about landing them — and
       the tag is cut from `main`, so anything still sitting in the working tree
@@ -222,6 +222,19 @@ scripts/release-verify.sh vN.M.K
 #    can only skip. A skip is not a pass: until this second run, nothing has
 #    confirmed that the site offers the new release to an existing install.
 scripts/release-verify.sh vN.M.K      # expect 0 skipped this time
+
+# 9. Publish the documentation to quern.dev.
+#    A SEPARATE REPOSITORY and a separate deploy: nothing above touches it,
+#    and the release being out does not put a single doc fix on the site.
+#    The checkout path is in RELEASE_LOCAL.md.
+cd <quern.dev checkout>
+git pull --ff-only
+python3 scripts/sync-docs.py --repo <quern>       # rewrites the drifted pages
+git add -A && git commit -m "Sync docs for quern N.M.K"
+git push origin main                              # pushing IS the deploy
+
+# 10. Confirm the site matches.
+python3 scripts/sync-docs.py --repo <quern> --check   # expect exit 0
 ```
 
 That last step is not optional and takes under ten seconds. It asserts what a
@@ -241,6 +254,22 @@ served locally its resolver asks GitHub instead. That was found by rehearsing
 against 0.18.4, where it reported two passes it had not earned -- the local
 server was never asked -- and it matters because a rehearsal of an
 already-published tag is exactly when the wrong answer matches.
+
+**Steps 9 and 10 are a second deploy, and they get forgotten.** quern.dev is a
+separate repository with its own `main`, and pushing to it is what publishes
+the site — nothing in steps 1-8 touches it. A guide corrected in the quern repo
+and never synced leaves the site serving the old text.
+
+This was a checkbox in the documentation pass above and nothing else, and it
+did not work: at the 0.21.0 cut the site was still synced at **0.19.0**, so it
+had been missed twice running, and two pages had been telling users the wrong
+thing for two releases — one of them describing the exact local-capture
+behaviour that #275 fixed. It is a numbered step now because the doc pass ends
+with edits landing in *this* repo, which feels like finishing, and the second
+repository is out of sight.
+
+Step 10 is the check that it took. `--check` exits 0 only when every synced
+page matches, so a partial or unpushed sync cannot read as done.
 
 **Step 8 exists because the first run cannot check quern.dev, and the release
 is not verified until it does.** The site caches the ref it resolves for about
