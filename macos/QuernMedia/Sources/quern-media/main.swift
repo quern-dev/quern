@@ -168,6 +168,23 @@ attachPrimer.install { source.requestCurrentFrame() }
 
 let shutdownOnce = ShutdownGuard { () -> Int32 in
     source.stop()
+
+    // Read before `stop()`, which drops the clients the counters describe.
+    //
+    // Reported at all because the H.264 desync state is otherwise invisible
+    // from outside this process. `framesHeld` climbing while `resyncs` stays
+    // at zero is an encoder that is not honouring the keyframe request, and
+    // the viewer sees a frozen picture on a stream that every other number
+    // here calls healthy. Symmetrical with the recording summary below: a run
+    // should be able to say what it actually did.
+    if let server {
+        MediaLog.log(String(
+            format: "[http] %d frames sent, %d skipped, %d held for a keyframe, "
+                + "%d resynced, %d keepalives, %d bytes",
+            server.framesSent, server.framesSkipped, server.framesHeldForKeyframe,
+            server.keyframeResyncs, server.keepalivesSent, server.bytesSent
+        ))
+    }
     server?.stop()
 
     var status: Int32 = 0

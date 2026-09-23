@@ -67,6 +67,32 @@ each other.
   carries an `Action not completed` block when it did not, and the
   walkthrough's "Review limit reached" banner is a stale edit that lies.
 
+- **Done, live: the H.264 desync gate engages in production.** The unit test
+  drives a synthetic client, so it proves the logic and not that `inFlight`
+  ever becomes true against a real socket. Measured on a booted iPhone 16,
+  native resolution, 60fps, 40 Mbit, with a reader that stopped reading for
+  18s: **1029 frames skipped, 1 resync, 0 held**.
+
+  Two things that cost a run each, worth not repeating:
+
+  - **A default-sized socket never fills.** At `--max-dim 900` the frames are
+    ~2 KB and loopback absorbed a 6-second stall without a single skip. The
+    first probe reported PASS against `0 skipped`, which is no test at all --
+    it is this repo's usual shape, an empty result that looks like a passing
+    one. Shrinking `SO_RCVBUF` on the client did not help either. What works
+    is `--max-dim 0` and a high bitrate, so the frames are large.
+  - **"An IDR arrived after the stall" proves nothing.** `MaxKeyFrameInterval`
+    is `2 x fps`, so a periodic IDR lands every ~2s of delivered frames
+    anyway, and a client cannot tell bytes buffered before the stall from
+    bytes sent after it. The counters are the only real evidence, which is
+    why `[http] ... frames sent, skipped, held, resynced` is now logged at
+    shutdown.
+
+  `0 held` is the correct outcome rather than a gap: the keyframe request
+  fires on every frame while a client is desynced, so `pendingKeyframe` is
+  already set by the time the client drains and the next encoded frame is an
+  IDR. Frames only need holding if the encoder ignores the request.
+
 - [ ] **One re-read of the four commits since that review.** The fixes above
   plus the ambiguous-device-name refusal. CodeRabbit auto-resolved all
   three threads on the push, which is not the same as having read the
