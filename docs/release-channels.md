@@ -67,6 +67,33 @@ in the normal course of any session.
 
 ## For maintainers — release-cut procedure
 
+### Your own release notes: `RELEASE_LOCAL.md`
+
+Cutting a release needs facts that are true of *your* machines and nobody
+else's: which keychain profile you created, which install you use for the
+update test, which host the tarball check runs against. None of that belongs in
+a public repository — it is wrong for every other reader, and it reads as though
+quern depends on one person's setup.
+
+Keep it in **`RELEASE_LOCAL.md`** at the repository root. It is gitignored
+beside `RELEASE_NOTES.md`, for the same reason: a `git add -A` swept one of
+those into #152, where CodeRabbit reviewed it as documentation and reported its
+command count as wrong.
+
+**Values and local facts only — never procedure.** The steps live in this
+document and stay here, so there is one source of truth for *how* and a separate
+one for *yours*. Two files describing the same procedure will drift, and the
+untracked one is the copy nobody reviews.
+
+Nothing in it should be irrecoverable. Everything below is re-derivable from the
+machine itself — `security find-identity -v -p codesigning` for the identity,
+`xcrun notarytool store-credentials` to recreate a profile — so losing the file
+costs an afternoon of rediscovery, not a release. Do not put secrets in it: the
+keychain already holds those, and a plaintext file at a repository root is
+exactly where they should not be.
+
+`scripts/release-local-template.md` is a starting point — copy it and fill it in.
+
 ### Channel branches: where they live, what they track
 
 Two reserved branches on `origin`:
@@ -302,25 +329,36 @@ in a single run. It needs the tag and Release to already exist, so it belongs
 at step 6, not step 0.
 
 **Where the credentials actually are.** `macos/QuernMenuBar/README.md` covers
-the one-time setup with placeholders. The signing setup was established first
-in the mp3cd project, whose `CLAUDE.md` is where it was originally written
-down — but nothing there is needed to cut a release, because the secrets live
-in the keychain and everything else is below:
+the one-time setup. Nothing secret is in this repository and nothing needs to
+be: the secrets live in the keychain, and `release-menubar.sh` reads both of
+these from the environment.
 
-- **Signing identity** — `$SIGNING_IDENTITY`, exported from `~/.zshrc`. That is
-  the value `DEVELOPER_ID_APP` wants, so `DEVELOPER_ID_APP="$SIGNING_IDENTITY"`
-  works once the profile is sourced. `security find-identity -v -p codesigning`
-  lists what the machine actually holds if the variable is missing.
-- **Notarization profile** — `mp3cd-notarize`, a `notarytool` keychain profile.
-  Confirm it still works before starting a release with
-  `xcrun notarytool history --keychain-profile mp3cd-notarize`, which is much
-  faster than finding out at the end of a build.
+- **Signing identity** — `$SIGNING_IDENTITY`, exported from your shell profile.
+  That is the value `DEVELOPER_ID_APP` wants, so
+  `DEVELOPER_ID_APP="$SIGNING_IDENTITY"` works once the profile is sourced.
+  `security find-identity -v -p codesigning` lists what the machine actually
+  holds if the variable is missing.
+- **Notarization profile** — `$NOTARY_PROFILE`, the name of a `notarytool`
+  keychain profile you created with `xcrun notarytool store-credentials`.
+  `release-menubar.sh` refuses to start without it. Confirm it still works
+  before beginning a release:
+
+      xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"
+
+  That is much faster than finding out at the end of a build, and it is the
+  check worth running even when nothing has changed — a profile can stop
+  resolving without anything in this repository moving.
 
 They are **separate credentials**: signing is a keychain identity, notarizing is
 an Apple ID plus an app-specific password stored under that profile name. Having
 one working tells you nothing about the other, which is the thing that wastes an
-afternoon. Use whatever name you gave it when you ran `store-credentials` if you
-set this up yourself.
+afternoon.
+
+**The concrete values are not written down here, on purpose.** Both are
+machine-specific — a profile name you chose and a shell variable you exported —
+and a public repository describing one maintainer's laptop is wrong for every
+other reader. Keep yours in `RELEASE_LOCAL.md` at the repository root, which is
+gitignored; see *Your own release notes* below.
 
 **Why the ordering matters:** see the *GitHub quirk* section. Once the Release
 in step 5 exists, you cannot retroactively move any branch to that commit. The
