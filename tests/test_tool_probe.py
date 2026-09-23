@@ -499,6 +499,11 @@ class TestHotPathsDoNotSpawnSubprocesses:
     a fix, and the command they guard fails on its own terms anyway.
     """
 
+    # Drives `AdbBackend.list_devices` directly, which the conftest stub
+    # replaces -- and this test already says so itself, via the
+    # "the listing never ran, so the probe count proves nothing"
+    # assertion that caught it.
+    @pytest.mark.device_discovery
     async def test_listing_devices_does_not_probe(self):
         from server.device.adb import AdbBackend
 

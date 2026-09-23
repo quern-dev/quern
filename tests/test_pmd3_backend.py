@@ -10,6 +10,11 @@ import pytest
 from server.device.pmd3 import Pmd3Backend, _no_tunnel_hint, _recover_tunneld_if_wedged
 from server.models import DeviceError
 
+#: This file *is* the discovery code -- the autouse stubs in conftest replace
+#: these very methods, so it opts out rather than asserting against them.
+#: The subprocess layer beneath is mocked, so nothing here reaches the machine.
+pytestmark = pytest.mark.device_discovery
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
