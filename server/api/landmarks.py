@@ -186,12 +186,6 @@ async def validate_landmarks(
         result = detect_collisions(scan.screens)
         if skipped_payload:
             result["skipped"] = skipped_payload
-        if scan.warnings:
-            # Files that loaded but do not mean what their author wrote -- a
-            # `scrollable: "true"` that is a string and is therefore ignored.
-            # Nothing else in the system would ever mention it: the coercion is
-            # deliberate and silent, and `list_landmarks` reports only counts.
-            result["warnings"] = scan.warnings
         return result
 
     return registry.validate(app=app)

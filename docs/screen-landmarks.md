@@ -104,9 +104,10 @@ a wrong entry costs a slowdown rather than making an element unreachable.
 
 **Write an unquoted boolean.** `scrollable: "true"` is a string, and anything
 that is not a literal boolean is read as "nobody has said" — a typo must never
-be read as consent to swipe someone's screen. Because that coercion is silent,
-`validate_landmarks` reports it under `warnings`, which is the only place it
-surfaces.
+be read as consent to swipe someone's screen. Note that the coercion is
+currently **silent**: nothing reports it, so a quoted boolean simply does
+nothing. Reporting it is proposed in
+[`proposals/knowledge-base-health.md`](proposals/knowledge-base-health.md).
 
 ## Integration with the knowledge base
 

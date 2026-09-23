@@ -182,10 +182,17 @@ partial_matches contains EVERY non-fully-matched screen (including zero-match), 
     }),
   }, async ({ app, path }) => {
     try {
-      const body: Record<string, unknown> = {};
-      if (app) body.app = app;
-      if (path) body.source = path;
-      const data = await apiRequest("POST", "/api/v1/landmarks/validate", undefined, body);
+      // Query parameters, not a body. The handler declares `source` and `app`
+      // as bare scalars, which FastAPI reads from the query string -- so a
+      // JSON body was silently discarded and every call validated the whole
+      // loaded registry instead of the app or path asked for. It was the only
+      // landmarks tool sending a body to a handler that takes neither, and it
+      // failed the way this repo's failures usually do: a plausible answer to
+      // a different question.
+      const params: Record<string, string> = {};
+      if (app) params.app = app;
+      if (path) params.source = path;
+      const data = await apiRequest("POST", "/api/v1/landmarks/validate", params);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(data, null, 2) },

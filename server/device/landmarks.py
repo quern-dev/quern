@@ -76,16 +76,6 @@ class ParseResult:
 
     screen: ScreenLandmarks | None = None
     skip: SkippedFile | None = None
-    warnings: list[dict] = field(default_factory=list)
-    """Things wrong with a file that still parsed.
-
-    Distinct from `skip`, which means nothing usable came out. A warning means
-    the file loaded and one of its fields does not say what its author thinks
-    -- a `scrollable: "true"` that is a string, and therefore ignored. Silent
-    coercion is the right *behaviour* (a typo must never read as consent to
-    swipe the screen) and a bad outcome to leave unreported, because the author
-    believes the opposite of what the file now means.
-    """
     web_content: list[WebContentHint] = field(default_factory=list)
     """Carried on both paths deliberately. The screens that most need a web
     content hint -- an OAuth view, a settings page behind
@@ -100,7 +90,6 @@ class KnowledgeBaseScan:
 
     screens: list[ScreenLandmarks] = field(default_factory=list)
     skipped: list[SkippedFile] = field(default_factory=list)
-    warnings: list[dict] = field(default_factory=list)
     web_content: list[WebContentHint] = field(default_factory=list)
 
 
@@ -439,30 +428,12 @@ def parse_screen_landmarks(
     # -- the same rule `auto_install_cert` follows for the same reason.
     raw_scrollable = data.get("scrollable")
     scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
-    # Coercing a typo to "nobody has said" is the right behaviour -- a
-    # mis-typed `scrollable: "true"` must never be read as consent to swipe --
-    # but it is also invisible, and the author who wrote it believes the
-    # opposite of what the file now means. Reported so `validate_landmarks`
-    # can say so; the value stays None either way.
-    bad_scrollable = raw_scrollable is not None and not isinstance(
-        raw_scrollable, bool,
-    )
 
     return ParseResult(
         screen=ScreenLandmarks(
             screen=screen_name, landmarks=landmarks, scrollable=scrollable,
         ),
         web_content=hints,
-        warnings=(
-            [{
-                "file": label, "screen": screen_name, "field": "scrollable",
-                "value": raw_scrollable,
-                "detail": (
-                    "not a boolean, so it is being ignored -- write "
-                    "`scrollable: true` or `scrollable: false`, unquoted"
-                ),
-            }] if bad_scrollable else []
-        ),
     )
 
 
@@ -511,7 +482,6 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
             continue
         result = parse_screen_landmarks(md_file, base_path=path)
         scan.web_content.extend(result.web_content)
-        scan.warnings.extend(result.warnings)
         if result.screen is not None:
             scan.screens.append(result.screen)
         elif result.skip is not None:
