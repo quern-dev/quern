@@ -1218,8 +1218,29 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
             await sp.remove(udid)
             return {"status": "removed", "serial": udid}
 
-        # iOS → CoreMediaIO
         pm = _get_preview_manager(request)
+
+        # iOS simulator → the udid is the session key, so it goes straight
+        # through, exactly as in `preview_start`.
+        #
+        # Resolving it to a display name throws the identity away, and
+        # `PreviewManager.remove` resolves capture devices before labels: with
+        # a phone and a simulator of the same name both previewed, the name
+        # landed on the phone. That closed the wrong window and returned
+        # "removed", while the simulator's window and its `quern-media` stayed
+        # up holding the framebuffer subscription.
+        #
+        # This is also why the simulator path must not touch `list_devices`
+        # below — a udid that is already the key needs no lookup, and a
+        # `DeviceError` from an unavailable simctl used to 404 it.
+        if not controller._is_physical(udid):
+            try:
+                await pm.remove(udid)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {"status": "removed", "udid": udid}
+
+        # iOS physical → CoreMediaIO, which matches on a localizedName.
         device_name: str | None = None
         try:
             devices = await controller.list_devices()
@@ -1236,7 +1257,13 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
                 detail=f"Could not resolve device name for UDID {udid}",
             )
 
-        await pm.remove(device_name)
+        # Caught for the reason `preview_start` catches it: an ambiguous name
+        # is a RuntimeError carrying the only instructions the caller can act
+        # on, and uncaught it reaches FastAPI as a 500 with no detail at all.
+        try:
+            await pm.remove(device_name)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
         return {"status": "removed", "name": device_name}
 
     # No UDID — stop all

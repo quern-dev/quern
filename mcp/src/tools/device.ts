@@ -914,7 +914,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("stop_preview", {
-    description: `Stop a live device preview. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
+    description: `Stop a live device preview. Accepts the UDID of a physical device or of a booted simulator. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
     inputSchema: strictParams({
       udid: z
         .string()

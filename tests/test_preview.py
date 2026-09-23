@@ -9,6 +9,7 @@ from collections import deque
 
 import pytest
 
+from server.device.controller import DeviceError
 from server.device.preview import PreviewManager
 
 
@@ -951,3 +952,134 @@ class TestSimulatorPreviewRouting:
         )
         assert added == ["Jerimiah's iPhone"]
         assert result["status"] == "added"
+
+
+class TestSimulatorStopRouting:
+    """`POST /device/preview/stop`, the sibling of `TestSimulatorPreviewRouting`.
+
+    The simulator fix landed on `preview_start` and not here, so this route
+    went on resolving the udid to a display name and handing that to
+    `pm.remove`. `PreviewManager.remove` resolves capture devices before
+    labels, deliberately -- so with a phone and a simulator of the same name
+    both previewed, stopping the simulator closed the phone's window and
+    reported success.
+    """
+
+    @staticmethod
+    def _request(pm, *, physical: bool, devices=None, list_raises=False):
+        class _Controller:
+            def _is_android(self, _udid):
+                return False
+
+            def _is_physical(self, _udid):
+                return physical
+
+            async def resolve_udid(self, udid):
+                return udid
+
+            async def list_devices(self):
+                if list_raises:
+                    raise DeviceError("simctl unavailable")
+                return devices or []
+
+        class _State:
+            device_controller = _Controller()
+            preview_manager = pm
+            scrcpy_preview = None
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        return _Request()
+
+    @staticmethod
+    def _pm(removed, raises=None):
+        class _PM:
+            async def remove(self, name):
+                if raises is not None:
+                    raise raises
+                removed.append(name)
+
+        return _PM()
+
+    def test_a_simulator_is_stopped_by_its_udid(self):
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        udid = "11111111-2222-3333-4444-555555555555"
+        removed: list[str] = []
+
+        result = asyncio.run(
+            preview_stop(
+                self._request(self._pm(removed), physical=False),
+                PreviewStopRequest(udid=udid),
+            )
+        )
+        # The udid, not a name. A name here lands on a capture device of the
+        # same name and closes the wrong window.
+        assert removed == [udid]
+        assert result["status"] == "removed"
+
+    def test_a_simulator_stop_does_not_depend_on_the_device_list(self):
+        """`list_devices` raising used to 404 a udid that is already the key."""
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        udid = "11111111-2222-3333-4444-555555555555"
+        removed: list[str] = []
+
+        result = asyncio.run(
+            preview_stop(
+                self._request(self._pm(removed), physical=False, list_raises=True),
+                PreviewStopRequest(udid=udid),
+            )
+        )
+        assert removed == [udid]
+        assert result["status"] == "removed"
+
+    def test_an_ambiguous_removal_is_a_reported_error_not_a_bare_500(self):
+        """`preview_start` wraps RuntimeError; this route did not, so an
+        ambiguous label reached FastAPI as a 500 with no detail -- and the
+        message tells the caller to use the key they had just passed."""
+        from fastapi import HTTPException
+
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        udid = "11111111-2222-3333-4444-555555555555"
+        pm = self._pm([], raises=RuntimeError("2 previews are called 'iPhone 16 Pro'"))
+
+        try:
+            asyncio.run(
+                preview_stop(
+                    self._request(pm, physical=False),
+                    PreviewStopRequest(udid=udid),
+                )
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 500
+            assert "iPhone 16 Pro" in str(exc.detail)
+        else:
+            raise AssertionError("expected an HTTPException carrying the reason")
+
+    def test_a_physical_device_still_stops_through_its_name(self):
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        udid = "00008030-000123456789002E"
+        removed: list[str] = []
+
+        class _Device:
+            def __init__(self):
+                self.udid = udid
+                self.name = "Jerimiah's iPhone"
+
+        result = asyncio.run(
+            preview_stop(
+                self._request(
+                    self._pm(removed), physical=True, devices=[_Device()]
+                ),
+                PreviewStopRequest(udid=udid),
+            )
+        )
+        assert removed == ["Jerimiah's iPhone"]
+        assert result["status"] == "removed"

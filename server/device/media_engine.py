@@ -76,8 +76,14 @@ async def build_media_engine(force: bool = False) -> Path:
     Async because every caller inside the server is, and the work below
     blocks for up to BUILD_TIMEOUT seconds: called directly from a request
     path it would stall the event loop for three minutes. The blocking half
-    is `build_media_engine_sync`, which `quern setup` and the tests call
-    directly because neither has a loop to protect.
+    is `build_media_engine_sync`, which the tests call directly because they
+    have no loop to protect.
+
+    Note that `quern setup` does *not* call it, though an earlier version of
+    this docstring said so. Setup builds `ios-preview` and not this, so the
+    first simulator preview pays a cold SwiftPM build (~7s, off the loop) and
+    a broken toolchain surfaces there rather than where every other tool is
+    checked. Tracked rather than fixed here -- see the media handoff.
     """
     return await asyncio.to_thread(build_media_engine_sync, force)
 
