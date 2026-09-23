@@ -30,12 +30,17 @@ Your agent generates a script like:
 
 ```python
 """Order list loading test — generated from interactive session."""
+import os
 import requests
 import pytest
 import time
 
-BASE = "http://localhost:9100/api/v1"
-API_KEY = open("~/.quern/api-key").read().strip()  # your agent reads the real path
+# Run `eval "$(quern env)"` first: it exports QUERN_SERVER_URL and
+# QUERN_API_KEY. Don't write the port down -- quern starts on whatever port
+# was free, so a script that hardcodes 9100 breaks the first time something
+# else has it, and `quern restart` used to be enough to move it.
+BASE = f"{os.environ['QUERN_SERVER_URL']}/api/v1"
+API_KEY = os.environ["QUERN_API_KEY"]
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 
 @pytest.fixture(autouse=True)
@@ -210,9 +215,15 @@ Get a **Mac Mini M4 Pro** (or any Mac you can dedicate to this). The more RAM, t
 Your test scripts just need one change:
 
 ```python
-# Instead of localhost...
-BASE = "http://mac-mini.local:9100/api/v1"
+# Instead of the local server, point at the Mac Mini's.
+BASE = f"http://mac-mini.local:{os.environ.get('QUERN_REMOTE_PORT', '9100')}/api/v1"
 ```
+
+`quern env` reads the *local* `~/.quern/state.json`, so it cannot tell you
+anything about a server on another machine — run `quern url` **on the Mac
+Mini** to see which port it actually came up on, and set that. 9100 is only
+the port quern tries first. The API key is the remote machine's
+`~/.quern/api-key`, not your laptop's.
 
 That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the Mac Mini. Your laptop stays free for development.
 

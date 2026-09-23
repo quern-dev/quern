@@ -79,6 +79,7 @@ Each screen file captures:
 - **Navigation edges** — where this screen leads to, and how to get there
 - **States** — empty, populated, error, premium-locked, etc.
 - **Overlay panels** — floating UI like bottom sheets or summary cards that aren't full screens
+- **Whether the screen scrolls** — `scrollable: true` or `false` in the frontmatter
 
 Screen files include actual tool calls that the agent can copy-paste:
 
@@ -86,6 +87,64 @@ Screen files include actual tool calls that the agent can copy-paste:
 leads_to:
   - screen: "[[screens/item-detail]]"
     action: 'tap_element label_prefix="Order #" element_type="button"'
+```
+
+#### Recording whether a screen scrolls
+
+`scrollable` is a top-level key in a screen file's YAML frontmatter, beside
+`landmarks`:
+
+```yaml
+---
+screen: SettingsRoot
+scrollable: true
+landmarks:
+  - element: StaticText
+    label: "Settings"
+---
+```
+
+It is worth recording because quern cannot work it out by looking. Measured on
+a booted simulator, Settings and Safari both scroll and both report **zero**
+scroll containers in `type` and in `role` — the accessibility tree exposes
+interactive leaves, not the containers around them. The only way to find out is
+to swipe, which is why the fact belongs in the knowledge base rather than being
+rediscovered on every tap.
+
+What each value does when `tap_element` misses and `scroll_to_find` is unset:
+
+| Value | Behaviour on a miss |
+|---|---|
+| `true` | Sweeps the screen looking for the element |
+| `false` | Does not sweep, and reports `screen_not_scrollable` — "the element is not here" |
+| omitted | Does not sweep, and reports `scrollability_unknown` |
+
+`false` is not the same as omitting it, and recording it is not wasted effort.
+Only `false` lets a miss say *the element is not on this screen and scrolling
+will not find it*, which saves the caller a retry that cannot help. Omitting it
+means nobody has said, and the caller has to guess.
+
+Getting it wrong is cheap in one direction only, which is the point: an
+explicit `scroll_to_find: true` always overrides the knowledge base, so a screen
+wrongly marked `false` costs a slowdown, never an unreachable element.
+
+Two things to know when recording it:
+
+- **A typo reads as "unset", not as an answer.** Only a literal YAML boolean
+  counts — `scrollable: "true"` is a string and is ignored. The screen falls
+  back to `scrollability_unknown` rather than silently asserting one of the two
+  answers.
+- **Load landmarks for one app at a time.** Screen identification matches across
+  every loaded app, so if two apps each have a `Home` that matches, quern will
+  not guess whose `scrollable` applies — it reports `screen_ambiguous` and names
+  the candidates. A correctly recorded `scrollable: true` simply stops being
+  consulted.
+
+Inline loading via `load_landmarks` supports it too, using the mapping form
+instead of a bare list:
+
+```json
+{"Home": {"scrollable": true, "landmarks": [{"element": "Button", "label": "OK"}]}}
 ```
 
 ### Alerts
