@@ -312,6 +312,33 @@ each other.
     shape can still move if review pushes back.
 - [ ] Android on-device encoder.
 
+### Filed from the entry-point audit, 2026-09-23
+
+An agent was asked one question — *which call site did the fix forget* — and
+it found five things. The two in the route #164 had just touched were fixed
+there; the rest are filed.
+
+- **#284** preview can open a simulator when a physical device was asked for.
+  `add()` falls through from capture devices to simulators matching on name,
+  and default simulator names *are* device model names. The response carries
+  no `kind`, so the caller cannot tell which they got.
+- **#285** simulator preview is invisible to setup and to discovery. `quern
+  setup` never builds `quern-media`, `is_available()` has zero callers, and
+  `GET /device/preview/devices` lists capture devices only.
+- **#286** orphaned `quern-media` after a SIGKILLed server, and a stale
+  `_active` after a menu-driven remove. Two instances of one path freeing a
+  resource and another not.
+- **#283** `/video-test` is unauthenticated and serves the API key in
+  plaintext, on a server whose default bind is `0.0.0.0`. Pre-existing and
+  unrelated to this branch; filed because the audit walked past it.
+
+**The lesson is about who asks.** The same question, asked by hand an hour
+earlier, found the `preview_start` gate. Asked again by a fresh agent, the
+first thing it returned was that the fix for that gate had not been applied to
+`preview_stop` — the sibling route, written by the session that had just
+written up the rule. Ask it with something other than the head that wrote the
+code.
+
 ### Known defects, deferred with reasons
 
 - [ ] **A failed `SimulatorFramebuffer.start()` leaves the successful half
