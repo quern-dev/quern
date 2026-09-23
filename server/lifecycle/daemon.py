@@ -22,7 +22,29 @@ from server.lifecycle.state import is_server_healthy, read_state
 LOG_FILE = CONFIG_DIR / "server.log"
 
 
-def daemonize(server_port: int) -> None:
+def _without_port_flags(argv: list[str]) -> list[str]:
+    """`argv` with any port flags and their values removed.
+
+    The resolved ports are appended separately, and two `--port` on one
+    command line is an invitation for the wrong one to win.
+    """
+    flags = ("--port", "--proxy-port")
+    out: list[str] = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg in flags:
+            skip = True          # drop the value that follows
+            continue
+        if any(arg.startswith(f"{flag}=") for flag in flags):
+            continue
+        out.append(arg)
+    return out
+
+
+def daemonize(server_port: int, proxy_port: int | None = None) -> None:
     """Spawn the server as a detached background process.
 
     Re-invokes the current command with ``--foreground`` so the child
@@ -41,11 +63,28 @@ def daemonize(server_port: int) -> None:
     # Build the child command: same Python, same module, force foreground.
     # Strip any existing -f/--foreground from argv (shouldn't be there, but
     # be safe), then pass through all remaining args after the subcommand.
-    passthrough = [
+    # The *resolved* ports, not whatever argv happened to carry. The parent
+    # has already reclaimed or scanned, and it is about to wait on health at
+    # `server_port` -- so the child has to be told, or the two disagree.
+    #
+    # They used to agree only by coincidence. `quern start --port N` put the
+    # flag in argv and the child re-parsed it; `quern restart` has an empty
+    # argv, so the child bound the default while the parent waited on the
+    # port the server had actually been using. That surfaced as "Server
+    # started but health check timed out after 30s" with a healthy server
+    # running on the wrong port. The same gap applies whenever the parent
+    # scans upward because a port was busy.
+    passthrough = _without_port_flags([
         a for a in sys.argv[2:]
         if a not in ("-f", "--foreground")
+    ])
+    child_cmd = [
+        sys.executable, "-m", "server", "start", "--foreground",
+        "--port", str(server_port),
     ]
-    child_cmd = [sys.executable, "-m", "server", "start", "--foreground"] + passthrough
+    if proxy_port is not None:
+        child_cmd += ["--proxy-port", str(proxy_port)]
+    child_cmd += passthrough
 
     proc = subprocess.Popen(
         child_cmd,

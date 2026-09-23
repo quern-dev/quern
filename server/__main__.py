@@ -10,6 +10,7 @@ For all other commands, delegates to server.main.cli().
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -765,6 +766,118 @@ def _check_args(
     return ops
 
 
+def _valid_port(value: object) -> int | None:
+    """`value` if it is a usable TCP port, else None.
+
+    `state.json` is a file on disk and can hold anything, including the
+    remains of a server that is long gone. `isinstance(v, int)` is not the
+    test: `True` passes it, because bool subclasses int, and so do 0 and
+    70000. A port nothing can connect to must not reach a URL a script is
+    about to trust.
+    """
+    if type(value) is not int or not (1 <= value <= 65535):
+        return None
+    return value
+
+
+def _server_base_url() -> str | None:
+    """Where a client on this machine should talk to the running server.
+
+    Loopback, never the bind host. The server listens on 0.0.0.0 by default,
+    and a script on this machine should not be sent out to the network and
+    back. The MCP wrapper builds its URL the same way.
+
+    None when nothing is actually answering. A readable state file is not a
+    running server: a crash or a SIGKILL leaves the file behind, and without
+    the health check `quern url` would exit 0 and hand a script a URL that
+    refuses connections -- which is worse than the hardcoded 9100 these
+    commands replaced, because it looks authoritative.
+    """
+    from server.lifecycle.ports import _get_pid_on_port
+    from server.lifecycle.state import is_server_healthy, read_state
+
+    state = read_state()
+    if not state:
+        return None
+    port = _valid_port(state.get("server_port"))
+    if port is None or not is_server_healthy(port):
+        return None
+
+    # Answering /health is not proof of being ours, and `quern env` prints the
+    # API key. Quern records the port it settled on, which is not 9100 when
+    # something else had that first -- so if quern then dies, an untrusted
+    # local process can take the freed port, answer 200, and be handed the key
+    # by a caller that only checked for a pulse.
+    #
+    # The recorded pid is the thing an impostor does not control. Anyone who
+    # can rewrite state.json can read ~/.quern/api-key directly, so this is
+    # not the weak link.
+    recorded = state.get("pid")
+    if isinstance(recorded, int):
+        listener = _get_pid_on_port(port)
+        if listener is not None and listener != recorded:
+            return None
+    return f"http://127.0.0.1:{port}"
+
+
+def _url_usage() -> None:
+    print("Usage: quern url")
+    print()
+    print("Prints the running server's base URL, for scripts:")
+    print()
+    print("    BASE=$(quern url) || exit 1")
+
+
+def _cmd_url() -> int:
+    url = _server_base_url()
+    if url is None:
+        print("No server answering — start it with `quern start`.", file=sys.stderr)
+        return 1
+    print(url)
+    return 0
+
+
+def _env_usage() -> None:
+    print("Usage: quern env")
+    print()
+    print("Prints shell exports for the running server, so a script never has")
+    print("to hardcode a port or read ~/.quern by hand:")
+    print()
+    print('    eval "$(quern env)"')
+    print('    curl -H "Authorization: Bearer $QUERN_API_KEY" "$QUERN_SERVER_URL/health"')
+
+
+def _cmd_env() -> int:
+    """Emit the server's URL and API key as shell exports.
+
+    The `eval "$(quern env)"` shape, as `fnm env` and `docker-machine env`
+    use it: computed when it is asked for, so it cannot go stale the way a
+    file written at start-up would once the server moved to another port.
+
+    Nothing goes to stdout when there is no server. A partial environment is
+    worse than none -- `eval` would set half of it and the script would fail
+    later, somewhere unrelated.
+    """
+    from server.config import API_KEY_FILE
+
+    url = _server_base_url()
+    if url is None:
+        print("No server answering — start it with `quern start`.", file=sys.stderr)
+        return 1
+
+    try:
+        key = API_KEY_FILE.read_text().strip()
+    except OSError:
+        key = ""
+    if not key:
+        print(f"No API key at {API_KEY_FILE} — run `quern setup`.", file=sys.stderr)
+        return 1
+
+    print(f"export QUERN_SERVER_URL={shlex.quote(url)}")
+    print(f"export QUERN_API_KEY={shlex.quote(key)}")
+    return 0
+
+
 def _setup_usage() -> None:
     print("Usage: quern setup [-y|--yes]")
     print()
@@ -837,6 +950,14 @@ def main() -> None:
         _check_args("setup", rest, allowed=("-y", "--yes"), usage=_setup_usage)
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup(assume_yes=bool({"-y", "--yes"} & set(rest))))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "url":
+        _check_args("url", sys.argv[2:], usage=_url_usage)
+        sys.exit(_cmd_url())
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "env":
+        _check_args("env", sys.argv[2:], usage=_env_usage)
+        sys.exit(_cmd_env())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
         _check_args("uninstall", sys.argv[2:])

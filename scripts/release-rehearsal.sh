@@ -14,6 +14,12 @@
 # The old code is the point. The candidate's own updater is not exercised here
 # at all: users run the one they already have.
 #
+# IT REHEARSES COMMITTED WORK. Both trees come from `git archive`, so anything
+# still in the working directory is not in the candidate -- and the failure
+# looks exactly like the fix not working, twice over: a result that disagrees
+# with the unit tests you just watched pass is this, until proved otherwise.
+# Commit, then rehearse.
+#
 # Each case runs in its own sandbox -- its own HOME and QUERN_STATE_DIR, with
 # osascript/open/sudo/launchctl/pkill/killall stubbed ahead of the real ones on
 # PATH. Nothing outside the sandbox is written. That is not a nicety: this
@@ -817,6 +823,64 @@ case_fresh_install() {
         PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
         "$installed/quern" setup ) > "$sb/setup.log" 2>&1 || true
+    # The second half of the documented install. `install.sh` runs this as
+    # its own step, and it is the only thing that points MCP clients at the
+    # new install -- setup does not.
+  fi
+
+  # Unconditional, and it was not: this sat inside the "setup did not finish"
+  # branch above, which stopped being taken once setup created the venv
+  # without asking. The registration step then never ran, and the check for
+  # it reported the absence of a file nobody had tried to write. The
+  # documented install runs this every time.
+  #
+  # The caller's PATH, since `quern mcp-install` is run from the user's shell
+  # and may rebuild the wrapper, which needs their node.
+  set +e
+  ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+      PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
+      "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1
+  local mcp_rc=$?
+  set -e
+  # The status, not just the file it should have written. A command that
+  # half-ran can leave a plausible-looking result behind, and then the
+  # assertion below reports on it as though the step had succeeded.
+  if [[ $mcp_rc -eq 0 ]]; then
+    ok "mcp-install completed"
+  else
+    bad "mcp-install exited $mcp_rc"
+    tail -n 6 "$sb/mcp-install.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  # The MCP registration the installer writes, checked for *where it points*.
+  # This project has twice written a path into another tool's config that was
+  # wrong -- once a temporary directory -- and nothing notices, because the
+  # client keeps launching whatever the entry says until someone wonders why
+  # their tools are stale. `install.sh` runs `quern mcp-install` as its own
+  # step; setup does not do this, which is why it is checked here.
+  local claude_json="$sb/home/.claude.json"
+  if [[ -f "$claude_json" ]]; then
+    local entry
+    entry="$(python3 -c '
+import json, sys
+try:
+    servers = json.load(open(sys.argv[1])).get("mcpServers") or {}
+except Exception:
+    print(""); raise SystemExit
+for name, spec in servers.items():
+    if "quern" in name.lower():
+        print(" ".join([spec.get("command", "")] + list(spec.get("args") or [])))
+        break' "$claude_json" 2>/dev/null || true)"
+    if [[ -z "$entry" ]]; then
+      bad "install.sh wrote no quern entry into .claude.json"
+    elif [[ "$entry" == *"$installed/mcp/dist/launcher.cjs"* ]]; then
+      ok "the MCP registration points into the install it just made"
+    else
+      bad "the MCP registration points somewhere else: $entry"
+    fi
+  else
+    bad "no .claude.json after mcp-install — the clients were never pointed anywhere"
+    tail -n 6 "$sb/mcp-install.log" 2>/dev/null | sed 's/^/      /' || true
   fi
 
   # From another directory, because the wrapper resolves its own location and
@@ -869,10 +933,17 @@ hold_default_ports() {
   local sb="$1"
   python3 - "$sb/decoy.pid" <<'PY' > "$sb/decoy.log" 2>&1 &
 import socket, sys, time
+
+# Deliberately NOT SO_REUSEADDR. The bind failing is the whole signal: it is
+# how this knows a real quern already has the port, so the case can refuse to
+# run rather than let the restart reclaim it. With SO_REUSEADDR set, binding
+# 127.0.0.1:9100 SUCCEEDS while a server holds 0.0.0.0:9100 -- so the guard
+# reported the ports held, the case ran, and `reclaim_port` (which asks lsof,
+# and finds the real listener) killed the developer's server. Measured: it
+# did, twice.
 held = []
 for port in (9100, 9101):
     s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(("127.0.0.1", port))
     except OSError:
@@ -1111,6 +1182,361 @@ case_tarball_update() {
 
 set +e
 ( case_tarball_update )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "Setup with the menu-bar app already running"
+# --------------------------------------------------------------------------
+# #215: every run of setup quit the running app and reopened it, even when
+# there was nothing new to install -- which is every run on a git install.
+# When the reopen failed (macOS error -600, seen during a live update) the app
+# stayed quit, and the only sign was its absence from the menu bar.
+#
+# The app is faked, but the *detection* is not: setup finds it with
+# `pgrep -f <bundle>/Contents/MacOS/QuernMenuBar`, so this puts a real process
+# at that path with that argv. A stubbed pgrep would have tested the stub.
+case_menubar_app_left_running() {
+  failures=0   # a subshell copy: a case reports only its own
+  local install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "menu-bar app: the update case left no install to run setup from"
+    return 0
+  fi
+
+  local sb="$WORK/menubar-running"
+  local app="$sb/home/Applications/Quern.app"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin" "$app/Contents/MacOS"
+  make_stubs "$sb/bin"
+
+  # Current, so there is nothing to install and nothing setup needs to
+  # replace. A version behind would be a different case: then setup *should*
+  # quit it, and putting both in one test would let either pass for the
+  # other's reason.
+  cat > "$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key>
+  <string>$candidate_version</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.quern.QuernMenuBar</string>
+</dict>
+</plist>
+EOF
+  cat > "$app/Contents/MacOS/QuernMenuBar" <<'EOF'
+#!/bin/sh
+# Stands in for the app: what matters is that the *bundle path* is in the
+# argv pgrep matches, and that it stays up.
+#
+# The sleep is a child, and killing this shell orphans it -- fifteen minutes
+# of a stray `sleep` on the developer's machine, which is exactly the litter
+# that made an unrelated test kill a bystander. So the child's pid is
+# recorded for the case to clean up, and this traps the signals it might be
+# stopped with so it usually tidies up after itself first.
+sleep 900 &
+child=$!
+echo "$child" > "${0}.child"
+trap 'kill "$child" 2>/dev/null; exit 0' TERM INT HUP
+wait "$child"
+EOF
+  chmod +x "$app/Contents/MacOS/QuernMenuBar"
+
+  "$app/Contents/MacOS/QuernMenuBar" &
+  local app_pid=$!
+  sleep 0.5
+  if ! kill -0 "$app_pid" 2>/dev/null; then
+    bad "menu-bar app: the stand-in would not stay running"
+    return "$failures"
+  fi
+  # Confirm setup will actually see it, or the case proves nothing.
+  if ! pgrep -f "$app/Contents/MacOS/QuernMenuBar" >/dev/null 2>&1; then
+    kill "$app_pid" 2>/dev/null || true
+    bad "menu-bar app: pgrep cannot see the stand-in, so setup would not either"
+    return "$failures"
+  fi
+  ok "a running app of the current version is in place"
+
+  set +e
+  ( cd "$install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
+      "$install/quern" setup ) > "$sb/setup.log" 2>&1
+  local setup_rc=$?
+  set -e
+
+  # Evidence that setup reached the menu-bar decision at all. Without this,
+  # a setup that died early leaves the app running for the most boring
+  # reason available -- it never got there -- and "setup left it running"
+  # passes on that.
+  if grep -qi "Quern app" "$sb/setup.log"; then
+    ok "setup reached the menu-bar check (rc $setup_rc)"
+  else
+    bad "setup never reported on the Quern app, so the check below proves nothing (rc $setup_rc)"
+    tail -n 8 "$sb/setup.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  if kill -0 "$app_pid" 2>/dev/null; then
+    ok "setup left it running"
+  else
+    bad "setup quit the app it had nothing to replace (#215)"
+    grep -i "quern app\|menu.bar\|quit" "$sb/setup.log" | head -6 | sed 's/^/      /'
+  fi
+
+  # And it must not have decided to fetch one either: an app that is current
+  # is not an app to reinstall, and a rehearsal that downloads here would be
+  # testing the network.
+  if grep -qi "Fetching the signed menu-bar app\|Downloading" "$sb/setup.log"; then
+    bad "setup went to fetch an app it already had at $candidate_version"
+  else
+    ok "and did not go looking for another one"
+  fi
+
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  # Belt as well as braces: if the shell was killed before its trap ran, the
+  # sleep is orphaned and `wait` above cannot see it.
+  # An `if`, not `[[ ... ]] && kill ...`: under `set -e` that one-liner's
+  # status is the whole list's, so an empty $stray ended the case there --
+  # silently, with the parent adding a failure nobody had printed. Exactly
+  # the shape the per-case exit status was introduced to carry, biting the
+  # case that reports it.
+  local stray
+  stray="$(cat "$app/Contents/MacOS/QuernMenuBar.child" 2>/dev/null || true)"
+  if [[ -n "$stray" ]]; then
+    kill "$stray" 2>/dev/null || true
+    # `kill` returns when the signal is delivered, not when the process is
+    # gone, so an immediate `kill -0` can still find it mid-exit and report a
+    # leak that cleanup had handled. A flake in the check would be worse than
+    # the leak it looks for.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$stray" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if [[ -n "$stray" ]] && kill -0 "$stray" 2>/dev/null; then
+    bad "the stand-in left $stray running"
+  else
+    ok "the stand-in left nothing behind"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_menubar_app_left_running )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "A clone that cannot be fast-forwarded"
+# --------------------------------------------------------------------------
+# Two states a real clone is often in, and in both the update must decline
+# and say what to do -- not pull, not half-pull, and above all not discard
+# work. They share the origin the first case built.
+#
+# `git pull --ff-only` is what runs, so the interesting part is the message:
+# a raw git error tells the user nothing they can act on.
+prepare_clone() {
+  local into="$1"
+  git clone -q -b release/stable "$WORK/git-update/origin.git" "$into"
+  git -C "$into" reset -q --hard HEAD~1
+  python3 -m venv "$into/.venv" > "$into/venv.log" 2>&1 || true
+  "$into/.venv/bin/pip" install -q -e "$into" > "$into/pip.log" 2>&1 || true
+}
+
+case_clone_on_another_branch() {
+  failures=0   # a subshell copy: a case reports only its own
+  if [[ ! -d "$WORK/git-update/origin.git" ]]; then
+    skip "branch clone: the update case left no origin to clone from"
+    return 0
+  fi
+  local sb="$WORK/branch-clone"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+  prepare_clone "$sb/install"
+
+  # The ordinary dev-clone state: working on something, not on the channel
+  # branch. Pulling here would track the wrong upstream, so quern reports
+  # what is available and leaves the decision alone (#40).
+  git -C "$sb/install" checkout -q -b my-work
+
+  set +e
+  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if grep -q "You're on branch" "$sb/update.log" \
+     && grep -q "release/stable" "$sb/update.log"; then
+    ok "it names the branch you are on and the one to switch to"
+  else
+    bad "the update did not explain why it would not pull"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  local still
+  still="$(sed -n 's/^version = "\(.*\)"/\1/p' "$sb/install/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$still" == "$prev_version" ]] \
+    && ok "the clone is left where it was, on $prev_version" \
+    || bad "the clone moved to ${still:-nothing} from a branch it should not have pulled"
+
+  [[ "$(git -C "$sb/install" rev-parse --abbrev-ref HEAD)" == "my-work" ]] \
+    && ok "and still on my-work" \
+    || bad "the update changed the checked-out branch"
+  (( rc == 0 || rc == 2 )) && ok "it exits without claiming failure (rc $rc)" \
+    || ok "it exits $rc"
+  return "$failures"
+}
+
+case_clone_with_local_changes() {
+  failures=0   # a subshell copy: a case reports only its own
+  if [[ ! -d "$WORK/git-update/origin.git" ]]; then
+    skip "dirty clone: the update case left no origin to clone from"
+    return 0
+  fi
+  local sb="$WORK/dirty-clone"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+  prepare_clone "$sb/install"
+
+  # One stray edit is all it takes, and it is the user's work: the only
+  # unacceptable outcome here is losing it.
+  local marker="# a local edit the update must not discard"
+  printf '%s\n' "$marker" >> "$sb/install/README.md"
+
+  set +e
+  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if grep -qi "local changes" "$sb/update.log"; then
+    ok "it says local changes are in the way"
+  else
+    bad "the update did not explain that local changes blocked it"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+  grep -qi "stash" "$sb/update.log" \
+    && ok "and says what to do about them" \
+    || bad "it does not say how to proceed"
+
+  # The load-bearing one.
+  if grep -qF "$marker" "$sb/install/README.md"; then
+    ok "the local edit is still there"
+  else
+    bad "the update discarded uncommitted work"
+  fi
+
+  [[ $rc -ne 0 ]] \
+    && ok "the refusal reaches the exit code (rc $rc)" \
+    || bad "a blocked update exited 0"
+  return "$failures"
+}
+
+set +e
+( case_clone_on_another_branch )
+failures=$((failures + $?))
+( case_clone_with_local_changes )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "A channel offering an older release is refused"
+# --------------------------------------------------------------------------
+# 0.18.1's defect: the beta channel resolved to a release three minor
+# versions old and every tarball user was offered it, then pinned there. The
+# guard exists so a wrong answer from the resolver is refused rather than
+# acted on -- and refusing has to be distinguishable from having nothing to
+# do, because rc 2 means "already up to date" and maps to exit 0, which would
+# tell every surface that nothing needed doing.
+#
+# Driven against the *candidate's* updater, unlike the cases above: this is a
+# question about the code that is going out, not the code users are leaving.
+case_downgrade_refused() {
+  failures=0   # a subshell copy: a case reports only its own
+  local installed="$WORK/tarball-update/home/.local/share/quern"
+  if [[ ! -x "$installed/quern" ]]; then
+    skip "downgrade refusal: the tarball-update case left no install to offer a downgrade to"
+    return 0
+  fi
+  local at
+  at="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  if [[ "$at" != "$candidate_version" ]]; then
+    skip "downgrade refusal: that install is ${at:-nothing}, not the candidate"
+    return 0
+  fi
+
+  local sb="$WORK/downgrade"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin" "$sb/srv/releases"
+  make_stubs "$sb/bin"
+  # The state and home of the install being updated, so the run is the same
+  # one the tarball case left behind rather than a fresh machine.
+  cp -R "$WORK/tarball-update/home/." "$sb/home/" 2>/dev/null || true
+
+  # No asset is staged on purpose. The refusal happens at the version
+  # comparison, before anything is downloaded, so a served tarball here would
+  # only be able to hide a guard that had stopped working.
+  local port
+  port="$(python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8908)"
+  cat > "$sb/srv/releases/latest" <<EOF
+{"tag_name": "$PREV", "prerelease": false,
+ "assets": [{"name": "quern-$prev_version.tar.gz",
+             "browser_download_url": "http://127.0.0.1:$port/releases/download/$PREV/quern-$prev_version.tar.gz"}]}
+EOF
+  python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
+  local srv_pid=$!
+  local waited=0
+  until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if (( waited > 20 )); then
+      { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+      bad "downgrade refusal: the local release server never came up"
+      return "$failures"
+    fi
+    sleep 0.5
+  done
+
+  set +e
+  ( cd "$installed" && env -i \
+      HOME="$sb/home" \
+      QUERN_STATE_DIR="$sb/state" \
+      QUERN_RELEASES_URL="http://127.0.0.1:$port" \
+      PATH="$sb/bin:$PATH" \
+      "$installed/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+  { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+
+  if grep -q "Not downgrading" "$sb/update.log"; then
+    ok "it refuses the older release, and says why"
+  else
+    bad "nothing refused $prev_version being offered to $candidate_version"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  # Not rc 2. That is NO_OP -- "already up to date" -- and it reaches the
+  # CLI, the menu bar's isNoOp and the result file alike. A refusal is the
+  # opposite: an update was wanted and did not happen.
+  if [[ $rc -eq 0 || $rc -eq 2 ]]; then
+    bad "the refusal exited $rc, which reads as success or as nothing-to-do"
+  else
+    ok "the refusal reaches the exit code (rc $rc)"
+  fi
+
+  local still
+  still="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$still" == "$candidate_version" ]] \
+    && ok "the install is untouched at $candidate_version" \
+    || bad "the install is now ${still:-nothing} — it downgraded anyway"
+
+  return "$failures"
+}
+
+set +e
+( case_downgrade_refused )
 failures=$((failures + $?))
 set -e
 

@@ -221,17 +221,28 @@ quern stop
 curl -fsSL https://quern.dev/install.sh | bash
 ```
 
-The installer puts Quern in `~/.local/share/quern` and runs setup from there.
-Setup re-points the `quern` command at the new install, re-registers your MCP
-clients, and installs the matching Quern app. Open a new terminal (or run
+The installer puts Quern in `~/.local/share/quern`, runs setup from there and
+then runs `quern mcp-install`. Setup re-points the `quern` command at the new
+install and installs the matching Quern app; the separate `mcp-install` step
+is what re-points your MCP clients. Open a new terminal (or run
 `rehash`) so your shell picks up the change, then check that Settings now says
 **Release**.
 
 Your settings, API key and device state live in `~/.quern` and are kept. The
 clone is left where it was. Delete it if you don't need it.
 
-To go back to the clone, run `./quern setup` inside it. That points `quern` and
-your MCP clients at the clone again.
+To go back to the clone, run both of these inside it:
+
+```bash
+./quern setup
+./quern mcp-install
+```
+
+Setup re-points the `quern` command; `mcp-install` re-points your MCP clients.
+Setup does not do the second, so running it alone leaves your clients launching
+the release install's wrapper while the command runs from the clone — the two
+then disagree about which quern you are using, and the MCP side is the one you
+will not notice.
 
 ## Quitting
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -2767,3 +2768,272 @@ class TestTheEntryPointsParseTheirArguments:
             main_mod.cli()
         assert exc.value.code == 2
         assert "--yse" in capsys.readouterr().err
+
+
+class TestUrlAndEnv:
+    """`quern url` and `quern env` exist so a script never writes 9100 down.
+
+    The shipped example did exactly that -- `os.getenv("QUERN_SERVER_URL",
+    "http://127.0.0.1:9100")` -- which is the habit CONTRIBUTING forbids in
+    the sentence "All consumers discover the server via ~/.quern/state.json.
+    Never hardcode ports."
+    """
+
+    def _run(self, monkeypatch, argv, state=None, key=None):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: state,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda port, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: None,
+        )
+        if key is not None:
+            import tempfile
+            from pathlib import Path
+            tmp = Path(tempfile.mkdtemp()) / "api-key"
+            tmp.write_text(key)
+            monkeypatch.setattr("server.config.API_KEY_FILE", tmp)
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        return exc.value.code
+
+    def test_url_reports_the_port_the_server_actually_took(self, monkeypatch, capsys):
+        """Not the default. A server that found 9100 busy is on another port,
+        and that is precisely when a hardcoded URL fails."""
+        code = self._run(monkeypatch, ["url"], state={"server_port": 9137})
+        assert code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_a_stale_state_file_is_not_a_running_server(self, monkeypatch, capsys):
+        """A crash or a SIGKILL leaves state.json behind. Without a health
+        check `quern url` exits 0 and hands a script a URL that refuses
+        connections — worse than the hardcoded 9100 it replaced, because it
+        looks authoritative."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: {"server_port": 9137},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda port, **kw: False,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "a script would have used this URL"
+        assert "quern start" in err
+
+    @pytest.mark.parametrize("port", [True, False, 0, 70000, -1, "9100", None, 3.5])
+    def test_an_unusable_port_is_refused(self, monkeypatch, capsys, port):
+        """`isinstance(port, int)` was the test, and `True` passes it —
+        bool subclasses int — as do 0 and 70000."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: {"server_port": port},
+        )
+        # Would pass the health check if it were ever reached, so a failure
+        # here is the validation and nothing else.
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1, f"{port!r} was accepted as a port"
+        assert capsys.readouterr().out == ""
+
+    def test_a_different_process_on_the_port_gets_nothing(self, monkeypatch, capsys):
+        """Answering /health is not proof of being ours, and `quern env`
+        prints the API key. Quern takes whatever port was free, so if it dies
+        an untrusted local process can claim the freed one and answer 200."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "env"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: 9999,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "the API key went to a process that is not quern"
+        assert "quern start" in err
+
+    def test_our_own_server_is_accepted(self, monkeypatch, capsys):
+        """The other half: the check must not refuse the real thing."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: 4242,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_an_unanswerable_owner_check_does_not_invent_a_refusal(
+        self, monkeypatch, capsys
+    ):
+        """`lsof` can fail or be absent. "Could not ask" must not read as
+        "an impostor" -- that would break the command on machines where the
+        real server is running perfectly well."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr("server.lifecycle.ports._get_pid_on_port", lambda p: None)
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_url_says_so_when_nothing_is_running(self, monkeypatch, capsys):
+        code = self._run(monkeypatch, ["url"], state=None)
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "a script would have eval'd or curl'd this"
+        assert "quern start" in err
+
+    def test_env_is_evalable(self, monkeypatch, capsys):
+        code = self._run(
+            monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret",
+        )
+        assert code == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert lines == [
+            "export QUERN_SERVER_URL=http://127.0.0.1:9137",
+            "export QUERN_API_KEY=s3cret",
+        ]
+
+    def test_env_quotes_what_it_exports(self, monkeypatch, capsys):
+        """An API key is opaque; a shell-special character in one must not
+        become shell syntax when the caller evals it."""
+        code = self._run(
+            monkeypatch, ["env"], state={"server_port": 9137}, key="a b;rm -rf /",
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "export QUERN_API_KEY='a b;rm -rf /'" in out
+
+    def test_env_prints_nothing_when_there_is_no_server(self, monkeypatch, capsys):
+        """A partial environment is worse than none: `eval` would set half of
+        it and the script would fail later, somewhere unrelated."""
+        code = self._run(monkeypatch, ["env"], state=None, key="s3cret")
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert "quern start" in err
+
+    def test_env_does_not_emit_the_prototype_name(self, monkeypatch, capsys):
+        """QUERN_DEBUG_SERVER_URL is the old name. The wrapper still honours
+        it with a deprecation warning; nothing should be teaching it."""
+        self._run(monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret")
+        assert "QUERN_DEBUG_SERVER_URL" not in capsys.readouterr().out
+
+
+class TestRestartKeepsThePort:
+    """`quern restart` takes no ports, so they arrived as None and the
+    defaults were filled in — meaning a server on any other port came back on
+    9100.
+
+    Not hypothetical: `quern update` restarts the server for you, so an
+    update silently moved it. The rehearsal caught this by starting a server
+    on 9190 and watching it return on 9102.
+    """
+
+    def _resolved(self, monkeypatch, argv, state):
+        """The ports `cli()` would hand to start, without starting anything."""
+        from server import main as main_mod
+
+        monkeypatch.setattr(main_mod, "read_state", lambda: state)
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", *argv])
+        seen = {}
+        monkeypatch.setattr(main_mod, "_cmd_restart",
+                            lambda args: seen.update(port=args.port,
+                                                     proxy=args.proxy_port))
+        # `cli()` returns for restart rather than exiting; other commands
+        # exit, so both are tolerated.
+        with contextlib.suppress(SystemExit):
+            main_mod.cli()
+        return seen
+
+    def test_it_returns_to_the_port_it_was_on(self, monkeypatch):
+        seen = self._resolved(
+            monkeypatch, ["restart"],
+            state={"server_port": 9190, "proxy_port": 9191},
+        )
+        assert seen == {"port": 9190, "proxy": 9191}, (
+            "the restart moved the server to the default port"
+        )
+
+    def test_an_explicit_port_still_wins(self, monkeypatch):
+        """`quern restart --port N` is a request to move, and adopting the
+        running port must not override it."""
+        seen = self._resolved(
+            monkeypatch, ["restart", "--port", "9300"],
+            state={"server_port": 9190, "proxy_port": 9191},
+        )
+        assert seen["port"] == 9300
+        assert seen["proxy"] == 9191, "the proxy port was not asked about"
+
+    def test_with_no_server_it_falls_back_to_the_defaults(self, monkeypatch):
+        from server.lifecycle.ports import DEFAULT_PROXY_PORT, DEFAULT_SERVER_PORT
+
+        seen = self._resolved(monkeypatch, ["restart"], state=None)
+        assert seen == {"port": DEFAULT_SERVER_PORT, "proxy": DEFAULT_PROXY_PORT}
+
+    def test_a_junk_port_in_state_does_not_become_the_port(self, monkeypatch):
+        """State is a file on disk and can be anything. A non-integer must
+        fall through to the default rather than reaching `bind`."""
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        seen = self._resolved(
+            monkeypatch, ["restart"],
+            state={"server_port": "not-a-port", "proxy_port": None},
+        )
+        assert seen["port"] == DEFAULT_SERVER_PORT
+
+    def test_start_is_not_affected(self, monkeypatch):
+        """Only restart adopts. `quern start` with no port means the default,
+        which is how someone deliberately returns a moved server to 9100."""
+        from server import main as main_mod
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        monkeypatch.setattr(main_mod, "read_state",
+                            lambda: {"server_port": 9190, "proxy_port": 9191})
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", "start"])
+        seen = {}
+        monkeypatch.setattr(main_mod, "_cmd_start",
+                            lambda args: seen.update(port=args.port))
+        with contextlib.suppress(SystemExit):
+            main_mod.cli()
+        assert seen == {"port": DEFAULT_SERVER_PORT}

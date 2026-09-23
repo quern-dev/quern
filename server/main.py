@@ -759,6 +759,38 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _keep_running_ports(args: argparse.Namespace) -> argparse.Namespace:
+    """For a restart, stay on the ports the server is actually using.
+
+    `restart` takes no ports of its own, so they arrived as None and
+    `_resolve_args` filled in the defaults -- meaning a server started on
+    another port came back on 9100. That is not hypothetical: `quern update`
+    restarts the server for you, so an update silently moved it, and the
+    state file recorded the new port while every script that had been told
+    the old one broke.
+
+    Only when the caller said nothing. `quern restart --port N` is a request
+    to move, and this must not override it.
+
+    Called before `_resolve_args`, which is the last moment "the user did not
+    say" is still distinguishable from "the user said 9100".
+    """
+    state = read_state()
+    if not state:
+        return args
+    from server.__main__ import _valid_port
+
+    if getattr(args, "port", None) is None:
+        port = _valid_port(state.get("server_port"))
+        if port is not None:
+            args.port = port
+    if getattr(args, "proxy_port", None) is None:
+        proxy_port = _valid_port(state.get("proxy_port"))
+        if proxy_port is not None:
+            args.proxy_port = proxy_port
+    return args
+
+
 def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Fill in defaults for None-valued port args."""
     if args.port is None:
@@ -865,7 +897,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
     # Daemonize if not foreground mode
     if not args.foreground:
-        daemonize(server_port)
+        daemonize(server_port, proxy_port if enable_proxy else None)
         # daemonize() never returns — it spawns a child process and exits.
 
     # Configure logging
@@ -1830,6 +1862,14 @@ def cli() -> None:
         "check-updates",
         help="Check for a new release now, ignoring the once-a-day rate limit",
     )
+    # Dispatched early in `server.__main__`, like setup. Declared here so
+    # `quern --help` lists them and the two entry points agree about what
+    # exists.
+    subparsers.add_parser(
+        "url", help="Print the running server's base URL")
+    subparsers.add_parser(
+        "env", help="Print shell exports for the running server")
+
     setup_parser = subparsers.add_parser(
         "setup", help="Check environment and install dependencies")
     # `server.__main__` dispatches setup before this parser is reached, and
@@ -1896,8 +1936,12 @@ def cli() -> None:
         # case above, where server flags live on `start_parser`.
         parser.error("unrecognised arguments: " + " ".join(remaining))
 
-    # Fill port defaults
+    # Fill port defaults. A restart first adopts whatever the running server
+    # is on, since by the time defaults are filled in, "not given" and "9100"
+    # are the same value.
     if hasattr(args, "port"):
+        if args.command == "restart":
+            _keep_running_ports(args)
         _resolve_args(args)
 
     # Dispatch
@@ -1923,6 +1967,12 @@ def cli() -> None:
         sys.exit(run(getattr(args, "output", None)))
     elif args.command == "check-updates":
         sys.exit(_cmd_check_updates())
+    elif args.command == "url":
+        from server.__main__ import _cmd_url
+        sys.exit(_cmd_url())
+    elif args.command == "env":
+        from server.__main__ import _cmd_env
+        sys.exit(_cmd_env())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup(assume_yes=getattr(args, "assume_yes", False)))
