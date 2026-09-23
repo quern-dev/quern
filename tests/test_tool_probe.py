@@ -17,6 +17,7 @@ because every one of these bugs returned a perfectly plausible value.
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 import time
@@ -61,13 +62,28 @@ class TestAProbeIsBounded:
         and makes any mutation result measured in that window worthless.
         """
         marker = "quern-probe-leak-canary-98214"
+        # The grandchild's duration is the marker, because a grandchild has no
+        # other identity: it is `sleep`, and the comment carrying `marker` is on
+        # its *parent's* command line, which is the blindness this test exists
+        # to cover. So the duration has to be one nothing else would pick.
+        #
+        # `sleep 90` was not. Its pattern below is anchored only at the front,
+        # so it matched `sleep 900` and `sleep 905` too -- and any bare
+        # `sleep 90` from anything else on the machine. `release-rehearsal.sh`
+        # uses `sleep 900` for two stand-in processes, and a polling loop
+        # sleeping 90s between ticks is an ordinary thing for a terminal to be
+        # doing. Either made this test fail with an orphan it had not created,
+        # and then `kill -9` it -- so the suite reached out and killed a
+        # stranger's process to report a leak that had not happened.
+        grandchild_sleep = "90.98214"
         # Bounded from outside, because the thing under test owns the only
         # other bound. When the internal `wait_for` regresses this fails in
         # seconds instead of hanging the suite for the length of the sleep --
         # which is exactly what mutating that timeout away did.
         await asyncio.wait_for(
             probe_command(
-                "/bin/sh", "-c", f"sleep 90 & echo go; wait  # {marker}",
+                "/bin/sh", "-c",
+                f"sleep {grandchild_sleep} & echo go; wait  # {marker}",
                 timeout=1.0, tool="canary",
             ),
             timeout=15.0,
@@ -81,7 +97,13 @@ class TestAProbeIsBounded:
             ).stdout.split()
 
         child = alive(marker)
-        grandchild = [p for p in alive("^sleep 90") if p not in child]
+        # Anchored both ends, and the dot escaped: `pgrep -f` takes an ERE, so
+        # an unescaped `.` matches any character and a missing `$` matches any
+        # suffix. Both ends have to hold for this to name only our own process.
+        grandchild = [
+            p for p in alive(rf"^sleep {re.escape(grandchild_sleep)}$")
+            if p not in child
+        ]
         for pid in child + grandchild:
             subprocess.run(["kill", "-9", pid], capture_output=True)
 
