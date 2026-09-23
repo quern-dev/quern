@@ -641,9 +641,31 @@ class PreviewManager:
 
         # Not a capture device. A simulator is the other thing it can be, and
         # it reaches the screen by a different route entirely.
-        for udid, sim_name in await booted_simulators():
-            if name in (udid, sim_name):
+        #
+        # The udid is checked across every simulator before any name is, for
+        # the reason `_resolve_device` checks ids first: a name that collides
+        # with some other simulator's udid must not win.
+        booted = await booted_simulators()
+        for udid, sim_name in booted:
+            if name == udid:
                 return await self.add_simulator(udid, title=sim_name)
+
+        # Two booted simulators of one model carry one name -- cloning a
+        # device is the ordinary way to get there. Opening whichever simctl
+        # happened to list first is the defect `_resolve_device` and
+        # `_key_for_label` both refuse to commit, and it was asymmetric as
+        # well as wrong: `add` picked one while `remove` with the same string
+        # raised once both were active.
+        by_name = [(u, n) for u, n in booted if n == name]
+        if len(by_name) > 1:
+            udids = ", ".join(u for u, _ in by_name)
+            raise RuntimeError(
+                f"{len(by_name)} booted simulators are called '{name}'. "
+                f"Ask for one by its udid: {udids}"
+            )
+        if by_name:
+            udid, sim_name = by_name[0]
+            return await self.add_simulator(udid, title=sim_name)
 
         available = [f"{d.name} ({d.cmio_id})" for d in self._available]
         raise RuntimeError(
@@ -708,6 +730,18 @@ class PreviewManager:
         binary = await build_media_engine()
 
         async with self._stagger_lock:
+            # Re-checked under the lock. The check above happens before an
+            # await on a build that can take seconds, so two calls for one
+            # udid -- an agent retrying after a client timeout is enough --
+            # both passed it. The second then overwrote `_streams[udid]`,
+            # stranding the first `quern-media`: out of `_streams`, so
+            # `_stop_stream`, `_terminate_streams` and `stop()` could not
+            # reach it, holding its port and the framebuffer subscription
+            # until the server exited. It also leaked the first `position`
+            # and sent ios-preview a second `add_stream` for a live window.
+            if udid in self._active:
+                return self._active[udid]
+
             position = self._next_position()
             port = find_available_port(
                 STREAM_BASE_PORT,

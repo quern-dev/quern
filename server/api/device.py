@@ -1133,6 +1133,13 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         if not controller._is_physical(udid):
             try:
                 preview = await pm.add(udid)
+            except DeviceError as e:
+                # `add` enumerates booted simulators through simctl to match
+                # the udid, so an unavailable or mid-update Xcode raises here.
+                # Uncaught it is a bare 500 with no detail; routed through the
+                # shared handler it says which tool failed and why, the same
+                # as every other simctl-backed route.
+                raise _handle_device_error(e)
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
             return {

@@ -880,7 +880,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
         .string()
         .optional()
         .describe(
-          "UDID of a physical device, or of a booted simulator, to preview. If omitted, previews all USB-connected physical devices and no simulators."
+          "UDID of a physical device (iOS or Android), a booted iOS simulator, or an Android emulator. If omitted, previews every USB-connected physical iOS device and nothing else -- no simulators, no Android."
         ),
     }),
   }, async ({ udid }) => {

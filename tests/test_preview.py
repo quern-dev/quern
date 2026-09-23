@@ -1083,3 +1083,130 @@ class TestSimulatorStopRouting:
         )
         assert removed == ["Jerimiah's iPhone"]
         assert result["status"] == "removed"
+
+
+class TestSimulatorAddSafety:
+    """`add` grew a simulator branch; it did not grow the rules the rest of
+    the identity handling follows."""
+
+    def test_two_booted_simulators_of_one_name_are_refused(self, monkeypatch):
+        """Cloning a device is the ordinary way to get two of one name.
+        Opening whichever simctl listed first is the defect `_resolve_device`
+        and `_key_for_label` both refuse to commit -- and it was asymmetric
+        too: `add` picked one while `remove` raised once both were active."""
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+
+        async def _no_process():
+            return None
+
+        async def _booted():
+            return [("udid-a", "iPhone 16 Pro"), ("udid-b", "iPhone 16 Pro")]
+
+        async def _never(*_a, **_k):
+            raise AssertionError("add_simulator must not be reached")
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview_mod, "booted_simulators", _booted)
+        monkeypatch.setattr(mgr, "add_simulator", _never)
+
+        with pytest.raises(RuntimeError, match="are called 'iPhone 16 Pro'"):
+            asyncio.run(mgr.add("iPhone 16 Pro"))
+
+    def test_a_udid_beats_another_simulators_name(self, monkeypatch):
+        """Names are checked only after every udid, so a name colliding with
+        some other simulator's udid cannot win."""
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+        picked: list[str] = []
+
+        async def _no_process():
+            return None
+
+        async def _booted():
+            # The first entry is *named* the same string that is the second
+            # entry's udid. Scanning entry-by-entry matches the name first.
+            return [("udid-a", "udid-b"), ("udid-b", "iPhone 16 Pro")]
+
+        async def _add_sim(udid, title=None):
+            picked.append(udid)
+            return preview_mod.ActivePreview(name=udid, position=0, kind="simulator")
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview_mod, "booted_simulators", _booted)
+        monkeypatch.setattr(mgr, "add_simulator", _add_sim)
+
+        asyncio.run(mgr.add("udid-b"))
+        assert picked == ["udid-b"], "a name matched ahead of a udid"
+
+    def test_two_concurrent_adds_for_one_simulator_start_one_stream(
+        self, monkeypatch
+    ):
+        """The check sat before an await on a build that takes seconds, so
+        both callers passed it -- an agent retrying after a client timeout is
+        enough. The second overwrote `_streams[udid]`, stranding the first
+        `quern-media` where `_stop_stream`, `_terminate_streams` and `stop()`
+        could not reach it: it held its port and the framebuffer subscription
+        until the server exited.
+        """
+        from server.device import preview as preview_mod
+
+        udid = "11111111-2222-3333-4444-555555555555"
+        started: list[int] = []
+
+        async def run():
+            mgr = PreviewManager()
+            mgr._process = _LiveStreamProcess()
+
+            release = asyncio.Event()
+
+            async def _no_process():
+                return None
+
+            async def _build():
+                # Both callers are inside here at once, which is the window.
+                await release.wait()
+                return "/tmp/quern-media"
+
+            async def _start_stream(key, binary, port):
+                started.append(port)
+                stream = preview_mod._StreamProcess(
+                    process=_LiveStreamProcess(), port=port, log=deque(maxlen=20),
+                )
+                # The real one registers here, which is the assignment the
+                # second caller used to overwrite. A stub that skips it cannot
+                # show the stranding.
+                mgr._streams[key] = stream
+                return stream
+
+            async def _wait_until_serving(_key, _stream):
+                return None
+
+            async def _send(cmd):
+                mgr._dispatch_event(
+                    {"event": "added", "key": cmd["key"], "id": cmd["id"]}
+                )
+
+            monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+            monkeypatch.setattr(preview_mod, "build_media_engine", _build)
+            monkeypatch.setattr(mgr, "_start_stream", _start_stream)
+            monkeypatch.setattr(mgr, "_wait_until_serving", _wait_until_serving)
+            monkeypatch.setattr(mgr, "_send", _send)
+
+            first = asyncio.create_task(mgr.add_simulator(udid, title="iPhone 16 Pro"))
+            second = asyncio.create_task(mgr.add_simulator(udid, title="iPhone 16 Pro"))
+            await asyncio.sleep(0)
+            release.set()
+            return await asyncio.gather(first, second), mgr
+
+        (a, b), mgr = asyncio.run(run())
+
+        # Asserted on the streams actually started, not on the two results
+        # being equal: the buggy version returned two records that compared
+        # fine while a second quern-media ran untracked.
+        assert len(started) == 1, f"started {len(started)} streams for one simulator"
+        assert len(mgr._streams) == 1
+        assert len(mgr._positions) == 1
+        assert a.name == b.name == udid

@@ -1,7 +1,7 @@
 # Handoff — media engine
 
-Written 2026-09-13 at the end of the session that built this, updated
-2026-09-14. Everything below is either verified or explicitly flagged as
+Written 2026-09-13 at the end of the session that built this; last updated
+2026-09-23. Everything below is either verified or explicitly flagged as
 unverified.
 
 ## Where things are
