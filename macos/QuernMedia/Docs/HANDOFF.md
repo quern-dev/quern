@@ -89,6 +89,24 @@ each other.
 
 ### Product work
 
+- [ ] **`feat/media-keyframe-control` is pushed and parked, awaiting #164.**
+      One commit (`be73b74`): `POST /keyframe` on the stream server, so a
+      caller can ask for an IDR without reconnecting. No PR yet, on purpose —
+      it stacks, and a stacked PR is never auto-reviewed.
+
+      **Collapse the two callbacks when rebasing it, do not keep both.** That
+      branch adds `onKeyframeRequested` beside `onClientAttached` and wires
+      both to the same closure in `main.swift`. #164 has since renamed
+      `onClientAttached` to `onKeyframeNeeded`, because the H.264 desync gate
+      made it fire for a second reason; a control request is a third, and all
+      three mean one thing to the pipeline. So the rebase should call the
+      existing `onKeyframeNeeded?()` from the `POST /keyframe` route and
+      delete the added parameter. A mechanical conflict resolution keeps both,
+      which restores the trailing-closure hazard that branch's own comment
+      spends six lines warning about — a lone trailing closure binds to the
+      *last* closure parameter, so adding one at the end silently rebound
+      every existing call site with no diagnostic.
+
 - **Done: a viewer attaching to an idle simulator now gets a picture in
       ~0.1s.** Measured on a completely idle simulator: 0.108s to the first
       complete JPEG, against **no frame at all within 25 seconds** before —
