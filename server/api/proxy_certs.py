@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from server.api.actions import action, logged_action
+from server.device.devicectl import canonical_device_id
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,
@@ -528,7 +529,32 @@ async def record_device_proxy_config_endpoint(
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
-    record_device_proxy_config(body.udid, body.ssid, proxy_host, port, client_ip=body.client_ip)
+    # Canonicalised before it is stored. `_ip_map` feeds these keys straight
+    # into `owns()`, so a config recorded under the spelling Xcode shows never
+    # joined the actions logged under the other -- which is precisely the
+    # damage `_identity_aliases` was added to end, left unfixed on the half
+    # that writes. Worse after `GET /trace?udid=` began canonicalising its
+    # query: the flows stopped matching either spelling, and the caller saw an
+    # action with an empty `flows` list, which reads as "the app made no
+    # requests".
+    # No device-list refresh here, deliberately.
+    #
+    # An earlier version warmed the alias map first, so a cold map would not
+    # store the raw udid. That was wrong twice over: every unrecognised udid
+    # triggered a full simctl+devicectl+usbmux+adb enumeration, with no
+    # negative cache, so a caller passing distinct unknown udids could spin the
+    # device stack (CWE-400); and when the refresh *failed* it swallowed the
+    # error and wrote the raw udid anyway -- a permanently wrong key that
+    # survives discovery recovering.
+    #
+    # `ip_to_udid` canonicalises on read instead, which fixes the cold case,
+    # the failed case, and every file written before canonicalisation existed.
+    # Canonicalising here as well is belt and braces: it costs nothing when the
+    # map is warm, which it is on any server that has listed devices.
+    record_device_proxy_config(
+        canonical_device_id(body.udid), body.ssid, proxy_host, port,
+        client_ip=body.client_ip,
+    )
     return {
         "udid": body.udid,
         "ssid": body.ssid,

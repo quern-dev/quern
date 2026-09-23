@@ -186,6 +186,9 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
     now = now or datetime.now(UTC)
     mapping: dict[str, tuple[str, bool]] = {}
     recorded_at: dict[str, datetime | None] = {}
+    # Keys arrive canonicalised: `read_cert_state` does it for every reader,
+    # because there are eight of them and fixing this one alone left
+    # certificate verification reading by the other spelling.
     for udid, record in (cert_state or {}).items():
         for config in (record.get("wifi_proxy_configs") or {}).values():
             ip = config.get("client_ip")

@@ -9,7 +9,7 @@ import time
 from server import logging_ext
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.devicectl import DevicectlBackend
+from server.device.devicectl import DevicectlBackend, canonical_device_id
 from server.device.idb import IdbBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
@@ -139,6 +139,21 @@ class DeviceController(DeviceControllerUI):
 
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
+        # Canonicalised here, not at the ten places that assign it.
+        #
+        # `resolve_udid` canonicalises what it returns, but the active device
+        # is also written directly by `POST /device/active` and by four paths
+        # in `DevicePool`. Those stored the raw udid, so a caller who set the
+        # active device by the spelling Xcode shows got it back uncanonicalised
+        # from branch 2 of `_resolve_udid` -- and once `GET /trace?udid=`
+        # started canonicalising its query, *both* spellings returned nothing.
+        # That is worse than before the canonicalisation existed, and it is the
+        # "empty is indistinguishable from quiet" failure the trace exists to
+        # prevent.
+        #
+        # Fixing the callers would have left the eleventh. This is the one
+        # place the value lands, and it is also what the sidecar persists.
+        value = canonical_device_id(value) if value else value
         # Best-effort name: the cache is filled by list_devices(), which
         # every resolve path runs before landing here, but the pool and the
         # set-active-device API can assign a UDID directly. A miss writes no
@@ -396,7 +411,9 @@ class DeviceController(DeviceControllerUI):
             logger.debug("Device type unknown for %s, refreshing device list...", udid[:8])
             await self.list_devices()
 
-    async def resolve_udid(self, udid: str | None = None) -> str:
+    async def resolve_udid(
+        self, udid: str | None = None, *, set_active: bool = True,
+    ) -> str:
         """Resolve which device to target, and tell the action log about it.
 
         This is the one place that *decides* which device a call goes to, so
@@ -408,27 +425,57 @@ class DeviceController(DeviceControllerUI):
 
         The assignment is a no-op when no action is being recorded.
         """
-        resolved = await self._resolve_udid(udid)
+        resolved = await self._resolve_udid(udid, set_active=set_active)
         current_action().udid = resolved
         return resolved
 
-    async def _resolve_udid(self, udid: str | None = None) -> str:
+    async def _resolve_udid(
+        self, udid: str | None = None, *, set_active: bool = True,
+    ) -> str:
         """Resolve which device to target.
 
         If a DevicePool is attached, attempts pool-based resolution for
         claim-aware, multi-device-friendly behavior. If pool resolution
         fails for any reason, silently falls back to the original logic.
 
+        `set_active=False` resolves without changing which device subsequent
+        unqualified calls go to. It exists so a read that names its own device
+        does not have to bypass this function to dodge the side effect --
+        bypassing is what `screenshot` did, and it silently cost the action log
+        its udid and physical devices their routing.
+
         Resolution order:
-        1. Explicit udid parameter → use it, update active
+        1. Explicit udid parameter → canonicalise it, use it, update active
         2. Stored active_udid → use it
         3. Pool resolution (if pool attached) → best available booted device
         4. Fallback: simple auto-detect (original logic, unchanged)
         """
         if udid:
+            # Warm the caches first: `_ensure_device_type_cached` refreshes the
+            # device list when it does not recognise the udid, and that refresh
+            # is what learns a physical device's other spelling. Canonicalising
+            # before it would look the alias up in an empty map.
             await self._ensure_device_type_cached(udid)
-            self._active_udid = udid
-            return udid
+            canonical = canonical_device_id(udid)
+            if canonical != udid:
+                logger.debug(
+                    "Resolved %s to its canonical identifier %s",
+                    udid[:8], canonical[:8],
+                )
+                # The type cache is keyed on the canonical spelling only, so
+                # `_ensure_device_type_cached(udid)` above is a guaranteed miss
+                # every time a caller names the hardware udid -- a full
+                # simctl+devicectl+usbmux+adb enumeration per call, for a device
+                # already known. Teaching the cache the other spelling is what
+                # stops that; re-running `ensure` on the canonical, which is
+                # what this used to do, was a no-op in every reachable path
+                # (deleting it left all 168 tests green).
+                known = self._device_type_cache.get(canonical)
+                if known is not None:
+                    self._device_type_cache[udid] = known
+            if set_active:
+                self._active_udid = canonical
+            return canonical
 
         if self._active_udid:
             restored = self._active_udid
@@ -442,7 +489,18 @@ class DeviceController(DeviceControllerUI):
             # ran, and the menu bar showed the UDID. The dedup guard makes
             # this a no-op once the name and type have landed.
             self._active_udid = restored
-            return restored
+            # The canonical spelling, not `restored`. `__init__` writes the
+            # persisted udid straight into the backing field -- deliberately,
+            # since restoring is not a change worth writing -- so it bypasses
+            # the setter that canonicalises. A sidecar holding the hardware
+            # udid therefore survives a restart, and this branch returned it
+            # raw on the first call: `resolve_udid` records that on the action,
+            # and trace ownership compares udids exactly, so the action reads
+            # FOREIGN against everything recorded canonically.
+            #
+            # Reproduced: sidecar = hardware udid, `resolve_udid()` returned
+            # the hardware udid while `_active_udid` held the canonical one.
+            return self._active_udid
 
         # Step 3: try pool-based resolution (silent upgrade)
         if self._pool is not None:
@@ -948,20 +1006,14 @@ class DeviceController(DeviceControllerUI):
         quality: int = 85,
     ) -> tuple[bytes, str]:
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
-        # Use resolve_udid for fallback logic but don't change the active device
-        if udid:
-            await self._ensure_device_type_cached(udid)
-            resolved = udid
-            # Named here too, not only on the fallback path. `resolve_udid`
-            # is what tells the action log which device a call went to, and
-            # short-circuiting past it meant the *explicitly scoped* call was
-            # the one that recorded no device -- backwards from any reading of
-            # it. Live: `GET /device/screenshot?udid=<sim>` logged `udid: ""`,
-            # so a per-device trace dropped it and its logs fell back to
-            # matching on time alone.
-            current_action().udid = resolved
-        else:
-            resolved = await self.resolve_udid(None)
+        # Through `resolve_udid`, not around it. This short-circuited when
+        # the caller named a device, to avoid changing the active one, and so
+        # skipped everything else that function does: the action log never
+        # learned the udid (fixed once by repeating the assignment here, which
+        # left the bypass in place), and a physical device's second spelling
+        # was never canonicalised, which routed a connected iPhone to simctl.
+        # `set_active=False` buys the same thing without the bypass.
+        resolved = await self.resolve_udid(udid, set_active=False)
         raw_png = await self.raw_screenshot(resolved)
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
 

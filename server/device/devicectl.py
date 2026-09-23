@@ -14,6 +14,66 @@ from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceT
 
 logger = logging.getLogger(__name__)
 
+#: Every spelling of a physical device's identity, mapped to the one quern
+#: keys it on.
+#:
+#: A physical device has two identifiers and Apple's own tools disagree about
+#: which to show. `devicectl`'s JSON calls the CoreDevice UUID `identifier`
+#: and the ECID-based one `hardwareProperties.udid`; its *printed* table shows
+#: only the latter, under a column headed `(UDID)`, which is also what Xcode
+#: and the device's own About screen show. quern keys on `identifier`, so a
+#: caller who read the udid off any of those was passing a real identifier for
+#: a real connected device and getting HTTP 500 back:
+#:
+#:     screenshot?udid=B34C4EE9-...  -> 200
+#:     screenshot?udid=00008030-...  -> 500  "[simctl] simctl io failed"
+#:
+#: The 500 is the second-order damage. An unknown udid never reached the type
+#: cache, so `_is_physical` defaulted to simulator and routed a connected
+#: iPhone to simctl -- an error naming a tool the caller never asked for.
+#:
+#: The silent damage is worse and is why this is keyed at all rather than
+#: patched at the error site: attribution compares identifiers by equality
+#: (`owns()` in server/trace.py), so two spellings of one phone are FOREIGN to
+#: each other -- "never the same work". An action logged under one and a proxy
+#: config recorded under the other never join, and the flow simply vanishes
+#: from the trace looking exactly like a quiet device. See #270.
+_identity_aliases: dict[str, str] = {}
+
+
+def canonical_device_id(udid: str) -> str:
+    """The identifier quern keys a device on, given any of its spellings.
+
+    Unknown values pass through unchanged: this canonicalises, it does not
+    validate. A simulator UDID has only one spelling and is returned as-is.
+
+    Populated by `DevicectlBackend.list_devices`, which parses the JSON
+    carrying both forms. It is deliberately not a second `devicectl`
+    invocation -- two independent readings of the same fact can disagree, and
+    the one that decides identity should not be the one nobody is looking at.
+    """
+    return _identity_aliases.get(udid, udid)
+
+
+def _remember_identity(canonical: str, *spellings: str) -> None:
+    """Record every known spelling of one device, including the canonical.
+
+    An empty canonical is refused rather than stored. The loop below guards
+    the *key* and says nothing about the value, so a devicectl entry with no
+    `identifier` -- which `list_devices` reads defensively as `""` -- produced
+    `{hardware_udid: ""}`. `canonical_device_id` then returned `""` for a real
+    device, and because `""` is falsy the trace's `if udid:` filter became a
+    pass-through that answered with *other* devices' actions and echoed
+    `udid: ""`. `resolve_udid` returned `""` for a truthy input too, breaking
+    its own contract. The rest of this file defends against a missing
+    `identifier`; the defence here was written on the wrong operand.
+    """
+    if not canonical:
+        return
+    for spelling in (canonical, *spellings):
+        if spelling:
+            _identity_aliases[spelling] = canonical
+
 
 class DevicectlBackend:
     """Manages physical iOS devices via xcrun devicectl subprocess calls."""
@@ -108,6 +168,16 @@ class DevicectlBackend:
         for dev in device_list:
             connection_props = dev.get("connectionProperties", {})
             pairing_state = connection_props.get("pairingState", "")
+
+            # Identity first, before any filter. A device that is unpaired,
+            # unreachable or simulated is still a device someone can name, and
+            # knowing both its spellings is what lets a refusal say which
+            # device it means instead of blaming simctl for an "invalid
+            # device" -- which is the failure this exists to end.
+            _remember_identity(
+                dev.get("identifier", ""),
+                dev.get("hardwareProperties", {}).get("udid", ""),
+            )
 
             # Only show paired devices
             if pairing_state != "paired":

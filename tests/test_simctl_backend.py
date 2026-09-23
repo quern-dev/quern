@@ -644,3 +644,27 @@ class TestALaunchThatDidNotSurvive:
         with patch.object(backend, "_run_simctl",
                           AsyncMock(return_value=(str(tmp_path), ""))):
             assert await backend.app_display_name("AAAA-1111", "com.example.App") == expected
+
+
+class TestMalformedOutputDoesNotEscape:
+    """`json.loads` raises `JSONDecodeError`, which is not a `DeviceError`, so
+    it escaped this backend entirely.
+
+    Survivable while an explicit udid bypassed enumeration. Now that
+    `screenshot` resolves through `resolve_udid`, one malformed `simctl list`
+    would stop a screenshot of a device the caller named exactly -- a failure
+    with nothing to do with the device or the request."""
+
+    async def test_truncated_json_lists_no_devices(self):
+        backend = SimctlBackend()
+        backend._run_simctl = AsyncMock(return_value=('{"devices": {"iOS', ""))
+
+        with patch("server.device.simctl.xcode_available", return_value=True):
+            assert await backend.list_devices() == []
+
+    async def test_non_json_output_lists_no_devices(self):
+        backend = SimctlBackend()
+        backend._run_simctl = AsyncMock(return_value=("command not found", ""))
+
+        with patch("server.device.simctl.xcode_available", return_value=True):
+            assert await backend.list_devices() == []

@@ -107,8 +107,18 @@ class SimctlBackend:
         """
         if not xcode_available():
             return []
-        stdout, _ = await self._run_simctl("list", "devices", "--json")
-        data = json.loads(stdout)
+        # Both in the try, not just the call. `json.loads` on truncated or
+        # non-JSON output raises `JSONDecodeError`, which is not a
+        # `DeviceError`, so it escaped this backend entirely. That was survivable
+        # while an explicit udid bypassed enumeration; now that `screenshot`
+        # resolves through `resolve_udid`, one malformed `simctl list` would
+        # stop a screenshot of a device the caller named exactly.
+        try:
+            stdout, _ = await self._run_simctl("list", "devices", "--json")
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            logger.warning("Could not parse the simctl device list; treating as empty")
+            return []
         devices: list[DeviceInfo] = []
 
         for runtime_key, device_list in data.get("devices", {}).items():

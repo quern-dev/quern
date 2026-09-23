@@ -457,7 +457,12 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     # the active-device sidecar is written with no human-readable name.
     await controller._ensure_device_type_cached(body.udid)
     controller._active_udid = body.udid
-    return {"active_udid": body.udid}
+    # What was stored, not what was asked for. The setter canonicalises, so
+    # echoing the request tells a caller who passed the hardware udid that it
+    # is the active device -- and every later comparison, including the trace
+    # filter, is against the canonical one. "Report the outcome, not the
+    # request", which this repo already learned from `simctl launch`.
+    return {"active_udid": controller._active_udid}
 
 
 # ---------------------------------------------------------------------------
