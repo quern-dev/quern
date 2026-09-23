@@ -302,13 +302,10 @@ in a single run. It needs the tag and Release to already exist, so it belongs
 at step 6, not step 0.
 
 **Where the credentials actually are.** `macos/QuernMenuBar/README.md` covers
-the one-time setup with placeholders; the values in use on the maintainer's
-machine are recorded in the mp3cd project, which established this signing
-setup first and is the reference for it:
-
-    /Volumes/Home/Dev/mp3cd/mp3cd-gpui/CLAUDE.md
-
-In short, and worth knowing before you go looking:
+the one-time setup with placeholders. The signing setup was established first
+in the mp3cd project, whose `CLAUDE.md` is where it was originally written
+down — but nothing there is needed to cut a release, because the secrets live
+in the keychain and everything else is below:
 
 - **Signing identity** — `$SIGNING_IDENTITY`, exported from `~/.zshrc`. That is
   the value `DEVELOPER_ID_APP` wants, so `DEVELOPER_ID_APP="$SIGNING_IDENTITY"`
