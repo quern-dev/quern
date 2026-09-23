@@ -51,6 +51,22 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
         }
     if requested is False:
         return {"attempted": False, "reason": "scroll_to_find=false"}
+    if requested is True:
+        # Asked for and not done, which only happens when the search was not
+        # eligible: `scroll_to_element` can only reach an exact label or
+        # identifier, so `label_contains`, `label_prefix` and a bare
+        # `element_type` fall through. Telling that caller to "retry with
+        # scroll_to_find=true" -- which the unknown branch below does -- is
+        # advice they have already taken.
+        return {
+            "attempted": False,
+            "reason": "not_searchable",
+            "detail": (
+                "scrolling can only search for an exact label or identifier, "
+                "so this query was not eligible. Re-run with label= or "
+                "identifier= to have quern scroll looking for it."
+            ),
+        }
     known = sweep.get("known_scrollable")
     if known is False:
         return {
@@ -62,20 +78,38 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
                 "element is not on it. Scrolling will not find it."
             ),
         }
+    if sweep.get("why") == "needs_page_urls":
+        return {
+            "attempted": False,
+            "reason": "needs_page_urls",
+            "screen": None,
+            "detail": (
+                "this app's screens are identified by web page URL, which is "
+                "not read on this path, so quern cannot tell which screen you "
+                "are on. Pass scroll_to_find explicitly."
+            ),
+        }
     if sweep.get("why") == "ambiguous":
         # Distinct from "nobody recorded it", because the fix is different and
         # the usual cause is mundane: landmarks loaded for two apps at once,
         # where one screen matches both. Folding this into "unknown" told the
         # caller to record something they had already recorded.
+        candidates = sweep.get("candidates") or []
+        named = ", ".join(repr(c) for c in candidates)
         return {
             "attempted": False,
             "reason": "screen_ambiguous",
             "screen": None,
+            # Named, because the remedy needs them. "Load landmarks for one app
+            # at a time" is unactionable if the caller cannot tell which two
+            # collided -- and this list was computed and then dropped on the
+            # way out, so the advice arrived without the one fact it needed.
+            "candidates": candidates,
             "detail": (
-                "more than one known screen matches what is on the device, so "
-                "quern will not guess which one's scrollability applies. Load "
-                "landmarks for one app at a time, or pass scroll_to_find "
-                "explicitly."
+                f"more than one known screen matches what is on the device"
+                f"{' (' + named + ')' if named else ''}, so quern will not "
+                "guess which one's scrollability applies. Load landmarks for "
+                "one app at a time, or pass scroll_to_find explicitly."
             ),
         }
     return {
@@ -373,7 +407,7 @@ class DeviceControllerUI:
 
     def _scrollable_hint(
         self, elements: list[UIElement],
-    ) -> tuple[bool | None, str | None, str]:
+    ) -> tuple[bool | None, str | None, str, list[str] | None]:
         """What the knowledge base says about this screen, if anything.
 
         `(None, None)` whenever nobody has said -- no registry attached, none
@@ -393,15 +427,15 @@ class DeviceControllerUI:
         """
         lookup = getattr(self, "_scrollable_lookup", None)
         if lookup is None:
-            return None, None, "no_knowledge"
+            return None, None, "no_knowledge", None
         try:
             hint = lookup(elements)
         except Exception:
             # A knowledge base that cannot answer must not break a tap. The
             # answer it would have given is an optimisation; the tap is not.
             logger.debug("scrollable lookup failed", exc_info=True)
-            return None, None, "lookup_failed"
-        return hint.scrollable, hint.screen, hint.reason
+            return None, None, "lookup_failed", None
+        return hint.scrollable, hint.screen, hint.reason, hint.candidates
 
     async def _ios_scroll_to_element(
         self,
@@ -884,6 +918,15 @@ class DeviceControllerUI:
                 el, fingerprint = await _read_at_rest(sweep_probe)
                 moved = _moved(last_fingerprint, fingerprint)
                 last_fingerprint = fingerprint
+                # Here, not in the one branch that used to set it. `moved` is
+                # computed on every iteration and was only recorded when the
+                # target was still absent, so a sweep that located the target
+                # and kept scrolling toward it reported "nothing moved" --
+                # measured at 3 swipes and 150pt of travel, reported
+                # `{'swipes': 3, 'moved': False}`. Telling a caller the screen
+                # did not move when it did is worse than saying nothing.
+                if report is not None and moved:
+                    report["moved"] = True
 
                 if el is not None and _visible(el):
                     _note("  found, at rest and visible — returning")
@@ -898,8 +941,6 @@ class DeviceControllerUI:
 
                 if moved:
                     moved_at_all = True
-                    if report is not None:
-                        report["moved"] = True
                     _note("  not in tree")
                     continue
 
@@ -1688,6 +1729,9 @@ class DeviceControllerUI:
         # else falls through to the dump-based path below.
         resolved_fast = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved_fast)
+        # Declared before the Android fast path below, not just before the iOS
+        # block: both of them swipe, and a caller has to be told about either.
+        sweep: dict = {"attempted": False}
         if (
             self._is_android(resolved_fast)
             and value is None
@@ -1713,6 +1757,13 @@ class DeviceControllerUI:
             # `scroll_into_view` swipes for real too and deserves the same
             # treatment; it needs a cheaper way to identify the screen first.
             if tapped is None and scroll_to_find is not False:
+                # Recorded even though the knowledge base is not consulted on
+                # this path: the swipe is just as real, and a response saying
+                # `attempted: False` after the device was swiped is the exact
+                # defect this object exists to prevent, reintroduced on the
+                # other platform.
+                sweep["attempted"] = True
+                sweep["platform"] = "android"
                 found = await backend.scroll_into_view(
                     resolved_fast, identifier=identifier, label=label,
                 )
@@ -1759,7 +1810,6 @@ class DeviceControllerUI:
         # to (scroll_to_element's contract); contains/prefix/type-only fall
         # through to not_found.
         all_elements: list[UIElement] | None = None
-        sweep: dict = {"attempted": False}
         if (
             len(matches) == 0
             and not self._is_android(resolved)
@@ -1785,11 +1835,14 @@ class DeviceControllerUI:
                 all_elements = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
                 )
-                hint, screen_name, why = self._scrollable_hint(all_elements)
+                hint, screen_name, why, candidates = self._scrollable_hint(
+                    all_elements,
+                )
                 should_sweep = hint is True
                 sweep["screen"] = screen_name
                 sweep["known_scrollable"] = hint
                 sweep["why"] = why
+                sweep["candidates"] = candidates
             if should_sweep:
                 # The miss above is only authoritative if that read reached the
                 # device. With the cache live it can be served from an entry up

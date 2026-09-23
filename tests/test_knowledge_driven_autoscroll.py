@@ -228,3 +228,135 @@ class TestASweepThatRanIsVisible:
 
         assert result["status"] == "not_found"
         assert result["scroll"]["attempted"] is True
+
+
+class TestTheProductionWiringIsPinned:
+    """Deleting the injection in `main.py` left the whole suite green.
+
+    Every test here sets the lookups on its own controller, so nothing asserted
+    that the running server ever connects the knowledge base to the device
+    layer -- the same shape as the registry that was never attached at all and
+    was found only by running the server. Read out of the source, because
+    building the app needs a device stack this cannot have.
+    """
+
+    def _main_source(self) -> str:
+        import pathlib
+
+        return (
+            pathlib.Path(__file__).resolve().parents[1] / "server" / "main.py"
+        ).read_text()
+
+    def test_the_scrollable_lookup_is_wired(self):
+        assert "_scrollable_lookup = (" in self._main_source()
+        assert "landmark_registry.scrollable_for" in self._main_source()
+
+    def test_they_are_wired_where_the_controller_exists(self):
+        """Attaching these beside the registry's construction raised
+        AttributeError on boot: that runs in `create_app`, where
+        `app.state.device_controller` is still None."""
+        source = self._main_source()
+        made = source.index("device_controller = DeviceController()")
+        wired = source.index("_scrollable_lookup = (")
+
+        assert wired > made, "wired before the controller is built"
+
+
+class TestTheReportSurvivesTheDetailsThatWereWrong:
+    async def test_an_ambiguous_report_names_the_screens(self):
+        reg = LandmarkRegistry()
+        reg.load("one", [ScreenLandmarks(
+            screen="A", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        reg.load("two", [ScreenLandmarks(
+            screen="B", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert sorted(result["scroll"]["candidates"]) == ["A", "B"]
+        assert "'A'" in result["scroll"]["detail"]
+
+    async def test_a_url_identified_app_says_it_needs_the_page_listing(self):
+        """`web_url_contains` matches nothing without the page listing, so such
+        a screen could never be recognised and its recorded `scrollable` was
+        invisible. Saying 'unknown' told the caller to record what they had."""
+        reg = LandmarkRegistry()
+        reg.load("web", [ScreenLandmarks(
+            screen="WebScreen", scrollable=True,
+            landmarks=[Landmark(web_url_contains="example.com")],
+        )])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["reason"] == "needs_page_urls"
+        assert "record" not in result["scroll"]["detail"]
+
+    async def test_an_explicit_true_that_cannot_be_honoured_says_why(self):
+        """`label_contains` is not searchable by the scroll loop, so an
+        explicit True is silently not done. Telling that caller to 'retry with
+        scroll_to_find=true' is advice they have already taken."""
+        ctrl = _controller(None)
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(
+                label_contains="Nope", scroll_to_find=True,
+            )
+
+        assert result["scroll"]["reason"] == "not_searchable"
+        assert "scroll_to_find=true" not in result["scroll"]["detail"]
+
+
+class TestAndroidSaysWhenItSwept:
+    """Android's fast path calls `scroll_into_view`, a real swipe loop, and the
+    response said `attempted: False` -- then offered two remedies that are both
+    no-ops there: unset already sweeps on Android, and no Android path reads
+    `scrollable`. The exact defect the `scroll` object exists to prevent,
+    reintroduced on the other platform."""
+
+    def _android(self, backend):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._ui_backend = MagicMock(return_value=backend)
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "emulator-5554"))
+        return ctrl
+
+    async def test_a_swept_android_screen_is_reported(self):
+        backend = MagicMock()
+        backend.tap_by_selector = AsyncMock(return_value=None)
+        backend.scroll_into_view = AsyncMock(return_value=None)
+        ctrl = self._android(backend)
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(identifier="nope")
+
+        backend.scroll_into_view.assert_awaited_once()
+        assert result["scroll"]["attempted"] is True, (
+            "the device was swiped and the response says it was not"
+        )
+
+    async def test_it_does_not_offer_ios_remedies_to_android(self):
+        backend = MagicMock()
+        backend.tap_by_selector = AsyncMock(return_value=None)
+        backend.scroll_into_view = AsyncMock(return_value=None)
+        ctrl = self._android(backend)
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(identifier="nope")
+
+        assert "scrollable: true" not in (result["scroll"].get("detail") or "")

@@ -472,7 +472,14 @@ When a sweep runs — because you passed scroll_to_find, or the screen is record
       if (udid) body.udid = udid;
       if (source_timeout) body.source_timeout = source_timeout;
       if (value !== undefined) body.value = value;
-      if (scroll_to_find === false) body.scroll_to_find = false;
+      // Both values forwarded, and undefined deliberately omitted. This read
+      // `=== false` while the schema had `.default(true)`, when omitting true
+      // was right because true *was* the server default. With the schema now
+      // optional, unset and true produced an identical body -- so
+      // `scroll_to_find: true` never reached the server, and the retry quern
+      // itself recommends ("retry with scroll_to_find=true") returned a
+      // byte-identical response and looped.
+      if (scroll_to_find !== undefined) body.scroll_to_find = scroll_to_find;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;

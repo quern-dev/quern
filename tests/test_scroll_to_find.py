@@ -421,3 +421,26 @@ async def test_a_report_is_filled_in_even_when_nothing_is_found(controller):
     )
 
     assert "swipes" in report and "moved" in report
+
+
+async def test_the_report_says_the_screen_moved_even_when_the_target_is_found(
+    controller,
+):
+    """`moved` was recorded only in the branch taken when the target was still
+    absent, so a sweep that located it and kept scrolling toward it reported
+    "nothing moved". Measured before the fix: 3 swipes, 150pt of travel,
+    `{'swipes': 3, 'moved': False}`.
+
+    Telling a caller the screen did not move when it did is worse than saying
+    nothing -- they act next against a screen they believe is unchanged."""
+    controller.scrolls = True
+    report: dict = {}
+
+    await controller._ios_scroll_to_element(
+        "SIM", label=None, identifier="_Target", max_swipes=1, report=report,
+    )
+
+    assert report["swipes"] > 0
+    assert report["moved"] is True, (
+        f"swiped {report['swipes']} times and reported the screen unmoved"
+    )

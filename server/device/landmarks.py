@@ -547,7 +547,10 @@ class LandmarkRegistry:
         return {app: len(screens) for app, screens in self._sets.items()}
 
     def scrollable_for(
-        self, elements: list[UIElement], app: str | None = None,
+        self,
+        elements: list[UIElement],
+        app: str | None = None,
+        page_urls: Sequence[Mapping[str, str | None]] | None = None,
     ) -> ScrollHint:
         """Does the screen these elements came from scroll? And which screen?
 
@@ -570,7 +573,17 @@ class LandmarkRegistry:
         screens = self.all_screens(app)
         if not screens:
             return ScrollHint(None, None, "no_knowledge")
-        result = identify_screen(elements, screens)
+        if needs_page_urls(screens) and page_urls is None:
+            # A `web_url_contains` landmark matches nothing when the page
+            # listing is absent (`match_landmark` returns False outright), so a
+            # screen identified by URL could never be recognised here and its
+            # recorded `scrollable` was permanently invisible. Reported as its
+            # own reason rather than "no_match": the knowledge is there and
+            # correct, and telling the caller to record it is the "told to
+            # record what you already recorded" failure this type exists to
+            # avoid.
+            return ScrollHint(None, None, "needs_page_urls")
+        result = identify_screen(elements, screens, page_urls=page_urls)
         confidence = result.get("confidence")
         if confidence == "ambiguous":
             # `matched` plus `ambiguous_with`, which is where identify_screen
