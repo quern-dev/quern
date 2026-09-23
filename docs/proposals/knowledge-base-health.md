@@ -23,14 +23,20 @@ never fire.
 
 ## What is silently discarded today
 
-Four, in one parser, all deliberate and all unreported:
+Five, in one parser, all deliberate and none of them reported to a caller:
 
 | `server/device/landmarks.py` | what is dropped |
 |---|---|
 | `scrollable` coercion | a non-boolean value, read as unset |
 | landmark entry not a dict | the entry, `continue` |
 | landmark fails model validation | the entry, `continue` — naming neither an element nor a URL |
-| `web_content` malformed | the hint, deliberately: "a bad hint must never stop a knowledge base loading" |
+| `web_content` not a list | the whole block, with no log at all |
+| `web_content` entry malformed | the hint, deliberately: "a bad hint must never stop a knowledge base loading" — this one *is* logged |
+
+Two of those already log, and two are wholly silent — which is its own point:
+a server log is not a channel an agent authoring a knowledge base will ever
+read, so "it is logged" and "it is reported" are different claims and this
+proposal is about the second.
 
 Each rule is correct on its own. The second and third matter most: a screen
 written with three landmarks can load with **two**, and then identifies on
@@ -81,7 +87,7 @@ went unanswered, never merely because the knowledge base is empty.
 
 ## Sketch
 
-- **`warnings` on `validate_landmarks`** — the four discards above, each naming
+- **`warnings` on `validate_landmarks`** — the five discards above, each naming
   the file, the screen, the field and the value. This is the reporting half and
   the cheap half.
 - **An `unknown_screen` signal** where identification runs and matches nothing,

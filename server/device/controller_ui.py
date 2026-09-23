@@ -112,6 +112,22 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
                 "one app at a time, or pass scroll_to_find explicitly."
             ),
         }
+    if sweep.get("platform") == "android":
+        # Android's sweep is the selector-based `scroll_into_view` on the fast
+        # path, which no knowledge base gates -- so neither iOS remedy applies
+        # here. `scroll_to_find=true` is already the effective default, and
+        # nothing on this platform reads `scrollable`. Saying either would send
+        # the caller somewhere that cannot help.
+        return {
+            "attempted": False,
+            "reason": "not_searchable",
+            "detail": (
+                "this query did not take the selector path, which is the only "
+                "one that scrolls on Android. Re-run with just label= or "
+                "identifier= -- no element_type or value -- to have quern "
+                "scroll looking for it."
+            ),
+        }
     return {
         "attempted": False,
         "reason": "scrollability_unknown",
@@ -1731,7 +1747,17 @@ class DeviceControllerUI:
         await self._warn_if_input_is_suppressed(resolved_fast)
         # Declared before the Android fast path below, not just before the iOS
         # block: both of them swipe, and a caller has to be told about either.
-        sweep: dict = {"attempted": False}
+        #
+        # The platform goes in immediately, because a miss that never reaches
+        # either sweep still produces a report -- an Android `tap_element` with
+        # `value` set, or `identifier` plus `element_type`, skips the fast path
+        # and is then skipped by the iOS block too. Without this it was handed
+        # the iOS advice: "add `scrollable: true` to the screen's
+        # knowledge-base entry", on a platform where no path reads that field.
+        sweep: dict = {
+            "attempted": False,
+            "platform": "android" if self._is_android(resolved_fast) else "ios",
+        }
         if (
             self._is_android(resolved_fast)
             and value is None
@@ -1763,7 +1789,6 @@ class DeviceControllerUI:
                 # defect this object exists to prevent, reintroduced on the
                 # other platform.
                 sweep["attempted"] = True
-                sweep["platform"] = "android"
                 found = await backend.scroll_into_view(
                     resolved_fast, identifier=identifier, label=label,
                 )

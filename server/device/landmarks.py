@@ -573,18 +573,25 @@ class LandmarkRegistry:
         screens = self.all_screens(app)
         if not screens:
             return ScrollHint(None, None, "no_knowledge")
-        if needs_page_urls(screens) and page_urls is None:
-            # A `web_url_contains` landmark matches nothing when the page
-            # listing is absent (`match_landmark` returns False outright), so a
-            # screen identified by URL could never be recognised here and its
-            # recorded `scrollable` was permanently invisible. Reported as its
-            # own reason rather than "no_match": the knowledge is there and
-            # correct, and telling the caller to record it is the "told to
-            # record what you already recorded" failure this type exists to
-            # avoid.
-            return ScrollHint(None, None, "needs_page_urls")
         result = identify_screen(elements, screens, page_urls=page_urls)
         confidence = result.get("confidence")
+        if confidence == "none" and needs_page_urls(screens) and page_urls is None:
+            # Only when nothing matched, and only then.
+            #
+            # A `web_url_contains` landmark matches nothing when the page
+            # listing is absent (`match_landmark` returns False outright), so a
+            # screen identified by URL is unrecognisable here and its recorded
+            # `scrollable` would read as "nobody has said" -- the "told to
+            # record what you already recorded" failure this type exists to
+            # avoid. Saying so needs its own reason.
+            #
+            # Checking it *before* identifying was a regression: the lookup
+            # passes no `app`, so `all_screens(None)` spans every loaded app,
+            # and one URL-identified screen anywhere turned off recorded
+            # scrollability for all of them. A native screen that identifies
+            # perfectly well must not be refused because some other app has a
+            # web screen.
+            return ScrollHint(None, None, "needs_page_urls")
         if confidence == "ambiguous":
             # `matched` plus `ambiguous_with`, which is where identify_screen
             # puts the rest. `partial_matches` holds the screens that did *not*

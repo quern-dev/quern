@@ -399,3 +399,95 @@ class TestASuccessfulTapAlsoReportsTheSweep:
 
         assert result["status"] == "ok"
         assert "scroll" not in result
+
+
+class TestOneWebAppDoesNotDisableTheOthers:
+    """The lookup passes no `app`, so `all_screens(None)` spans every loaded
+    app. Checking `needs_page_urls` *before* identifying therefore let a single
+    URL-identified screen anywhere turn off recorded scrollability everywhere
+    -- a native screen that identifies perfectly well refused because some
+    other app has a web screen.
+
+    The check belongs after identification, and only when nothing matched."""
+
+    def _both_apps(self):
+        reg = LandmarkRegistry()
+        reg.load("native", [ScreenLandmarks(
+            screen="NativeHome", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        reg.load("web", [ScreenLandmarks(
+            screen="WebScreen",
+            landmarks=[Landmark(web_url_contains="example.com")],
+        )])
+        return reg
+
+    async def test_the_native_screen_is_still_identified(self):
+        ctrl = _controller(self._both_apps())
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True, (
+            "a web-identified screen in another app disabled this one"
+        )
+
+    async def test_a_genuinely_unmatched_screen_still_says_needs_page_urls(self):
+        """The case the early return was added for must keep working."""
+        reg = LandmarkRegistry()
+        reg.load("web", [ScreenLandmarks(
+            screen="WebScreen", scrollable=True,
+            landmarks=[Landmark(web_url_contains="example.com")],
+        )])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["reason"] == "needs_page_urls"
+
+
+class TestAndroidGetsAdviceThatWorksOnAndroid:
+    """An Android `tap_element` that skips the selector fast path -- `value`
+    set, or `identifier` plus `element_type` -- is then skipped by the iOS
+    block too, so it produced a report with nothing recorded and fell through
+    to the iOS advice: retry with `scroll_to_find=true`, or add `scrollable:
+    true` to the knowledge base.
+
+    Both are no-ops on Android. Unset already sweeps there, and no Android path
+    reads `scrollable`. Advice that cannot help is worse than none: it sends
+    the caller somewhere that will not fix it."""
+
+    def _android(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "emulator-5554"))
+        ctrl._ui_backend = MagicMock(return_value=MagicMock(
+            tap_by_selector=AsyncMock(return_value=None),
+        ))
+        return ctrl
+
+    async def _miss_off_the_fast_path(self, ctrl):
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            # element_type keeps it off the selector path
+            return await ctrl.tap_element(identifier="nope", element_type="Button")
+
+    async def test_it_is_not_told_to_record_scrollable(self):
+        result = await self._miss_off_the_fast_path(self._android())
+
+        assert "scrollable: true" not in (result["scroll"].get("detail") or "")
+
+    async def test_it_is_not_told_to_retry_with_scroll_to_find(self):
+        """Already the effective default on Android."""
+        result = await self._miss_off_the_fast_path(self._android())
+
+        assert "scroll_to_find=true" not in (result["scroll"].get("detail") or "")
+
+    async def test_it_is_told_what_would_actually_work(self):
+        result = await self._miss_off_the_fast_path(self._android())
+
+        assert result["scroll"]["reason"] == "not_searchable"
+        assert "selector path" in result["scroll"]["detail"]
