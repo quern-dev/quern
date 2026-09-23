@@ -24,9 +24,12 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from server.device import devicectl as dc
 from server.device.controller import DeviceController
 from server.models import DeviceType
+from server.proxy.cert_state import CERT_STATE_FILE
 
 CD_UUID = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
 HW_UDID = "00008030-000C59623A69802E"
@@ -44,6 +47,23 @@ _DEVICECTL_JSON = json.dumps({
         },
     }]},
 })
+
+
+@pytest.fixture(autouse=True)
+def _a_clean_cert_state():
+    """Cert state is a file under `QUERN_STATE_DIR`, shared by every test here.
+
+    Without this, records accumulate across tests and the assertions become
+    order-dependent: a config written by an earlier test turns up in a later
+    one's merge. Scoped to this file rather than conftest -- these are the only
+    tests that write it, and a repo-wide clear would be a bigger claim than is
+    warranted.
+    """
+    from server.proxy.cert_state import CERT_STATE_FILE
+
+    CERT_STATE_FILE.unlink(missing_ok=True)
+    yield
+    CERT_STATE_FILE.unlink(missing_ok=True)
 
 
 def _action_on(udid: str):
@@ -433,13 +453,19 @@ class TestTheProxyConfigHalfOfTheJoin:
         it. Mocking the thing under test is this file's own subject, arriving
         one level up.
         """
-        from server.proxy.cert_state import read_cert_state
 
         await _listed()          # discovery has run, as on any live server
         await _record_proxy_config(HW_UDID)
 
-        assert CD_UUID in read_cert_state(), "stored under the raw udid"
-        assert HW_UDID not in read_cert_state()
+        # The *file*, not `read_cert_state`, which canonicalises on the way out
+        # and would report success whether or not the writer did anything.
+        # Asserting through the layer that masks the behaviour under test is
+        # this file's own subject; the first version did exactly that and the
+        # "store it raw again" mutation survived.
+        on_disk = json.loads(CERT_STATE_FILE.read_text())
+
+        assert CD_UUID in on_disk, "the writer did not canonicalise"
+        assert HW_UDID not in on_disk
 
     async def test_a_key_from_before_canonicalisation_is_repaired_on_read(self):
         """No migration. Cert state written by an older quern holds raw
@@ -553,3 +579,107 @@ class TestTheActiveDeviceEndpointReportsWhatItStored:
         result = await set_active_device(request, ShutdownDeviceRequest(udid=HW_UDID))
 
         assert result["active_udid"] == CD_UUID
+
+
+class TestEveryCertStateReaderSeesOneSpelling:
+    """Canonicalising one reader was not enough, and the gap was specific.
+
+    `ip_to_udid` was fixed, which repaired trace lookups -- while
+    `_verify_physical_device` read cert state by the *canonical* key, found
+    nothing under it, and reported `proxy_not_configured` for a device whose
+    proxy was configured. There are eight readers; `read_cert_state` is the one
+    place they all pass through.
+    """
+
+    def _record_raw(self, ssid: str = "home", ip: str = "10.0.0.9") -> None:
+        """A config filed under the hardware udid, as a cold map or an older
+        quern would have written it."""
+        from server.proxy.cert_state import record_device_proxy_config
+
+        record_device_proxy_config(HW_UDID, ssid, "10.0.0.2", 9101, client_ip=ip)
+
+    async def test_a_direct_key_lookup_finds_it(self):
+        """The shape `_verify_physical_device` uses: state[canonical_udid]."""
+        from server.proxy.cert_state import read_cert_state
+
+        self._record_raw()
+        await _listed()
+
+        assert read_cert_state().get(CD_UUID) is not None, (
+            "a reader keyed on the canonical udid cannot see the record"
+        )
+
+    async def test_read_cert_state_for_device_finds_it_too(self):
+        from server.proxy.cert_state import read_cert_state_for_device
+
+        self._record_raw()
+        await _listed()
+
+        assert read_cert_state_for_device(CD_UUID) is not None
+
+    async def test_an_unknown_udid_is_left_alone(self):
+        """Simulators have one spelling. Canonicalisation must not rename
+        anything it does not recognise."""
+        from server.proxy.cert_state import read_cert_state, record_device_proxy_config
+
+        record_device_proxy_config("SIM-1234", "home", "10.0.0.2", 9101)
+        await _listed()
+
+        assert "SIM-1234" in read_cert_state()
+
+
+class TestTwoSpellingsOfOneDeviceAreMerged:
+    """An old file can hold both spellings -- one written before
+    canonicalisation, one after. Taking the later record wholesale drops the
+    other's `wifi_proxy_configs`, which is the data the trace needs to
+    attribute that device's flows at all.
+
+    Caught by a test going red, not by review: a config recorded while the
+    alias map was cold vanished when a second record for the same device
+    arrived."""
+
+    def _file_with_both_spellings(self) -> None:
+        """Written directly, because the writer cannot produce this state.
+
+        `record_device_proxy_config` reads through `read_cert_state`, which
+        canonicalises and merges -- so going through it merges the records
+        before they reach disk, and a merge bug in the reader becomes
+        invisible. The file this builds is what an older quern left behind:
+        both spellings, each with its own configs.
+        """
+        CERT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CERT_STATE_FILE.write_text(json.dumps({
+            HW_UDID: {"wifi_proxy_configs": {"old-wifi": {
+                "client_ip": "10.0.0.7", "proxy_host": "10.0.0.2",
+                "proxy_port": 9101, "set_at": "2026-09-01T00:00:00+00:00",
+            }}},
+            CD_UUID: {"wifi_proxy_configs": {"new-wifi": {
+                "client_ip": "10.0.0.9", "proxy_host": "10.0.0.2",
+                "proxy_port": 9101, "set_at": "2026-09-20T00:00:00+00:00",
+            }}},
+        }))
+
+    async def test_configs_from_both_spellings_survive(self):
+        from server.proxy.cert_state import read_cert_state
+
+        self._file_with_both_spellings()
+        await _listed()
+
+        configs = read_cert_state()[CD_UUID]["wifi_proxy_configs"]
+
+        assert set(configs) == {"old-wifi", "new-wifi"}, (
+            "merging two spellings dropped a proxy config"
+        )
+
+    async def test_both_addresses_still_map_to_the_device(self):
+        """The reason it matters: each config carries a client_ip, and a lost
+        one is a device whose flows stop being attributed."""
+        from server.proxy.cert_state import read_cert_state
+        from server.trace import ip_to_udid
+
+        self._file_with_both_spellings()
+        await _listed()
+        ip_map = ip_to_udid(read_cert_state())
+
+        assert ip_map["10.0.0.7"][0] == CD_UUID
+        assert ip_map["10.0.0.9"][0] == CD_UUID

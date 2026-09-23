@@ -49,10 +49,58 @@ def read_cert_state() -> dict[str, dict]:
 
         if not content.strip():
             return {}
-        return json.loads(content)
+        return _canonicalised(json.loads(content))
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to read cert state file: %s", e)
         return {}
+
+
+def _canonicalised(state: dict[str, dict]) -> dict[str, dict]:
+    """Keys as the rest of quern spells them.
+
+    A physical device has two identifiers, and this file can hold either: the
+    writer canonicalises what it is handed, but only once device discovery has
+    run, and every file written before canonicalisation existed holds the raw
+    hardware udid.
+
+    Doing it here rather than in each reader is the point. There are eight, and
+    the first attempt fixed one -- `ip_to_udid` -- which repaired trace lookups
+    while `_verify_physical_device` still read by the canonical key, found
+    nothing, and reported `proxy_not_configured` for a device whose proxy was
+    configured. Every reader goes through this function; none of them should
+    have to know.
+
+    Unknown spellings pass through untouched, so simulators and anything
+    recorded before its device was ever listed are unaffected.
+
+    **Collisions are merged, not overwritten.** An old file can hold both
+    spellings of one device -- one written before canonicalisation, one after
+    -- and taking the later record wholesale drops the other's
+    `wifi_proxy_configs`, which is exactly the data the trace needs to
+    attribute that device's flows. A test caught this doing precisely that: a
+    proxy config recorded while the alias map was cold vanished when a second
+    record for the same device arrived.
+
+    Scalar fields still take the later value, which is the newest thing known
+    about the certificate. Only `wifi_proxy_configs` unions, keyed by SSID, and
+    a repeated SSID takes the later one for the same reason.
+    """
+    from server.device.devicectl import canonical_device_id
+
+    merged: dict[str, dict] = {}
+    for udid, record in state.items():
+        key = canonical_device_id(udid)
+        if key not in merged:
+            merged[key] = dict(record)
+            continue
+        configs = {
+            **(merged[key].get("wifi_proxy_configs") or {}),
+            **(record.get("wifi_proxy_configs") or {}),
+        }
+        merged[key] = {**merged[key], **record}
+        if configs:
+            merged[key]["wifi_proxy_configs"] = configs
+    return merged
 
 
 def read_cert_state_for_device(udid: str) -> dict | None:
