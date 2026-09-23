@@ -54,14 +54,25 @@ each other.
 
 ### Blocking the merge of #164
 
-- [ ] **The head has never had a CodeRabbit full pass.** Three attempts:
-      one refused on the review limit, two accepted and silently never ran.
-      Two review agents covered `a00eeb2` instead and found nine real
-      problems, so the gap is partly filled, but everything since is
-      unreviewed. Confirm a review actually *started* before waiting on one —
-      the acknowledgement body says `Reviews are available now` when it did
-      and carries an `Action not completed` block when it did not, and the
+- [x] **A CodeRabbit full pass.** Done at 15:46Z on `d3bb987`, after three
+      earlier attempts — one refused on the review limit, two accepted and
+      silently never ran. Three actionable findings, all fixed and
+      mutation-tested: `Recorder.finish()` overwriting a start failure with
+      `.alreadyFinished`, the binary install rewriting a running executable
+      in place, and the dropped-frame gate corrupting H.264 viewers. Two
+      review agents had covered `a00eeb2` earlier and found nine more.
+
+      Confirm a review actually *started* before waiting on one — the
+      acknowledgement body says `Reviews are available now` when it did and
+      carries an `Action not completed` block when it did not, and the
       walkthrough's "Review limit reached" banner is a stale edit that lies.
+
+- [ ] **One re-read of the four commits since that review.** The fixes above
+      plus the ambiguous-device-name refusal. CodeRabbit auto-resolved all
+      three threads on the push, which is not the same as having read the
+      fixes — it resolves what it can see a diff for. `merge-pr.sh` refuses
+      while the head is newer than the newest review and `--ask` requests
+      one; the coordination note below still applies.
 
       **Coordinate before asking.** The limit is one review per *hour*, and
       the window is repo-wide — shared across PRs and across agents, six
