@@ -50,6 +50,20 @@ _DEVICECTL_JSON = json.dumps({
 
 
 @pytest.fixture(autouse=True)
+def _a_clean_alias_map():
+    """`_identity_aliases` is a module global, so it outlives each test.
+
+    Without this, whichever test ran `_listed()` first warmed the map for
+    every test after it, and a test that never triggers discovery of its own
+    canonicalises anyway -- passing on a neighbour's side effect. That is the
+    same defect as pre-warming inside a harness, one level further out.
+    """
+    dc._identity_aliases.clear()
+    yield
+    dc._identity_aliases.clear()
+
+
+@pytest.fixture(autouse=True)
 def _a_clean_cert_state():
     """Cert state is a file under `QUERN_STATE_DIR`, shared by every test here.
 
@@ -785,12 +799,20 @@ class TestARestoredSidecarIsCanonicalisedToo:
     a restart."""
 
     async def _restored(self, persisted: str) -> DeviceController:
-        await _listed()
         ctrl = DeviceController()
         # Exactly what __init__ does with a persisted udid.
         ctrl._DeviceController__active_udid = persisted
-        ctrl.list_devices = AsyncMock(return_value=[])
-        ctrl._device_type_cache[CD_UUID] = DeviceType.DEVICE
+
+        # Discovery is the only route to an alias here. Calling `_listed()`
+        # before the controller existed meant the map was already warm, so the
+        # branch under test could skip `_ensure_device_type_cached` entirely
+        # and still canonicalise -- deleting that call left all 43 tests green.
+        async def _discovered() -> list:
+            await _listed()
+            ctrl._device_type_cache[CD_UUID] = DeviceType.DEVICE
+            return []
+
+        ctrl.list_devices = AsyncMock(side_effect=_discovered)
         return ctrl
 
     async def test_a_raw_sidecar_resolves_to_the_canonical_udid(self):
