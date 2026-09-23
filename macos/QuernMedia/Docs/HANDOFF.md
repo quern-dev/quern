@@ -93,7 +93,19 @@ each other.
   already set by the time the client drains and the next encoded frame is an
   IDR. Frames only need holding if the encoder ignores the request.
 
-- [ ] **One re-read of the four commits since that review.** The fixes above
+- [ ] **Held for the release cut, not for anything wrong with it.** As of
+  2026-09-23 21:xx UTC the PR is *ready*: coverage marker equals head
+  `b94966f`, zero open findings, all nine CI checks green, `CLEAN` and
+  mergeable. Jerimiah's decision was to hold rather than land +8423/-152
+  across 47 files between the last reviewed PR and a release tag.
+
+  **Do not merge this on sight.** Wait for the release to be cut, then
+  rebase on main, re-run both suites, and check the coverage marker again --
+  a rebase moves the head past the review that blessed it, and `merge-pr.sh`
+  will refuse until a newer review exists. Expect to spend one more review
+  round on it.
+
+- [x] **One re-read of the commits since the 15:46Z review.** The fixes above
   plus the ambiguous-device-name refusal. CodeRabbit auto-resolved all
   three threads on the push, which is not the same as having read the
   fixes — it resolves what it can see a diff for. `merge-pr.sh` refuses
