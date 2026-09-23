@@ -650,3 +650,63 @@ class TestASameAppUrlRivalIsNotResolvedByGuessing:
         result = await _tap(ctrl)
 
         assert result["scroll"]["attempted"] is True
+
+
+class TestTwoAppsSharingAScreenName:
+    """`identify_screen` returns a screen *name*, and a name is not unique
+    across loaded apps. Mapping it back through `{s.screen: s}` keeps whichever
+    app loaded last, so the hint could come from a screen that did not match --
+    the same collision `_url_rival_in_same_app` was fixed for, one line above
+    it. `Home`, `Login` and `Settings` repeat across apps constantly."""
+
+    def _two_homes(self):
+        reg = LandmarkRegistry()
+        # Loaded first, and the one actually on screen.
+        reg.load("one", [ScreenLandmarks(
+            screen="Home", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        # Loaded second, so it wins a by-name lookup. Opposite value.
+        reg.load("two", [ScreenLandmarks(
+            screen="Home", scrollable=False,
+            landmarks=[Landmark(element="Button", label="NotOnScreen")],
+        )])
+        return reg
+
+    async def test_the_hint_comes_from_the_screen_that_matched(self):
+        ctrl = _controller(self._two_homes())
+
+        result = await _tap(ctrl)
+
+        # app one's Home matched and records scrollable: true.
+        assert result["scroll"]["attempted"] is True
+
+    async def test_it_does_not_report_the_other_apps_recorded_value(self):
+        """The wrong-app value arrives wearing `reason="recorded"`, which is
+        the most confident thing this type can say."""
+        ctrl = _controller(self._two_homes())
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"].get("reason") != "screen_not_scrollable"
+
+    async def test_it_holds_whichever_order_the_apps_were_loaded(self):
+        """The mirror of the case above, and it is not redundant: with the
+        matching app loaded first, *any* rule that ignores the match --
+        first-wins as well as matched-wins -- lands on the right screen by
+        luck. Only this ordering separates them."""
+        reg = LandmarkRegistry()
+        # The screen that is NOT on display, loaded first.
+        reg.load("two", [ScreenLandmarks(
+            screen="Home", scrollable=False,
+            landmarks=[Landmark(element="Button", label="NotOnScreen")],
+        )])
+        reg.load("one", [ScreenLandmarks(
+            screen="Home", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True

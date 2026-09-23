@@ -607,8 +607,33 @@ class LandmarkRegistry:
         # both. Two earlier shapes each carried a redundant guard that mutation
         # testing showed to be equivalent -- a rule spelled twice is a pair
         # that drifts apart later, and an unkillable mutant is how you find it.
-        by_name = {screen.screen: screen for screen in screens}
-        found = by_name.get(result.get("matched"))
+        # The screen that *matched*, not the last one loaded under that name.
+        # `identify_screen` returns a name, and a name is not unique across
+        # loaded apps -- `{s.screen: s}` kept whichever app loaded last, so the
+        # hint could come from a screen that did not match, arriving with
+        # `reason="recorded"`, the most confident thing this type says. That is
+        # the same collision `_url_rival_in_same_app` is built to avoid, one
+        # line below. `Home`, `Login` and `Settings` repeat across apps.
+        #
+        # Exactly one screen fully matched -- `ambiguous` has already returned
+        # -- so this finds it or nothing. The extra `match_landmarks` pass runs
+        # only over screens sharing the matched name, and reads no device.
+        #
+        # That exactness also makes `screen.screen == matched_name` redundant,
+        # and mutation testing duly cannot kill it: the match test alone picks
+        # the same screen. It stays because it says which screen we are looking
+        # for, where the match test only says how we recognise it -- and it is
+        # what keeps this honest if `identify_screen` ever reports a best
+        # candidate rather than a sole one.
+        matched_name = result.get("matched")
+        found = next(
+            (
+                screen for screen in screens
+                if screen.screen == matched_name and screen.landmarks
+                and match_landmarks(elements, screen.landmarks, page_urls)[0]
+            ),
+            None,
+        )
         if found is None:
             return ScrollHint(None, None, "no_match")
         if page_urls is None and self._url_rival_in_same_app(found, elements):
