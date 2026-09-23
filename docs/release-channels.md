@@ -215,6 +215,13 @@ DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
 ```sh
 # 7. Check the published release from the outside.
 scripts/release-verify.sh vN.M.K
+
+# 8. Run step 7 AGAIN, an hour or more later.
+#    quern.dev caches the ref it resolves for about an hour, so immediately
+#    after publishing it still names the *previous* version and that check
+#    can only skip. A skip is not a pass: until this second run, nothing has
+#    confirmed that the site offers the new release to an existing install.
+scripts/release-verify.sh vN.M.K      # expect 0 skipped this time
 ```
 
 That last step is not optional and takes under ten seconds. It asserts what a
@@ -234,6 +241,20 @@ served locally its resolver asks GitHub instead. That was found by rehearsing
 against 0.18.4, where it reported two passes it had not earned -- the local
 server was never asked -- and it matters because a rehearsal of an
 already-published tag is exactly when the wrong answer matches.
+
+**Step 8 exists because the first run cannot check quern.dev, and the release
+is not verified until it does.** The site caches the ref it resolves for about
+an hour, so a verify run immediately after publishing reports:
+
+    – quern.dev still names the previous version, 0m after publishing — its
+      ref cache is an hour; re-run this step after that to confirm it caught up
+
+That is the check confirming an *existing install* is actually offered the new
+release, which is the single thing most users experience. Skipping it leaves
+the most user-visible property of the release unverified, and it is the easiest
+step in the whole procedure to walk away from, because everything else has
+already gone green and the release looks finished. Set a reminder; the 0.21.0
+cut is the one where this was noticed and written down.
 
 **The tarball is no longer a pure `git archive`.** `--publish` now runs
 `npm ci && npm run build` inside the staged tree and ships `mcp/dist`, dropping
