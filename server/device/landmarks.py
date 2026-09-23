@@ -611,8 +611,49 @@ class LandmarkRegistry:
         found = by_name.get(result.get("matched"))
         if found is None:
             return ScrollHint(None, None, "no_match")
+        if page_urls is None and self._url_rival_in_same_app(found, result):
+            # A screen in the *same* app whose only unmet landmark is its URL.
+            # Without the page listing that landmark cannot match, so
+            # `identify_screen` reports the native screen as "exact" when the
+            # honest answer is "one of two". Using its `scrollable` would be a
+            # guess wearing an exact match's clothes.
+            #
+            # Same app only: a URL screen belonging to a different app is not a
+            # rival for this one, and treating it as one is the regression that
+            # disabled recorded scrollability everywhere.
+            return ScrollHint(None, None, "needs_page_urls")
         reason = "recorded" if found.scrollable is not None else "screen_silent"
         return ScrollHint(found.scrollable, found.screen, reason)
+
+    def _url_rival_in_same_app(
+        self, matched: ScreenLandmarks, result: dict,
+    ) -> bool:
+        """Could a URL-identified screen beside `matched` also be on screen?
+
+        Only its app's screens are considered, and only those whose *non-URL*
+        landmarks all matched -- a screen that failed on something native is
+        not a rival, whatever its URL says. Reads `partial_matches`, which
+        `identify_screen` already computed; no device read and no extra pass.
+        """
+        app = next(
+            (name for name, screens in self._sets.items() if matched in screens),
+            None,
+        )
+        if app is None:
+            return False
+        siblings = {s.screen for s in self._sets[app] if s is not matched}
+        for partial in result.get("partial_matches", []):
+            if partial.get("screen") not in siblings:
+                continue
+            # Each entry is `{"landmark": {...}, "matched": bool}`, so the
+            # selector is one level down. Reading `web_url_contains` off the
+            # result made this always False -- a silent no-op that passed every
+            # test, which is the shape this branch keeps finding.
+            results = partial.get("landmarks") or []
+            unmet = [r.get("landmark") or {} for r in results if not r.get("matched")]
+            if unmet and all(lm.get("web_url_contains") for lm in unmet):
+                return True
+        return False
 
     def all_screens(self, app: str | None = None) -> list[ScreenLandmarks]:
         """Get all screens, optionally filtered by app."""

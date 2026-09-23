@@ -491,3 +491,80 @@ class TestAndroidGetsAdviceThatWorksOnAndroid:
 
         assert result["scroll"]["reason"] == "not_searchable"
         assert "selector path" in result["scroll"]["detail"]
+
+
+class TestASameAppUrlRivalIsNotResolvedByGuessing:
+    """Without the page listing a `web_url_contains` landmark cannot match, so
+    `identify_screen` reports a native sibling as "exact" when the honest
+    answer is "one of two". Using the native screen's `scrollable` would be a
+    guess wearing an exact match's clothes.
+
+    Same app only. A URL screen in a *different* app is not a rival, and
+    treating it as one is the regression that disabled recorded scrollability
+    everywhere."""
+
+    def _app_with_a_url_sibling(self):
+        reg = LandmarkRegistry()
+        reg.load("one", [
+            ScreenLandmarks(
+                screen="NativeHome", scrollable=True,
+                landmarks=[Landmark(element="Button", label="Anchor")],
+            ),
+            # Same anchor, plus a URL it cannot check without the page listing.
+            ScreenLandmarks(
+                screen="WebVariant", scrollable=False,
+                landmarks=[
+                    Landmark(element="Button", label="Anchor"),
+                    Landmark(web_url_contains="example.com"),
+                ],
+            ),
+        ])
+        return reg
+
+    async def test_it_refuses_to_use_the_native_screens_value(self):
+        ctrl = _controller(self._app_with_a_url_sibling())
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is False
+        assert result["scroll"]["reason"] == "needs_page_urls"
+
+    async def test_a_url_screen_in_another_app_is_not_a_rival(self):
+        """The distinction the whole check rests on."""
+        reg = LandmarkRegistry()
+        reg.load("one", [ScreenLandmarks(
+            screen="NativeHome", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        reg.load("two", [ScreenLandmarks(
+            screen="OtherWeb",
+            landmarks=[Landmark(web_url_contains="example.com")],
+        )])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True
+
+    async def test_a_sibling_failing_on_something_native_is_not_a_rival(self):
+        """Only a screen whose *sole* unmet landmark is the URL counts. One
+        that failed on a native selector is simply not this screen."""
+        reg = LandmarkRegistry()
+        reg.load("one", [
+            ScreenLandmarks(
+                screen="NativeHome", scrollable=True,
+                landmarks=[Landmark(element="Button", label="Anchor")],
+            ),
+            ScreenLandmarks(
+                screen="Unrelated",
+                landmarks=[
+                    Landmark(element="Button", label="NotOnScreen"),
+                    Landmark(web_url_contains="example.com"),
+                ],
+            ),
+        ])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True

@@ -39,10 +39,18 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
     reason `scrollable` is tri-state rather than a boolean.
     """
     if sweep.get("attempted"):
+        # `swipes` and `moved` only when something measured them. Android's
+        # `scroll_into_view` reports whether the target appeared and nothing
+        # else, so defaulting these to 0 and False stated two facts it never
+        # established -- and "swiped 0 times, nothing moved" alongside
+        # `attempted: true` is a contradiction the reader has to resolve.
+        # Absent means unmeasured; present means measured.
+        measured = {
+            k: sweep[k] for k in ("swipes", "moved") if k in sweep
+        }
         return {
             "attempted": True,
-            "swipes": sweep.get("swipes", 0),
-            "moved": sweep.get("moved", False),
+            **measured,
             "screen": sweep.get("screen"),
             "detail": (
                 "the screen was swiped to look for this element, so it may have "
@@ -51,6 +59,22 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
         }
     if requested is False:
         return {"attempted": False, "reason": "scroll_to_find=false"}
+    if sweep.get("platform") == "android":
+        # Android's sweep is the selector-based `scroll_into_view` on the fast
+        # path, which no knowledge base gates -- so neither iOS remedy applies
+        # here. `scroll_to_find=true` is already the effective default, and
+        # nothing on this platform reads `scrollable`. Saying either would send
+        # the caller somewhere that cannot help.
+        return {
+            "attempted": False,
+            "reason": "not_searchable",
+            "detail": (
+                "this query did not take the selector path, which is the only "
+                "one that scrolls on Android. Re-run with just label= or "
+                "identifier= -- no element_type or value -- to have quern "
+                "scroll looking for it."
+            ),
+        }
     if requested is True:
         # Asked for and not done, which only happens when the search was not
         # eligible: `scroll_to_element` can only reach an exact label or
@@ -76,6 +100,16 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
             "detail": (
                 f"{sweep.get('screen')!r} is recorded as not scrolling, so the "
                 "element is not on it. Scrolling will not find it."
+            ),
+        }
+    if sweep.get("why") == "read_failed":
+        return {
+            "attempted": False,
+            "reason": "screen_unreadable",
+            "detail": (
+                "the screen could not be read, so quern cannot tell which "
+                "screen this is or whether it scrolls. Retry, or pass "
+                "scroll_to_find explicitly."
             ),
         }
     if sweep.get("why") == "needs_page_urls":
@@ -110,22 +144,6 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
                 f"{' (' + named + ')' if named else ''}, so quern will not "
                 "guess which one's scrollability applies. Load landmarks for "
                 "one app at a time, or pass scroll_to_find explicitly."
-            ),
-        }
-    if sweep.get("platform") == "android":
-        # Android's sweep is the selector-based `scroll_into_view` on the fast
-        # path, which no knowledge base gates -- so neither iOS remedy applies
-        # here. `scroll_to_find=true` is already the effective default, and
-        # nothing on this platform reads `scrollable`. Saying either would send
-        # the caller somewhere that cannot help.
-        return {
-            "attempted": False,
-            "reason": "not_searchable",
-            "detail": (
-                "this query did not take the selector path, which is the only "
-                "one that scrolls on Android. Re-run with just label= or "
-                "identifier= -- no element_type or value -- to have quern "
-                "scroll looking for it."
             ),
         }
     return {
@@ -404,22 +422,30 @@ class DeviceControllerUI:
         filter_label: str | None,
         identifier: str | None,
         element_type: str | None,
-    ) -> list[UIElement]:
+    ) -> tuple[list[UIElement], bool]:
         """The whole screen, for identification and for not-found context.
 
         `elements` may have been read under filters, and a filtered read is not
         cached -- so it holds only what matched and cannot answer "which screen
         is this". Falls back to the filtered list rather than failing: partial
         context beats none, and this is never the thing the caller asked for.
+
+        Returns `(elements, complete)`. The flag is reported rather than
+        inferred from whether the list came back unchanged: the no-filter path
+        legitimately returns the caller's own list, and a mocked
+        `get_ui_elements` returns the same object for both reads, so identity
+        says nothing about whether the read worked. A caller identifying a
+        screen needs "no screen matched" and "quern could not look" to be
+        different answers.
         """
         if not (filter_label or identifier or element_type):
-            return elements
+            return elements, True
         try:
             full, _ = await self.get_ui_elements(resolved)
         except Exception:
             logger.debug("full-tree read for screen context failed", exc_info=True)
-            return elements
-        return full
+            return elements, False
+        return full, True
 
     def _scrollable_hint(
         self, elements: list[UIElement],
@@ -1866,12 +1892,20 @@ class DeviceControllerUI:
                 # The full tree, which the not-found path below fetches anyway.
                 # Doing it here instead pays for identification and that context
                 # at once, and `identify_screen` needs no device read of its own.
-                all_elements = await self._all_elements_for_context(
+                all_elements, complete = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
                 )
-                hint, screen_name, why, candidates = self._scrollable_hint(
-                    all_elements,
-                )
+                if not complete:
+                    # The full read failed and this is the *filtered* list --
+                    # the target's matches, or nothing. Identifying against it
+                    # would compare landmarks with a handful of elements and
+                    # conclude "no known screen", which reads as "you have not
+                    # recorded this" when the truth is "quern could not look".
+                    hint, screen_name, why, candidates = None, None, "read_failed", None
+                else:
+                    hint, screen_name, why, candidates = self._scrollable_hint(
+                        all_elements,
+                    )
                 should_sweep = hint is True
                 sweep["screen"] = screen_name
                 sweep["known_scrollable"] = hint
@@ -1904,7 +1938,7 @@ class DeviceControllerUI:
             if element_type:
                 search_desc += f", type='{element_type}'"
             if all_elements is None:
-                all_elements = await self._all_elements_for_context(
+                all_elements, _ = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
                 )
             screen_context = _build_screen_context(all_elements)
