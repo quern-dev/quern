@@ -770,3 +770,50 @@ class TestADuplicateSsidIsResolvedByTime:
         await _listed()
 
         assert read_cert_state()[CD_UUID]["wifi_proxy_configs"]["home"]["client_ip"] == "10.0.0.9"
+
+
+class TestARestoredSidecarIsCanonicalisedToo:
+    """`__init__` writes the persisted udid straight into the backing field --
+    deliberately, since restoring is not a change worth writing -- so it
+    bypasses the setter that canonicalises. A sidecar written by an older
+    quern, holding the hardware udid, therefore survives a restart.
+
+    The restored-active branch returned that raw value on the first call, and
+    `resolve_udid` records what it returns on the action. Trace ownership
+    compares udids exactly, so the action read FOREIGN against everything
+    recorded canonically -- the bug this branch exists to fix, arriving through
+    a restart."""
+
+    async def _restored(self, persisted: str) -> DeviceController:
+        await _listed()
+        ctrl = DeviceController()
+        # Exactly what __init__ does with a persisted udid.
+        ctrl._DeviceController__active_udid = persisted
+        ctrl.list_devices = AsyncMock(return_value=[])
+        ctrl._device_type_cache[CD_UUID] = DeviceType.DEVICE
+        return ctrl
+
+    async def test_a_raw_sidecar_resolves_to_the_canonical_udid(self):
+        ctrl = await self._restored(HW_UDID)
+
+        assert await ctrl.resolve_udid() == CD_UUID
+
+    async def test_the_action_log_gets_the_canonical_one(self):
+        """What the bug actually cost: the recorded udid."""
+        from server.api.actions import ActionScope
+        from server.logging_ext import reset_current_action, set_current_action
+
+        ctrl = await self._restored(HW_UDID)
+        scope = ActionScope("tap", "device.action")
+        token = set_current_action(scope)
+        try:
+            await ctrl.resolve_udid()
+        finally:
+            reset_current_action(token)
+
+        assert scope.udid == CD_UUID
+
+    async def test_a_canonical_sidecar_is_unchanged(self):
+        ctrl = await self._restored(CD_UUID)
+
+        assert await ctrl.resolve_udid() == CD_UUID

@@ -489,7 +489,18 @@ class DeviceController(DeviceControllerUI):
             # ran, and the menu bar showed the UDID. The dedup guard makes
             # this a no-op once the name and type have landed.
             self._active_udid = restored
-            return restored
+            # The canonical spelling, not `restored`. `__init__` writes the
+            # persisted udid straight into the backing field -- deliberately,
+            # since restoring is not a change worth writing -- so it bypasses
+            # the setter that canonicalises. A sidecar holding the hardware
+            # udid therefore survives a restart, and this branch returned it
+            # raw on the first call: `resolve_udid` records that on the action,
+            # and trace ownership compares udids exactly, so the action reads
+            # FOREIGN against everything recorded canonically.
+            #
+            # Reproduced: sidecar = hardware udid, `resolve_udid()` returned
+            # the hardware udid while `_active_udid` held the canonical one.
+            return self._active_udid
 
         # Step 3: try pool-based resolution (silent upgrade)
         if self._pool is not None:
