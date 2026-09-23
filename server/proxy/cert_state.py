@@ -55,6 +55,30 @@ def read_cert_state() -> dict[str, dict]:
         return {}
 
 
+def _newer_configs(first: dict, second: dict) -> dict:
+    """Union two SSID maps, keeping the more recently recorded on a clash.
+
+    By `set_at`, not by which record the file happened to list second. Both
+    spellings of one device carry their own history, and file order says
+    nothing about which was written later -- so taking the later entry could
+    resurrect a proxy address the device had already moved away from, and the
+    trace would then attribute its flows by a stale `client_ip`.
+
+    An entry with no `set_at` loses to one that has it: knowing when beats not
+    knowing. Between two undated entries there is nothing to choose, so the
+    second stands.
+    """
+    merged = dict(first)
+    for ssid, config in second.items():
+        existing = merged.get(ssid)
+        if existing is None:
+            merged[ssid] = config
+            continue
+        if str(config.get("set_at") or "") >= str(existing.get("set_at") or ""):
+            merged[ssid] = config
+    return merged
+
+
 def _canonicalised(state: dict[str, dict]) -> dict[str, dict]:
     """Keys as the rest of quern spells them.
 
@@ -93,10 +117,10 @@ def _canonicalised(state: dict[str, dict]) -> dict[str, dict]:
         if key not in merged:
             merged[key] = dict(record)
             continue
-        configs = {
-            **(merged[key].get("wifi_proxy_configs") or {}),
-            **(record.get("wifi_proxy_configs") or {}),
-        }
+        configs = _newer_configs(
+            merged[key].get("wifi_proxy_configs") or {},
+            record.get("wifi_proxy_configs") or {},
+        )
         merged[key] = {**merged[key], **record}
         if configs:
             merged[key]["wifi_proxy_configs"] = configs
@@ -108,8 +132,14 @@ def read_cert_state_for_device(udid: str) -> dict | None:
 
     Returns None if no state exists for the device.
     """
+    from server.device.devicectl import canonical_device_id
+
+    # The *key* too, not only the state. `read_cert_state` canonicalises what
+    # it returns, so a caller asking by the hardware udid looked for a key that
+    # had just been rewritten to the other spelling and got None -- the same
+    # miss this whole change exists to end, one layer down.
     state = read_cert_state()
-    return state.get(udid)
+    return state.get(canonical_device_id(udid))
 
 
 def _write_cert_state(state: dict) -> None:

@@ -683,3 +683,90 @@ class TestTwoSpellingsOfOneDeviceAreMerged:
 
         assert ip_map["10.0.0.7"][0] == CD_UUID
         assert ip_map["10.0.0.9"][0] == CD_UUID
+
+
+class TestTheLookupKeyIsCanonicalisedToo:
+    """`read_cert_state` canonicalises what it returns, so a caller asking by
+    the hardware udid looked for a key that had just been rewritten to the
+    other spelling -- the same miss this change exists to end, one layer
+    down."""
+
+    async def test_a_hardware_udid_finds_the_record(self):
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            record_device_proxy_config,
+        )
+
+        record_device_proxy_config(CD_UUID, "home", "10.0.0.2", 9101, client_ip="10.0.0.9")
+        await _listed()
+
+        assert read_cert_state_for_device(HW_UDID) is not None
+
+    async def test_the_canonical_one_still_does(self):
+        from server.proxy.cert_state import (
+            read_cert_state_for_device,
+            record_device_proxy_config,
+        )
+
+        record_device_proxy_config(CD_UUID, "home", "10.0.0.2", 9101, client_ip="10.0.0.9")
+        await _listed()
+
+        assert read_cert_state_for_device(CD_UUID) is not None
+
+
+class TestADuplicateSsidIsResolvedByTime:
+    """Both spellings of one device carry their own history, and file order
+    says nothing about which was written later. Taking the later *entry* could
+    resurrect a proxy address the device had already moved away from, and the
+    trace would then attribute its flows by a stale `client_ip`."""
+
+    def _both(self, hw_set_at: str, cd_set_at: str) -> None:
+        CERT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CERT_STATE_FILE.write_text(json.dumps({
+            HW_UDID: {"wifi_proxy_configs": {"home": {
+                "client_ip": "10.0.0.7", "proxy_host": "10.0.0.2",
+                "proxy_port": 9101, "set_at": hw_set_at,
+            }}},
+            CD_UUID: {"wifi_proxy_configs": {"home": {
+                "client_ip": "10.0.0.9", "proxy_host": "10.0.0.2",
+                "proxy_port": 9101, "set_at": cd_set_at,
+            }}},
+        }))
+
+    async def test_the_newer_entry_wins_even_when_listed_first(self):
+        from server.proxy.cert_state import read_cert_state
+
+        # The hardware record is listed first and is the *newer* one.
+        self._both("2026-09-20T00:00:00+00:00", "2026-09-01T00:00:00+00:00")
+        await _listed()
+
+        config = read_cert_state()[CD_UUID]["wifi_proxy_configs"]["home"]
+
+        assert config["client_ip"] == "10.0.0.7", (
+            "file order beat the recorded time, resurrecting a stale address"
+        )
+
+    async def test_the_newer_entry_wins_when_listed_second(self):
+        from server.proxy.cert_state import read_cert_state
+
+        self._both("2026-09-01T00:00:00+00:00", "2026-09-20T00:00:00+00:00")
+        await _listed()
+
+        assert read_cert_state()[CD_UUID]["wifi_proxy_configs"]["home"]["client_ip"] == "10.0.0.9"
+
+    async def test_a_dated_entry_beats_an_undated_one(self):
+        """Knowing when beats not knowing, whichever order they appear in."""
+        from server.proxy.cert_state import read_cert_state
+
+        CERT_STATE_FILE.write_text(json.dumps({
+            CD_UUID: {"wifi_proxy_configs": {"home": {
+                "client_ip": "10.0.0.9", "proxy_host": "10.0.0.2", "proxy_port": 9101,
+                "set_at": "2026-09-20T00:00:00+00:00",
+            }}},
+            HW_UDID: {"wifi_proxy_configs": {"home": {
+                "client_ip": "10.0.0.7", "proxy_host": "10.0.0.2", "proxy_port": 9101,
+            }}},
+        }))
+        await _listed()
+
+        assert read_cert_state()[CD_UUID]["wifi_proxy_configs"]["home"]["client_ip"] == "10.0.0.9"
