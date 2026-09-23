@@ -48,7 +48,12 @@ from server.api.system import router as system_router
 from server.api.trace import router as trace_router
 from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
-from server.config import ServerConfig, get_local_capture_processes, set_local_capture_processes
+from server.config import (
+    ServerConfig,
+    get_local_capture_processes,
+    set_local_capture_processes,
+    with_capture_minimum,
+)
 from server.device.controller import DeviceController
 from server.lifecycle.daemon import _print_status, daemonize
 from server.lifecycle.ports import (
@@ -963,7 +968,28 @@ def _cmd_start(args: argparse.Namespace) -> None:
     enable_syslog = args.syslog is True and not args.no_syslog
     enable_oslog = args.oslog is True and not args.no_oslog
     enable_crash = not args.no_crash
-    local_capture_processes = get_local_capture_processes() if enable_proxy else []
+    # Widened here too, and this is the entry point that matters most for
+    # anyone already using the feature: `quern enable-local-capture MyApp` on
+    # any released version wrote `["MyApp"]` to config.json, and the lifespan
+    # routes straight from that file. Fixing only the endpoint and the CLI left
+    # every existing install still capturing nothing after upgrading -- the
+    # exact bug this change is about, surviving on the path where users live.
+    #
+    # `only` is deliberately not honoured here: config.json stores a bare list,
+    # so a stored narrow list cannot be told apart from one narrowed by
+    # accident. Widening is the safe reading of an ambiguous record -- capturing
+    # more than asked is visible and recoverable, capturing nothing is the
+    # silent failure. Persisting the distinction is the follow-up (#275 notes).
+    # Both bound here, not just the one the branch needs. `_capture_added`
+    # assigned only inside the `if` meant `quern start --no-proxy` raised
+    # UnboundLocalError building the state dict, before the server started at
+    # all -- and no test started with the proxy off, so the suite was green.
+    local_capture_processes: list[str] = []
+    _capture_added: list[str] = []
+    if enable_proxy:
+        local_capture_processes, _capture_added = with_capture_minimum(
+            get_local_capture_processes(),
+        )
 
     # Auto-fix developer dir before any tool checks
     developer_dir_msg = _fix_developer_dir()
@@ -980,6 +1006,13 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "proxy_enabled": enable_proxy,
         "proxy_status": "starting" if enable_proxy else "disabled",
         "local_capture": local_capture_processes,
+        # What start-up added on this boot, not just the total. The foreground
+        # banner says it, but `quern start` daemonizes by default: the child
+        # runs with `args.foreground` false so the banner never prints, and the
+        # parent reports from this file. Putting it here is what makes the
+        # addition visible to the default path -- and to `quern status` later,
+        # which is where someone whose Safari broke will actually look.
+        "local_capture_added": _capture_added,
         "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
     }
@@ -1008,6 +1041,20 @@ def _cmd_start(args: argparse.Namespace) -> None:
             print(f"  Proxy: enabled (port: {proxy_port})")
             if local_capture_processes:
                 print(f"  Local capture: {', '.join(local_capture_processes)}")
+                if _capture_added:
+                    # Say what start-up added, not just the total. These are
+                    # newly routed through the proxy on this boot, so if the CA
+                    # is not trusted on a booted simulator their HTTPS starts
+                    # failing where it previously worked -- and without this
+                    # line the user has no way to connect the two. Booting
+                    # cannot refuse over a certificate (see
+                    # `warn_if_capture_lacks_trust`), so saying so is the
+                    # remedy available here.
+                    print(f"    added for you: {', '.join(_capture_added)}")
+                    print("    (a webview's requests leave through WebKit and an")
+                    print("     OAuth hand-off through Safari; if the CA is not")
+                    print("     trusted on a booted simulator, their HTTPS will")
+                    print("     fail until it is -- run: quern doctor)")
             else:
                 print("  Local capture: disabled")
                 print("    Capture simulator traffic without a system proxy:")
@@ -1726,7 +1773,21 @@ def _cmd_enable_local_capture(
     process_names: list[str], skip_cert_check: bool = False,
 ) -> None:
     """Enable local capture mode for specific processes."""
-    processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
+    # Same widening as the HTTP endpoint. This command writes config.json and
+    # the lifespan routes from it, so a narrow list here has exactly the same
+    # effect as a narrow list there -- and `quern enable-local-capture MyApp`
+    # is the most natural way to make the mistake.
+    if process_names:
+        processes, added = with_capture_minimum(process_names)
+        if added:
+            print(f"  Also capturing {', '.join(added)}.")
+            print("  A webview's requests leave through WebKit, and an OAuth")
+            print("  hand-off leaves through Safari; naming only the app")
+            print("  captures neither.")
+    else:
+        from server.config import CAPTURE_MINIMUM
+
+        processes = list(CAPTURE_MINIMUM)
 
     current = get_local_capture_processes()
     if current == processes:
@@ -1907,10 +1968,10 @@ def cli() -> None:
     enable_lc.add_argument(
         "processes", nargs="*", default=[],
         help=(
-            "Process names to capture (default: MobileSafari and "
-            "com.apple.WebKit.Networking). Safari's requests leave through the "
-            "WebKit networking extension, so naming the app alone captures "
-            "nothing."
+            "Process names to capture. MobileSafari and "
+            "com.apple.WebKit.Networking are always kept, because a webview's "
+            "requests leave through WebKit and an OAuth hand-off goes through "
+            "Safari."
         ),
     )
     enable_lc.add_argument(
