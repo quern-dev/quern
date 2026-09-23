@@ -360,3 +360,90 @@ class TestAndroidSaysWhenItSwept:
             result = await ctrl.tap_element(identifier="nope")
 
         assert "scrollable: true" not in (result["scroll"].get("detail") or "")
+
+
+class TestASuccessfulTapAlsoReportsTheSweep:
+    """A tap that succeeded only *because* the screen scrolled has moved the
+    screen, and `status: ok` alone does not say so. The easiest case to forget,
+    because nothing went wrong -- and the same defect as the Android branch
+    reporting `attempted: False`."""
+
+    async def test_a_tap_after_a_sweep_says_it_scrolled(self):
+        found = _element("Target")
+        ctrl = _controller(_registry(True))
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=found)
+        ctrl._ui_backend = MagicMock(return_value=MagicMock(tap=AsyncMock()))
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(label="Target", skip_stability_check=True)
+
+        assert result["status"] == "ok"
+        assert result["scroll"]["attempted"] is True
+
+    async def test_a_plain_tap_carries_no_scroll_key(self):
+        """Omitted rather than reported empty: a `scroll` object on every tap
+        would make the one that means something invisible."""
+        found = _element("Here")
+        ctrl = _controller(_registry(True))
+        ctrl.get_ui_elements = AsyncMock(return_value=([found], "AAAA-1111"))
+        ctrl._ui_backend = MagicMock(return_value=MagicMock(tap=AsyncMock()))
+
+        with patch(
+            "server.device.controller_ui._capture_screenshot",
+            AsyncMock(return_value=None),
+        ):
+            result = await ctrl.tap_element(label="Here", skip_stability_check=True)
+
+        assert result["status"] == "ok"
+        assert "scroll" not in result
+
+
+class TestAMistypedScrollableIsReported:
+    """Coercing a typo to "nobody has said" is the right behaviour -- a
+    mis-typed `scrollable: "true"` must never read as consent to swipe -- and
+    it is invisible, so the author believes the opposite of what the file
+    means. `validate_landmarks` says so; the value stays None either way."""
+
+    def _parse(self, tmp_path, value: str):
+        from server.device.landmarks import parse_screen_landmarks
+
+        f = tmp_path / "screen.md"
+        f.write_text(
+            f"---\nscreen: Home\nscrollable: {value}\n"
+            'landmarks:\n  - element: "Button"\n    label: "Go"\n---\n',
+        )
+        return parse_screen_landmarks(f, base_path=tmp_path)
+
+    def test_a_quoted_boolean_is_ignored_and_flagged(self, tmp_path):
+        result = self._parse(tmp_path, '"true"')
+
+        assert result.screen.scrollable is None, "a string must not enable sweeping"
+        assert result.warnings, "the author was not told their field is ignored"
+        assert result.warnings[0]["field"] == "scrollable"
+
+    def test_a_number_is_ignored_and_flagged(self, tmp_path):
+        result = self._parse(tmp_path, "1")
+
+        assert result.screen.scrollable is None
+        assert result.warnings
+
+    def test_a_real_boolean_is_accepted_silently(self, tmp_path):
+        result = self._parse(tmp_path, "true")
+
+        assert result.screen.scrollable is True
+        assert result.warnings == []
+
+    def test_an_absent_field_is_not_a_warning(self, tmp_path):
+        from server.device.landmarks import parse_screen_landmarks
+
+        f = tmp_path / "screen.md"
+        f.write_text(
+            '---\nscreen: Home\nlandmarks:\n  - element: "Button"\n    label: "Go"\n---\n',
+        )
+        result = parse_screen_landmarks(f, base_path=tmp_path)
+
+        assert result.screen.scrollable is None
+        assert result.warnings == []

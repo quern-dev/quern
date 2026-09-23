@@ -1782,7 +1782,16 @@ class DeviceControllerUI:
                     )
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
-                return {"status": "ok", "tapped": tapped}
+                result = {"status": "ok", "tapped": tapped}
+            # A tap that succeeded only *because* the screen scrolled has
+            # moved the screen, and the caller cannot see that from
+            # `status: ok` alone. Same defect as the Android branch reporting
+            # `attempted: False` -- a gesture the caller cannot see -- on the
+            # path where it is easiest to forget, because nothing went wrong.
+            # Omitted entirely when no sweep ran, so a plain tap is unchanged.
+                if sweep.get("attempted"):
+                    result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                return result
             # Not found even after scrolling — fall through to the dump-based path.
 
         # Traditional path: fetch full UI tree
@@ -1916,7 +1925,7 @@ class DeviceControllerUI:
                 cx, cy = get_tap_point(el)
                 await self._ui_backend(resolved).tap(resolved, cx, cy)
                 self._invalidate_ui_cache(resolved)
-                return {
+                result = {
                     "status": "ok",
                     "tapped": {
                         "type": el.type, "label": el.label,
@@ -1924,6 +1933,9 @@ class DeviceControllerUI:
                         "source": (el.extra_attrs or {}).get("source"),
                     },
                 }
+                if sweep.get("attempted"):
+                    result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                return result
 
             # Value check for switches/toggles: skip tap if already in desired state
             if value is not None:
@@ -2067,6 +2079,8 @@ class DeviceControllerUI:
             if value is not None:
                 result["previous_value"] = el.value or ""
                 result["requested_value"] = value
+            if sweep.get("attempted"):
+                result["scroll"] = _scroll_report(sweep, scroll_to_find)
             return result
 
         # Future enhancement: Retry logic implementation
