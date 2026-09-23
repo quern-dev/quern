@@ -277,6 +277,31 @@ def _no_real_network_settings(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_device_identity_leaks_between_tests():
+    """`_identity_aliases` is module-level, and nothing clears it in a test run.
+
+    Every module that parses a devicectl fixture writes into it permanently, so
+    aliases leaked across files -- measured, after `test_devicectl_backend.py`:
+
+        {'53DA57AA-...': '53DA57AA-...', '00008130-AAAA1111': 'UDID-0',
+         'UDID-0': 'UDID-0', 'UDID-1': 'UDID-1', ...}
+
+    Three distinct fixture devices had collapsed onto one hardware udid with
+    silent last-writer-wins. A test that then canonicalises anything is reading
+    another file's fixtures, and the order tests run in decides the answer.
+
+    Autouse and here rather than in the one file that noticed, because the
+    writes come from every file that loads a device list -- which is most of
+    them -- and only the file doing the reading would ever think to clear it.
+    """
+    from server.device import devicectl
+
+    devicectl._identity_aliases.clear()
+    yield
+    devicectl._identity_aliases.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_subprocess_spawns(monkeypatch):
     """Fail any test that spawns a real device-side subprocess.
 

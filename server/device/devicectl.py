@@ -56,7 +56,20 @@ def canonical_device_id(udid: str) -> str:
 
 
 def _remember_identity(canonical: str, *spellings: str) -> None:
-    """Record every known spelling of one device, including the canonical."""
+    """Record every known spelling of one device, including the canonical.
+
+    An empty canonical is refused rather than stored. The loop below guards
+    the *key* and says nothing about the value, so a devicectl entry with no
+    `identifier` -- which `list_devices` reads defensively as `""` -- produced
+    `{hardware_udid: ""}`. `canonical_device_id` then returned `""` for a real
+    device, and because `""` is falsy the trace's `if udid:` filter became a
+    pass-through that answered with *other* devices' actions and echoed
+    `udid: ""`. `resolve_udid` returned `""` for a truthy input too, breaking
+    its own contract. The rest of this file defends against a missing
+    `identifier`; the defence here was written on the wrong operand.
+    """
+    if not canonical:
+        return
     for spelling in (canonical, *spellings):
         if spelling:
             _identity_aliases[spelling] = canonical

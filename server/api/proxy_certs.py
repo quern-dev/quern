@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from server.api.actions import action, logged_action
+from server.device.devicectl import canonical_device_id
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,
@@ -528,7 +529,18 @@ async def record_device_proxy_config_endpoint(
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
-    record_device_proxy_config(body.udid, body.ssid, proxy_host, port, client_ip=body.client_ip)
+    # Canonicalised before it is stored. `_ip_map` feeds these keys straight
+    # into `owns()`, so a config recorded under the spelling Xcode shows never
+    # joined the actions logged under the other -- which is precisely the
+    # damage `_identity_aliases` was added to end, left unfixed on the half
+    # that writes. Worse after `GET /trace?udid=` began canonicalising its
+    # query: the flows stopped matching either spelling, and the caller saw an
+    # action with an empty `flows` list, which reads as "the app made no
+    # requests".
+    record_device_proxy_config(
+        canonical_device_id(body.udid), body.ssid, proxy_host, port,
+        client_ip=body.client_ip,
+    )
     return {
         "udid": body.udid,
         "ssid": body.ssid,

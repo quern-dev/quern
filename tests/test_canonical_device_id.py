@@ -24,8 +24,6 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from server.device import devicectl as dc
 from server.device.controller import DeviceController
 from server.models import DeviceType
@@ -46,13 +44,6 @@ _DEVICECTL_JSON = json.dumps({
         },
     }]},
 })
-
-
-@pytest.fixture(autouse=True)
-def _clean_alias_map():
-    dc._identity_aliases.clear()
-    yield
-    dc._identity_aliases.clear()
 
 
 def _action_on(udid: str):
@@ -246,3 +237,270 @@ class TestTheTraceAcceptsEitherSpelling:
         result = await self._trace("SOME-OTHER-DEVICE")
 
         assert result["actions"] == []
+
+
+class TestEveryWriterOfTheActiveDeviceCanonicalises:
+    """`resolve_udid` canonicalising what it *returns* is not enough.
+
+    The active device is also written directly -- by `POST /device/active` and
+    by four paths in `DevicePool` -- and those stored the raw udid. Branch 2 of
+    `_resolve_udid` then handed it back uncanonicalised, so once
+    `GET /trace?udid=` began canonicalising its query, **both** spellings
+    matched nothing. That is worse than before the canonicalisation existed.
+
+    So the property setter canonicalises, which is the one place all eleven
+    writers land, and is also what the sidecar persists.
+    """
+
+    async def test_a_raw_hardware_udid_is_stored_canonically(self):
+        await _listed()          # the map is filled by list_devices, not by construction
+        ctrl = _isolated_controller()
+
+        ctrl._active_udid = HW_UDID
+
+        assert ctrl._active_udid == CD_UUID
+
+    def test_the_canonical_spelling_is_unchanged(self):
+        ctrl = _isolated_controller()
+
+        ctrl._active_udid = CD_UUID
+
+        assert ctrl._active_udid == CD_UUID
+
+    def test_clearing_it_still_works(self):
+        """`None` must not be canonicalised into something truthy."""
+        ctrl = _isolated_controller()
+        ctrl._active_udid = HW_UDID
+
+        ctrl._active_udid = None
+
+        assert ctrl._active_udid is None
+
+    def test_an_unknown_udid_passes_through(self):
+        ctrl = _isolated_controller()
+
+        ctrl._active_udid = "SIM-1234"
+
+        assert ctrl._active_udid == "SIM-1234"
+
+    async def test_the_restored_active_path_returns_the_canonical(self):
+        """Branch 2 of `_resolve_udid`. This is the path that carried the raw
+        value out to the trace filter."""
+        await _listed()
+        ctrl = _isolated_controller()
+        ctrl._active_udid = HW_UDID
+
+        assert await ctrl.resolve_udid() == CD_UUID
+
+
+class TestAnEmptyCanonicalIsRefused:
+    """The guard was on the key and never the value, so a devicectl entry with
+    no `identifier` -- read defensively as `""` -- produced `{HW: ""}`.
+
+    `canonical_device_id` then returned `""` for a real device, and `""` is
+    falsy, so the trace's `if udid:` filter became a pass-through: it answered
+    with *other* devices' actions and echoed `udid: ""`.
+    """
+
+    def test_a_missing_identifier_records_nothing(self):
+        dc._remember_identity("", HW_UDID)
+
+        assert dc.canonical_device_id(HW_UDID) == HW_UDID
+
+    def test_a_real_identifier_still_records(self):
+        dc._remember_identity(CD_UUID, HW_UDID)
+
+        assert dc.canonical_device_id(HW_UDID) == CD_UUID
+
+
+class TestIdentityIsRecordedBeforeTheFilters:
+    """Deliberate: a device that is unpaired, unreachable or simulated is still
+    one someone can name, and knowing both its spellings is what lets a refusal
+    say which device it means instead of blaming simctl for an "invalid
+    device".
+
+    Untested until a surviving mutant said so -- moving `_remember_identity`
+    below both filters left all 168 tests green, because every fixture was
+    paired, reachable and physical.
+    """
+
+    async def _listed_with(self, **overrides) -> None:
+        import json as _json
+        from unittest.mock import AsyncMock as _AsyncMock
+        from unittest.mock import patch as _patch
+
+        dev = {
+            "identifier": CD_UUID,
+            "deviceProperties": {"name": "iPhone 11", "osVersionNumber": "18.6"},
+            "connectionProperties": {
+                "transportType": "wired", "tunnelState": "connected",
+                "pairingState": "paired",
+            },
+            "hardwareProperties": {
+                "udid": HW_UDID, "deviceType": "iPhone", "reality": "physical",
+            },
+        }
+        for path, value in overrides.items():
+            section, key = path.split(".")
+            dev[section][key] = value
+        backend = dc.DevicectlBackend()
+        with _patch.object(
+            backend, "_run_devicectl",
+            _AsyncMock(return_value=(_json.dumps({"result": {"devices": [dev]}}), "")),
+        ), _patch("server.device.devicectl.xcode_available", return_value=True):
+            await backend.list_devices()
+
+    async def test_an_unpaired_device_is_still_nameable(self):
+        await self._listed_with(**{"connectionProperties.pairingState": "unpaired"})
+
+        assert dc.canonical_device_id(HW_UDID) == CD_UUID
+
+    async def test_an_unreachable_device_is_still_nameable(self):
+        await self._listed_with(**{"connectionProperties.tunnelState": "unavailable"})
+
+        assert dc.canonical_device_id(HW_UDID) == CD_UUID
+
+    async def test_a_simulated_entry_is_still_nameable(self):
+        await self._listed_with(**{"hardwareProperties.reality": "simulated"})
+
+        assert dc.canonical_device_id(HW_UDID) == CD_UUID
+
+
+class TestTheProxyConfigHalfOfTheJoin:
+    """The damage `_identity_aliases` exists to end, on the half that *writes*.
+
+    `record_device_proxy_config` stored the raw udid and `_ip_map` feeds those
+    keys straight into `owns()`, so a config recorded under the spelling Xcode
+    shows never joined the actions logged under the other. Canonicalising the
+    query alone made it worse: the flows then matched neither spelling, and the
+    caller saw an action with an empty `flows` list -- "the app made no
+    requests", which is the confidently wrong reading.
+
+    The first version of this file's query-side test passed `flow_store=None`,
+    so it never touched the half that was actually half-done. That is why this
+    one builds a real flow.
+    """
+
+    def _flow(self, ip: str):
+        import uuid as _uuid
+        from datetime import UTC, datetime, timedelta
+
+        from server.models import FlowRecord, FlowRequest
+
+        return FlowRecord(
+            id=_uuid.uuid4().hex,
+            timestamp=datetime.now(UTC) - timedelta(seconds=1),
+            request=FlowRequest(method="GET", url="https://x/", host="x", path="/"),
+            client_ip=ip,
+        )
+
+    async def test_the_endpoint_canonicalises_what_it_stores(self):
+        """Through the real handler with a *raw* udid.
+
+        The first version of this test called `canonical_device_id` itself and
+        passed the result in -- so it exercised the function and not the
+        endpoint's use of it, and a mutation putting the raw udid back survived
+        it. Mocking the thing under test is this file's own subject, arriving
+        one level up.
+        """
+        from types import SimpleNamespace
+
+        from server.api.proxy_certs import (
+            RecordDeviceProxyRequest,
+            record_device_proxy_config_endpoint,
+        )
+        from server.proxy.cert_state import read_cert_state
+
+        await _listed()
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid=HW_UDID, ssid="wifi", client_ip="10.0.0.9"),
+            request,
+        )
+
+        assert CD_UUID in read_cert_state(), "stored under the raw udid"
+        assert HW_UDID not in read_cert_state()
+
+    async def test_the_recorded_ip_then_joins_a_canonical_action(self):
+        """The join itself, which is the point of storing it canonically."""
+        from types import SimpleNamespace
+
+        from server.api.proxy_certs import (
+            RecordDeviceProxyRequest,
+            record_device_proxy_config_endpoint,
+        )
+        from server.proxy.cert_state import read_cert_state
+        from server.trace import ip_to_udid, owns
+
+        await _listed()
+        await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid=HW_UDID, ssid="wifi", client_ip="10.0.0.9"),
+            SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        )
+        ip_map = ip_to_udid(read_cert_state())
+
+        assert owns(CD_UUID, ip_map["10.0.0.9"][0]).value == "owns"
+
+    async def test_the_raw_spelling_would_not_have_joined(self):
+        """Pins why this has to happen at the writer: `owns` tests equal
+        strings and nothing else."""
+        from server.trace import Ownership, owns
+
+        await _listed()
+
+        assert owns(CD_UUID, HW_UDID) is Ownership.FOREIGN
+
+
+class TestTheHardwareSpellingIsCachedToo:
+    """The type cache is keyed on the canonical spelling only, so
+    `_ensure_device_type_cached(hardware_udid)` missed on *every* call -- a
+    full simctl+devicectl+usbmux+adb enumeration each time, for a device
+    already known.
+
+    Counted rather than timed: a duration assertion on a mocked backend
+    measures the mock.
+    """
+
+    async def test_a_repeated_hardware_udid_enumerates_once(self):
+        await _listed()
+        ctrl = DeviceController()
+        calls = {"n": 0}
+
+        async def _counting_list_devices():
+            calls["n"] += 1
+            await _listed()
+            ctrl._device_type_cache[CD_UUID] = DeviceType.DEVICE
+            return []
+
+        ctrl.list_devices = _counting_list_devices
+
+        for _ in range(3):
+            await ctrl.resolve_udid(HW_UDID)
+
+        assert calls["n"] == 1, (
+            f"enumerated {calls['n']} times for one device already known"
+        )
+
+
+class TestTheActiveDeviceEndpointReportsWhatItStored:
+    """Echoing the request told a caller who passed the hardware udid that it
+    was the active device, while every later comparison -- the trace filter
+    among them -- used the canonical one. The same shape as `simctl launch`
+    reporting the launch it was asked for."""
+
+    async def test_it_echoes_the_canonical_udid(self):
+        from types import SimpleNamespace
+
+        from server.api.device import set_active_device
+        from server.models import ShutdownDeviceRequest
+
+        await _listed()
+        ctrl = _isolated_controller()
+        ctrl._ensure_device_type_cached = AsyncMock()
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            device_controller=ctrl,
+        )))
+
+        result = await set_active_device(request, ShutdownDeviceRequest(udid=HW_UDID))
+
+        assert result["active_udid"] == CD_UUID

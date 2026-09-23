@@ -139,6 +139,21 @@ class DeviceController(DeviceControllerUI):
 
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
+        # Canonicalised here, not at the ten places that assign it.
+        #
+        # `resolve_udid` canonicalises what it returns, but the active device
+        # is also written directly by `POST /device/active` and by four paths
+        # in `DevicePool`. Those stored the raw udid, so a caller who set the
+        # active device by the spelling Xcode shows got it back uncanonicalised
+        # from branch 2 of `_resolve_udid` -- and once `GET /trace?udid=`
+        # started canonicalising its query, *both* spellings returned nothing.
+        # That is worse than before the canonicalisation existed, and it is the
+        # "empty is indistinguishable from quiet" failure the trace exists to
+        # prevent.
+        #
+        # Fixing the callers would have left the eleventh. This is the one
+        # place the value lands, and it is also what the sidecar persists.
+        value = canonical_device_id(value) if value else value
         # Best-effort name: the cache is filled by list_devices(), which
         # every resolve path runs before landing here, but the pool and the
         # set-active-device API can assign a UDID directly. A miss writes no
@@ -447,7 +462,17 @@ class DeviceController(DeviceControllerUI):
                     "Resolved %s to its canonical identifier %s",
                     udid[:8], canonical[:8],
                 )
-                await self._ensure_device_type_cached(canonical)
+                # The type cache is keyed on the canonical spelling only, so
+                # `_ensure_device_type_cached(udid)` above is a guaranteed miss
+                # every time a caller names the hardware udid -- a full
+                # simctl+devicectl+usbmux+adb enumeration per call, for a device
+                # already known. Teaching the cache the other spelling is what
+                # stops that; re-running `ensure` on the canonical, which is
+                # what this used to do, was a no-op in every reachable path
+                # (deleting it left all 168 tests green).
+                known = self._device_type_cache.get(canonical)
+                if known is not None:
+                    self._device_type_cache[udid] = known
             if set_active:
                 self._active_udid = canonical
             return canonical
