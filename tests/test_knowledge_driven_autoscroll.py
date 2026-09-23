@@ -568,3 +568,85 @@ class TestASameAppUrlRivalIsNotResolvedByGuessing:
         result = await _tap(ctrl)
 
         assert result["scroll"]["attempted"] is True
+
+    async def test_another_apps_screen_sharing_a_name_is_not_a_rival(self):
+        """The join must be on the app's own screens, not on screen names.
+
+        `partial_matches` carries a name and no app, so filtering by name let
+        app `two`'s `Login` stand in for app `one`'s. `Login`, `Home` and
+        `Settings` are exactly the names that repeat across apps, so this is
+        ordinary rather than contrived -- and the earlier test here named its
+        foreign screen `OtherWeb`, which collides with nothing and so passed
+        against the bug.
+        """
+        reg = LandmarkRegistry()
+        reg.load("one", [
+            ScreenLandmarks(
+                screen="NativeHome", scrollable=True,
+                landmarks=[Landmark(element="Button", label="Anchor")],
+            ),
+            # Same app, but it fails on a native landmark, so not a rival.
+            ScreenLandmarks(
+                screen="Login",
+                landmarks=[Landmark(element="Button", label="NotOnScreen")],
+            ),
+        ])
+        reg.load("two", [
+            # Another app, same screen name, identified only by its URL.
+            ScreenLandmarks(
+                screen="Login",
+                landmarks=[Landmark(web_url_contains="example.com")],
+            ),
+        ])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True
+
+    async def test_a_sibling_with_no_landmarks_left_is_not_a_rival(self):
+        """A screen can load with zero landmarks -- the parser discards entries
+        that fail validation, and `docs/proposals/knowledge-base-health.md` is
+        about exactly that going unreported. `identify_screen` skips such a
+        screen, but this walks the app's screens directly, and `all([])` is
+        True: without the URL filter an empty screen rivals everything in its
+        app and silently disables recorded scrollability across it.
+        """
+        reg = LandmarkRegistry()
+        reg.load("one", [
+            ScreenLandmarks(
+                screen="NativeHome", scrollable=True,
+                landmarks=[Landmark(element="Button", label="Anchor")],
+            ),
+            ScreenLandmarks(screen="EverythingWasDiscarded", landmarks=[]),
+        ])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True
+
+    async def test_one_matching_native_landmark_does_not_make_a_rival(self):
+        """*All* the native landmarks must match, not any of them. A screen
+        sharing one selector with the matched screen and failing another is
+        not on screen, whatever its URL says."""
+        reg = LandmarkRegistry()
+        reg.load("one", [
+            ScreenLandmarks(
+                screen="NativeHome", scrollable=True,
+                landmarks=[Landmark(element="Button", label="Anchor")],
+            ),
+            ScreenLandmarks(
+                screen="WebVariant",
+                landmarks=[
+                    Landmark(element="Button", label="Anchor"),      # matches
+                    Landmark(element="Button", label="NotOnScreen"),  # does not
+                    Landmark(web_url_contains="example.com"),
+                ],
+            ),
+        ])
+        ctrl = _controller(reg)
+
+        result = await _tap(ctrl)
+
+        assert result["scroll"]["attempted"] is True

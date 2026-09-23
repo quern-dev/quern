@@ -611,7 +611,7 @@ class LandmarkRegistry:
         found = by_name.get(result.get("matched"))
         if found is None:
             return ScrollHint(None, None, "no_match")
-        if page_urls is None and self._url_rival_in_same_app(found, result):
+        if page_urls is None and self._url_rival_in_same_app(found, elements):
             # A screen in the *same* app whose only unmet landmark is its URL.
             # Without the page listing that landmark cannot match, so
             # `identify_screen` reports the native screen as "exact" when the
@@ -626,14 +626,24 @@ class LandmarkRegistry:
         return ScrollHint(found.scrollable, found.screen, reason)
 
     def _url_rival_in_same_app(
-        self, matched: ScreenLandmarks, result: dict,
+        self, matched: ScreenLandmarks, elements: list[UIElement],
     ) -> bool:
         """Could a URL-identified screen beside `matched` also be on screen?
 
         Only its app's screens are considered, and only those whose *non-URL*
         landmarks all matched -- a screen that failed on something native is
-        not a rival, whatever its URL says. Reads `partial_matches`, which
-        `identify_screen` already computed; no device read and no extra pass.
+        not a rival, whatever its URL says.
+
+        This walks the app's own `ScreenLandmarks` rather than filtering
+        `identify_screen`'s `partial_matches`, because those carry a screen
+        name and no app. Joining on the name let `Login` in another app count
+        as a rival for `Login` here, which is the precise regression this
+        method exists to prevent -- and the names that repeat across apps are
+        exactly the common ones. The first test written for this used the name
+        `OtherWeb`, which collides with nothing, so it passed against the bug.
+
+        Pure: `match_landmark` reads the element list the caller already has,
+        and the pass is over one app's screens.
         """
         app = next(
             (name for name, screens in self._sets.items() if matched in screens),
@@ -641,17 +651,21 @@ class LandmarkRegistry:
         )
         if app is None:
             return False
-        siblings = {s.screen for s in self._sets[app] if s is not matched}
-        for partial in result.get("partial_matches", []):
-            if partial.get("screen") not in siblings:
+        for sibling in self._sets[app]:
+            # `sibling is matched` is unreachable today and kept deliberately:
+            # this runs only when `page_urls is None`, a URL landmark cannot
+            # match without the listing, so an exactly-matched screen holds no
+            # URL landmark and the `needs_page_urls` filter already excludes
+            # it. Mutation testing cannot kill it, which by this repo's usual
+            # rule argues for deleting it -- but the rule it encodes is "a
+            # screen is not its own rival", and it stops being redundant the
+            # moment this is called with a listing in hand.
+            if sibling is matched or not needs_page_urls([sibling]):
                 continue
-            # Each entry is `{"landmark": {...}, "matched": bool}`, so the
-            # selector is one level down. Reading `web_url_contains` off the
-            # result made this always False -- a silent no-op that passed every
-            # test, which is the shape this branch keeps finding.
-            results = partial.get("landmarks") or []
-            unmet = [r.get("landmark") or {} for r in results if not r.get("matched")]
-            if unmet and all(lm.get("web_url_contains") for lm in unmet):
+            # `page_urls` is None on this path by construction, so a URL
+            # landmark cannot match and is excluded rather than evaluated.
+            native = [lm for lm in sibling.landmarks if lm.web_url_contains is None]
+            if all(match_landmark(elements, lm) for lm in native):
                 return True
         return False
 
