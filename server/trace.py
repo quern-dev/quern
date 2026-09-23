@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from server.device.devicectl import canonical_device_id
 from server.models import FlowRecord, LogEntry, LogSource
 
 #: How long after a recorded `client_ip` we still believe it identifies a
@@ -186,7 +187,18 @@ def ip_to_udid(cert_state: dict, *, now: datetime | None = None) -> dict[str, tu
     now = now or datetime.now(UTC)
     mapping: dict[str, tuple[str, bool]] = {}
     recorded_at: dict[str, datetime | None] = {}
-    for udid, record in (cert_state or {}).items():
+    for raw_udid, record in (cert_state or {}).items():
+        # Canonicalised on the way *out*, not only on the way in. A key is
+        # written by `record_device_proxy_config`, which canonicalises what it
+        # is handed -- but only if device discovery has run. When it has not,
+        # or when it failed, the raw hardware udid is persisted and stays
+        # wrong forever: `owns()` compares strings, so every flow from that
+        # device reads FOREIGN against actions logged canonically, and the
+        # trace shows an app that made no requests.
+        #
+        # Doing it here fixes that case, and every cert-state file written
+        # before canonicalisation existed, without a migration.
+        udid = canonical_device_id(raw_udid)
         for config in (record.get("wifi_proxy_configs") or {}).values():
             ip = config.get("client_ip")
             if not ip:

@@ -537,20 +537,20 @@ async def record_device_proxy_config_endpoint(
     # query: the flows stopped matching either spelling, and the caller saw an
     # action with an empty `flows` list, which reads as "the app made no
     # requests".
-    # Warm the alias map first. `canonical_device_id` returns its input
-    # unchanged when nothing has enumerated yet, so on a server that has not
-    # listed devices this would store the raw udid and the canonicalisation
-    # would silently not apply -- the failure looking exactly like success.
-    # `device_pool.refresh()` warms it at startup, but this endpoint is called
-    # early in setup and must not depend on that having happened.
-    controller = request.app.state.device_controller
-    try:
-        await controller._ensure_device_type_cached(body.udid)
-    except Exception:
-        # Best effort: a device list that cannot be read costs the caller the
-        # canonicalisation, which is worth less than failing the recording.
-        _logger.debug("device list refresh before proxy-config failed", exc_info=True)
-
+    # No device-list refresh here, deliberately.
+    #
+    # An earlier version warmed the alias map first, so a cold map would not
+    # store the raw udid. That was wrong twice over: every unrecognised udid
+    # triggered a full simctl+devicectl+usbmux+adb enumeration, with no
+    # negative cache, so a caller passing distinct unknown udids could spin the
+    # device stack (CWE-400); and when the refresh *failed* it swallowed the
+    # error and wrote the raw udid anyway -- a permanently wrong key that
+    # survives discovery recovering.
+    #
+    # `ip_to_udid` canonicalises on read instead, which fixes the cold case,
+    # the failed case, and every file written before canonicalisation existed.
+    # Canonicalising here as well is belt and braces: it costs nothing when the
+    # map is warm, which it is on any server that has listed devices.
     record_device_proxy_config(
         canonical_device_id(body.udid), body.ssid, proxy_host, port,
         client_ip=body.client_ip,

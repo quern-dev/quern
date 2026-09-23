@@ -435,38 +435,60 @@ class TestTheProxyConfigHalfOfTheJoin:
         """
         from server.proxy.cert_state import read_cert_state
 
+        await _listed()          # discovery has run, as on any live server
         await _record_proxy_config(HW_UDID)
 
         assert CD_UUID in read_cert_state(), "stored under the raw udid"
         assert HW_UDID not in read_cert_state()
+
+    async def test_a_key_from_before_canonicalisation_is_repaired_on_read(self):
+        """No migration. Cert state written by an older quern holds raw
+        hardware udids, and those must still join actions logged
+        canonically."""
+        from server.proxy.cert_state import read_cert_state, record_device_proxy_config
+        from server.trace import ip_to_udid
+
+        record_device_proxy_config(HW_UDID, "old", "10.0.0.2", 9101, client_ip="10.0.0.7")
+        await _listed()
+
+        assert ip_to_udid(read_cert_state())["10.0.0.7"][0] == CD_UUID
 
     async def test_the_recorded_ip_then_joins_a_canonical_action(self):
         """The join itself, which is the point of storing it canonically."""
         from server.proxy.cert_state import read_cert_state
         from server.trace import ip_to_udid, owns
 
+        await _listed()
         await _record_proxy_config(HW_UDID)
         ip_map = ip_to_udid(read_cert_state())
 
         assert owns(CD_UUID, ip_map["10.0.0.9"][0]).value == "owns"
 
-    async def test_a_cold_alias_map_is_warmed_rather_than_stored_raw(self):
-        """`canonical_device_id` returns its input unchanged when nothing has
-        enumerated, so on a server that has not listed devices this stored the
-        raw udid and the canonicalisation silently did not apply -- the failure
-        looking exactly like success.
+    async def test_a_cold_map_stores_raw_and_the_reader_repairs_it(self):
+        """The endpoint no longer refreshes the device list, so a cold map
+        stores the raw udid -- and `ip_to_udid` canonicalises on the way out,
+        which is what makes that harmless.
 
-        `device_pool.refresh()` warms the map at startup, but this endpoint is
-        called early in setup and must not depend on that having happened. Note
-        the map is *not* pre-warmed here: that is the point.
+        Warming here was wrong twice over: every unrecognised udid triggered a
+        full four-backend enumeration with no negative cache (CWE-400), and a
+        refresh that *failed* swallowed the error and wrote the raw udid
+        anyway, leaving a permanently wrong key that survived discovery
+        recovering. Reading fixes the cold case, the failed case, and every
+        file written before canonicalisation existed.
         """
         from server.proxy.cert_state import read_cert_state
+        from server.trace import ip_to_udid
 
         assert dc.canonical_device_id(HW_UDID) == HW_UDID, "map should start cold"
-
         await _record_proxy_config(HW_UDID)
+        assert HW_UDID in read_cert_state(), "cold map stores raw, as expected"
 
-        assert CD_UUID in read_cert_state()
+        await _listed()          # discovery runs later, as it does on a live server
+
+        assert ip_to_udid(read_cert_state())["10.0.0.9"][0] == CD_UUID, (
+            "a key written while the map was cold never became usable"
+        )
+
 
     async def test_the_raw_spelling_would_not_have_joined(self):
         """Pins why this has to happen at the writer: `owns` tests equal
