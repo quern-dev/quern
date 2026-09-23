@@ -567,6 +567,26 @@ class PreviewManager:
             pos += 1
         return pos
 
+    def _key_for_label(self, label: str) -> str:
+        """The session key of the active preview showing `label`.
+
+        Returns `label` unchanged when nothing matches: the caller may be
+        naming a stream whose window the user already closed, which
+        `_stop_stream` handles.
+
+        Refuses a label two previews share, for the reason `_resolve_device`
+        refuses an ambiguous device name -- two simulators of one model carry
+        one name, and closing whichever came first shuts a window the caller
+        did not name.
+        """
+        matches = [key for key, p in self._active.items() if p.label == label]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"{len(matches)} previews are called '{label}'. "
+                f"Remove one by its key: {', '.join(matches)}"
+            )
+        return matches[0] if matches else label
+
     def _resolve_device(self, identifier: str) -> PreviewDeviceInfo | None:
         """Find a capture device by unique ID, or unambiguously by name.
 
@@ -852,11 +872,31 @@ class PreviewManager:
         self._streams.clear()
 
     async def remove(self, name: str) -> None:
-        """Remove a preview, by session key or by device name."""
+        """Remove a preview, by session key, device name, or simulator name.
+
+        The same three forms `add` takes, and for the same reason: whatever
+        opened a window has to be able to close it.
+
+        A simulator is filed under its udid with the simulator name as its
+        label, and `_resolve_device` searches capture devices only -- so it
+        cannot see that label. `remove("iPhone 16 Pro")` therefore fell
+        through with a display name for a key, matched nothing, and returned
+        normally with the window still open and quern-media still holding the
+        framebuffer subscription. Silence is what the bug looked like.
+
+        Capture devices are resolved first, exactly as in `add`. Resolving the
+        label first would let one string name a different window depending on
+        which end of the pair you called.
+
+        Raises:
+            RuntimeError: when a label matches more than one active preview.
+        """
         if name not in self._active:
             device = self._resolve_device(name)
             if device is not None and device.cmio_id in self._active:
                 name = device.cmio_id
+            else:
+                name = self._key_for_label(name)
         if self._process is None or self._process.returncode is not None:
             self._active.pop(name, None)
             await self._stop_stream(name)

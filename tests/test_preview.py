@@ -726,3 +726,228 @@ class TestSharedSourcesAreRequired:
 
         for path in preview._SHARED_SOURCE_CANDIDATES:
             assert path.exists(), f"{path} is referenced by the build but absent"
+
+
+class TestRemoveByLabel:
+    """`add` accepts three identifier forms; `remove` accepted two.
+
+    A simulator is filed under its udid with the simulator name as a label.
+    `_resolve_device` searches CoreMediaIO devices only, so it cannot see that
+    label -- `remove("iPhone 16 Pro")` fell through to `_stop_stream` with a
+    display name for a key, which matches nothing. It returned normally with
+    the window still open and quern-media still holding the framebuffer.
+    """
+
+    @staticmethod
+    def _with_simulator(*previews):
+        """A manager with a live subprocess and the given previews active."""
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+        mgr._process = _LiveStreamProcess()
+        for i, (key, label) in enumerate(previews):
+            mgr._active[key] = preview_mod.ActivePreview(
+                name=key, position=i, kind="simulator",
+                stream_port=preview_mod.STREAM_BASE_PORT + i, label=label,
+            )
+            mgr._positions.add(i)
+        return mgr
+
+    def test_a_simulator_preview_is_removed_by_its_name(self, monkeypatch):
+        udid = "11111111-2222-3333-4444-555555555555"
+        mgr = self._with_simulator((udid, "iPhone 16 Pro"))
+
+        sent: list[dict] = []
+        stopped: list[str] = []
+
+        async def _send(cmd):
+            sent.append(cmd)
+            mgr._dispatch_event(
+                {"event": "removed", "key": cmd["key"], "id": cmd["id"]}
+            )
+
+        async def _stop_stream(key):
+            stopped.append(key)
+
+        monkeypatch.setattr(mgr, "_send", _send)
+        monkeypatch.setattr(mgr, "_stop_stream", _stop_stream)
+
+        asyncio.run(mgr.remove("iPhone 16 Pro"))
+
+        # Asserted on the key that went to the app, not merely on `_active`
+        # shrinking. The bug returned normally and left the window open, so
+        # "no exception" is exactly what it looked like.
+        assert [c["key"] for c in sent] == [udid]
+        assert udid not in mgr._active
+        assert stopped == [udid]
+
+    def test_a_simulator_preview_is_still_removable_by_udid(self, monkeypatch):
+        """The form that already worked, kept honest."""
+        udid = "11111111-2222-3333-4444-555555555555"
+        mgr = self._with_simulator((udid, "iPhone 16 Pro"))
+
+        sent: list[dict] = []
+
+        async def _send(cmd):
+            sent.append(cmd)
+            mgr._dispatch_event(
+                {"event": "removed", "key": cmd["key"], "id": cmd["id"]}
+            )
+
+        monkeypatch.setattr(mgr, "_send", _send)
+        monkeypatch.setattr(mgr, "_stop_stream", _noop_stop_stream)
+
+        asyncio.run(mgr.remove(udid))
+        assert [c["key"] for c in sent] == [udid]
+
+    def test_an_ambiguous_label_is_refused_rather_than_guessed(self):
+        """Two simulators of one model share a name, and there is no third
+        thing to arbitrate with -- the same reason `_resolve_device` refuses.
+        Removing the first would close a window the caller did not name."""
+        mgr = self._with_simulator(
+            ("udid-a", "iPhone 16 Pro"), ("udid-b", "iPhone 16 Pro")
+        )
+        with pytest.raises(RuntimeError, match="are called 'iPhone 16 Pro'"):
+            asyncio.run(mgr.remove("iPhone 16 Pro"))
+
+        assert set(mgr._active) == {"udid-a", "udid-b"}
+
+    def test_a_capture_device_still_wins_over_a_matching_label(self, monkeypatch):
+        """`add` resolves a capture device before it considers a simulator, so
+        `remove` must too, or one string names two different windows."""
+        from server.device import preview as preview_mod
+
+        mgr = self._with_simulator(("udid-sim", "iPhone 11"))
+        mgr._available = [preview_mod.PreviewDeviceInfo(name="iPhone 11", cmio_id="CMIO")]
+        mgr._active["CMIO"] = preview_mod.ActivePreview(
+            name="CMIO", position=9, kind="device", label="iPhone 11"
+        )
+
+        sent: list[dict] = []
+
+        async def _send(cmd):
+            sent.append(cmd)
+            mgr._dispatch_event(
+                {"event": "removed", "key": cmd["key"], "id": cmd["id"]}
+            )
+
+        monkeypatch.setattr(mgr, "_send", _send)
+        monkeypatch.setattr(mgr, "_stop_stream", _noop_stop_stream)
+
+        asyncio.run(mgr.remove("iPhone 11"))
+        assert [c["key"] for c in sent] == ["CMIO"]
+        assert "udid-sim" in mgr._active, "removed the simulator instead"
+
+
+async def _noop_stop_stream(key):
+    pass
+
+
+class TestSimulatorPreviewRouting:
+    """`POST /device/preview/start` must reach the simulator path.
+
+    `PreviewManager.add` grew simulator support, and this route is the only
+    HTTP way in -- but it refused a simulator udid with a 400 before ever
+    calling it, so the capability shipped unreachable. `preview_stop` never
+    had the matching gate, which is what makes the asymmetry a bug rather
+    than a boundary: stopping a simulator preview was reachable while
+    starting one was not.
+    """
+
+    @staticmethod
+    def _request(pm, *, physical: bool):
+        """A stand-in for the FastAPI Request the route reads app state from."""
+
+        class _Controller:
+            def _is_android(self, _udid):
+                return False
+
+            def _is_physical(self, _udid):
+                return physical
+
+            async def resolve_udid(self, udid):
+                return udid
+
+            async def list_devices(self):
+                raise AssertionError(
+                    "the simulator path must not round-trip the udid through a "
+                    "CoreMediaIO device name"
+                )
+
+        class _State:
+            device_controller = _Controller()
+            preview_manager = pm
+            scrcpy_preview = None
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        return _Request()
+
+    def test_a_simulator_udid_opens_a_preview(self):
+        from server.api.device import PreviewStartRequest, preview_start
+        from server.device import preview as preview_mod
+
+        udid = "11111111-2222-3333-4444-555555555555"
+        added: list[str] = []
+
+        class _PM:
+            async def add(self, name):
+                added.append(name)
+                return preview_mod.ActivePreview(
+                    name=udid, position=0, kind="simulator",
+                    stream_port=preview_mod.STREAM_BASE_PORT,
+                    label="iPhone 16 Pro",
+                )
+
+        result = asyncio.run(
+            preview_start(
+                self._request(_PM(), physical=False),
+                PreviewStartRequest(udid=udid),
+            )
+        )
+
+        # The udid, not a name. Resolving it to a display name and handing
+        # that to `add` is the lossy round-trip the physical path needs and
+        # the simulator path must not do -- a simulator is filed under its
+        # udid.
+        assert added == [udid]
+        assert result["status"] == "added"
+        assert result["name"] == "iPhone 16 Pro"
+        assert result["platform"] == "ios"
+
+    def test_a_physical_udid_still_resolves_through_a_device_name(self):
+        """The existing path, kept honest: CoreMediaIO matches on a name."""
+        from server.api.device import PreviewStartRequest, preview_start
+        from server.device import preview as preview_mod
+
+        udid = "00008030-000123456789002E"
+        added: list[str] = []
+
+        class _Device:
+            def __init__(self):
+                self.udid = udid
+                self.name = "Jerimiah's iPhone"
+
+        class _PM:
+            async def add(self, name):
+                added.append(name)
+                return preview_mod.ActivePreview(
+                    name="CMIO-ID", position=0, label="Jerimiah's iPhone"
+                )
+
+        request = self._request(_PM(), physical=True)
+
+        async def _list_devices():
+            return [_Device()]
+
+        request.app.state.device_controller.list_devices = _list_devices
+
+        result = asyncio.run(
+            preview_start(request, PreviewStartRequest(udid=udid))
+        )
+        assert added == ["Jerimiah's iPhone"]
+        assert result["status"] == "added"

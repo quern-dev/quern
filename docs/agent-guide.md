@@ -309,13 +309,13 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - `grant_permission` — simulators only
 - `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators). Captures os_log and Logger output only — `print()` writes to stdout and is not captured. Both support `preset` parameter to apply ingestion filters at start time
 - `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
-- `preview_device` — opens a live macOS video preview window of the device screen via CoreMediaIO (USB-connected physical devices only, not simulators). Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and available devices
+- `preview_device` — opens a live macOS video preview window of the device screen: CoreMediaIO for USB-connected physical devices, and quern-media's MJPEG stream for booted simulators. Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and available devices
 
 ---
 
-### Live Preview of Physical Devices
+### Live Preview of Devices and Simulators
 
-Open real-time video windows to see what's happening on USB-connected physical devices. Each device is independently managed — no restart penalty after the initial 3-second CoreMediaIO discovery.
+Open real-time video windows to see what's happening on USB-connected physical devices and on booted simulators. Each device is independently managed — no restart penalty after the initial 3-second CoreMediaIO discovery.
 
 1. `preview_device` with a device UDID — adds that device's preview window
 2. `preview_device` with another UDID — adds a second device (1s stagger, no rediscovery)
@@ -325,7 +325,9 @@ Open real-time video windows to see what's happening on USB-connected physical d
 
 **Key insight**: The preview process stays alive even if all windows are closed (by user or via `stop_preview` with UDID). Re-adding a device is instant — no 3s discovery delay. Only `stop_preview` without a UDID kills the process.
 
-**Limitations**: USB-connected physical devices only. Simulators are not CoreMediaIO screen capture sources.
+**Two routes, one tool.** A simulator is not a CoreMediaIO capture source, so it does not arrive the same way: `quern-media` reads its framebuffer directly and serves MJPEG on loopback, and the preview window opens on that stream. Pass a booted simulator's UDID to `preview_device` and it works; the difference matters only when something breaks, because the failure modes are unrelated.
+
+**Limitations**: a simulator must already be booted, and `preview_device` with no UDID previews USB-connected physical devices only — it does not sweep up simulators, which would open a window for every booted one.
 
 ---
 

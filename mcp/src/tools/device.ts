@@ -874,13 +874,13 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("preview_device", {
-    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO (USB only, not simulators). Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices.`,
+    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO over USB. Booted iOS simulators are supported too, by a different route: quern-media reads the simulator framebuffer and serves it as MJPEG. Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices -- simulators are not included in that sweep and must be named.`,
     inputSchema: strictParams({
       udid: z
         .string()
         .optional()
         .describe(
-          "UDID of a physical device to preview. If omitted, previews all USB-connected devices."
+          "UDID of a physical device, or of a booted simulator, to preview. If omitted, previews all USB-connected physical devices and no simulators."
         ),
     }),
   }, async ({ udid }) => {

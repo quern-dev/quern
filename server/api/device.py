@@ -1115,15 +1115,32 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        # iOS physical → CoreMediaIO
-        if not controller._is_physical(udid):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Device {udid} is a simulator. Live preview only works with "
-                       f"physical devices connected via USB.",
-            )
-
         pm = _get_preview_manager(request)
+
+        # iOS simulator → quern-media serves its framebuffer as MJPEG on
+        # loopback and the preview app opens a window on that stream.
+        #
+        # The udid goes straight through. The name round-trip below exists
+        # because CoreMediaIO matches on a localizedName and has no idea
+        # simulators exist; a simulator preview is filed under its udid, so
+        # resolving it to a name would only throw the identity away.
+        #
+        # This route used to refuse simulators with a 400, which left the
+        # capability with no way in: `PreviewManager.add` grew simulator
+        # support and this is the only HTTP path that reaches it. `preview_stop`
+        # never had the matching gate, so stopping a simulator preview was
+        # reachable while starting one was not.
+        if not controller._is_physical(udid):
+            try:
+                preview = await pm.add(udid)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {
+                "status": "added",
+                "name": preview.label or preview.name,
+                "position": preview.position,
+                "platform": "ios",
+            }
 
         # Get device name for the CoreMediaIO match
         device_name = None
