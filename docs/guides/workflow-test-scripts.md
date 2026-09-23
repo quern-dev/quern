@@ -210,22 +210,23 @@ Your test scripts talk to Quern over HTTP. That HTTP server doesn't have to be o
 
 ### The Setup
 
-Get a **Mac Mini M4 Pro** (or any Mac you can dedicate to this). The more RAM, the better — 32GB runs 6-8 simulators comfortably, 64GB can handle more. Install Quern on it, start the server, and you have a dedicated test machine.
+Any Mac you can dedicate to this will do. Install Quern on it and start the server, and you have a test machine. RAM is what bounds how many simulators run at once, so it is the spec worth spending on.
 
 Your test scripts just need one change:
 
 ```python
-# Instead of the local server, point at the Mac Mini's.
-BASE = f"http://mac-mini.local:{os.environ.get('QUERN_REMOTE_PORT', '9100')}/api/v1"
+# Point at the test machine's server instead of a local one.
+BASE = f"{os.environ['QUERN_REMOTE_URL']}/api/v1"
+API_KEY = os.environ["QUERN_REMOTE_KEY"]
 ```
 
-`quern env` reads the *local* `~/.quern/state.json`, so it cannot tell you
-anything about a server on another machine — run `quern url` **on the Mac
-Mini** to see which port it actually came up on, and set that. 9100 is only
-the port quern tries first. The API key is the remote machine's
-`~/.quern/api-key`, not your laptop's.
+Both values come from the **test machine**, not from your laptop. Run `quern url`
+there for the URL — quern starts on whatever port was free, so do not assume
+9100 — and read its `~/.quern/api-key` for the key. `quern env` cannot help
+here: it reads the local `~/.quern/state.json`, which knows nothing about a
+server on another host.
 
-That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the Mac Mini. Your laptop stays free for development.
+That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the test machine. Your laptop stays free for development.
 
 ### Parallel Test Execution
 
@@ -257,23 +258,19 @@ Each simulator gets its own slice of tests, its own proxy traffic (automatically
 
 Cloud-based iOS CI (Bitrise, CircleCI, Xcode Cloud, etc.) is great for builds. But for UI automation at scale:
 
-- **Parallelism is expensive.** Most providers charge per concurrent machine. Running 6 simulators in parallel means paying for 6 machines. On your own Mac Mini, it's free after the hardware cost.
+- **Parallelism is expensive.** Most providers charge per concurrent machine, so running 6 simulators in parallel means paying for 6 machines. On hardware you own, the concurrency is bounded by RAM rather than by billing.
 - **Test sharding is hard or impossible.** Most CI providers run your test suite serially on a single simulator. Some support Xcode's native test parallelism, but that's limited to XCTest and doesn't give you network mocking, state management, or custom UI flows.
 - **Network mocking isn't available.** Good luck setting up mitmproxy in a cloud CI environment. With Quern on your own hardware, proxy capture, mocking, and interception work out of the box.
-- **You own the environment.** No waiting for provider capacity. No mystery failures from a shared VM image. No "works on my machine but fails in CI." Your Mac Mini is your machine — you control the OS version, Xcode version, simulator runtimes, everything.
+- **You own the environment.** No waiting for provider capacity. No mystery failures from a shared VM image. No "works on my machine but fails in CI." You control the OS version, Xcode version and simulator runtimes.
 
-### The Math
-
-A Mac Mini M4 Pro with 32GB RAM costs around $1,600 one-time. A cloud CI provider running 6 parallel macOS machines costs $300-600/month. The Mac Mini pays for itself in 3-5 months — and then it's free forever.
-
-And you get something no cloud provider offers: full network interception with mocking on every test run, app state checkpoints for instant test setup, and your AI agent on standby to investigate any failure.
+What you get on your own hardware that a cloud provider does not offer: full network interception with mocking on every test run, app state checkpoints for instant test setup, and your agent on standby to investigate a failure.
 
 ### Build It, Own It
 
 The complete pipeline:
 
 1. **Your agent** writes the test scripts (interactive → script generation)
-2. **Your Mac Mini** runs them in parallel across 6+ simulators
+2. **Your test machine** runs them in parallel across several simulators
 3. **Quern** handles device management, proxy, mocking, state, and screenshots
 4. **Your CI system** (GitHub Actions, Jenkins, whatever) triggers the run and collects the report
 5. **Your agent** investigates failures on demand
