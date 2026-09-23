@@ -48,7 +48,7 @@ def _controller(registry: LandmarkRegistry | None):
     # the screen -- the two reads tap_element really makes on this path.
     ctrl.get_ui_elements = AsyncMock(return_value=([_element("Anchor")], "AAAA-1111"))
     ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
-    ctrl._landmarks = registry
+    ctrl._scrollable_lookup = registry.scrollable_for if registry else None
     return ctrl
 
 
@@ -140,27 +140,59 @@ class TestTheKnowledgeBaseDecidesWhenItCan:
 
 
 class TestAnAmbiguousIdentificationIsNotKnowledge:
-    async def test_two_matching_screens_read_as_unknown(self):
-        """Two screens can disagree about scrolling. Taking either would be a
-        guess presented as knowledge, which is what the knowledge base exists
-        to avoid."""
+    """Two screens matching is not a guess to be broken; it is a state to be
+    reported. They can disagree about scrolling, so taking either would be a
+    guess presented as knowledge -- but the caller still has to be told which
+    of the two silences they are in, because the fixes differ.
+
+    The cause is mundane and was found by measurement, not imagination:
+    landmarks loaded for two apps at once, where one screen matches both. Then
+    a `scrollable: true` that is correctly recorded silently stops being
+    consulted, and folding that into "nobody has said" tells the caller to
+    record something they already recorded.
+    """
+
+    def _two_apps(self):
         reg = LandmarkRegistry()
-        reg.load("app", [
-            ScreenLandmarks(
-                screen="A", scrollable=True,
-                landmarks=[Landmark(element="Button", label="Anchor")],
-            ),
-            ScreenLandmarks(
-                screen="B", scrollable=True,
-                landmarks=[Landmark(element="Button", label="Anchor")],
-            ),
-        ])
-        ctrl = _controller(reg)
+        reg.load("app.one", [ScreenLandmarks(
+            screen="A", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        reg.load("app.two", [ScreenLandmarks(
+            screen="B", scrollable=True,
+            landmarks=[Landmark(element="Button", label="Anchor")],
+        )])
+        return reg
+
+    async def test_it_does_not_sweep_on_a_guess(self):
+        ctrl = _controller(self._two_apps())
+
+        await _tap(ctrl)
+
+        ctrl._ios_scroll_to_element.assert_not_awaited()
+
+    async def test_it_says_ambiguous_rather_than_unknown(self):
+        ctrl = _controller(self._two_apps())
 
         result = await _tap(ctrl)
 
-        ctrl._ios_scroll_to_element.assert_not_awaited()
-        assert result["scroll"]["reason"] == "scrollability_unknown"
+        assert result["scroll"]["reason"] == "screen_ambiguous"
+
+    async def test_it_does_not_tell_you_to_record_what_you_recorded(self):
+        """The whole point of separating this from unknown."""
+        ctrl = _controller(self._two_apps())
+
+        result = await _tap(ctrl)
+
+        assert "scrollable: true" not in result["scroll"]["detail"]
+        assert "one app at a time" in result["scroll"]["detail"]
+
+    async def test_scoping_to_one_app_resolves_it(self):
+        """Not a test of tap_element, but of the advice the message gives. A
+        remedy that does not work is worse than none."""
+        reg = self._two_apps()
+
+        assert reg.scrollable_for([_element("Anchor")], app="app.one").scrollable is True
 
 
 class TestASweepThatRanIsVisible:

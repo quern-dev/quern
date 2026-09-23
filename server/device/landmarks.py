@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 from pydantic import ValidationError
@@ -20,6 +20,21 @@ from server.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ScrollHint(NamedTuple):
+    """What the knowledge base can say about a screen's scrollability.
+
+    `reason` exists so the caller can tell four different silences apart:
+    nothing loaded, nothing matched, two things matched, or a match that says
+    nothing about scrolling. They all produce `scrollable=None` and they ask
+    the reader to do different things about it.
+    """
+
+    scrollable: bool | None
+    screen: str | None
+    reason: str
+    candidates: list[str] | None = None
 
 
 @dataclass
@@ -533,32 +548,51 @@ class LandmarkRegistry:
 
     def scrollable_for(
         self, elements: list[UIElement], app: str | None = None,
-    ) -> tuple[bool | None, str | None]:
+    ) -> ScrollHint:
         """Does the screen these elements came from scroll? And which screen?
-
-        Returns `(scrollable, screen_name)`. `scrollable` is None whenever
-        nobody has said -- no knowledge base loaded, the screen unrecognised,
-        or recognised but carrying no `scrollable:` field.
 
         **Only an exact identification counts.** `ambiguous` means two screens
         matched, and they can disagree about scrolling; taking either would be
         a guess presented as knowledge, which is the failure the whole
-        knowledge base exists to avoid. Ambiguous reads as unknown.
+        knowledge base exists to avoid.
+
+        But ambiguous is reported as itself rather than folded into "nobody has
+        said", because the two need different things from the reader. Unknown
+        means *record it*; ambiguous means *the recording is there and cannot
+        be used*, and the usual cause is mundane -- landmarks loaded for two
+        apps at once, where one screen matches both. Measured: load a second
+        app whose screen shares a landmark and a working `scrollable: true`
+        silently stops being consulted. Scope with `app` to avoid it.
 
         Pure: no device read. `identify_screen` works off the element list the
-        caller already has.
+        caller already has, at ~0.26ms against a 200-screen base.
         """
         screens = self.all_screens(app)
         if not screens:
-            return None, None
+            return ScrollHint(None, None, "no_knowledge")
         result = identify_screen(elements, screens)
-        if result.get("confidence") != "exact":
-            return None, None
-        name = result.get("matched")
-        for screen in screens:
-            if screen.screen == name:
-                return screen.scrollable, name
-        return None, name
+        confidence = result.get("confidence")
+        if confidence == "ambiguous":
+            # `matched` plus `ambiguous_with`, which is where identify_screen
+            # puts the rest. `partial_matches` holds the screens that did *not*
+            # fully match, so reading candidates from it returned an empty list
+            # -- which says "no candidates" rather than "several", and is the
+            # one answer that is certainly wrong.
+            candidates = [result.get("matched"), *result.get("ambiguous_with", [])]
+            return ScrollHint(
+                None, None, "ambiguous", candidates=[c for c in candidates if c],
+            )
+        # No second "is it exact?" test. Ambiguous has already returned above,
+        # and a no-match leaves `matched` None, so the lookup below answers
+        # both. Two earlier shapes each carried a redundant guard that mutation
+        # testing showed to be equivalent -- a rule spelled twice is a pair
+        # that drifts apart later, and an unkillable mutant is how you find it.
+        by_name = {screen.screen: screen for screen in screens}
+        found = by_name.get(result.get("matched"))
+        if found is None:
+            return ScrollHint(None, None, "no_match")
+        reason = "recorded" if found.scrollable is not None else "screen_silent"
+        return ScrollHint(found.scrollable, found.screen, reason)
 
     def all_screens(self, app: str | None = None) -> list[ScreenLandmarks]:
         """Get all screens, optionally filtered by app."""

@@ -62,6 +62,22 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
                 "element is not on it. Scrolling will not find it."
             ),
         }
+    if sweep.get("why") == "ambiguous":
+        # Distinct from "nobody recorded it", because the fix is different and
+        # the usual cause is mundane: landmarks loaded for two apps at once,
+        # where one screen matches both. Folding this into "unknown" told the
+        # caller to record something they had already recorded.
+        return {
+            "attempted": False,
+            "reason": "screen_ambiguous",
+            "screen": None,
+            "detail": (
+                "more than one known screen matches what is on the device, so "
+                "quern will not guess which one's scrollability applies. Load "
+                "landmarks for one app at a time, or pass scroll_to_find "
+                "explicitly."
+            ),
+        }
     return {
         "attempted": False,
         "reason": "scrollability_unknown",
@@ -357,7 +373,7 @@ class DeviceControllerUI:
 
     def _scrollable_hint(
         self, elements: list[UIElement],
-    ) -> tuple[bool | None, str | None]:
+    ) -> tuple[bool | None, str | None, str]:
         """What the knowledge base says about this screen, if anything.
 
         `(None, None)` whenever nobody has said -- no registry attached, none
@@ -365,20 +381,27 @@ class DeviceControllerUI:
         question. Every one of those means the same thing to the caller, so
         they are not distinguished here.
 
-        Registry attached by `main.py`, like `_pool`, so a controller built
-        without one -- every unit test that constructs its own -- behaves as it
-        always did rather than needing to know this exists.
+        A callable, injected by `main.py`, rather than the registry itself.
+        The controller has no business knowing what a `LandmarkRegistry` is --
+        it needs one question answered, and depending on the shape of the
+        answer rather than on the class that produces it keeps the knowledge
+        base at the layer that owns it. It also makes this trivially fakeable,
+        which matters because the real one needs a loaded knowledge base.
+
+        Absent -- as in every unit test that builds its own controller -- the
+        tap behaves as though nothing were recorded.
         """
-        registry = getattr(self, "_landmarks", None)
-        if registry is None:
-            return None, None
+        lookup = getattr(self, "_scrollable_lookup", None)
+        if lookup is None:
+            return None, None, "no_knowledge"
         try:
-            return registry.scrollable_for(elements)
+            hint = lookup(elements)
         except Exception:
             # A knowledge base that cannot answer must not break a tap. The
             # answer it would have given is an optimisation; the tap is not.
             logger.debug("scrollable lookup failed", exc_info=True)
-            return None, None
+            return None, None, "lookup_failed"
+        return hint.scrollable, hint.screen, hint.reason
 
     async def _ios_scroll_to_element(
         self,
@@ -1762,10 +1785,11 @@ class DeviceControllerUI:
                 all_elements = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
                 )
-                hint, screen_name = self._scrollable_hint(all_elements)
+                hint, screen_name, why = self._scrollable_hint(all_elements)
                 should_sweep = hint is True
                 sweep["screen"] = screen_name
                 sweep["known_scrollable"] = hint
+                sweep["why"] = why
             if should_sweep:
                 # The miss above is only authoritative if that read reached the
                 # device. With the cache live it can be served from an entry up
