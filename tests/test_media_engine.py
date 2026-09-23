@@ -160,6 +160,30 @@ class TestBuildInvocation:
         assert any("--show-bin-path" in c for c in calls)
 
 
+    def test_the_binary_is_renamed_into_place_not_overwritten(
+        self, package: Path, tmp_path: Path
+    ) -> None:
+        """copy2 keeps the inode and rewrites in place. macOS validates
+        code-signature pages per vnode, so rewriting the file underneath a
+        running quern-media can kill it with a signature fault, and a
+        concurrent launch can exec a half-written one. A rename gives the new
+        file its own inode and leaves running processes on the old one."""
+        import os
+
+        capture: list = []
+        installed = self._run_build(package, tmp_path, capture)
+
+        before = os.stat(installed).st_ino
+        # A second build over the top of the first.
+        self._run_build(package, tmp_path, [])
+        after = os.stat(installed).st_ino
+
+        assert before != after, (
+            "the binary was rewritten in place; a running process would have "
+            "had its file changed underneath it"
+        )
+
+
 class TestFailures:
     def test_missing_sources_are_reported_clearly(self, tmp_path: Path) -> None:
         with patch.object(media_engine, "_PACKAGE_CANDIDATES", [tmp_path / "nope"]):

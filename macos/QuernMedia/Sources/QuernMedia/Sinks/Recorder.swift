@@ -167,6 +167,12 @@ public final class Recorder {
             // one leaves whatever reason is already there alone.
             let neverStarted = !started && !finished
             let repeatCall = finished
+            // A start failure already wrote the real reason here, and
+            // `append` set `finished` on its way out — so this guard sees a
+            // repeat call and would label a rejected writer
+            // `.alreadyFinished`, replacing the only explanation there was.
+            // Nothing overwrites an existing reason.
+            let alreadyExplained = failureReason != nil
             finished = true
             lock.unlock()
             // Both are nil, and a caller cannot act on a bare nil. Without
@@ -174,6 +180,7 @@ public final class Recorder {
             // no reason at all, and main.swift -- which dispatches on the
             // reason -- reported "could not finish the recording: unknown"
             // and exited 1 for a recording that was fine.
+            if alreadyExplained { return nil }
             if neverStarted { note(.neverStarted) }
             else if repeatCall { note(.alreadyFinished) }
             return nil

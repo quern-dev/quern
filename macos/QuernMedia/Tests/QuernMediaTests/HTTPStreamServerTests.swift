@@ -376,3 +376,129 @@ func startFailsLoudlyOnABoundPort() throws {
     }
     #expect(!second.isListening)
 }
+
+
+/// A viewer that reads only when told to.
+///
+/// The helpers above read continuously, which is the one thing this cannot
+/// do: the dropped-frame gate only engages against a client that has stopped
+/// draining its socket.
+private final class ThrottledViewer: @unchecked Sendable {
+    private let conn: NWConnection
+    private let lock = NSLock()
+    private var draining = false
+
+    init(port: UInt16) {
+        conn = NWConnection(
+            host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!, using: .tcp
+        )
+        conn.stateUpdateHandler = { [conn] state in
+            guard case .ready = state else { return }
+            let request = "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            conn.send(content: Data(request.utf8), completion: .contentProcessed { _ in })
+        }
+        conn.start(queue: .global())
+    }
+
+    /// Starts reading, and keeps reading.
+    func drain() {
+        lock.lock()
+        let already = draining
+        draining = true
+        lock.unlock()
+        guard !already else { return }
+        readMore()
+    }
+
+    private func readMore() {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] _, _, done, err in
+            guard let self, !done, err == nil else { return }
+            self.readMore()
+        }
+    }
+
+    func stop() { conn.cancel() }
+}
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func bump() { lock.lock(); n += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+}
+
+/// An H.264 payload of a given size. The server reads `annexB` and
+/// `isKeyframe` and nothing else, so the sample buffer can be empty.
+private func h264(bytes: Int, keyframe: Bool) throws -> EncodedPayload {
+    var made: CMSampleBuffer?
+    _ = CMSampleBufferCreate(
+        allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: true,
+        makeDataReadyCallback: nil, refcon: nil, formatDescription: nil,
+        sampleCount: 0, sampleTimingEntryCount: 0, sampleTimingArray: nil,
+        sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &made
+    )
+    let sample = try #require(made)
+    return .h264(H264Output(
+        frame: EncodedFrame(sample: sample, time: .zero, isKeyframe: keyframe),
+        annexB: Data(repeating: 0x41, count: bytes)
+    ))
+}
+
+private func waitFor(
+    _ what: String, timeout: TimeInterval = 10, _ condition: () -> Bool
+) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() { return }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    Issue.record("timed out waiting for \(what)")
+}
+
+@Test("an H.264 client that missed a frame gets nothing until the next keyframe")
+func h264SkipHoldsUntilKeyframe() async throws {
+    // A skipped H.264 frame is not one lost picture. Every P-frame after it
+    // references a picture the client never received, so it renders a corrupt
+    // image rather than a stale one -- and MaxKeyFrameInterval counts frames,
+    // not seconds, so on an idle event-driven source the next IDR can be a
+    // very long way off.
+    let port = freePort()
+    let requests = Counter()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264) {
+        requests.bump()
+    }
+    try server.start()
+    defer { server.stop() }
+
+    let viewer = ThrottledViewer(port: port)
+    defer { viewer.stop() }
+    await waitFor("the viewer to attach") { server.wantsFrames }
+    let afterAttach = requests.value
+
+    // Fill the socket. Nothing is reading, so the send stays outstanding and
+    // the next frame is skipped. Bounded rather than polled to a deadline: an
+    // unbounded loop here queues megabytes a tick when the gate misbehaves.
+    let big = try h264(bytes: 1 << 21, keyframe: true)
+    for _ in 0..<16 where server.framesSkipped == 0 {
+        server.receive(big)
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    #expect(server.framesSkipped > 0, "the viewer kept draining; the gate was never exercised")
+    #expect(requests.value > afterAttach, "a skip should ask the encoder for a keyframe")
+
+    // Let it catch up. Without this the assertions below pass on the
+    // in-flight gate alone and say nothing about the desync one.
+    viewer.drain()
+    await waitFor("the outstanding send to complete") { server.sendsInFlight == 0 }
+    #expect(server.sendsInFlight == 0, "the viewer never caught up")
+
+    let baseline = server.bytesSent
+    server.receive(try h264(bytes: 1024, keyframe: false))
+    #expect(server.bytesSent == baseline, "a desynced client was sent an undecodable P-frame")
+    #expect(server.keyframeResyncs == 0)
+    #expect(server.framesHeldForKeyframe == 1, "the withheld frame was not reported")
+
+    server.receive(try h264(bytes: 1024, keyframe: true))
+    #expect(server.bytesSent > baseline, "a keyframe should have resynced the client")
+    #expect(server.keyframeResyncs == 1)
+}

@@ -47,13 +47,23 @@ public final class HTTPStreamServer: FrameSink {
         /// behind". One frame in flight; newer frames are skipped, not queued.
         var inFlight = false
 
+        /// Set when the gate skipped a frame this client needed.
+        ///
+        /// MJPEG never sets it -- every JPEG decodes alone, so a skip costs one
+        /// frame. In H.264 it costs everything up to the next IDR: each later
+        /// P-frame references a picture this client never received, so it
+        /// renders a corrupt image rather than a stale one. `MaxKeyFrameInterval`
+        /// counts frames, not seconds, so on an idle event-driven source the
+        /// next IDR can be minutes away. Sends are held back until one arrives.
+        var desynced = false
+
         init(_ connection: NWConnection) { self.connection = connection }
     }
 
     private let port: NWEndpoint.Port
     private let bindAll: Bool
     private let codec: StreamPipeline.Codec
-    private let onClientAttached: (() -> Void)?
+    private let onKeyframeNeeded: (() -> Void)?
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "quern.media.http")
@@ -81,6 +91,29 @@ public final class HTTPStreamServer: FrameSink {
     /// nothing went wrong.
     public private(set) var keepalivesSent = 0
 
+    /// Clients an IDR has resynced after the gate skipped a frame. Counted so
+    /// a test asserts the recovery happened, not merely that nothing crashed.
+    public private(set) var keyframeResyncs = 0
+
+    /// Frames withheld from a desynced client while it waits for an IDR.
+    ///
+    /// Reported because the state is otherwise invisible: a client whose
+    /// keyframe never arrives sits frozen while `framesSent` climbs, which
+    /// reads as a healthy stream. Rising here with `keyframeResyncs` flat is
+    /// an encoder that is not honouring the request.
+    public private(set) var framesHeldForKeyframe = 0
+
+    /// Clients with a send outstanding. Internal, for tests only.
+    ///
+    /// Both gates below suppress a send, so a test that cannot tell "still
+    /// draining the last frame" from "waiting for an IDR" passes just as
+    /// happily against a desync gate that does nothing.
+    var sendsInFlight: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return clients.values.filter(\.inFlight).count
+    }
+
     public private(set) var framesSent = 0
     public private(set) var framesSkipped = 0
     public private(set) var bytesSent = 0
@@ -88,9 +121,10 @@ public final class HTTPStreamServer: FrameSink {
     /// - Parameters:
     ///   - bindAll: listen on every interface instead of loopback. The stream
     ///     is **unauthenticated**, so this is opt-in and loopback is default.
-    ///   - onClientAttached: wire this to `StreamPipeline.requestKeyframe()`.
-    ///     H.264 frames depend on earlier ones, so a viewer arriving mid-stream
-    ///     decodes nothing until an IDR.
+    ///   - onKeyframeNeeded: wire this to `StreamPipeline.requestKeyframe()`.
+    ///     H.264 frames depend on earlier ones, so a client with no recent IDR
+    ///     decodes nothing. Two things put a client in that state: attaching
+    ///     mid-stream, and being skipped by the dropped-frame gate below.
     /// - Parameter keepalive: how long the server may go without sending
     ///   before it repeats its last frame to every viewer.
     ///
@@ -111,13 +145,13 @@ public final class HTTPStreamServer: FrameSink {
         bindAll: Bool,
         codec: StreamPipeline.Codec,
         keepalive: TimeInterval = 5,
-        onClientAttached: (() -> Void)? = nil
+        onKeyframeNeeded: (() -> Void)? = nil
     ) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8422
         self.bindAll = bindAll
         self.codec = codec
         self.keepalive = keepalive
-        self.onClientAttached = onClientAttached
+        self.onKeyframeNeeded = onKeyframeNeeded
     }
 
     public func start(timeout: TimeInterval = 5) throws {
@@ -217,15 +251,38 @@ public final class HTTPStreamServer: FrameSink {
         }
 
         lock.lock()
-        let targets = clients.values.filter { $0.streaming && !$0.inFlight }
-        let skipped = clients.values.filter { $0.streaming && $0.inFlight }.count
-        for client in targets { client.inFlight = true }
+        let watching = clients.values.filter(\.streaming)
+        let stalled = watching.filter(\.inFlight)
+
+        // A skip is what breaks the reference chain, so the mark goes on here
+        // rather than where the send is suppressed.
+        if codec == .h264 {
+            for client in stalled { client.desynced = true }
+        }
+
+        let targets = watching.filter { client in
+            guard !client.inFlight else { return false }
+            return !client.desynced || payload.isKeyframe
+        }
+        let resynced = targets.filter(\.desynced).count
+        let held = watching.filter { $0.desynced && !$0.inFlight }.count - resynced
+        for client in targets {
+            client.inFlight = true
+            client.desynced = false
+        }
         framesSent += targets.isEmpty ? 0 : 1
-        framesSkipped += skipped
+        framesSkipped += stalled.count
+        keyframeResyncs += resynced
+        framesHeldForKeyframe += held
         bytesSent += bytes.count * targets.count
         if codec == .mjpeg { lastPart = bytes }
         lastSendAt = Date()
+        let wantKeyframe = watching.contains(where: \.desynced)
         lock.unlock()
+
+        // Outside the lock: the handler calls back into the pipeline, which
+        // is the deadlock the rest of this file is careful to avoid.
+        if wantKeyframe { onKeyframeNeeded?() }
 
         for client in targets {
             client.connection.send(content: bytes, completion: .contentProcessed {
@@ -375,6 +432,6 @@ public final class HTTPStreamServer: FrameSink {
         MediaLog.log("[http] viewer attached (\(total) total)")
         // Ask for a keyframe now rather than making this viewer wait for the
         // periodic one.
-        onClientAttached?()
+        onKeyframeNeeded?()
     }
 }

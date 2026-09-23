@@ -271,3 +271,40 @@ func recordingSinkForwardsFailure() throws {
         return
     }
 }
+
+@Test("a writer that refused to start keeps its reason through finish()")
+func startFailureSurvivesFinish() throws {
+    // `append` records the real reason and sets `finished` on its way out, so
+    // `finish()` sees a repeat call. Labelling that `.alreadyFinished` threw
+    // away the only explanation of what went wrong — and main.swift
+    // dispatches on the reason.
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    // A sample buffer with no format description is what the writer refuses:
+    // a passthrough input cannot be created without a sourceFormatHint.
+    var made: CMSampleBuffer?
+    let status = CMSampleBufferCreate(
+        allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: true,
+        makeDataReadyCallback: nil, refcon: nil, formatDescription: nil,
+        sampleCount: 0, sampleTimingEntryCount: 0, sampleTimingArray: nil,
+        sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &made
+    )
+    #expect(status == noErr)
+    let bogus = try #require(made)
+    #expect(
+        recorder.append(EncodedFrame(sample: bogus, time: .zero, isKeyframe: true)) == false
+    )
+
+    guard case .noFormatDescription = try #require(recorder.failure) else {
+        Issue.record("expected noFormatDescription, got \(String(describing: recorder.failure))")
+        return
+    }
+
+    #expect(recorder.finish() == nil)
+    guard case .noFormatDescription = try #require(recorder.failure) else {
+        Issue.record("finish() overwrote the start failure with \(String(describing: recorder.failure))")
+        return
+    }
+}

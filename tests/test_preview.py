@@ -495,6 +495,24 @@ class TestIdentityResolution:
         mgr = self._available(("BBB", "AAA"), ("iPhone 11", "BBB"))
         assert mgr._resolve_device("BBB").cmio_id == "BBB"
 
+    def test_an_ambiguous_name_is_refused_rather_than_guessed(self):
+        """Two phones of one model share a localizedName. Returning the first
+        meant a request for phone B opened phone A — silently, and the same
+        way every time. There is nothing to disambiguate with: CoreMediaIO's
+        uniqueID is neither the hardware UDID nor the CoreDevice UUID, so no
+        caller can supply the right id for a name."""
+        mgr = self._available(("iPhone 15 Pro", "AAA"), ("iPhone 15 Pro", "BBB"))
+        with pytest.raises(RuntimeError, match="are called 'iPhone 15 Pro'"):
+            mgr._resolve_device("iPhone 15 Pro")
+
+        # Each is still reachable by its own id.
+        assert mgr._resolve_device("AAA").cmio_id == "AAA"
+        assert mgr._resolve_device("BBB").cmio_id == "BBB"
+
+    def test_a_unique_name_still_resolves(self):
+        mgr = self._available(("iPhone 11", "AAA"), ("iPhone 15 Pro", "BBB"))
+        assert mgr._resolve_device("iPhone 11").cmio_id == "AAA"
+
     def test_a_name_still_resolves(self):
         """It is what a person reads off the menu."""
         mgr = self._available(("iPhone 11", "AAA"))

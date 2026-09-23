@@ -568,19 +568,36 @@ class PreviewManager:
         return pos
 
     def _resolve_device(self, identifier: str) -> PreviewDeviceInfo | None:
-        """Find a capture device by unique ID or by name.
+        """Find a capture device by unique ID, or unambiguously by name.
 
-        ID first: it is the identity. Two phones of the same model share a
-        name, so a name match picks whichever was discovered first, which is
-        not a choice this should be making silently.
+        ID first: it is the identity. A name is a label, and two phones of the
+        same model share one -- so a name matching more than one device is
+        refused rather than resolved. Picking the first was the original
+        defect: a caller asking for phone B got phone A, silently and
+        repeatably.
+
+        Refusing is the only honest answer here, because there is nothing to
+        disambiguate *with*. CoreMediaIO's `uniqueID` is not the hardware UDID
+        and not the CoreDevice UUID either -- measured on one iPhone 11:
+        `A65275E0-...` to CoreMediaIO against `B34C4EE9-...` from devicectl --
+        so `canonical_device_id` cannot bridge them and no caller upstream can
+        hand us the right ID for a name.
+
+        Raises:
+            RuntimeError: when a name matches more than one connected device.
         """
         for device in self._available:
             if device.cmio_id == identifier:
                 return device
-        for device in self._available:
-            if device.name == identifier:
-                return device
-        return None
+
+        by_name = [d for d in self._available if d.name == identifier]
+        if len(by_name) > 1:
+            ids = ", ".join(d.cmio_id for d in by_name)
+            raise RuntimeError(
+                f"{len(by_name)} connected devices are called '{identifier}'. "
+                f"Ask for one by its id: {ids}"
+            )
+        return by_name[0] if by_name else None
 
     async def add(self, name: str) -> ActivePreview:
         """Open a preview for a physical device or a booted simulator.
