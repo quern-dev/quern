@@ -366,6 +366,36 @@ class TestIdentityIsRecordedBeforeTheFilters:
         assert dc.canonical_device_id(HW_UDID) == CD_UUID
 
 
+async def _record_proxy_config(udid: str) -> None:
+    """Drive the real endpoint, without letting it ask the machine anything.
+
+    It derives `proxy_host` from the host's own interfaces, so calling it
+    unmocked reads whatever network this happens to be on -- a test touching
+    the real machine, which is the defect #272 exists to end. Pinned to a
+    fixed address instead; the value is irrelevant here, only the udid the
+    config is filed under matters.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch as _patch
+
+    from server.api.proxy_certs import (
+        RecordDeviceProxyRequest,
+        record_device_proxy_config_endpoint,
+    )
+
+    ctrl = _isolated_controller()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        device_controller=ctrl,
+    )))
+    with _patch(
+        "server.lifecycle.state.detect_host_ip_for_subnet", return_value="10.0.0.2",
+    ), _patch("server.lifecycle.state.detect_local_ip", return_value="10.0.0.2"):
+        await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid=udid, ssid="wifi", client_ip="10.0.0.9"),
+            request,
+        )
+
+
 class TestTheProxyConfigHalfOfTheJoin:
     """The damage `_identity_aliases` exists to end, on the half that *writes*.
 
@@ -403,43 +433,40 @@ class TestTheProxyConfigHalfOfTheJoin:
         it. Mocking the thing under test is this file's own subject, arriving
         one level up.
         """
-        from types import SimpleNamespace
-
-        from server.api.proxy_certs import (
-            RecordDeviceProxyRequest,
-            record_device_proxy_config_endpoint,
-        )
         from server.proxy.cert_state import read_cert_state
 
-        await _listed()
-        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-        await record_device_proxy_config_endpoint(
-            RecordDeviceProxyRequest(udid=HW_UDID, ssid="wifi", client_ip="10.0.0.9"),
-            request,
-        )
+        await _record_proxy_config(HW_UDID)
 
         assert CD_UUID in read_cert_state(), "stored under the raw udid"
         assert HW_UDID not in read_cert_state()
 
     async def test_the_recorded_ip_then_joins_a_canonical_action(self):
         """The join itself, which is the point of storing it canonically."""
-        from types import SimpleNamespace
-
-        from server.api.proxy_certs import (
-            RecordDeviceProxyRequest,
-            record_device_proxy_config_endpoint,
-        )
         from server.proxy.cert_state import read_cert_state
         from server.trace import ip_to_udid, owns
 
-        await _listed()
-        await record_device_proxy_config_endpoint(
-            RecordDeviceProxyRequest(udid=HW_UDID, ssid="wifi", client_ip="10.0.0.9"),
-            SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
-        )
+        await _record_proxy_config(HW_UDID)
         ip_map = ip_to_udid(read_cert_state())
 
         assert owns(CD_UUID, ip_map["10.0.0.9"][0]).value == "owns"
+
+    async def test_a_cold_alias_map_is_warmed_rather_than_stored_raw(self):
+        """`canonical_device_id` returns its input unchanged when nothing has
+        enumerated, so on a server that has not listed devices this stored the
+        raw udid and the canonicalisation silently did not apply -- the failure
+        looking exactly like success.
+
+        `device_pool.refresh()` warms the map at startup, but this endpoint is
+        called early in setup and must not depend on that having happened. Note
+        the map is *not* pre-warmed here: that is the point.
+        """
+        from server.proxy.cert_state import read_cert_state
+
+        assert dc.canonical_device_id(HW_UDID) == HW_UDID, "map should start cold"
+
+        await _record_proxy_config(HW_UDID)
+
+        assert CD_UUID in read_cert_state()
 
     async def test_the_raw_spelling_would_not_have_joined(self):
         """Pins why this has to happen at the writer: `owns` tests equal
