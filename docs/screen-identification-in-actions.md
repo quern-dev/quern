@@ -1,13 +1,33 @@
 # Screen Identification in Action Responses
 
-> **Status (v0.13):** the underlying landmark engine — `LandmarkRegistry`,
-> `identify_screen`, `get_screen_summary?identify=true` — is shipped (v0.11
-> with v0.12 refinements). The narrower work this doc proposes is **not**:
-> `_capture_screen_context` does not call `registry.identify()`, and the
-> `expected_screen` request parameter / `matched_expected` response field
-> are not present in the codebase. This remains a forward-looking spec
-> for bundling identification into action responses (`tap_element`,
-> `type_text`, `swipe`, `press_button`) in a single round-trip.
+> **Status (v0.21):** auto-identification **has shipped**.
+> `_capture_screen_context` calls `registry.identify()`, so every action
+> taking `include_screen_context` — `launch_app`, `open_url`, `tap_element`,
+> `type_text` — returns `identified_as` and `confidence` when landmarks are
+> loaded, plus `candidates` on an ambiguous match.
+>
+> **Where the shipped code differs from this spec, the code is right and
+> this document is kept for its reasoning, not its interface:**
+>
+> - `confidence` is a **string** — `"exact"`, `"ambiguous"`, `"none"` — not a
+>   0.0–1.0 float. The string form shipped with
+>   `get_screen_summary?identify=true` before this work; inventing a second
+>   shape for one fact, or changing that endpoint, both cost more than they
+>   buy. Ignore the `1/N` proposal in *Design decisions* and the `1.0` values
+>   in the examples below.
+> - `expected_screen` / `matched_expected` did **not** ship and are not
+>   planned here.
+> - `swipe` and `press_button` do not take `include_screen_context`, so they
+>   gain nothing yet.
+> - The `not_found` branch of `tap_element` and the timeout branch of
+>   `wait_for_element` return `screen_context` built elsewhere
+>   (`controller_ui._build_screen_context`) and are **not** identified — see
+>   the worked 404 example below, which shows an `identified_as` that the
+>   code does not produce.
+>
+> This document also predates `web_url_contains` landmarks. Identification
+> reaches for the Web Inspector page listing only when a loaded landmark
+> needs one, which is what keeps it free on a knowledge base without them.
 
 ## Problem
 
