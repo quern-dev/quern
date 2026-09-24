@@ -255,3 +255,58 @@ class TestASimBridgeFailureReachesTheCaller:
         from server.device.sim_bridge import _TOOL
 
         assert SimBridgeBackend.TOOL_NAME == _TOOL
+
+
+class TestABrokenBackendIsNotReadAsAnEmptyField:
+    """#178's containment. Converting sim-bridge to `DeviceError` made it
+    visible to two `except DeviceError: return None` handlers in the read-back
+    path, where `None` means *unreadable* and the caller reports "the field may
+    be read-only". A dead bridge would have become a confident misdiagnosis —
+    worse than the bodyless 500, because the caller acts on it.
+
+    Both handlers, because the first version of this fix corrected one and
+    left its sibling four lines above."""
+
+    @staticmethod
+    def _controller(raiser):
+        ctrl = DeviceController()
+        ctrl.get_ui_elements = raiser
+        ctrl.get_web_content = raiser
+        return ctrl
+
+    @pytest.mark.parametrize("tool", ["sim-bridge", "idb", "wda", "u2"])
+    async def test_a_backend_failure_propagates(self, tool):
+        async def boom(*a, **kw):
+            raise DeviceError("the bridge died", tool=tool)
+
+        ctrl = self._controller(boom)
+        target = type("T", (), {"extra_attrs": {"source": "native"}, "type": "TextField"})()
+
+        with pytest.raises(DeviceError, match="the bridge died"):
+            await ctrl._read_field_value("udid", target, "label", None)
+
+    async def test_a_non_backend_failure_still_reads_as_unreadable(self):
+        """The control. If everything propagated, the handler would be pointless
+        and a genuinely absent field would become an error."""
+        async def boom(*a, **kw):
+            raise DeviceError("no web view here", tool="web-content")
+
+        ctrl = self._controller(boom)
+        target = type("T", (), {"extra_attrs": {"source": "native"}, "type": "TextField"})()
+
+        assert await ctrl._read_field_value("udid", target, "label", None) is None
+
+    async def test_the_web_content_handler_propagates_too(self):
+        """The sibling that was missed: `get_web_content` does a native tree
+        read first, so a broken backend surfaces there before the Web Inspector
+        error handling."""
+        async def boom(*a, **kw):
+            raise DeviceError("the bridge died", tool="sim-bridge")
+
+        ctrl = self._controller(boom)
+        target = type(
+            "T", (), {"extra_attrs": {"source": "web-inspector"}, "type": "TextField"},
+        )()
+
+        with pytest.raises(DeviceError, match="the bridge died"):
+            await ctrl._read_field_value("udid", target, "label", None)

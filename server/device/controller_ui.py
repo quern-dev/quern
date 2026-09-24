@@ -1836,7 +1836,7 @@ class DeviceControllerUI:
             raise DeviceError(
                 "Either label/label_contains/label_prefix or identifier "
                 "is required for tap-element",
-                tool=self._backend_name(udid),
+                tool="quern",
             )
 
         # Android fast path: tap by native selector, skipping the full UI-tree
@@ -2732,7 +2732,7 @@ class DeviceControllerUI:
                 f"{'unreadable' if after is None else str(len(after)) + ' after'}). "
                 "The tap may not have taken focus, or the field may be "
                 "read-only.",
-                tool=self._backend_name(udid),
+                tool=self._backend_name(resolved),
             )
         return {"udid": resolved, "verified": True}
 
@@ -2786,7 +2786,15 @@ class DeviceControllerUI:
         if (target.extra_attrs or {}).get("source") in ("web-inspector", "web-probe"):
             try:
                 await self.get_web_content(udid=udid)
-            except DeviceError:
+            except DeviceError as e:
+                # Same rule as the read below, and this is its sibling four
+                # lines up -- fixed one and left the other, which is the shape
+                # this whole change is about. `get_web_content` does a native
+                # tree read before its Web Inspector handling, so a broken
+                # backend surfaces here first and would be swallowed into
+                # "unreadable".
+                if e.tool in _BACKEND_FAILURE_TOOLS:
+                    raise
                 return None
         try:
             elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
@@ -2909,7 +2917,7 @@ class DeviceControllerUI:
                 "keystroke, and the Web Inspector could not reach the page to "
                 "clear it directly. Reload the page, or make the web view "
                 "inspectable.",
-                tool=self._backend_name(udid),
+                tool=self._backend_name(resolved),
             )
 
         if remaining and hasattr(backend, "delete_backwards"):
