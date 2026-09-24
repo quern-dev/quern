@@ -288,6 +288,12 @@ class DeviceControllerUI:
             return self.sim_bridge
         return self.idb
 
+    #: Backend name per device, written by `get_ui_elements` when it selects
+    #: one. Read by the error paths that follow a read, so the label names the
+    #: backend that did the work rather than whatever is selected a moment
+    #: later. See #186.
+    _last_read_backend: dict[str, str]
+
     def _backend_name(self, udid: str) -> str:
         """What the backend driving this device calls itself.
 
@@ -1414,6 +1420,13 @@ class DeviceControllerUI:
             await self._ensure_android_screen_on(resolved)
 
         backend = self._ui_backend(resolved)
+        # Recorded at the one moment it is authoritative: the read's own
+        # selection. Capturing it before the call is stale if the periodic
+        # refresh flips `_sim_bridge_ok` in between, and recomputing it when
+        # the error is built is stale the other way. Only the read knows.
+        self._last_read_backend[resolved] = getattr(
+            backend, "TOOL_NAME", "unknown",
+        )
         if mode == "flat" and hasattr(backend, "describe_all_flat"):
             raw = await backend.describe_all_flat(
                 resolved, snapshot_depth=snapshot_depth,
@@ -1533,7 +1546,7 @@ class DeviceControllerUI:
                 search_desc += f", type='{element_type}'"
             raise DeviceError(
                 f"No element found matching {search_desc}",
-                tool=backend,
+                tool=self._last_read_backend.get(resolved, backend),
             )
 
         # Return first match with match_count if ambiguous
@@ -2771,7 +2784,7 @@ class DeviceControllerUI:
         if self._web_overlay.get(udid):
             with contextlib.suppress(DeviceError):
                 await self.get_web_content(udid=udid)
-        elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+        elements, read_udid = await self.get_ui_elements(udid=udid, use_cache=False)
         matches = self._matching_fields(elements, label, identifier)
         if not matches:
             raise DeviceError(
@@ -2779,7 +2792,7 @@ class DeviceControllerUI:
                 # which reads as a broken server rather than a missing field.
                 f"No element found: no text field matching "
                 f"{label or identifier!r} to type into",
-                tool=backend,
+                tool=self._last_read_backend.get(read_udid, backend),
             )
         return matches[0]
 

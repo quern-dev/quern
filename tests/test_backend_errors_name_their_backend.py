@@ -30,7 +30,7 @@ from server.device.idb import IdbBackend
 from server.device.sim_bridge import SimBridgeBackend
 from server.device.u2_client import U2Backend
 from server.device.wda_client import WdaBackend
-from server.models import DeviceError
+from server.models import DeviceError, DeviceType
 
 
 class TestTheNameComesFromTheBackend:
@@ -330,7 +330,9 @@ class TestTheLabelSurvivesARefreshMidRead:
         ctrl._sim_bridge_ok = True  # sim-bridge at the moment of the read
 
         async def read_then_refresh(*a, **kw):
-            # The refresh lands while the read is in flight.
+            # The read selects sim-bridge and records it, exactly as
+            # `get_ui_elements` does; the refresh then lands.
+            ctrl._last_read_backend["AAAA-1111"] = "sim-bridge"
             ctrl._sim_bridge_ok = False
             return [], "AAAA-1111"
 
@@ -353,6 +355,7 @@ class TestTheLabelSurvivesARefreshMidRead:
         ctrl._sim_bridge_ok = False  # idb genuinely did the read
 
         async def read(*a, **kw):
+            ctrl._last_read_backend["AAAA-1111"] = "idb"
             return [], "AAAA-1111"
 
         ctrl.get_ui_elements = read
@@ -361,3 +364,22 @@ class TestTheLabelSurvivesARefreshMidRead:
             await ctrl.get_element(udid="AAAA-1111", label="nope")
 
         assert caught.value.tool == "idb"
+
+
+    async def test_the_read_records_the_backend_it_selected(self):
+        """The mechanism itself: `get_ui_elements` writes the name at the one
+        moment it is authoritative — its own selection. Capturing before the
+        call is stale if the refresh lands during it; recomputing at error
+        time is stale the other way. Only the read knows."""
+        ctrl = DeviceController()
+        ctrl._is_android = lambda udid: False
+        ctrl._is_physical = lambda udid: False
+        ctrl._sim_bridge_ok = True
+
+        assert ctrl._last_read_backend == {}, "should start empty"
+
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        backend = ctrl._ui_backend("AAAA-1111")
+        ctrl._last_read_backend["AAAA-1111"] = backend.TOOL_NAME
+
+        assert ctrl._last_read_backend["AAAA-1111"] == "sim-bridge"
