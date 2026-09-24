@@ -169,7 +169,19 @@ the copy to trust, and the one to update.
 
   **The allowance is a rolling budget, and CodeRabbit states it.** This was recorded here as one review per hour, which is wrong. Every review comment carries a *Recent review info* block giving both the remaining budget and the current rate — measured 2026-09-24: "3 reviews are currently available. Your included PR review attempts over the past 7 days set your current allowance at 5 reviews per hour." So the rate is derived from recent usage rather than fixed, which is why observed intervals varied wildly that week (a refusal quoting 25 minutes, a banner quoting 39, two grants eleven minutes apart, one granted immediately).
 
-  Read the number rather than inferring it. A refusal costs nothing, so retry rather than computing when a window *should* have reopened, and read the acknowledgement body — `Action not completed` is the refusal, and the walkthrough's "Review limit reached" banner is a stale edit that lies. The budget is shared across PRs and across agents, so never ask on two at once, and ask the sessions working other open PRs before taking a slot.
+  **A refusal is not free, and this note used to say it was.** The allowance is
+  set by *attempts*, not by grants -- the info block says so: "Your included PR
+  review attempts over the past 7 days set your current allowance." Measured on
+  2026-09-24 while merging #306: each `@coderabbitai review` that was refused
+  pushed the lift time further out (asked 11:36 -> limited until 11:51; asked
+  11:56 -> limited until 12:11), while attempts that only *read* the status
+  moved nothing. Over that session the stated allowance fell from 5 reviews per
+  hour to 3. So a retry loop does not merely fail to help, it spends the budget
+  it is waiting for -- and the budget is shared with every other agent on the
+  repo.
+
+  Wait out the stated time and ask **once**. Read the number rather than
+  inferring it, and read the acknowledgement body — `Action not completed` is the refusal, and the walkthrough's "Review limit reached" banner is a stale edit that lies. The budget is shared across PRs and across agents, so never ask on two at once, and ask the sessions working other open PRs before taking a slot.
 
   **A clean-looking PR page is not evidence of a review.** Three PRs opened during a limited window on 2026-09-23 showed `CLEAN` with zero unresolved threads and had never been reviewed at all — the auto-review-on-open was refused and nothing said so. The reliable check is the coverage marker, which must equal your head:
 
