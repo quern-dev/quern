@@ -290,8 +290,7 @@ class TestTheResponseReportsTheDeviceNotTheRequest:
 
     async def test_a_write_that_did_not_take_is_visible(self):
         """The failure this repo keeps producing: success and broken looking
-        identical. If the device reports something other than what quern set,
-        the response says so rather than echoing the request."""
+        identical."""
         ctrl = _android()
         ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
         a, b = _hosts()
@@ -597,3 +596,96 @@ class TestBothBranchesReturnTheSameShape:
         assert set(applied) - set(cleared) == set()
         assert cleared["applied"] is False
         assert applied["cleared"] is False
+
+
+class TestQuernMakesTheComparisonItself:
+    """Reporting `device_proxy` beside `proxy_reachable_at` and leaving the
+    comparison to the caller is how a write that did not take goes unnoticed:
+    the caller who would check is the one who already suspects a problem."""
+
+    async def test_a_matching_read_back_verifies(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="192.168.1.189:9177")
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True),
+                _request(ctrl, port=9177),
+            )
+
+        assert out["proxy_verified"] is True
+
+    async def test_the_device_holding_something_else_fails_verification(self):
+        """A stale value from a previous configuration is the realistic case,
+        and it is indistinguishable from success without this."""
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="10.0.2.2:9101")
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True),
+                _request(ctrl, port=9177),
+            )
+
+        assert out["applied"] is True
+        assert out["proxy_verified"] is False
+
+    async def test_a_failed_read_back_verifies_nothing_either_way(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=RuntimeError("offline"))
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["proxy_verified"] is None
+
+    async def test_nothing_applied_verifies_nothing(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", ssid="w", client_ip="1.2.3.4"),
+                _request(ctrl),
+            )
+
+        assert out["proxy_verified"] is None
+
+    async def test_clearing_is_verified_by_asking_the_device(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert out["proxy_verified"] is True
+
+    async def test_a_clear_that_did_not_take_fails_verification(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="192.168.1.189:9177")
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert out["cleared"] is True
+        assert out["proxy_verified"] is False
+
+    async def test_a_clear_whose_read_back_failed_claims_nothing(self):
+        """None here is the whole point of splitting the read into a value and
+        a did-it-happen: without it, a device that could not be asked reports
+        the same `device_proxy: None` as one confirmed clear."""
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=RuntimeError("offline"))
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert out["device_proxy"] is None
+        assert out["proxy_verified"] is None

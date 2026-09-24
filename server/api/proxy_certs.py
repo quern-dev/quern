@@ -575,18 +575,20 @@ def _reattach_hint(
     )
 
 
-async def _read_device_proxy(controller, udid: str) -> str | None:
-    """The device's current proxy, or None if it has none or cannot be asked.
+async def _read_device_proxy(controller, udid: str) -> tuple[str | None, bool]:
+    """The device's current proxy, and whether the read actually happened.
 
-    A read-back failure is not worth failing the write over -- the write
-    already succeeded -- but it must not be reported as "no proxy set" either,
-    so the caller gets None for both and the log carries the difference.
+    Two facts, because `None` alone conflates them: a device with no proxy set
+    and a device that could not be asked look identical, and on the clear path
+    the first is success while the second is no evidence at all. A read-back
+    failure is not worth failing the write over -- the write already
+    succeeded -- but it must not be allowed to masquerade as confirmation.
     """
     try:
-        return await controller.adb.get_http_proxy(udid)
+        return await controller.adb.get_http_proxy(udid), True
     except Exception:
         _logger.debug("Could not read back the proxy on %s", udid, exc_info=True)
-        return None
+        return None, False
 
 
 @router.post("/device-proxy-config")
@@ -638,6 +640,7 @@ async def record_device_proxy_config_endpoint(
             ) from e
         forgotten = forget_device_proxy_configs(canonical_device_id(body.udid))
         reattached = await controller.adb.reattach_network(body.udid)
+        cleared_proxy, cleared_ok = await _read_device_proxy(controller, body.udid)
         return {
             "udid": body.udid,
             "cleared": True,
@@ -663,7 +666,11 @@ async def record_device_proxy_config_endpoint(
             ),
             #: Read back from the device rather than inferred from the call
             #: returning. None here is the success case.
-            "device_proxy": await _read_device_proxy(controller, body.udid),
+            "device_proxy": cleared_proxy,
+            #: True only when the device was actually asked and answered that
+            #: it holds nothing. A read that failed returns None here rather
+            #: than borrowing the success value.
+            "proxy_verified": (cleared_proxy is None) if cleared_ok else None,
         }
 
     if body.apply and not is_android:
@@ -755,6 +762,10 @@ async def record_device_proxy_config_endpoint(
         # rather than the outcome.
         reattached = await controller.adb.reattach_network(body.udid)
 
+    device_proxy, read_ok = (
+        await _read_device_proxy(controller, body.udid) if applied else (None, False)
+    )
+
     record_device_proxy_config(
         canonical_device_id(body.udid), ssid, proxy_host, port,
         client_ip=client_ip,
@@ -795,8 +806,15 @@ async def record_device_proxy_config_endpoint(
         #: nothing was applied. Asserting something positive happened is the
         #: point: a write that silently did not take looks exactly like one
         #: that did.
-        "device_proxy": (
-            await _read_device_proxy(controller, body.udid) if applied else None
+        "device_proxy": device_proxy,
+        #: Whether the device actually holds what quern set. Reporting the two
+        #: values and leaving the comparison to the caller is how a write that
+        #: did not take goes unnoticed -- the caller who would spot it is the
+        #: one who already suspects a problem. None when nothing was applied,
+        #: and None when the read-back itself failed, which is not evidence
+        #: either way.
+        "proxy_verified": (
+            (device_proxy == f"{proxy_host}:{port}") if read_ok else None
         ),
     }
 
