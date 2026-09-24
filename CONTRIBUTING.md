@@ -323,9 +323,29 @@ tmp=$(mktemp -d); git archive --format=tar HEAD | tar -x -C "$tmp"
 # run the suite from inside $tmp with this checkout's .venv/bin/python
 ```
 
+**`HEAD` is the commit you are standing on, which on a fix branch is the
+fix.** This line used to say only `HEAD`, and following it literally on
+`fix/296-...` extracted the *fixed* source, ran the new tests against it, and
+reported 5/5 green — read as "these tests do not detect the bug" when the truth
+was "this copy does not contain the bug". It cost a round of disbelief before a
+review agent reproduced the same false reading from the same line. To mutate
+*against the pre-fix state*, name it: `HEAD~1`, or the sha.
+
+So assert the copy is what you think before believing a green run — grep the
+extract for a symbol the fix introduced and stop if it is there. A mutation
+harness that cannot tell "the bug is absent" from "the test is blind" is the
+same can't-fail check this file warns about, aimed at the check itself.
+
 Clear `__pycache__` between mutations: a same-size swap can leave stale bytecode,
 and the false result reads as "my fix does not work" while the source in front of
 you says otherwise.
+
+And note the archive root wins over cwd. `tests/__init__.py` exists, so pytest
+puts the extract's root on `sys.path` ahead of the directory you launched from
+— which is what makes this recipe work at all. It does **not** hold for a
+script run by path: `python /abs/path/script.py` puts the *script's* directory
+at `sys.path[0]`, and the editable install then resolves `server` to the
+primary checkout rather than to the tree you meant.
 
 ### Agent review runs in a worktree
 
