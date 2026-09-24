@@ -1508,6 +1508,13 @@ class DeviceControllerUI:
                 tool="quern",
             )
 
+        # Captured before the read, not when the error is built. `_sim_bridge_ok`
+        # is flipped by the periodic refresh and by `/tools`, so a read that went
+        # through sim-bridge can report its no-match as `[idb]` if the flag moved
+        # while `describe_all()` was awaiting. The refresh does not reroute the
+        # in-flight read or change its result -- only the label, which is the one
+        # thing this change exists to get right.
+        backend = self._backend_name(udid)
         elements, resolved = await self.get_ui_elements(udid)
         matches = find_element(
             elements, label=label, label_contains=label_contains,
@@ -1526,7 +1533,7 @@ class DeviceControllerUI:
                 search_desc += f", type='{element_type}'"
             raise DeviceError(
                 f"No element found matching {search_desc}",
-                tool=self._backend_name(udid),
+                tool=backend,
             )
 
         # Return first match with match_count if ambiguous
@@ -2759,6 +2766,8 @@ class DeviceControllerUI:
         # changed, and typing at stale coordinates would put the text in
         # whatever now occupies them -- which the read-back afterwards, looking
         # up the same selector, would not necessarily notice.
+        # Captured before any await, for the reason given in `get_element`.
+        backend = self._backend_name(udid)
         if self._web_overlay.get(udid):
             with contextlib.suppress(DeviceError):
                 await self.get_web_content(udid=udid)
@@ -2770,7 +2779,7 @@ class DeviceControllerUI:
                 # which reads as a broken server rather than a missing field.
                 f"No element found: no text field matching "
                 f"{label or identifier!r} to type into",
-                tool=self._backend_name(udid),
+                tool=backend,
             )
         return matches[0]
 

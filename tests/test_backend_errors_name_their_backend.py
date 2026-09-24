@@ -310,3 +310,54 @@ class TestABrokenBackendIsNotReadAsAnEmptyField:
 
         with pytest.raises(DeviceError, match="the bridge died"):
             await ctrl._read_field_value("udid", target, "label", None)
+
+
+class TestTheLabelSurvivesARefreshMidRead:
+    """`_sim_bridge_ok` is flipped by the periodic refresh and by `/tools`
+    (`controller.py:331`, and the lock comment at :77 that exists for this
+    race). If it moves while `describe_all()` is awaiting, a read that went
+    through sim-bridge would report its no-match as `[idb]`.
+
+    The refresh does not reroute the in-flight read or change its result. It
+    changes only the label — which is the one thing this whole change exists
+    to get right, so a stale one here would be the bug surviving its own fix.
+    """
+
+    async def test_get_element_reports_the_backend_that_read(self):
+        ctrl = DeviceController()
+        ctrl._is_android = lambda udid: False
+        ctrl._is_physical = lambda udid: False
+        ctrl._sim_bridge_ok = True  # sim-bridge at the moment of the read
+
+        async def read_then_refresh(*a, **kw):
+            # The refresh lands while the read is in flight.
+            ctrl._sim_bridge_ok = False
+            return [], "AAAA-1111"
+
+        ctrl.get_ui_elements = read_then_refresh
+
+        with pytest.raises(DeviceError) as caught:
+            await ctrl.get_element(udid="AAAA-1111", label="nope")
+
+        assert caught.value.tool == "sim-bridge", (
+            "the label was recomputed after the refresh and named a backend "
+            "that did not perform the read"
+        )
+
+    async def test_the_control_still_reports_idb_when_it_really_read(self):
+        """Without this, capturing a stale value early would pass the test
+        above just as well."""
+        ctrl = DeviceController()
+        ctrl._is_android = lambda udid: False
+        ctrl._is_physical = lambda udid: False
+        ctrl._sim_bridge_ok = False  # idb genuinely did the read
+
+        async def read(*a, **kw):
+            return [], "AAAA-1111"
+
+        ctrl.get_ui_elements = read
+
+        with pytest.raises(DeviceError) as caught:
+            await ctrl.get_element(udid="AAAA-1111", label="nope")
+
+        assert caught.value.tool == "idb"
