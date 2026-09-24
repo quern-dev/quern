@@ -7,7 +7,7 @@ agents can read it over MCP as `quern://api-reference`.
 ## Authentication
 
 All endpoints require `Authorization: Bearer <key>` except these public paths: `/`,
-`/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`, `/video-test`,
+`/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
 and `/api/v1/proxy/cert`.
 
 `/api/v1/proxy/cert` is deliberately unauthenticated — devices and simulators fetch the
@@ -210,7 +210,6 @@ public probes, and a few operations the CLI uses directly.
 | GET | `/health` | Fast liveness ping (public). Does no device-tool probing — kept sub-millisecond so CLI health checks can't time out |
 | GET | `/tools` | Device-tool availability and UI cache stats (public). Backs `quern doctor` and `quern status`. Probes are bounded and run concurrently; the response also re-syncs the server's simulator UI backend |
 | GET | `/api/v1/device/tools/sites` | Per-install-site tool versions and provenance. Authenticated: it returns absolute paths, which `/tools` deliberately does not |
-| GET | `/video-test` | Internal preview test page (public) |
 | POST | `/api/v1/builds/parse` | Submit xcodebuild output |
 | POST | `/api/v1/device/active` | Set the active device by UDID |
 | POST | `/api/v1/devices/refresh` | Refresh pool from simctl |

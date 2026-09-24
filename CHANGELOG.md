@@ -5,6 +5,11 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- **`/video-test` is gone, and with it an unauthenticated route that served the API key.** The page was a browser test harness for MJPEG streaming added in March, and it was in `PUBLIC_PATHS` -- so it needed no bearer token -- while interpolating the live key into its JavaScript at two separate points. Since `--host` defaults to `0.0.0.0`, one unauthenticated GET from anywhere on the network returned the credential for every other endpoint, and left no failed-auth line behind because there was no auth to fail. Deleted rather than patched: the thing it tested now has better front ends in `quern-media`'s own index page and the preview app, and a public page has to justify holding a secret. Four documentation claims that it was a valid public path went with it, and a test now fails if the path is ever returned to `PUBLIC_PATHS`. Reported and fixed as #283.
+
 ## [0.21.0] - 2026-09-23
 
 ### Added

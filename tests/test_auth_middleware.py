@@ -24,8 +24,26 @@ from server.auth import APIKeyMiddleware
 KEY = "test-key-2f8a"
 PUBLIC_PATHS = (
     "/", "/health", "/api/v1/health", "/tools", "/docs", "/redoc",
-    "/openapi.json", "/api/v1/proxy/cert", "/video-test",
+    "/openapi.json", "/api/v1/proxy/cert",
 )
+
+#: Paths that were public and must not become so again without a decision.
+#:
+#: `/video-test` served a browser page that interpolated the live API key into
+#: its JavaScript, on a server whose default bind is 0.0.0.0 -- so one
+#: unauthenticated GET yielded the credential for every other route. The page
+#: is gone; this keeps the path from being re-added to PUBLIC_PATHS by someone
+#: restoring a test page without knowing why it went.
+RETIRED_PUBLIC_PATHS = ("/video-test",)
+
+
+def test_a_retired_public_path_is_not_public_again():
+    from server.auth import PUBLIC_PATHS as shipped
+
+    for path in RETIRED_PUBLIC_PATHS:
+        assert path not in shipped, (
+            f"{path} was removed from PUBLIC_PATHS deliberately; see #283"
+        )
 
 
 def _app(api_key: str = KEY) -> FastAPI:
