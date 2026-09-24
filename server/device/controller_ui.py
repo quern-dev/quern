@@ -118,9 +118,12 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
             "reason": "needs_page_urls",
             "screen": None,
             "detail": (
-                "this app's screens are identified by web page URL, which is "
-                "not read on this path, so quern cannot tell which screen you "
-                "are on. Pass scroll_to_find explicitly."
+                "this app's screens are identified by web page URL, which the "
+                "scrollability lookup does not read, so it cannot tell whether "
+                "this screen scrolls. Pass scroll_to_find explicitly. "
+                "(`identified_as` on the screen context may still name the "
+                "screen -- identification does read the page listing, so the "
+                "two can disagree about how much is known.)"
             ),
         }
     if sweep.get("why") == "ambiguous":
@@ -446,6 +449,45 @@ class DeviceControllerUI:
             logger.debug("full-tree read for screen context failed", exc_info=True)
             return elements, False
         return full, True
+
+    async def _identify_for_miss(self, udid: str, elements: list[UIElement]) -> dict:
+        """Which screen this is, for a response that reports a miss.
+
+        `tap_element` finding nothing and `wait_for_element` timing out are the
+        two responses where a caller most needs to know where it actually is --
+        an action that succeeded implies you are roughly where you meant to be;
+        a miss is exactly when you are lost. Both returned a screen context
+        without identification while the success paths gained it, so one
+        endpoint answered in two shapes and no caller could tell "nothing
+        matched" from "this path does not ask" (#288).
+
+        A callable injected by `main.py`, like `_scrollable_lookup` beside it
+        and for the same reason: the controller has no business knowing what a
+        `LandmarkRegistry` is. Absent -- as in every unit test that builds its
+        own controller -- this adds nothing, which is also what happens when no
+        landmarks are loaded.
+
+        Costs no *UI tree* read. Both call sites already hold the full element
+        list; the comment at the not-found path says it is fetched precisely so
+        identification needs none of its own.
+
+        It can cost one Web Inspector round trip: when a loaded landmark names
+        `web_url_contains`, `identify_for_context` fetches the page listing
+        through the callable passed here. That is the same rule the action
+        responses follow, and it is never paid by a knowledge base without URL
+        landmarks -- but "costs no device read" was wrong as written.
+        """
+        lookup = getattr(self, "_identify_lookup", None)
+        if lookup is None:
+            return {}
+        try:
+            return await lookup(elements, lambda: self.web_page_urls(udid))
+        except Exception:
+            # A knowledge base that cannot answer must not turn a reported miss
+            # into a failed call. The identification is an addition; the miss
+            # report is the answer the caller asked for.
+            logger.debug("identification for a miss failed", exc_info=True)
+            return {}
 
     def _scrollable_hint(
         self, elements: list[UIElement],
@@ -1608,6 +1650,9 @@ class DeviceControllerUI:
                         resolved, mode=mode,
                     )
                     screen_context = _build_screen_context(ctx_elements)
+                    screen_context.update(
+                        await self._identify_for_miss(resolved, ctx_elements),
+                    )
                 except Exception:
                     screen_context = {}
                 screenshot = await _capture_screenshot(
@@ -1870,6 +1915,13 @@ class DeviceControllerUI:
         # to (scroll_to_element's contract); contains/prefix/type-only fall
         # through to not_found.
         all_elements: list[UIElement] | None = None
+        # Tracked beside the elements, because identification is only honest
+        # against the whole tree. `_all_elements_for_context` falls back to the
+        # *filtered* list when the full read fails, and landmarks compared with
+        # the target's own matches name a confident wrong screen -- the
+        # scrollability path 40 lines down already refuses on this flag, and
+        # this one has to refuse on it too.
+        all_elements_complete: bool = True
         if (
             len(matches) == 0
             and not self._is_android(resolved)
@@ -1895,6 +1947,7 @@ class DeviceControllerUI:
                 all_elements, complete = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
                 )
+                all_elements_complete = complete
                 if not complete:
                     # The full read failed and this is the *filtered* list --
                     # the target's matches, or nothing. Identifying against it
@@ -1938,10 +1991,23 @@ class DeviceControllerUI:
             if element_type:
                 search_desc += f", type='{element_type}'"
             if all_elements is None:
-                all_elements, _ = await self._all_elements_for_context(
-                    resolved, elements, filter_label, identifier, element_type,
+                all_elements, all_elements_complete = (
+                    await self._all_elements_for_context(
+                        resolved, elements, filter_label, identifier,
+                        element_type,
+                    )
                 )
             screen_context = _build_screen_context(all_elements)
+            if all_elements_complete:
+                # Only against the whole tree. On a failed full read this is
+                # the filtered list, and identifying against it produces
+                # "identified_as: null, confidence: none" -- "I looked and
+                # recognised nothing" when nothing was looked at -- or worse, a
+                # named match that is simply wrong, because a screen defined by
+                # an absent landmark matches a list that is missing everything.
+                screen_context.update(
+                    await self._identify_for_miss(resolved, all_elements),
+                )
             screenshot = await _capture_screenshot(
                 self, resolved, "tap_not_found",
             )

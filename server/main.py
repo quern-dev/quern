@@ -313,6 +313,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     device_controller._scrollable_lookup = (
         app.state.landmark_registry.scrollable_for
     )
+    # The same injection for the same reason, and the miss paths need it:
+    # `tap_element` finding nothing and `wait_for_element` timing out build
+    # their screen context in the controller, so they cannot reach the
+    # registry the API layer holds (#288).
+    device_controller._identify_lookup = (
+        app.state.landmark_registry.identify_for_context
+    )
     tools = await device_controller.check_tools(adopt=True)
     logger.info("Device tools: %s", tools)
     if tools.get("sim_bridge"):

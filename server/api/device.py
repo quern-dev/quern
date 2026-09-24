@@ -11,7 +11,6 @@ from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
 from server.api.actions import action, logged_action
-from server.device.landmarks import needs_page_urls
 from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
@@ -89,54 +88,27 @@ async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
 
 
 async def _identify_for_context(controller, udid: str, registry, elements) -> dict:
-    """`identified_as` / `confidence` for a screen context, or nothing.
+    """Thin adapter onto `LandmarkRegistry.identify_for_context`.
 
-    Mirrors `get_screen_summary?identify=true` rather than inventing a second
-    shape for the same fact: the same field names, and the same string
-    confidence -- "exact", "ambiguous", "none". `docs/screen-identification-in-
-    actions.md` specified a 0.0-1.0 float, but it was written before the string
-    form shipped, and changing it now would break the endpoint that already
-    returns it.
-
-    `candidates` is added on an ambiguous match, which that endpoint does not
-    do. Reporting only the first of several matches would present a guess as an
-    identification.
-
-    Silent on failure. Identification is an addition to an action's response;
-    an action that worked must not report failure because a knowledge base
-    could not be consulted.
+    The rule -- and the reason for it -- lives on the registry, because the
+    miss paths in `controller_ui` need the same answer and a rule spelled
+    twice is a pair that drifts. This supplies the page-listing fetch, which
+    is the one part that needs a device.
     """
     if registry is None:
         return {}
     try:
-        # Inside the try, not above it. `all_screens()` raising would otherwise
-        # escape into `_capture_screen_context`'s own handler, which returns
-        # `{}` for the *whole* context -- so a knowledge base that could not be
-        # read would cost the caller `screen_title`, `summary`, `element_count`
-        # and `interactive_elements` too. Losing the identification is the
-        # intended degradation; losing the screen is not.
-        if not registry.all_screens():
-            return {}
-        # Only reach for the page listing when a loaded landmark needs it, so a
-        # knowledge base with no URL landmarks costs nothing extra -- the same
-        # rule `get_screen_summary?identify=true` follows.
-        page_urls = (
-            await controller.web_page_urls(udid)
-            if needs_page_urls(registry.all_screens()) else None
+        return await registry.identify_for_context(
+            elements, lambda: controller.web_page_urls(udid),
         )
-        result = registry.identify(elements, page_urls=page_urls)
     except Exception:
+        # The registry guards its own internals, but *this* call can still
+        # fail -- anything that is not a registry, or a future where the
+        # method changes shape. Nothing may escape: the caller treats any
+        # exception as "no screen context at all", so an escape here costs the
+        # title, summary and elements as well as the identification.
         logger.debug("screen identification failed", exc_info=True)
         return {}
-    identified = {
-        "identified_as": result.get("matched"),
-        "confidence": result.get("confidence"),
-    }
-    if result.get("confidence") == "ambiguous":
-        identified["candidates"] = [
-            result.get("matched"), *result.get("ambiguous_with", []),
-        ]
-    return identified
 
 
 async def _capture_action_screenshot(controller, udid: str, label: str) -> str | None:
