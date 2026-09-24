@@ -86,14 +86,21 @@ public final class HTTPStreamServer: FrameSink {
     private var lastPart: Data?
     private var lastSendAt = Date.distantPast
 
+    /// Control requests served. Counted so a test asserts the endpoint did
+    /// something, rather than asserting nothing went wrong.
+    public var keyframeRequests: Int { lock.lock(); defer { lock.unlock() }; return _keyframeRequests }
+    private var _keyframeRequests = 0
+
     /// How many times a frame has been repeated to keep the stream alive.
     /// Counted so a test can assert it happened, rather than asserting that
     /// nothing went wrong.
-    public private(set) var keepalivesSent = 0
+    public var keepalivesSent: Int { lock.lock(); defer { lock.unlock() }; return _keepalivesSent }
+    private var _keepalivesSent = 0
 
     /// Clients an IDR has resynced after the gate skipped a frame. Counted so
     /// a test asserts the recovery happened, not merely that nothing crashed.
-    public private(set) var keyframeResyncs = 0
+    public var keyframeResyncs: Int { lock.lock(); defer { lock.unlock() }; return _keyframeResyncs }
+    private var _keyframeResyncs = 0
 
     /// Frames withheld from a desynced client while it waits for an IDR.
     ///
@@ -101,7 +108,8 @@ public final class HTTPStreamServer: FrameSink {
     /// keyframe never arrives sits frozen while `framesSent` climbs, which
     /// reads as a healthy stream. Rising here with `keyframeResyncs` flat is
     /// an encoder that is not honouring the request.
-    public private(set) var framesHeldForKeyframe = 0
+    public var framesHeldForKeyframe: Int { lock.lock(); defer { lock.unlock() }; return _framesHeldForKeyframe }
+    private var _framesHeldForKeyframe = 0
 
     /// Clients with a send outstanding. Internal, for tests only.
     ///
@@ -114,9 +122,12 @@ public final class HTTPStreamServer: FrameSink {
         return clients.values.filter(\.inFlight).count
     }
 
-    public private(set) var framesSent = 0
-    public private(set) var framesSkipped = 0
-    public private(set) var bytesSent = 0
+    public var framesSent: Int { lock.lock(); defer { lock.unlock() }; return _framesSent }
+    private var _framesSent = 0
+    public var framesSkipped: Int { lock.lock(); defer { lock.unlock() }; return _framesSkipped }
+    private var _framesSkipped = 0
+    public var bytesSent: Int { lock.lock(); defer { lock.unlock() }; return _bytesSent }
+    private var _bytesSent = 0
 
     /// - Parameters:
     ///   - bindAll: listen on every interface instead of loopback. The stream
@@ -270,11 +281,11 @@ public final class HTTPStreamServer: FrameSink {
             client.inFlight = true
             client.desynced = false
         }
-        framesSent += targets.isEmpty ? 0 : 1
-        framesSkipped += stalled.count
-        keyframeResyncs += resynced
-        framesHeldForKeyframe += held
-        bytesSent += bytes.count * targets.count
+        _framesSent += targets.isEmpty ? 0 : 1
+        _framesSkipped += stalled.count
+        _keyframeResyncs += resynced
+        _framesHeldForKeyframe += held
+        _bytesSent += bytes.count * targets.count
         if codec == .mjpeg { lastPart = bytes }
         lastSendAt = Date()
         let wantKeyframe = watching.contains(where: \.desynced)
@@ -363,8 +374,8 @@ public final class HTTPStreamServer: FrameSink {
             return
         }
         for client in watchers { client.inFlight = true }
-        keepalivesSent += 1
-        bytesSent += part.count * watchers.count
+        _keepalivesSent += 1
+        _bytesSent += part.count * watchers.count
         lastSendAt = Date()
         lock.unlock()
 
@@ -406,14 +417,91 @@ public final class HTTPStreamServer: FrameSink {
 
             let head = String(decoding: client.head[..<end.lowerBound], as: UTF8.self)
             client.head = Data()
-            self.route(client, path: HTTPWire.requestPath(head))
+            self.route(
+                client,
+                method: HTTPWire.requestMethod(head),
+                path: HTTPWire.requestPath(head)
+            )
         }
     }
 
-    private func route(_ client: Client, path: String) {
-        guard HTTPWire.isStreamPath(path) else {
+    private func route(_ client: Client, method: String, path: String) {
+        // Checked before the stream path, and strictly. A GET here is a
+        // mistake worth reporting rather than quietly serving the index page
+        // the way an unrecognised path does.
+        // A mistyped control path is refused, never answered with the index
+        // page. Falling through gave it 200 and an HTML body, which to a
+        // caller of a 204 endpoint is indistinguishable from success.
+        if HTTPWire.keyframePathMatch(path) == .nearMiss {
             client.connection.send(
-                content: HTTPWire.indexPage(for: codec),
+                content: HTTPWire.notFoundResponse(),
+                completion: .contentProcessed { _ in client.connection.cancel() }
+            )
+            return
+        }
+
+        if HTTPWire.isKeyframePath(path) {
+            guard method == "POST" else {
+                client.connection.send(
+                    content: HTTPWire.methodNotAllowedResponse(),
+                    completion: .contentProcessed { _ in client.connection.cancel() }
+                )
+                return
+            }
+            // Nothing to ask. The CLI always wires this up, but the
+            // initialiser makes it optional, so a caller embedding the server
+            // can reach here with no encoder behind it -- and answering 204
+            // for a request that did no work is the same false success the
+            // near-miss path above exists to prevent, on the happy path.
+            guard let onKeyframeNeeded else {
+                client.connection.send(
+                    content: HTTPWire.noEncoderResponse(),
+                    completion: .contentProcessed { _ in client.connection.cancel() }
+                )
+                return
+            }
+
+            lock.lock()
+            _keyframeRequests += 1
+            let count = _keyframeRequests
+            lock.unlock()
+            // The same hook a viewer attaching and a desync skip both fire.
+            // All three mean one thing to the pipeline -- it owes us an IDR --
+            // so this route reuses it rather than adding a second callback
+            // wired to the same closure. That also keeps the initialiser to a
+            // single closure parameter, which is what makes the trailing-
+            // closure form at the call sites unambiguous.
+            onKeyframeNeeded()
+            MediaLog.log("[http] keyframe requested (\(count) total)")
+            client.connection.send(
+                content: HTTPWire.noContentResponse(),
+                completion: .contentProcessed { _ in client.connection.cancel() }
+            )
+            return
+        }
+
+        guard HTTPWire.isStreamPath(path) else {
+            // The index page is a page, so it answers the methods a browser
+            // uses and nothing else. `POST /anything` used to get 200 and an
+            // HTML body -- harmless for a person typing a URL, and for a
+            // caller driving this as an API the same false success the
+            // control path above just had to be fixed for.
+            guard method == "GET" || method == "HEAD" else {
+                client.connection.send(
+                    content: HTTPWire.notFoundResponse(),
+                    completion: .contentProcessed { _ in client.connection.cancel() }
+                )
+                return
+            }
+            // HEAD carries what GET would, minus the body. Handing it the
+            // whole page put the body on the wire under a correct
+            // Content-Length, which is a malformed response, not a harmless
+            // extra.
+            let page = method == "HEAD"
+                ? HTTPWire.indexHeaders(for: codec)
+                : HTTPWire.indexPage(for: codec)
+            client.connection.send(
+                content: page,
                 completion: .contentProcessed { _ in client.connection.cancel() }
             )
             return

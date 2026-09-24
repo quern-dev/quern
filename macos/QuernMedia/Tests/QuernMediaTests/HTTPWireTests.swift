@@ -86,3 +86,37 @@ func indexContentLengthIsCorrect(codec: StreamPipeline.Codec) throws {
     let bodyStart = try #require(page.range(of: Data("\r\n\r\n".utf8))).upperBound
     #expect(page.distance(from: bodyStart, to: page.endIndex) == declared)
 }
+
+@Test("the request method is parsed verbatim, and empty rather than guessed", arguments: [
+    ("POST /keyframe HTTP/1.1\r\nHost: x\r\n\r\n", "POST"),
+    // Not "POST". Methods are case-sensitive (RFC 9110 section 9.1), and this
+    // used to uppercase -- so `post` reached the control endpoint and fired
+    // the encoder, and the test asserted that as intended behaviour.
+    ("post /keyframe HTTP/1.1\r\n\r\n", "post"),
+    ("GET / HTTP/1.1\r\n\r\n", "GET"),
+    ("", ""),
+    ("garbage\r\n\r\n", "garbage"),
+])
+func requestMethodIsParsed(head: String, expected: String) {
+    #expect(HTTPWire.requestMethod(head) == expected)
+}
+
+@Test("the control path takes a query and a trailing slash, and nothing else", arguments: [
+    ("/keyframe", HTTPWire.ControlMatch.exact),
+    ("/keyframe?x=1", .exact),
+    ("/keyframe/", .exact),
+    ("/keyframe/?x=1", .exact),
+    // Paths are case-sensitive, so this is not the endpoint -- but it is
+    // plainly meant for it, and answering it with the index page is the
+    // false success the near-miss case exists to prevent.
+    ("/KEYFRAME", .nearMiss),
+    ("/Keyframe", .nearMiss),
+    ("/keyframes", .other),
+    ("/keyframe/extra", .other),
+    ("/", .other),
+    ("/stream", .other),
+])
+func keyframePathMatching(path: String, expected: HTTPWire.ControlMatch) {
+    #expect(HTTPWire.keyframePathMatch(path) == expected)
+    #expect(HTTPWire.isKeyframePath(path) == (expected == .exact))
+}

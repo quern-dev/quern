@@ -21,6 +21,9 @@ SOURCE (exactly one required)
 
 OUTPUT (at least one required; they combine)
   --serve <port>         HTTP server; open http://127.0.0.1:<port>/
+                         GET  /          a page that plays the stream
+                         GET  /stream    the video itself
+                         POST /keyframe  force an IDR now, answers 204
   --record <path>        write an .mp4. Implies --h264.
 
 TUNING
@@ -112,15 +115,21 @@ let attachPrimer = AttachPrimer()
 
 var server: HTTPStreamServer?
 if let port = options.servePort {
-    let s = HTTPStreamServer(port: port, bindAll: options.bindAll, codec: options.codec) {
-        // Unconditional, and deliberately not routed through the box. The
-        // server starts accepting the moment it binds, while the source is
-        // still being brought up -- dlopen, device resolution, callback
-        // registration, and for a USB device a blocking wait on enumeration.
-        // preview.py dials the port as soon as it is listening, so the first
-        // viewer lands squarely in that window. Making this wait on the source
-        // silently dropped the keyframe request that used to be live from the
-        // moment the port bound.
+    // Three things now fire this: a viewer attaching, the dropped-frame gate
+    // skipping a frame for an H.264 client, and a caller asking over
+    // `POST /keyframe`. They want the same two things for the same reason --
+    // a keyframe request only raises a flag, and the IDR lands on the next
+    // frame that arrives and passes the throttle. On an event-driven source
+    // that is unbounded, since an idle screen composites nothing, so priming
+    // is what turns "a keyframe eventually" into "a keyframe now".
+    //
+    // requestKeyframe() is called unconditionally rather than through the
+    // box: the server accepts the moment it binds, while the source is still
+    // coming up, and a caller arriving in that window must not silently lose
+    // its request.
+    let s = HTTPStreamServer(
+        port: port, bindAll: options.bindAll, codec: options.codec
+    ) {
         pipeline.requestKeyframe()
         attachPrimer.fire()
     }
@@ -180,9 +189,10 @@ let shutdownOnce = ShutdownGuard { () -> Int32 in
     if let server {
         MediaLog.log(String(
             format: "[http] %d frames sent, %d skipped, %d held for a keyframe, "
-                + "%d resynced, %d keepalives, %d bytes",
+                + "%d resynced, %d keepalives, %d control requests, %d bytes",
             server.framesSent, server.framesSkipped, server.framesHeldForKeyframe,
-            server.keyframeResyncs, server.keepalivesSent, server.bytesSent
+            server.keyframeResyncs, server.keepalivesSent, server.keyframeRequests,
+            server.bytesSent
         ))
     }
     server?.stop()
