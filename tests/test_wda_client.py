@@ -3429,3 +3429,43 @@ class TestAFailedForwardIsNotLeft:
 
         assert not new_proc.killed, "the newer forward was killed by a stale drop"
         assert backend._connections["test-udid"] is conn_new
+
+    async def test_a_superseded_reconnect_uses_the_winners_connection(self):
+        """If another caller reconnected while we were probing, we must use
+        their connection — not build our own over the top of it, which would
+        orphan their forward. The guard against killing a newer connection
+        created this second hole one level up."""
+        from server.device.wda_client import _WdaConnection
+
+        backend = WdaBackend()
+        stale = _WdaConnection(base_url="http://[fd00::1]:8100")  # tunneld, no proc
+        winner_proc = self._fake_proc()
+        winner = _WdaConnection(
+            base_url="http://localhost:18109", forward_proc=winner_proc,
+            local_port=18109,
+        )
+        backend._connections["test-udid"] = winner  # already replaced
+
+        got = await backend._drop_connection("test-udid", expected=stale)
+
+        assert got is winner, "a no-op drop did not name who superseded it"
+        assert not winner_proc.killed
+        assert backend._connections["test-udid"] is winner
+
+    async def test_a_real_drop_reports_no_winner(self):
+        """The control: when the drop actually happens there is no winner to
+        return, so a caller cannot mistake its own removal for someone
+        else's reconnect."""
+        from server.device.wda_client import _WdaConnection
+
+        backend = WdaBackend()
+        proc = self._fake_proc()
+        conn = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=proc, local_port=18100,
+        )
+        backend._connections["test-udid"] = conn
+
+        got = await backend._drop_connection("test-udid", expected=conn)
+
+        assert got is None, "a completed drop claimed to be superseded"
+        assert proc.killed

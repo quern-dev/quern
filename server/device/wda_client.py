@@ -273,7 +273,7 @@ class WdaBackend:
 
     async def _drop_connection(
         self, udid: str, expected: _WdaConnection | None = None,
-    ) -> None:
+    ) -> _WdaConnection | None:
         """Forget a device's connection, killing its forward if it had one.
 
         `expected` guards against dropping a *newer* connection than the one
@@ -283,6 +283,13 @@ class WdaBackend:
         is about to use -- turning what used to be a leak into a failed
         request. Pass the connection you actually used, and the drop becomes
         a no-op once it has been replaced.
+
+        **Returns the connection that superseded yours, or None.** That is
+        not a convenience: a caller that no-ops and then carries on to build
+        its own connection *overwrites* the replacement, orphaning its
+        forward -- the same leak this method exists to prevent, one level up.
+        Returning the winner makes "someone else already reconnected" a value
+        the caller has to handle rather than a case it has to remember.
 
         **Every** site that drops a `_WdaConnection` goes through here. A
         connection is the only record of its forward -- `close()` reaps what
@@ -299,12 +306,15 @@ class WdaBackend:
         Kept as one method rather than a rule to remember, because the rule
         was already not being remembered.
         """
-        if expected is not None and self._connections.get(udid) is not expected:
-            return  # already replaced by a newer connection; not ours to drop
+        current = self._connections.get(udid)
+        if expected is not None and current is not expected:
+            # Already replaced by a newer connection; not ours to drop. Hand
+            # the caller the winner so it uses that rather than replacing it.
+            return current
         conn = self._connections.pop(udid, None)
         self._last_interaction.pop(udid, None)
         if conn is None:
-            return
+            return None
         try:
             await _kill_forward(conn.forward_proc)
         except Exception:
@@ -312,6 +322,7 @@ class WdaBackend:
                 "Could not stop the usbmux forward for %s", udid[:8],
                 exc_info=True,
             )
+        return None
 
     async def close(self) -> None:
         """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
@@ -366,7 +377,13 @@ class WdaBackend:
                 if conn.forward_proc.returncode is None:
                     return conn.base_url
                 # Forward proc died — remove and reconnect
-                await self._drop_connection(udid, expected=conn)
+                winner = await self._drop_connection(udid, expected=conn)
+                if winner is not None:
+                    # Someone reconnected while we were checking. Use theirs;
+                    # building our own would overwrite it and orphan its
+                    # forward. Both branches, so this does not depend on
+                    # which of them happens to await today.
+                    return winner.base_url
             else:
                 # tunneld connection — verify WDA is still reachable
                 try:
@@ -381,7 +398,13 @@ class WdaBackend:
                 logger.info(
                     "Cached WDA tunnel stale for %s, reconnecting...", udid[:8],
                 )
-                await self._drop_connection(udid, expected=conn)
+                winner = await self._drop_connection(udid, expected=conn)
+                if winner is not None:
+                    # Someone reconnected while we were checking. Use theirs;
+                    # building our own would overwrite it and orphan its
+                    # forward. Both branches, so this does not depend on
+                    # which of them happens to await today.
+                    return winner.base_url
 
         # Try tunneld first (iOS 17+)
         base_url = await self._try_tunneld_connection(udid)
