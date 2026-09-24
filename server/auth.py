@@ -25,7 +25,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 #: Reachable without a key. Matched exactly, as the paths themselves are.
 PUBLIC_PATHS = frozenset({
     "/", "/health", "/api/v1/health", "/tools", "/docs", "/redoc",
-    "/openapi.json", "/api/v1/proxy/cert", "/video-test",
+    "/openapi.json", "/api/v1/proxy/cert",
 })
 
 _UNAUTHORISED_BODY = json.dumps(

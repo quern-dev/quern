@@ -439,7 +439,7 @@ The paths you will reach for most:
 
 Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key`, except
 `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
-`/video-test`, and `/api/v1/proxy/cert`.
+and `/api/v1/proxy/cert`.
 
 ## Advanced Patterns
 

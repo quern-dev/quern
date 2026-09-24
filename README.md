@@ -493,7 +493,7 @@ reference — every tool, the endpoint behind it, and the endpoints that have no
 tool — lives in **[`docs/api-reference.md`](docs/api-reference.md)**.
 
 All endpoints require `Authorization: Bearer <key>` except `/`, `/health`,
-`/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`, `/video-test`,
+`/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
 and `/api/v1/proxy/cert`. The key is at `~/.quern/api-key`; the server's URL and
 port are in `~/.quern/state.json`.
 
