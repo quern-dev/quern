@@ -245,6 +245,46 @@ class TestTheWrapperRunsFromAnywhere:
         return dest
 
     def _run(self, wrapper, cwd, env_extra=None):
+        """Run the wrapper from `cwd` and hand back the completed process.
+
+        `--version`, not `setup`. Both tests here ask one question -- does
+        `python -m server` resolve *this* wrapper's package -- and that is
+        decided in `runpy`, before any subcommand is dispatched. The wrapper
+        never branches on its arguments; both `exec` lines forward `"$@"`
+        verbatim. And `--version` is dispatched immediately after
+        `_maybe_reexec_in_venv`, so it covers the same re-exec path `setup`
+        did.
+
+        Why it changed: on a loaded CI runner `setup` exceeded the timeout
+        four times on 2026-09-24, across two PRs and three Python versions
+        (#303) -- failing for contention rather than for the thing under
+        test, and a red matrix on a PR that cannot have caused it sends the
+        author to read the wrong diff.
+
+        What `setup` was actually spending that time on is worth recording,
+        because the obvious guess is wrong. It was *not* building a venv: the
+        fixture copies only `server/` and `quern`, so `_find_project_root()`
+        finds no `pyproject.toml` and the venv block is skipped entirely. The
+        60 seconds went on its Homebrew, Xcode, pipx and idb probes -- real
+        subprocesses against the machine running the suite, which is the
+        thing CONTRIBUTING rules out. Removing that is a second reason for
+        this change, independent of the flake.
+
+        `--version` over `--help` or `status`: those reach
+        `from server.main import cli`, which imports uvicorn, and the fixture
+        is a tarball install with no dependencies -- so they crash with
+        `ModuleNotFoundError` and the test passes only because both its
+        assertions are negative. A probe whose passing state is "crashed
+        differently" is one bad assertion away from testing nothing.
+        `--version` needs only `from server import get_version` and exits 0,
+        which is why `_expect_clean_run` below can assert something positive.
+
+        Verified rather than assumed, on a tarball fixture: with the wrapper
+        reverted to `exec python3 -m server "$@"`, `--version` exits 1 with
+        `No module named server`; with `-P` stripped, it exits 1 with
+        `cannot be directly executed` from a directory containing `server/`.
+        Both defects are still caught.
+        """
         import os
         import subprocess
 
@@ -252,9 +292,35 @@ class TestTheWrapperRunsFromAnywhere:
         env.pop("PYTHONPATH", None)
         env.update(env_extra or {})
         return subprocess.run(
-            [str(wrapper), "setup"], cwd=str(cwd), env=env,
-            capture_output=True, text=True, timeout=60,
+            [str(wrapper), "--version"], cwd=str(cwd), env=env,
+            capture_output=True, text=True, timeout=30,
             input="",  # never let it prompt
+        )
+
+    @staticmethod
+    def _expect_clean_run(result, what):
+        """The wrapper completed and printed our own version line.
+
+        Asserted positively because every other check in this class is the
+        *absence* of a string, and a command that fails for some unrelated
+        reason satisfies all of them at once -- which is not hypothetical:
+        with `--help` here, the fixture's missing dependencies made every run
+        exit 1 on `ModuleNotFoundError: uvicorn`, and both tests passed
+        regardless.
+
+        What it does not prove: that the output came from quern rather than
+        from anything else exiting 0 with that prefix. Measured -- a stub
+        wrapper printing "quern 1.0" and never importing the package
+        satisfies this. It is a check that the command *ran ours*, not a
+        signature. The two absence checks remain the ones with teeth, and
+        mutation-testing the wrapper is what proves they bite.
+        """
+        assert result.returncode == 0, (
+            f"{what}: the wrapper exited {result.returncode} rather than "
+            f"running\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert result.stdout.startswith("quern "), (
+            f"{what}: expected quern's version line, got {result.stdout!r}"
         )
 
     def test_it_finds_its_own_package_from_a_foreign_directory(self, tmp_path):
@@ -267,6 +333,7 @@ class TestTheWrapperRunsFromAnywhere:
 
         result = self._run(dest / "quern", elsewhere)
 
+        self._expect_clean_run(result, "from a foreign directory")
         assert "No module named server" not in (result.stdout + result.stderr), (
             "the wrapper could not import its own package from another "
             f"directory:\n{result.stdout}\n{result.stderr}"
@@ -283,6 +350,7 @@ class TestTheWrapperRunsFromAnywhere:
 
         result = self._run(dest / "quern", their_project)
 
+        self._expect_clean_run(result, "from a directory containing server/")
         combined = result.stdout + result.stderr
         assert "cannot be directly executed" not in combined, (
             f"the caller's own server/ package shadowed quern's:\n{combined}"
