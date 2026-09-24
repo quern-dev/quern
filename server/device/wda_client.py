@@ -78,8 +78,47 @@ SOURCE_TIMEOUT_SLOW = 20.0
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
+FORWARD_KILL_GRACE = 3  # seconds to wait for SIGTERM before SIGKILL
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
 IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
+
+
+async def _kill_forward(proc: asyncio.subprocess.Process | None) -> None:
+    """Stop a usbmux forward subprocess, escalating to SIGKILL.
+
+    SIGTERM alone is not enough and cannot be relied on: measured on eleven
+    leaked forwards, every one survived `kill` and needed `kill -9` (#296).
+    So a bare `terminate()` is a cleanup that reports success and leaves the
+    process running -- this repo's recurring shape, in a teardown path.
+
+    One definition, used by both the failure path in `_start_usbmux_forward`
+    and by `close()`, because the two drifted once already: the second had
+    the escalation and the first did not.
+    """
+    if proc is None or proc.returncode is not None:
+        return
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=FORWARD_KILL_GRACE)
+        return
+    except TimeoutError:
+        pass
+    except BaseException:
+        # Cancelled while waiting out the grace period. SIGTERM has been
+        # sent and these children ignore it, so leaving now strands exactly
+        # the orphan this function exists to prevent. Escalate first, then
+        # let the cancellation through. Reachable on a second Ctrl-C, or
+        # from a TaskGroup cancelled while a sibling's cleanup runs.
+        proc.kill()
+        raise
+    proc.kill()
+    # Reap it, so the child does not sit as a zombie for the server's life.
+    # Bounded: a process that ignores SIGKILL is not ours to fix, and
+    # blocking teardown on it would be worse than the leak.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=FORWARD_KILL_GRACE)
+    except TimeoutError:
+        logger.warning("usbmux forward %s survived SIGKILL", proc.pid)
 
 # Class chain queries for the skeleton fallback (when /source times out).
 # These use XCTest's native lazy query API and bypass WDA's snapshot mechanism,
@@ -232,6 +271,59 @@ class WdaBackend:
             return SOURCE_TIMEOUT_SLOW
         return SOURCE_TIMEOUT
 
+    async def _drop_connection(
+        self, udid: str, expected: _WdaConnection | None = None,
+    ) -> _WdaConnection | None:
+        """Forget a device's connection, killing its forward if it had one.
+
+        `expected` guards against dropping a *newer* connection than the one
+        the caller was using. Two requests can be in flight on one device:
+        if A fails and reconnects, and B then fails on the old URL, B's drop
+        would otherwise remove A's fresh connection and kill the forward A
+        is about to use -- turning what used to be a leak into a failed
+        request. Pass the connection you actually used, and the drop becomes
+        a no-op once it has been replaced.
+
+        **Returns the connection that superseded yours, or None.** That is
+        not a convenience: a caller that no-ops and then carries on to build
+        its own connection *overwrites* the replacement, orphaning its
+        forward -- the same leak this method exists to prevent, one level up.
+        Returning the winner makes "someone else already reconnected" a value
+        the caller has to handle rather than a case it has to remember.
+
+        **Every** site that drops a `_WdaConnection` goes through here. A
+        connection is the only record of its forward -- `close()` reaps what
+        is in `self._connections` and nothing else -- so a bare
+        `self._connections.pop()` orphans the subprocess immediately and
+        permanently.
+
+        That was not a hypothetical: four sites popped without killing, and
+        the one that fires on an ordinary transport error (`_request`'s
+        reconnect) then calls `_get_base_url`, which takes the next port.
+        Measured in the wild: eleven forwards on the unbroken run
+        18100-18110, none with a live connection. See #296.
+
+        Kept as one method rather than a rule to remember, because the rule
+        was already not being remembered.
+        """
+        current = self._connections.get(udid)
+        if expected is not None and current is not expected:
+            # Already replaced by a newer connection; not ours to drop. Hand
+            # the caller the winner so it uses that rather than replacing it.
+            return current
+        conn = self._connections.pop(udid, None)
+        self._last_interaction.pop(udid, None)
+        if conn is None:
+            return None
+        try:
+            await _kill_forward(conn.forward_proc)
+        except Exception:
+            logger.warning(
+                "Could not stop the usbmux forward for %s", udid[:8],
+                exc_info=True,
+            )
+        return None
+
     async def close(self) -> None:
         """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
         # Cancel idle timeout task
@@ -251,14 +343,16 @@ class WdaBackend:
                 except Exception:
                     pass
 
-        # Kill port-forward subprocesses
-        for conn in self._connections.values():
-            if conn.forward_proc and conn.forward_proc.returncode is None:
-                conn.forward_proc.terminate()
-                try:
-                    await asyncio.wait_for(conn.forward_proc.wait(), timeout=3)
-                except TimeoutError:
-                    conn.forward_proc.kill()
+        # Kill port-forward subprocesses. Guarded per connection: one that
+        # refuses to die must not strand the rest, nor skip the clear() below.
+        for udid, conn in list(self._connections.items()):
+            try:
+                await _kill_forward(conn.forward_proc)
+            except Exception:
+                logger.warning(
+                    "Could not stop the usbmux forward for %s", udid[:8],
+                    exc_info=True,
+                )
         self._connections.clear()
         self._last_interaction.clear()
         self._current_depth.clear()
@@ -283,7 +377,13 @@ class WdaBackend:
                 if conn.forward_proc.returncode is None:
                     return conn.base_url
                 # Forward proc died — remove and reconnect
-                del self._connections[udid]
+                winner = await self._drop_connection(udid, expected=conn)
+                if winner is not None:
+                    # Someone reconnected while we were checking. Use theirs;
+                    # building our own would overwrite it and orphan its
+                    # forward. Both branches, so this does not depend on
+                    # which of them happens to await today.
+                    return winner.base_url
             else:
                 # tunneld connection — verify WDA is still reachable
                 try:
@@ -298,7 +398,13 @@ class WdaBackend:
                 logger.info(
                     "Cached WDA tunnel stale for %s, reconnecting...", udid[:8],
                 )
-                del self._connections[udid]
+                winner = await self._drop_connection(udid, expected=conn)
+                if winner is not None:
+                    # Someone reconnected while we were checking. Use theirs;
+                    # building our own would overwrite it and orphan its
+                    # forward. Both branches, so this does not depend on
+                    # which of them happens to await today.
+                    return winner.base_url
 
         # Try tunneld first (iOS 17+)
         base_url = await self._try_tunneld_connection(udid)
@@ -406,35 +512,60 @@ class WdaBackend:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Give the forward a moment to establish
-        await asyncio.sleep(0.5)
-
-        if proc.returncode is not None:
-            stderr = (await proc.stderr.read()).decode() if proc.stderr else ""
-            raise DeviceError(
-                f"usbmux forward failed for {udid[:8]}: {stderr.strip()}",
-                tool="wda",
-            )
-
-        base_url = f"http://localhost:{local_port}"
-
-        # Verify WDA is reachable
+        # From here to the `return`, every exit that is not a success has to
+        # kill `proc`. Nothing else will: `close()` reaps the forwards in
+        # `self._connections`, and this one is not in there until the caller
+        # records it, which only happens if we return.
+        #
+        # The try starts on the line after the spawn deliberately. It used to
+        # start below the sleep, which left a 0.5s window on *every* forward
+        # start where a cancellation orphaned the child -- and uvicorn cancels
+        # the request task when a client disconnects, so it was reachable
+        # rather than theoretical.
+        #
+        # It also used to catch httpx errors alone, while the non-200 raise
+        # sat inside the same try. DeviceError is not an httpx error, so it
+        # travelled straight past the cleanup: a device whose WDA answered
+        # 500 leaked a forward on every attempt, and the caller swallows the
+        # error and retries on the next port, so it also incremented.
+        # Measured: eleven orphans on 18100-18110, oldest 6d23h, none with a
+        # live connection. See #296.
         try:
+            # Give the forward a moment to establish
+            await asyncio.sleep(0.5)
+
+            if proc.returncode is not None:
+                stderr = (await proc.stderr.read()).decode() if proc.stderr else ""
+                raise DeviceError(
+                    f"usbmux forward failed for {udid[:8]}: {stderr.strip()}",
+                    tool="wda",
+                )
+
+            base_url = f"http://localhost:{local_port}"
             async with httpx.AsyncClient() as client:
                 resp = await client.get(f"{base_url}/status", timeout=3.0)
-                if resp.status_code != 200:
-                    raise DeviceError(
-                        f"WDA not responding on {udid[:8]} (status {resp.status_code}). "
-                        "Ensure WDA is running on the device.",
-                        tool="wda",
-                    )
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
-            proc.terminate()
+            if resp.status_code != 200:
+                raise DeviceError(
+                    f"WDA not responding on {udid[:8]} (status {resp.status_code}). "
+                    "Ensure WDA is running on the device.",
+                    tool="wda",
+                )
+        except httpx.HTTPError as exc:
+            # The base class, not the three subclasses that had been seen:
+            # a ProxyError or a ProtocolError is just as fatal here, and
+            # naming them one at a time is how this list got short.
+            await _kill_forward(proc)
             raise DeviceError(
                 f"Cannot connect to WDA on {udid[:8]} ({type(exc).__name__}). "
                 "Ensure WDA is running: launch WebDriverAgentRunner on the device.",
                 tool="wda",
-            )
+            ) from exc
+        except BaseException:
+            # The non-200 DeviceError above, and anything else including
+            # cancellation. Re-raised unchanged; this clause exists only so
+            # that no path leaves the subprocess behind.
+            await _kill_forward(proc)
+            raise
 
         logger.info(
             "WDA reachable via usbmux forward at %s (device %s)",
@@ -471,7 +602,7 @@ class WdaBackend:
                         json={"capabilities": {}},
                         timeout=WDA_TIMEOUT,
                     )
-            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+            except httpx.HTTPError as exc:  # base class: a ProxyError is as fatal (#296)
                 raise DeviceError(
                     f"WDA session creation failed on {udid[:8]} ({type(exc).__name__})",
                     tool="wda",
@@ -585,8 +716,7 @@ class WdaBackend:
                         await self.delete_session(udid)
                     except Exception:
                         pass
-                    self._connections.pop(udid, None)
-                    self._last_interaction.pop(udid, None)
+                    await self._drop_connection(udid)
         except asyncio.CancelledError:
             return
 
@@ -616,21 +746,35 @@ class WdaBackend:
         else:
             base_url = await self._get_base_url(udid)
             url = f"{base_url}{path}"
+        # Captured before the request so a failure drops *this* connection
+        # and not a newer one another request has since established.
+        conn_used = self._connections.get(udid)
         try:
             async with httpx.AsyncClient() as client:
                 resp = await getattr(client, method)(
                     url, timeout=timeout or WDA_TIMEOUT, **kwargs,
                 )
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+        except httpx.HTTPError as exc:  # base class: a ProxyError is as fatal (#296)
             if raise_on_timeout and isinstance(exc, httpx.TimeoutException):
                 # Caller wants to handle timeouts — don't invalidate connection
                 # (WDA may still be alive, just slow on this request)
                 raise
-            # Connection lost — invalidate cached connection
-            self._connections.pop(udid, None)
+            # Connection lost — invalidate cached connection, and kill
+            # its forward: this fires on ordinary transport errors and
+            # the reconnect below takes the next port (#296).
+            await self._drop_connection(udid, expected=conn_used)
 
-            # Retry once: _get_base_url() will reconnect (tunneld/usbmux/auto-start)
-            if not _is_connection_retry:
+            # Cleanup widened to every HTTPError; the *retry* deliberately
+            # did not. RemoteProtocolError ("server disconnected without
+            # sending a response") and DecodingError arrive *after* WDA has
+            # the request, so re-sending is re-executing: type_text types
+            # twice, a tap taps twice. tap/swipe/type/press all reach here
+            # with raise_on_timeout=False. The pre-existing set is already
+            # ambiguous for writes (#74); this must not add to it.
+            retryable = isinstance(
+                exc, (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException),
+            )
+            if retryable and not _is_connection_retry:
                 self._current_depth.pop(udid, None)
                 logger.info(
                     "WDA transport error on %s (%s), reconnecting",
@@ -644,11 +788,21 @@ class WdaBackend:
                     **kwargs,
                 )
 
+            if not retryable:
+                # Not retried on purpose: this error arrived after WDA had
+                # the request, so re-sending could re-execute it (#74).
+                raise DeviceError(
+                    f"WDA connection failed on {udid[:8]} "
+                    f"({type(exc).__name__}). The request may already have "
+                    "run on the device, so it was not retried. Ensure WDA is "
+                    "running and re-issue it yourself if it is safe to repeat.",
+                    tool="wda",
+                ) from exc
             raise DeviceError(
                 f"WDA connection failed on {udid[:8]} ({type(exc).__name__}) "
                 "after reconnect attempt. Ensure WDA is running on the device.",
                 tool="wda",
-            )
+            ) from exc
 
         # Track interaction for idle timeout
         self._last_interaction[udid] = time.monotonic()
@@ -702,7 +856,7 @@ class WdaBackend:
         from server.device.wda import start_driver, stop_driver
 
         # Clear cached connection
-        self._connections.pop(udid, None)
+        await self._drop_connection(udid)
 
         os_version = self._device_os_versions.get(udid)
         if not os_version:

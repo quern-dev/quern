@@ -3094,3 +3094,378 @@ class TestSourceTimeoutCoversRealHardware:
     def test_an_unknown_device_uses_the_default(self):
         backend = WdaBackend()
         assert backend._source_timeout("never-seen") == SOURCE_TIMEOUT
+
+
+class TestAFailedForwardIsNotLeft:
+    """A forward is spawned before WDA is probed, so every failure of that
+    probe has to kill it.
+
+    Nothing else will. `close()` reaps what is in `self._connections`, and a
+    forward only gets in there if `_start_usbmux_forward` returns -- so one
+    that fails verification is unreachable the moment it is orphaned.
+
+    The case that mattered is `status != 200`. The old code caught httpx
+    errors and terminated there, but the non-200 raise sits inside the same
+    `try` and DeviceError is not an httpx error, so it travelled past the
+    cleanup. Eleven forwards were found alive on 18100-18110, the oldest
+    nearly seven days (#296).
+
+    These assert the *process is dead*, not that an exception escaped:
+    asserting the raise passed happily against the bug.
+    """
+
+    @staticmethod
+    def _backend_with_fake_forward(monkeypatch, proc):
+        from server.device import wda_client
+
+        backend = WdaBackend()
+        monkeypatch.setattr(
+            "server.device.tunneld.find_pymobiledevice3_binary",
+            lambda: "/fake/pmd3",
+        )
+
+        async def fake_exec(*a, **kw):
+            return proc
+
+        monkeypatch.setattr(wda_client.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(wda_client.asyncio, "sleep", AsyncMock())
+        return backend
+
+    @staticmethod
+    def _fake_proc():
+        """A forward that **ignores SIGTERM**, which is what the real ones did.
+
+        This is the load-bearing detail. Measured on the eleven found in the
+        wild, every one survived `kill` and needed `kill -9`. An earlier
+        version of this helper set `returncode = -15` in `terminate()`, so
+        the mock died on SIGTERM -- and with it, all four tests below passed
+        against a cleanup of a bare `proc.terminate()`, the exact thing the
+        fix exists to replace. Asserting a signal was *sent* is not asserting
+        the process *died*.
+
+        `wait()` raising TimeoutError stands in for the grace period expiring
+        without making the suite wait three seconds for it.
+        """
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.returncode = None
+        proc.terminated = False
+        proc.killed = False
+
+        def terminate():
+            proc.terminated = True  # sent, and ignored, like the real ones
+
+        def kill():
+            proc.killed = True
+            proc.returncode = -9
+
+        proc.terminate.side_effect = terminate
+        proc.kill.side_effect = kill
+
+        async def wait():
+            if proc.returncode is None:
+                raise TimeoutError
+            return proc.returncode
+
+        proc.wait = wait
+        return proc
+
+    async def test_a_non_200_kills_the_forward(self, monkeypatch):
+        """The leak. WDA answers, but not with 200."""
+        proc = self._fake_proc()
+        backend = self._backend_with_fake_forward(monkeypatch, proc)
+
+        async def fake_get(self, url, **kw):
+            return httpx.Response(500, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        with pytest.raises(DeviceError, match="status 500"):
+            await backend._start_usbmux_forward("test-udid")
+
+        assert proc.killed, "a non-200 left the forward process running"
+        assert proc.returncode is not None, "the forward was never reaped"
+
+    async def test_a_transport_error_kills_the_forward(self, monkeypatch):
+        """The path that already worked, kept honest."""
+        proc = self._fake_proc()
+        backend = self._backend_with_fake_forward(monkeypatch, proc)
+
+        async def fake_get(self, url, **kw):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        with pytest.raises(DeviceError, match="Cannot connect"):
+            await backend._start_usbmux_forward("test-udid")
+
+        assert proc.killed, "a transport error left the forward running"
+
+    async def test_an_unexpected_error_kills_the_forward(self, monkeypatch):
+        """Not every failure is httpx's or ours, and the process still goes."""
+        proc = self._fake_proc()
+        backend = self._backend_with_fake_forward(monkeypatch, proc)
+
+        async def fake_get(self, url, **kw):
+            raise RuntimeError("something else entirely")
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        with pytest.raises(RuntimeError):
+            await backend._start_usbmux_forward("test-udid")
+
+        assert proc.killed, "an unexpected error left the forward running"
+
+    async def test_a_success_leaves_the_forward_running(self, monkeypatch):
+        """The control. Without this the cleanup could kill unconditionally
+        and all three tests above would still pass."""
+        proc = self._fake_proc()
+        backend = self._backend_with_fake_forward(monkeypatch, proc)
+
+        async def fake_get(self, url, **kw):
+            return httpx.Response(200, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        from server.device.wda_client import FORWARD_START_PORT
+
+        base_url, returned, port = await backend._start_usbmux_forward("test-udid")
+
+        assert returned is proc
+        assert not proc.terminated and not proc.killed, "a working forward was killed"
+        assert port == FORWARD_START_PORT
+        assert base_url == f"http://localhost:{FORWARD_START_PORT}"
+
+    async def test_sigterm_alone_is_not_trusted(self):
+        """The forwards found in the wild ignored SIGTERM. Cleanup that stops
+        at terminate() reports success and leaves the process running."""
+        from server.device.wda_client import _kill_forward
+
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.returncode = None
+        proc.killed = False
+
+        def kill():
+            proc.killed = True
+            proc.returncode = -9
+
+        proc.terminate.side_effect = lambda: None  # ignores SIGTERM
+        proc.kill.side_effect = kill
+
+        waits = {"n": 0}
+
+        async def wait():
+            waits["n"] += 1
+            if proc.returncode is None:
+                raise TimeoutError
+            return proc.returncode
+
+        proc.wait = wait
+
+        await _kill_forward(proc)
+
+        assert proc.killed, "escalation to SIGKILL never happened"
+
+    async def test_a_cancelled_start_does_not_orphan_the_forward(self, monkeypatch):
+        """The `except BaseException` clause says it covers cancellation.
+        Nothing tested that, and narrowing it to `except Exception` left the
+        suite green — so the comment was the only thing asserting it."""
+        proc = self._fake_proc()
+        backend = self._backend_with_fake_forward(monkeypatch, proc)
+
+        async def fake_get(self, url, **kw):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        with pytest.raises(asyncio.CancelledError):
+            await backend._start_usbmux_forward("test-udid")
+
+        assert proc.killed, "a cancelled start left the forward running"
+
+    async def test_a_cancel_during_the_settle_sleep_does_not_orphan_it(
+        self, monkeypatch,
+    ):
+        """The widest window: 0.5s on every forward start, before the probe.
+        uvicorn cancels the request task when a client disconnects, so this
+        is reachable rather than theoretical."""
+        from server.device import wda_client
+
+        proc = self._fake_proc()
+        backend = self._backend_with_fake_forward(monkeypatch, proc)
+
+        async def cancelled_sleep(*a, **kw):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(wda_client.asyncio, "sleep", cancelled_sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await backend._start_usbmux_forward("test-udid")
+
+        assert proc.killed, "cancelling the settle sleep orphaned the forward"
+
+    async def test_dropping_a_connection_kills_its_forward(self):
+        """Every site that forgets a connection goes through one method,
+        because four of them did not and each orphaned the forward."""
+        proc = self._fake_proc()
+        backend = WdaBackend()
+        from server.device.wda_client import _WdaConnection
+
+        backend._connections["test-udid"] = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=proc, local_port=18100,
+        )
+        backend._last_interaction["test-udid"] = 0.0
+
+        await backend._drop_connection("test-udid")
+
+        assert proc.killed, "the connection was dropped but its forward lived on"
+        assert "test-udid" not in backend._connections
+        assert "test-udid" not in backend._last_interaction
+
+    async def test_a_transport_error_retry_does_not_orphan_the_forward(
+        self, monkeypatch,
+    ):
+        """`_request`'s reconnect fires on ordinary transport errors and then
+        takes the next port. It popped the connection without killing the
+        forward, which explains the unbroken 18100-18110 run better than the
+        non-200 path does."""
+        proc = self._fake_proc()
+        backend = WdaBackend()
+        from server.device.wda_client import _WdaConnection
+
+        backend._connections["test-udid"] = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=proc, local_port=18100,
+        )
+
+        async def boom(*a, **kw):
+            raise httpx.ConnectError("device went away")
+
+        monkeypatch.setattr(httpx.AsyncClient, "request", boom)
+        monkeypatch.setattr(httpx.AsyncClient, "get", boom)
+
+        # _is_connection_retry=True so it drops the connection and gives up
+        # rather than reconnecting -- the reconnect is what would take the
+        # next port, and this test is about what happens to the old one.
+        with pytest.raises((DeviceError, httpx.HTTPError)):
+            await backend._request(
+                "get", "test-udid", "/status", _is_connection_retry=True,
+            )
+
+        assert proc.killed, "the reconnect path orphaned the forward"
+
+    async def test_a_post_wda_error_does_not_resend_the_request(self, monkeypatch):
+        """Widening the *cleanup* to httpx.HTTPError must not widen the retry.
+
+        RemoteProtocolError means "server disconnected without sending a
+        response" — WDA already had the request and may have run it. Re-sending
+        makes type_text type twice and a tap tap twice. tap/swipe/type/press
+        all reach here with raise_on_timeout=False (#74, #296).
+        """
+        proc = self._fake_proc()
+        backend = WdaBackend()
+        from server.device.wda_client import _WdaConnection
+
+        backend._connections["test-udid"] = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=proc, local_port=18100,
+        )
+        sent = {"n": 0}
+
+        async def boom(*a, **kw):
+            sent["n"] += 1
+            raise httpx.RemoteProtocolError("Server disconnected")
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", boom)
+        reconnects = AsyncMock(return_value="http://localhost:18101")
+        monkeypatch.setattr(backend, "_get_base_url", reconnects)
+
+        with pytest.raises(DeviceError, match="may already have run"):
+            await backend._request("post", "test-udid", "/wda/tap")
+
+        assert sent["n"] == 1, "a write was re-sent after WDA already had it"
+        assert proc.killed, "the forward was not cleaned up"
+
+    async def test_a_connect_error_still_retries(self, monkeypatch):
+        """The control for the test above: narrowing the retry must not
+        disable it. A ConnectError happens before WDA sees anything."""
+        backend = WdaBackend()
+        sent = {"n": 0}
+
+        async def boom(*a, **kw):
+            sent["n"] += 1
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", boom)
+        monkeypatch.setattr(
+            backend, "_get_base_url", AsyncMock(return_value="http://localhost:18100"),
+        )
+
+        with pytest.raises(DeviceError, match="after reconnect attempt"):
+            await backend._request("get", "test-udid", "/status")
+
+        assert sent["n"] == 2, "a pre-send failure was not retried"
+
+    async def test_dropping_does_not_kill_a_newer_connection(self):
+        """Two requests in flight: A fails and reconnects, B then fails on the
+        stale URL. B must not kill the forward A just established — that turns
+        a leak into a broken request, which is worse."""
+        from server.device.wda_client import _WdaConnection
+
+        backend = WdaBackend()
+        old_proc = self._fake_proc()
+        new_proc = self._fake_proc()
+        conn_old = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=old_proc, local_port=18100,
+        )
+        conn_new = _WdaConnection(
+            base_url="http://localhost:18101", forward_proc=new_proc, local_port=18101,
+        )
+
+        # A has already replaced the connection.
+        backend._connections["test-udid"] = conn_new
+
+        # B, which was using conn_old, now tries to drop.
+        await backend._drop_connection("test-udid", expected=conn_old)
+
+        assert not new_proc.killed, "the newer forward was killed by a stale drop"
+        assert backend._connections["test-udid"] is conn_new
+
+    async def test_a_superseded_reconnect_uses_the_winners_connection(self):
+        """If another caller reconnected while we were probing, we must use
+        their connection — not build our own over the top of it, which would
+        orphan their forward. The guard against killing a newer connection
+        created this second hole one level up."""
+        from server.device.wda_client import _WdaConnection
+
+        backend = WdaBackend()
+        stale = _WdaConnection(base_url="http://[fd00::1]:8100")  # tunneld, no proc
+        winner_proc = self._fake_proc()
+        winner = _WdaConnection(
+            base_url="http://localhost:18109", forward_proc=winner_proc,
+            local_port=18109,
+        )
+        backend._connections["test-udid"] = winner  # already replaced
+
+        got = await backend._drop_connection("test-udid", expected=stale)
+
+        assert got is winner, "a no-op drop did not name who superseded it"
+        assert not winner_proc.killed
+        assert backend._connections["test-udid"] is winner
+
+    async def test_a_real_drop_reports_no_winner(self):
+        """The control: when the drop actually happens there is no winner to
+        return, so a caller cannot mistake its own removal for someone
+        else's reconnect."""
+        from server.device.wda_client import _WdaConnection
+
+        backend = WdaBackend()
+        proc = self._fake_proc()
+        conn = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=proc, local_port=18100,
+        )
+        backend._connections["test-udid"] = conn
+
+        got = await backend._drop_connection("test-udid", expected=conn)
+
+        assert got is None, "a completed drop claimed to be superseded"
+        assert proc.killed
