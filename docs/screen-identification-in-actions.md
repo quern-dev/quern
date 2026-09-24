@@ -20,10 +20,13 @@
 > - `swipe` and `press_button` do not take `include_screen_context`, so they
 >   gain nothing yet.
 > - The `not_found` branch of `tap_element` and the timeout branch of
->   `wait_for_element` return `screen_context` built elsewhere
->   (`controller_ui._build_screen_context`) and are **not** identified — see
->   the worked 404 example below, which shows an `identified_as` that the
->   code does not produce.
+>   `wait_for_element` **are** identified, as of #288 — they were not when
+>   this note was first written. The worked 404 example below is therefore
+>   right about the shape, though its `confidence` is still a float where
+>   the code returns a string. One exception: `tap_element` skips
+>   identification when its full-tree read failed and it is holding the
+>   filtered list, because landmarks compared against the target's own
+>   matches name a screen confidently and wrongly.
 >
 > This document also predates `web_url_contains` landmarks. Identification
 > reaches for the Web Inspector page listing only when a loaded landmark

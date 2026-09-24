@@ -55,20 +55,6 @@ _DEVICECTL_JSON = json.dumps({
 
 
 @pytest.fixture(autouse=True)
-def _a_clean_alias_map():
-    """`_identity_aliases` is a module global, so it outlives each test.
-
-    Without this, whichever test ran `_listed()` first warmed the map for
-    every test after it, and a test that never triggers discovery of its own
-    canonicalises anyway -- passing on a neighbour's side effect. That is the
-    same defect as pre-warming inside a harness, one level further out.
-    """
-    dc._identity_aliases.clear()
-    yield
-    dc._identity_aliases.clear()
-
-
-@pytest.fixture(autouse=True)
 def _a_clean_cert_state():
     """Cert state is a file under `QUERN_STATE_DIR`, shared by every test here.
 
