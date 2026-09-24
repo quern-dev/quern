@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from fastapi import APIRouter, Query, Request
 
 from server.api.actions import logged_action
-from server.models import CrashLatestResponse
+from server.models import CrashLatestResponse, UtcDatetime
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ router = APIRouter(prefix="/api/v1/crashes", tags=["crashes"])
 async def get_latest_crashes(
     request: Request,
     limit: int = Query(default=10, ge=1, le=100),
-    since: datetime | None = None,
+    since: UtcDatetime | None = None,
     udid: str | None = Query(
         default=None,
         description="Device UDID to pull crashes from before returning",
