@@ -353,12 +353,14 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     # **Android is deliberately exempt, for now.** That sentence is false for
     # it: `simulators_without_cert` skips every non-simulator, so the gate
     # neither installs nor refuses (D9 in docs/proposals/cert-trust-model.md).
-    # Worse, `install_cert`'s Android path is also the only code in the tree
-    # that calls `adb.set_http_proxy`, so gating it here would remove both the
-    # cert and the emulator's proxy configuration and leave nothing to say so
-    # -- silent HTTPS failure, the exact class this subsystem exists to
-    # prevent, relocated to Android. `docs/guides/android-proxy.md` also
-    # promises the re-install after an emulator reboot that this provides.
+    # It no longer takes the proxy with it, though. That was the other half of
+    # the argument here -- `install_cert`'s Android path used to be the only
+    # code in the tree calling `adb.set_http_proxy`, so gating it removed the
+    # device's routing as well as its cert. #265 moved routing to
+    # `POST /proxy/device-proxy-config`, which is callable on its own and does
+    # not depend on a cert install succeeding, so only the cert argument above
+    # still holds. `docs/guides/android-proxy.md` also promises the re-install
+    # after an emulator reboot that this provides.
     # Bringing Android under the gate belongs with D9, where it can be tested
     # against a real emulator.
     cert_auto_installed: bool | None = None

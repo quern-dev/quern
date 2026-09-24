@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from server.models import DeviceCertState, DeviceType
+from server.models import DeviceCertState
 from server.proxy.cert_state import read_cert_state_for_device, update_cert_state
 
 logger = logging.getLogger(__name__)
@@ -386,14 +386,18 @@ async def _install_cert_android(
         "verified_at": now,
     })
 
-    # Also set HTTP proxy for emulators (10.0.2.2 = host loopback)
-    if controller._device_type(udid) == DeviceType.ANDROID_EMULATOR:
-        try:
-            await adb.set_http_proxy(udid, "10.0.2.2", 9101)
-            logger.info(f"Configured HTTP proxy on Android emulator {udid}")
-        except Exception as e:
-            logger.warning(f"Failed to set HTTP proxy on {udid}: {e}")
-
+    # No proxy configuration here. It used to happen at this point, gated on
+    # ANDROID_EMULATOR and hardcoded to 10.0.2.2:9101, which made routing a
+    # side-effect of a *successful* cert install -- so a device that could not
+    # take the cert got no proxy either, not even for plaintext HTTP, which
+    # needs no certificate at all. That is backwards twice over:
+    #
+    #   - the mechanism (`settings put global http_proxy`) is universal, needs
+    #     no root, and works on any Android device on any transport;
+    #   - the dependency runs the other way. `mitm.it` is served *by* the
+    #     proxy, so a device must be routed before it can fetch a cert at all.
+    #
+    # Routing is `POST /proxy/device-proxy-config` now, callable on its own.
     logger.info(f"Installed mitmproxy CA cert on Android device {udid}")
     return True
 
