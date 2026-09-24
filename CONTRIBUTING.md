@@ -169,26 +169,26 @@ the copy to trust, and the one to update.
 
   **The allowance is a rolling budget, and CodeRabbit states it.** This was recorded here as one review per hour, which is wrong. Every review comment carries a *Recent review info* block giving both the remaining budget and the current rate — measured 2026-09-24: "3 reviews are currently available. Your included PR review attempts over the past 7 days set your current allowance at 5 reviews per hour." So the rate is derived from recent usage rather than fixed, which is why observed intervals varied wildly that week (a refusal quoting 25 minutes, a banner quoting 39, two grants eleven minutes apart, one granted immediately).
 
-  **Attempts count, not just grants — but do not try to measure that yourself.**
-  CodeRabbit's info block states it: "Your included PR review *attempts* over the
-  past 7 days set your current allowance." That is the vendor's own description
-  and is the reason to ask once rather than loop.
+  **A refused ask costs nothing; an accepted one is what meters.** Asking is
+  free — post `@coderabbitai review`, and if the answer is a refusal you have
+  spent nothing. What draws down the allowance is a review actually being
+  *performed*. So retry rather than computing when a window should have
+  reopened.
 
-  What you cannot do is attribute a moving window to your own asks. **The budget
-  is shared across every agent on this repo, and several are usually asking at
-  the same time.** During #306 the lift time moved out twice shortly after this
-  session asked, and the stated allowance fell from 5 per hour to 3; that was
-  written up here as cause and effect, and it was not -- other sessions were
-  requesting reviews throughout. Two timestamps in a system with other writers
-  is a correlation, and this file is the wrong place to record one as a
-  measurement.
+  CodeRabbit's info block says "your included PR review **attempts** over the
+  past 7 days set your current allowance", and "attempts" there means the ones
+  it accepted, not the ones it turned away. This paragraph was rewritten twice
+  on 2026-09-24 to say the opposite — that retrying spends the budget — on the
+  strength of watching the lift time move out after this session's asks. The
+  budget is shared with every other agent on the repo and several ask
+  concurrently, so that correlation had other writers in it and was never
+  evidence of anything. Stated by Jerimiah, who can see the account.
 
-  So: the reason to ask once is that attempts are metered, per CodeRabbit. Any
-  "I watched my own request push the window" reasoning is unavailable to you
-  here, because you cannot see the other askers.
-
-  Wait out the stated time and ask **once**. Read the number rather than
-  inferring it, and read the acknowledgement body — `Action not completed` is the refusal, and the walkthrough's "Review limit reached" banner is a stale edit that lies. The budget is shared across PRs and across agents, so never ask on two at once, and ask the sessions working other open PRs before taking a slot.
+  Read the acknowledgement body to tell the two apart — `Action not completed`
+  is the refusal, and the walkthrough's "Review limit reached" banner is a
+  stale edit that lies. The budget being shared is still the reason not to ask
+  on two PRs at once, and to check with the sessions working other open PRs
+  before taking a slot.
 
   **A clean-looking PR page is not evidence of a review.** Three PRs opened during a limited window on 2026-09-23 showed `CLEAN` with zero unresolved threads and had never been reviewed at all — the auto-review-on-open was refused and nothing said so. The reliable check is the coverage marker, which must equal your head:
 
