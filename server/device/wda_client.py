@@ -271,8 +271,18 @@ class WdaBackend:
             return SOURCE_TIMEOUT_SLOW
         return SOURCE_TIMEOUT
 
-    async def _drop_connection(self, udid: str) -> None:
+    async def _drop_connection(
+        self, udid: str, expected: _WdaConnection | None = None,
+    ) -> None:
         """Forget a device's connection, killing its forward if it had one.
+
+        `expected` guards against dropping a *newer* connection than the one
+        the caller was using. Two requests can be in flight on one device:
+        if A fails and reconnects, and B then fails on the old URL, B's drop
+        would otherwise remove A's fresh connection and kill the forward A
+        is about to use -- turning what used to be a leak into a failed
+        request. Pass the connection you actually used, and the drop becomes
+        a no-op once it has been replaced.
 
         **Every** site that drops a `_WdaConnection` goes through here. A
         connection is the only record of its forward -- `close()` reaps what
@@ -289,6 +299,8 @@ class WdaBackend:
         Kept as one method rather than a rule to remember, because the rule
         was already not being remembered.
         """
+        if expected is not None and self._connections.get(udid) is not expected:
+            return  # already replaced by a newer connection; not ours to drop
         conn = self._connections.pop(udid, None)
         self._last_interaction.pop(udid, None)
         if conn is None:
@@ -354,7 +366,7 @@ class WdaBackend:
                 if conn.forward_proc.returncode is None:
                     return conn.base_url
                 # Forward proc died — remove and reconnect
-                await self._drop_connection(udid)
+                await self._drop_connection(udid, expected=conn)
             else:
                 # tunneld connection — verify WDA is still reachable
                 try:
@@ -369,7 +381,7 @@ class WdaBackend:
                 logger.info(
                     "Cached WDA tunnel stale for %s, reconnecting...", udid[:8],
                 )
-                await self._drop_connection(udid)
+                await self._drop_connection(udid, expected=conn)
 
         # Try tunneld first (iOS 17+)
         base_url = await self._try_tunneld_connection(udid)
@@ -711,6 +723,9 @@ class WdaBackend:
         else:
             base_url = await self._get_base_url(udid)
             url = f"{base_url}{path}"
+        # Captured before the request so a failure drops *this* connection
+        # and not a newer one another request has since established.
+        conn_used = self._connections.get(udid)
         try:
             async with httpx.AsyncClient() as client:
                 resp = await getattr(client, method)(
@@ -723,11 +738,20 @@ class WdaBackend:
                 raise
             # Connection lost — invalidate cached connection, and kill
             # its forward: this fires on ordinary transport errors and
-            # the retry below takes the next port (#296).
-            await self._drop_connection(udid)
+            # the reconnect below takes the next port (#296).
+            await self._drop_connection(udid, expected=conn_used)
 
-            # Retry once: _get_base_url() will reconnect (tunneld/usbmux/auto-start)
-            if not _is_connection_retry:
+            # Cleanup widened to every HTTPError; the *retry* deliberately
+            # did not. RemoteProtocolError ("server disconnected without
+            # sending a response") and DecodingError arrive *after* WDA has
+            # the request, so re-sending is re-executing: type_text types
+            # twice, a tap taps twice. tap/swipe/type/press all reach here
+            # with raise_on_timeout=False. The pre-existing set is already
+            # ambiguous for writes (#74); this must not add to it.
+            retryable = isinstance(
+                exc, (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException),
+            )
+            if retryable and not _is_connection_retry:
                 self._current_depth.pop(udid, None)
                 logger.info(
                     "WDA transport error on %s (%s), reconnecting",
@@ -741,11 +765,21 @@ class WdaBackend:
                     **kwargs,
                 )
 
+            if not retryable:
+                # Not retried on purpose: this error arrived after WDA had
+                # the request, so re-sending could re-execute it (#74).
+                raise DeviceError(
+                    f"WDA connection failed on {udid[:8]} "
+                    f"({type(exc).__name__}). The request may already have "
+                    "run on the device, so it was not retried. Ensure WDA is "
+                    "running and re-issue it yourself if it is safe to repeat.",
+                    tool="wda",
+                ) from exc
             raise DeviceError(
                 f"WDA connection failed on {udid[:8]} ({type(exc).__name__}) "
                 "after reconnect attempt. Ensure WDA is running on the device.",
                 tool="wda",
-            )
+            ) from exc
 
         # Track interaction for idle timeout
         self._last_interaction[udid] = time.monotonic()

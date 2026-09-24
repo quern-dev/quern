@@ -3353,3 +3353,79 @@ class TestAFailedForwardIsNotLeft:
             )
 
         assert proc.killed, "the reconnect path orphaned the forward"
+
+    async def test_a_post_wda_error_does_not_resend_the_request(self, monkeypatch):
+        """Widening the *cleanup* to httpx.HTTPError must not widen the retry.
+
+        RemoteProtocolError means "server disconnected without sending a
+        response" — WDA already had the request and may have run it. Re-sending
+        makes type_text type twice and a tap tap twice. tap/swipe/type/press
+        all reach here with raise_on_timeout=False (#74, #296).
+        """
+        proc = self._fake_proc()
+        backend = WdaBackend()
+        from server.device.wda_client import _WdaConnection
+
+        backend._connections["test-udid"] = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=proc, local_port=18100,
+        )
+        sent = {"n": 0}
+
+        async def boom(*a, **kw):
+            sent["n"] += 1
+            raise httpx.RemoteProtocolError("Server disconnected")
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", boom)
+        reconnects = AsyncMock(return_value="http://localhost:18101")
+        monkeypatch.setattr(backend, "_get_base_url", reconnects)
+
+        with pytest.raises(DeviceError, match="may already have run"):
+            await backend._request("post", "test-udid", "/wda/tap")
+
+        assert sent["n"] == 1, "a write was re-sent after WDA already had it"
+        assert proc.killed, "the forward was not cleaned up"
+
+    async def test_a_connect_error_still_retries(self, monkeypatch):
+        """The control for the test above: narrowing the retry must not
+        disable it. A ConnectError happens before WDA sees anything."""
+        backend = WdaBackend()
+        sent = {"n": 0}
+
+        async def boom(*a, **kw):
+            sent["n"] += 1
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", boom)
+        monkeypatch.setattr(
+            backend, "_get_base_url", AsyncMock(return_value="http://localhost:18100"),
+        )
+
+        with pytest.raises(DeviceError, match="after reconnect attempt"):
+            await backend._request("get", "test-udid", "/status")
+
+        assert sent["n"] == 2, "a pre-send failure was not retried"
+
+    async def test_dropping_does_not_kill_a_newer_connection(self):
+        """Two requests in flight: A fails and reconnects, B then fails on the
+        stale URL. B must not kill the forward A just established — that turns
+        a leak into a broken request, which is worse."""
+        from server.device.wda_client import _WdaConnection
+
+        backend = WdaBackend()
+        old_proc = self._fake_proc()
+        new_proc = self._fake_proc()
+        conn_old = _WdaConnection(
+            base_url="http://localhost:18100", forward_proc=old_proc, local_port=18100,
+        )
+        conn_new = _WdaConnection(
+            base_url="http://localhost:18101", forward_proc=new_proc, local_port=18101,
+        )
+
+        # A has already replaced the connection.
+        backend._connections["test-udid"] = conn_new
+
+        # B, which was using conn_old, now tries to drop.
+        await backend._drop_connection("test-udid", expected=conn_old)
+
+        assert not new_proc.killed, "the newer forward was killed by a stale drop"
+        assert backend._connections["test-udid"] is conn_new
