@@ -814,9 +814,16 @@ rm -rf /data/local/tmp/tmp-ca-copy
         try:
             await self._run_adb_for_device(serial, "shell", "svc", "wifi", "disable")
         except Exception:
-            # Nothing has changed on the device, so there is nothing to undo.
-            logger.debug("Could not disable Wi-Fi on %s", serial, exc_info=True)
-            return False
+            # Ambiguous, not harmless. A nonzero adb exit does not prove the
+            # command had no effect -- it may have disabled Wi-Fi and then
+            # failed to report back -- so returning here could leave the radio
+            # off with nothing left to turn it on. Fall through to the enable
+            # attempts instead, which are idempotent and cost nothing when
+            # Wi-Fi was never actually disturbed.
+            logger.warning(
+                "Disabling Wi-Fi on %s failed; attempting to re-enable in case "
+                "it took effect anyway", serial, exc_info=True,
+            )
         await asyncio.sleep(1.0)
         # Retried where `disable` is not, and warned about rather than logged
         # at debug. `svc wifi enable` is idempotent, and sharing one `try` with

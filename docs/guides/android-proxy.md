@@ -79,17 +79,45 @@ The `<debug-overrides>` block only applies to debug builds. Release builds ignor
 
 ## HTTP Proxy
 
-### Emulators
+Pointing a device at the proxy is its own operation, separate from installing
+the certificate. Ask your agent to configure the proxy, or call
+`record_device_proxy_config` with `apply=true`.
 
-Your agent configures this automatically during cert installation. Android emulators use `10.0.2.2` to reach the host machine's loopback — this is a built-in Android emulator feature.
+This works on **any** Android device or emulator, on USB or over the network,
+and needs no root: it writes `settings put global http_proxy` over adb. Quern
+picks the host address on the device's own subnet and the port the proxy is
+actually listening on, and reads the network name and the device's IP off the
+device rather than asking you to type them.
 
-### Physical Devices
+Do this **before** installing the certificate, not after. `mitm.it` is served
+*by* the proxy, so a device has to be routed through it before it can fetch a
+cert at all — and plain HTTP needs no certificate, so the proxy is useful on
+its own.
 
-Manual configuration: Settings > Wi-Fi > long-press your network > Modify network > Proxy: Manual. Set your Mac's IP and port 9101 — same as iOS physical device setup.
+Two things in the response are worth reading:
+
+- `network_reattached` — the setting is only read when the network attaches,
+  so quern bounces Wi-Fi. When this is `false` the setting is written but not
+  yet in effect; reconnect the device and it will be. `hint` says what to do.
+  Quern will not bounce Wi-Fi on a device whose adb connection runs over that
+  same Wi-Fi, since that would cut the connection needed to turn it back on.
+- `proxy_verified` — quern reads the setting back off the device and compares
+  it, rather than assuming the write took.
+
+### Physical devices
+
+No different. The Settings > Wi-Fi > Modify network > Proxy route still works
+by hand if you prefer, but nothing requires it.
 
 ## Cleanup
 
-Unlike the system proxy on macOS, the Android emulator proxy and cert are designed to persist. They don't affect anything outside the emulator, so there's nothing to clean up when you're done.
+The proxy setting lives in Android's global settings and **survives reboots**,
+so it stays until something changes it. A device left pointing at a proxy that
+is no longer listening has no working network, so unset it when you are done:
+call `record_device_proxy_config` with `clear=true`, which unsets the proxy and
+forgets every network config quern recorded for that device.
+
+The certificate is designed to persist and affects nothing outside the device.
 
 ## Troubleshooting
 
@@ -101,4 +129,10 @@ Unlike the system proxy on macOS, the Android emulator proxy and cert are design
 - Check if the app uses certificate pinning — pinned apps reject any non-pinned cert.
 
 **No traffic appearing:**
-- Ask your agent to check the proxy status. The emulator's HTTP proxy should be pointing at `10.0.2.2:9101`.
+- Ask your agent to check the proxy status, and look at `proxy_verified` and
+  `network_reattached` in the response to `record_device_proxy_config`. The
+  device's proxy should point at your machine's address on the device's own
+  network and at the port the proxy actually listens on — `10.0.2.2` is the
+  emulator's alias for *its* host and is not reachable from a physical phone.
+- If `network_reattached` is `false`, the setting is written but the device has
+  not picked it up. Reconnect it to Wi-Fi.

@@ -232,17 +232,41 @@ class TestTheRadioIsNotLeftOff:
 
         assert await adb.reattach_network("8BAY0WCL7") is False
 
-    async def test_a_failed_disable_changes_nothing_and_is_not_retried(
+    async def test_a_failed_disable_is_ambiguous_so_enable_is_still_attempted(
         self, adb, monkeypatch,
     ):
-        """Nothing happened on the device, so there is nothing to undo."""
+        """A nonzero adb exit does not prove the command had no effect. If it
+        disabled Wi-Fi and then failed to report back, returning here would
+        leave the radio off with nothing left to turn it on."""
         calls = []
 
         async def fake(serial, *args):
             calls.append(args)
-            raise RuntimeError("offline")
+            if args == ("shell", "svc", "wifi", "disable"):
+                raise RuntimeError("adb error after the command ran")
+            if args[:2] == ("shell", "ip"):
+                return ("30: wlan0    inet 192.168.1.244/24 brd x", "")
+            return ("", "")
 
         monkeypatch.setattr(adb, "_run_adb_for_device", fake)
 
+        result = await adb.reattach_network("8BAY0WCL7")
+
+        assert ("shell", "svc", "wifi", "enable") in calls
+        assert result is True
+
+    async def test_a_device_left_without_an_address_still_reports_failure(
+        self, adb, monkeypatch,
+    ):
+        """Recovery is attempted, not assumed to have worked."""
+        async def fake(serial, *args):
+            if args == ("shell", "svc", "wifi", "disable"):
+                raise RuntimeError("adb error")
+            if args[:2] == ("shell", "ip"):
+                return ("1: lo    inet 127.0.0.1/8 scope host lo", "")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
         assert await adb.reattach_network("8BAY0WCL7") is False
-        assert calls == [("shell", "svc", "wifi", "disable")]

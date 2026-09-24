@@ -451,7 +451,7 @@ iOS simulators: Always works (simctl keychain).
 
 Android emulators: Requires a rootable image (Google APIs, NOT Google Play). Google Play images have a locked system partition. If the user's emulator is a Google Play image, suggest creating a Google APIs AVD instead — it's identical for app development (apps are installed via adb, not Play Store). The tool will auto-detect and return a helpful error if the image isn't rootable.
 
-Also auto-configures the HTTP proxy on Android emulators (10.0.2.2:9101).
+Does NOT route the device through the proxy. On Android, call record_device_proxy_config with apply=true for that — it works without the cert (plain HTTP needs none) and is required before the device can reach mitm.it, which the proxy itself serves.
 
 When udid is omitted, resolution order is: (1) the active device set via resolve_device, if any — (2) otherwise, all booted simulators and rootable Android emulators in a single batch call. Do NOT loop over individual UDIDs — the batch path is just as fast and avoids N redundant round-trips.
 
