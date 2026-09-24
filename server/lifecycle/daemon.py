@@ -188,6 +188,17 @@ def _print_status(state: dict) -> None:
         if local_capture:
             names = ", ".join(local_capture) if isinstance(local_capture, list) else "enabled"
             print(f"  Local capture: {names}")
+            added = state.get("local_capture_added") or []
+            if added:
+                # These are newly routed through the proxy, so if the CA is not
+                # trusted on a booted simulator their HTTPS starts failing where
+                # it worked before. Booting cannot refuse over a certificate, so
+                # naming them is the remedy available -- and this is the path
+                # the default `quern start` takes.
+                print(f"    added for you: {', '.join(added)}")
+                print("    (webview traffic leaves through WebKit and an OAuth")
+                print("     hand-off through Safari; if the CA is untrusted on a")
+                print("     booted simulator their HTTPS fails -- run: quern doctor)")
         else:
             print("  Local capture: disabled (run: quern enable-local-capture)")
     else:

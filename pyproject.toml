@@ -1,6 +1,6 @@
 [project]
 name = "quern-debug-server"
-version = "0.20.0"
+version = "0.21.0"
 description = "Debug log capture and AI context server"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -117,4 +117,6 @@ addopts = "-m 'not integration'"
 markers = [
     "integration: tests that require real devices/simulators and external tools",
     "release_download: exercises download_release_app itself, with its own fake transport",
+    "real_device_tools: genuinely needs xcrun/adb/idb on the machine; exempt from the #272 guard",
+    "device_discovery: tests device/tool discovery itself, so it opts out of the stubs for it",
 ]

@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from server.api.actions import logged_action
+from server.config import with_capture_minimum
 from server.lifecycle.state import (
     detect_current_ssid,
     detect_host_ip_for_subnet,
@@ -906,6 +907,14 @@ async def set_local_capture(
     # runs; only the empty-string filtering is left to do.
     processes = [p for p in body.processes if p]
 
+    # Widened unless the caller said `only`. Naming an app used to replace the
+    # list, silently dropping the process its web traffic actually leaves
+    # through -- and the result was zero flows with no error, which reads
+    # exactly like an app that made no requests.
+    added_defaults: list[str] = []
+    if not body.only:
+        processes, added_defaults = with_capture_minimum(processes)
+
     adapter = request.app.state.proxy_adapter
     if adapter is None:
         raise HTTPException(status_code=503, detail="Proxy adapter not configured")
@@ -932,8 +941,9 @@ async def set_local_capture(
     removed = [p for p in previous if p not in processes]
     if removed:
         _proxy_logger.warning(
-            "local_capture no longer includes %s (replaced by %s). "
-            "Setting the list replaces it; pass every process you want captured.",
+            "local_capture no longer includes %s (now %s). The web-view "
+            "minimum is kept for you; everything else is set rather than "
+            "merged, so pass every process you want captured.",
             ", ".join(removed), ", ".join(processes) or "nothing",
         )
 
@@ -943,6 +953,18 @@ async def set_local_capture(
     # Persist to config
     from server.config import set_local_capture_processes
     set_local_capture_processes(processes)
+
+    # `state.json` too, because `quern status` reads it and would otherwise
+    # report the list as it was at boot. That matters most for
+    # `local_capture_added`: start-up records what *it* added, and leaving
+    # that behind after a runtime change lists processes beneath a capture
+    # list that no longer contains them -- a stale record presented as
+    # current fact, which is the failure this file already warns about for
+    # certificate trust. Both fields move together or neither should.
+    update_state(
+        local_capture=processes,
+        local_capture_added=added_defaults or [],
+    )
 
     # Restart proxy if running to apply new mode
     was_running = adapter.is_running
@@ -959,4 +981,11 @@ async def set_local_capture(
     except Exception:
         _proxy_logger.debug("Could not update state file", exc_info=True)
 
-    return await _get_proxy_status(request)
+    status = await _get_proxy_status(request)
+    # Carried on the response, not only in the log. The mistake this guards
+    # against -- naming an app and losing its web traffic -- produces zero
+    # flows and no error, so the moment of the call is the only place a
+    # caller can still connect cause to effect.
+    status.capture_added = added_defaults or None
+    status.capture_removed = removed or None
+    return status

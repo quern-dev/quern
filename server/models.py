@@ -547,8 +547,16 @@ class LocalCaptureRequest(BaseModel):
     processes: list[str]
     """Process names to capture. Empty list disables local capture.
 
-    Name the process that makes the requests: Safari's traffic leaves through
-    ``com.apple.WebKit.Networking``, not ``MobileSafari``.
+    `MobileSafari` and `com.apple.WebKit.Networking` are added automatically
+    unless ``only`` is set, because naming just an app captures none of its
+    web traffic and none of an OAuth hand-off to Safari.
+    """
+    only: bool = False
+    """Capture exactly ``processes``, without adding the usual minimum.
+
+    For a caller who means a narrow list. Phrased as what they want rather
+    than as an opinion about our defaults -- ``only: true`` states an intent,
+    where a ``no_defaults`` flag would state a complaint.
     """
     skip_cert_check: bool = False
     """Enable capture even when a booted simulator does not trust the CA.
@@ -720,6 +728,12 @@ class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
     status: str  # "running", "stopped", "error"
+    #: What `POST /proxy/local-capture` just changed, and nothing on the
+    #: plain status read. The caller who made the change is the one who needs
+    #: to see it, and a server log entry is not where they are looking: an
+    #: agent reads the response body and nothing else.
+    capture_added: list[str] | None = None
+    capture_removed: list[str] | None = None
     port: int = 9101
     listen_host: str = "0.0.0.0"
     started_at: datetime | None = None

@@ -115,7 +115,7 @@ Logs, network flows, and UI trees can be huge. Always filter to what you need.
 - **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). Use `set_local_capture` to change the process list at runtime without restarting the server.
 - **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
 
-**`set_local_capture` sets the list rather than adding to it.** Asked to capture one app, sending just that process name drops everything already being captured. The usual casualty is web traffic: `MobileSafari` and `com.apple.WebKit.Networking` are defaults applied only when nothing is specified, so naming your app removes them and web-view traffic stops being captured with no error. Read `local_capture` from `proxy_status` first and pass the existing entries alongside the new one. The response reports what was dropped — check it.
+**`set_local_capture` sets the list, but a minimum is always kept.** Naming one app no longer drops `MobileSafari` and `com.apple.WebKit.Networking` — a webview's requests leave through WebKit and an OAuth hand-off goes through Safari, so losing them silently stopped capturing the traffic you were probably looking for. The response says what was added for you (`capture_added`) and what your list removed (`capture_removed`); read both. Everything else is still replaced rather than merged, so read `local_capture` from `proxy_status` first and pass entries you want kept. `only: true` on the HTTP endpoint captures exactly your list for the running server. The **flag** is not stored but the **list is**, so it replaces whatever was configured before, and start-up widens that stored list again because nothing on disk records you meant it narrowly. Treat `only` as a one-shot narrowing, not a temporary view.
 
 Name the process that actually makes the requests. Safari's traffic leaves through `com.apple.WebKit.Networking`, not `MobileSafari`, and so does every in-app web view, so a list with `MobileSafari` alone captures nothing.
 
@@ -364,7 +364,9 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Text input: focus the element, then `type_text`
 
 **"The element I want is scrolled off-screen"**
-- `tap_element` already handles this: on a miss it scrolls the target into view and retries. Pass `scroll_to_find: false` to fail fast instead.
+- `tap_element` handles this: on a miss it scrolls the target into view and retries. `scroll_to_find` is tri-state — `true` always sweeps, `false` never, and **unset (the default) asks the knowledge base** and sweeps only on a screen recorded as `scrollable: true`.
+- With no knowledge base loaded nothing is recorded, so a miss does *not* sweep and the response says `scrollability_unknown`. Pass `scroll_to_find: true` if you know the screen scrolls, or record it once (see [App Knowledge Base](guides/app-knowledge.md)) and every later tap gets it right for free.
+- A sweep that runs is reported: the response carries the swipes and whether anything moved, so a gesture you did not ask for is never invisible.
 - Need it visible but *not* tapped (asserting on it, screenshotting it): `scroll_to_element`
 - Both work on Android and iOS (simulator and physical), and both drive a bounded swipe loop that re-checks the target by selector rather than dumping the UI tree — a tree dump can itself scroll the target away, which is the bug this design exists to avoid
 - Neither is a substitute for `swipe` when you want to scroll a *screen* rather than reach a known element
@@ -387,6 +389,14 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Reduce noise at start: `start_device_logging(process: "MyApp", preset: "device-quiet")` — applies subprocess-level process filter and ingestion preset in one call
 - Reduce noise mid-session: `set_log_filter(source: "device", process: "MyApp")` — automatically restarts the adapter with subprocess-level filtering and purges old entries
 - **App-only mode** (zero noise): First `tail_logs` with the process filter to discover your app's subsystem name, then lock it down with `set_log_filter(source: "device", process: "MyApp", subsystems: ["MyApp.debug.dylib"])`. This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's os_log output.
+
+**"Which request did my action cause?" / "What was quern doing when this happened?"**
+- `get_trace` — one timeline of quern's own actions, the flows each caused, and the app log lines that arrived while it ran. This is the tool for "I tapped Checkout, what did the app send?" and it replaces reconstructing the answer by hand from `query_flows` and `query_logs` timestamps.
+- Filter with `udid` when several agents share one server — the device is the only separator quern has.
+- Read `caveats` and `overlaps` before trusting a join. They are always present, so an empty list means "nothing to flag", not "this version doesn't say". Attribution strength varies: a simulator under local capture is joined exactly, a physical device by IP against a proxy config that DHCP may have invalidated, and a simulator behind a plain Wi-Fi proxy on timing alone.
+- Traffic an action caused *after* it returned is attributed through a three-second grace window and flagged as such — most actions hand work to the device and return before the request goes out.
+- `proxy_running` is in the response because a trace with no flows because the proxy was off looks exactly like one where the app requested nothing.
+- If the log window reached further back than the ring buffer holds, the trace says so rather than presenting a truncated window as a quiet one.
 
 **"I need to control the device"**
 - Boot: `boot_device` or `resolve_device` with auto_boot
@@ -418,6 +428,7 @@ The paths you will reach for most:
 | Query logs | GET | `/api/v1/logs/query` |
 | Log summary | GET | `/api/v1/logs/summary` |
 | Live log stream | GET | `/api/v1/logs/stream` (SSE — no MCP equivalent) |
+| Actions joined to flows and logs | GET | `/api/v1/trace` |
 | Query flows | GET | `/api/v1/proxy/flows` |
 | Flow summary | GET | `/api/v1/proxy/flows/summary` |
 | Live flow stream | GET | `/api/v1/proxy/flows/stream` (SSE — no MCP equivalent) |
@@ -482,6 +493,8 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **Using `get_ui_tree` to debug missing elements** — When `tap_element` can't find an element, use `take_annotated_screenshot` to visually see what the accessibility tree detects overlaid on the actual screen. It's faster than reading through the full UI tree and immediately shows mismatches between visual layout and accessibility labels.
 
+**Retrying a `tap_element` miss that says the screen does not scroll** — When a miss reports `reason: "screen_not_scrollable"`, that is an answer, not a failure to work around: the screen is recorded as not scrolling, so the element is not on it and sweeping cannot find it. Retrying with `scroll_to_find: true` costs two real gestures and reaches the same conclusion. Look at where you are instead. Each no-sweep reason carries a `detail` naming the remedy that actually works, and they are deliberately distinct — `screen_ambiguous` (landmarks loaded for two apps and a screen matches both; the colliding names are in `candidates`, so scope to one app), `scrollability_unknown` (nobody has recorded it — pass `scroll_to_find: true` now, and add `scrollable: true` to the screen's entry to make it automatic), `screen_unreadable` (the read failed; this one *is* worth retrying), and `needs_page_urls` (a web-identified app on a path that does not read URLs — pass `scroll_to_find` explicitly).
+
 **Not filtering logs/flows** — Unfiltered queries return overwhelming amounts of data. Always filter by level, process, host, status code, or search text.
 
 **Hardcoding device UDIDs** — Use `resolve_device` with a name and let Quern find the right device. UDIDs differ across machines.
@@ -545,7 +558,7 @@ not yet distinguishable in this response. If one is unexpectedly missing, check
 
 1. `tls_rejections` — clients that refused the certificate we offered, with the host, the resolved process and simulator UDID, and the TLS alert verbatim. This is the direct evidence, and it distinguishes the two causes that look identical from the outside: `unknown ca` means the device does not trust the CA, while any other alert on a device that does usually means the app pins its certificate. Don't reinstall a certificate to fix pinning.
 2. A `capture_without_cert` warning, and `cert_trust_stale` on a device in `cert_setup` — the second means that device's recorded `cert_installed: true` is contradicted by the device itself, which is what an erase leaves behind.
-3. Otherwise: if `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. Check that the list actually contains the process making the requests, since setting it replaces it. If local capture is not enabled, the device may not be configured to route through the proxy; check `proxy_setup_guide` for device configuration steps.
+3. Otherwise: if `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. Check that the list actually contains the process making the requests — the web-view minimum is kept for you, but anything else you previously named is replaced rather than merged. If local capture is not enabled, the device may not be configured to route through the proxy; check `proxy_setup_guide` for device configuration steps.
 
 An empty `tls_rejections` with no flows means the traffic is not reaching the proxy at all, rather than being refused once it does — a routing problem, not a certificate one.
 

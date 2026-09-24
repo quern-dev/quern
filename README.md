@@ -378,10 +378,10 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 
 Local capture requires approving the **Mitmproxy Redirector** system extension in **System Settings > Privacy & Security** on first use.
 
-With no arguments, `enable-local-capture` captures web traffic — `MobileSafari` and `com.apple.WebKit.Networking`. Naming processes **replaces** that list rather than adding to it, so pass everything you want captured:
+With no arguments, `enable-local-capture` captures web traffic — `MobileSafari` and `com.apple.WebKit.Networking`. Naming processes **keeps that minimum and adds yours**, because a webview's requests leave through WebKit and an OAuth hand-off goes through Safari:
 
 ```bash
-quern enable-local-capture MyApp                                # your app, and nothing else
+quern enable-local-capture MyApp                                # your app, plus the web-view minimum
 quern enable-local-capture MyApp com.apple.WebKit.Networking    # your app and web views
 ```
 

@@ -2,6 +2,31 @@
 screen: ""
 status: documented
 
+# Does this screen scroll? Worth recording: quern cannot work it out by looking.
+# Measured on a booted simulator, Settings and Safari both scroll and both
+# report ZERO scroll containers in `type` and in `role` — the accessibility tree
+# exposes interactive leaves, not the containers around them. The only way to
+# find out is to swipe, so the fact belongs here rather than being rediscovered
+# on every tap.
+#
+# What it does when `tap_element` misses and `scroll_to_find` was not passed:
+#   true      sweeps the screen looking for the element
+#   false     does not sweep, and reports `screen_not_scrollable` — meaning
+#             "the element is not on this screen", which saves the caller a
+#             retry that cannot help
+#   omitted   does not sweep, and reports `scrollability_unknown`
+#
+# `false` is worth writing down; it is NOT the same as leaving it out. Only
+# `false` can say the element is not here. Omitted means nobody has said.
+#
+# Wrong in one direction only, by design: an explicit `scroll_to_find: true`
+# always overrides this, so a screen wrongly marked `false` costs a slowdown,
+# never an unreachable element.
+#
+# Must be a literal YAML boolean. `scrollable: "true"` is a string and is
+# ignored — it reads as omitted rather than silently asserting an answer.
+scrollable:
+
 # Machine-evaluable screen identity (identifier-first for locale independence).
 # All landmarks must match for this screen to be recognized.
 # Priority: identifier > element type alone > label (locale-dependent, last resort).

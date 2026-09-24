@@ -45,6 +45,12 @@ macos/QuernMenuBar/build/
 # GitHub release. It reached a PR once by way of `git add -A`.
 RELEASE_NOTES.md
 
+# Machine-specific release facts: keychain profile name, which install the
+# update test runs against, which host holds the tarball check. Values only --
+# the procedure lives in docs/release-channels.md. Never secrets; the keychain
+# holds those. Copy scripts/release-local-template.md to start one.
+RELEASE_LOCAL.md
+
 # A stray `-` at the root: a tool told to write to stdout with `-o -` or `> -`
 # creates a file instead. One got committed and shipped in every release
 # tarball for two weeks before anyone noticed.

@@ -334,11 +334,44 @@ def get_local_capture_processes() -> list[str]:
     if value is None or value is False:
         return []
     if value is True:
-        # Legacy bool: default to Safari processes
-        return ["MobileSafari", "com.apple.WebKit.Networking"]
+        # Legacy bool: default to the minimum web-capture set
+        return list(CAPTURE_MINIMUM)
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+#: Always captured alongside whatever a caller names, unless they ask for
+#: exactly their own list.
+#:
+#: `com.apple.WebKit.Networking` is where a webview's requests actually leave.
+#: Naming only the app captures none of its web traffic -- not less of it,
+#: none -- and the result is zero flows with no error, which looks exactly
+#: like an app that made no requests. That mistake is common enough to design
+#: against: it has cost several sessions, including one where it was
+#: misdiagnosed as a broken redirector.
+#:
+#: `MobileSafari` is here for a less obvious reason: an OAuth flow hands off
+#: to real Safari. `ASWebAuthenticationSession` and `SFSafariViewController`
+#: are Safari, so a login journey leaves the app's own processes entirely.
+#: Debugging sign-in without it means watching the interesting half vanish.
+CAPTURE_MINIMUM: tuple[str, ...] = ("MobileSafari", "com.apple.WebKit.Networking")
+
+
+def with_capture_minimum(processes: list[str]) -> tuple[list[str], list[str]]:
+    """Add the minimum capture set to `processes`. Returns (list, added).
+
+    Order is preserved and the caller's own entries come first, so the list
+    still reads as "what I asked for, plus what makes it work".
+
+    An empty list is returned untouched: that means *disable capture*, and
+    quietly turning it into "capture the defaults" would be the opposite of
+    what was asked.
+    """
+    if not processes:
+        return [], []
+    added = [p for p in CAPTURE_MINIMUM if p not in processes]
+    return [*processes, *added], added
 
 
 def set_local_capture_processes(processes: list[str]) -> None:

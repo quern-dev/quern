@@ -320,6 +320,7 @@ class TestSimulatorKitDiscovery:
             )
 
 
+@pytest.mark.device_discovery
 class TestIsAvailableResolvesTheSamePath:
     """The helper is not the bug site.
 

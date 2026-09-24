@@ -302,7 +302,170 @@ def _no_device_identity_leaks_between_tests():
 
 
 @pytest.fixture(autouse=True)
-def _no_real_subprocess_spawns(monkeypatch):
+def _no_hardware_attached(monkeypatch, request):
+    """Device enumeration finds nothing, unless a test says otherwise.
+
+    The four backends behind `DeviceController.list_devices` are where the
+    machine actually gets asked. Stubbing them there leaves the aggregation,
+    the type cache and the identifier canonicalisation running for real: the
+    logic stays under test, only the question to the hardware goes away.
+
+    Empty is the honest default -- it is what a machine with nothing attached
+    returns, and what CI sees.
+
+    **On the instance, not the class, is how a test opts out.** Every test
+    that exercises `list_devices` itself already assigns
+    `ctrl.simctl.list_devices = AsyncMock(...)` and its three siblings, and an
+    instance attribute shadows this patch, so those keep working untouched.
+    That is also why the seam is here rather than on
+    `DeviceController.list_devices`: patching there replaced the very method
+    those tests exist to check, and broke fourteen of them.
+
+    The backend unit tests are the other direction -- they call
+    `SimctlBackend.list_devices` directly, mocking the subprocess beneath it,
+    so this patch would erase their subject. They carry
+    `pytest.mark.device_discovery`.
+
+    Without any of this, 101 tests reached the developer's desk and their
+    assertions were about whatever happened to be plugged in. See
+    `_no_real_subprocess_spawns` below: that is what makes a regression fail
+    rather than quietly go back to asking.
+    """
+    if request.node.get_closest_marker("real_device_tools"):
+        return
+    if request.node.get_closest_marker("device_discovery"):
+        return
+
+    from server.device.adb import AdbBackend
+    from server.device.devicectl import DevicectlBackend
+    from server.device.simctl import SimctlBackend
+    from server.device.usbmux import UsbmuxBackend
+
+    async def _none(self, *a, **k):
+        return []
+
+    async def _no_map(self, *a, **k):
+        return {}
+
+    for backend in (SimctlBackend, DevicectlBackend, UsbmuxBackend, AdbBackend):
+        monkeypatch.setattr(backend, "list_devices", _none, raising=False)
+    monkeypatch.setattr(UsbmuxBackend, "get_usb_udid_map", _no_map, raising=False)
+    monkeypatch.setattr(AdbBackend, "list_avds", _none, raising=False)
+
+    # "Is this tool installed?" is the machine's second question, asked by
+    # `check_tools` via `simctl help`, `idb --help`, `devicectl list devices`,
+    # `pymobiledevice3 version` and `adb version`. It is as machine-dependent
+    # as the device list: a test would pass or fail on whether idb happens to
+    # be installed on the developer's laptop. Answer yes, deterministically,
+    # so the code under test takes its normal path rather than its
+    # tool-missing one -- a test about the missing path patches its own
+    # instance, which shadows this.
+    from server.device.idb import IdbBackend
+    from server.device.pmd3 import Pmd3Backend
+    from server.device.sim_bridge import SimBridgeManager
+
+    async def _yes(self, *a, **k):
+        return True
+
+    # `SimBridgeManager`, not `SimBridgeBackend`. The backend has no
+    # `is_available` at all -- `controller.py` builds both and asks the
+    # *manager* (`self.sim_bridge_manager.is_available()`). Patching the
+    # backend created the attribute on a class nobody consults and left six
+    # real `xcode-select` spawns per run, which is the exact no-op this file
+    # exists to prevent, inside the fixture meant to prevent it.
+    #
+    # No `raising=False`: every name here has the attribute, so a rename
+    # should fail loudly rather than silently patch nothing. That flag is
+    # what hid the bug above.
+    for owner in (
+        SimctlBackend, DevicectlBackend, UsbmuxBackend, AdbBackend,
+        IdbBackend, Pmd3Backend, SimBridgeManager,
+    ):
+        monkeypatch.setattr(owner, "is_available", _yes)
+
+
+#: Commands that ask the machine what hardware is attached to it, or talk to
+#: it. A test reaching any of these is reading the developer's desk.
+_DEVICE_TOOLS = frozenset({
+    "xcrun", "simctl", "devicectl", "instruments",
+    "adb", "emulator", "avdmanager", "sdkmanager",
+    "idb", "idb_companion", "pymobiledevice3", "scrcpy",
+    # Added after review: each of these is spawned by `server/` and reads the
+    # machine. `ideviceinstaller` installs an app on a real attached iPhone
+    # (`server/device/wda.py`), the webkit proxies talk to one, and
+    # `xcode-select` / `xcodebuild` / `swiftc` report whatever toolchain this
+    # particular laptop has.
+    "ideviceinstaller", "ios-webkit-debug-proxy", "ios_webkit_debug_proxy",
+    "xcode-select", "xcodebuild", "swiftc",
+})
+
+#: Shells, which carry the real command in an argument rather than in argv[0].
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+
+
+def _fixture_binary_roots(config) -> tuple[str, ...]:
+    """Directories a test may legitimately build and run a binary in.
+
+    `tempfile.gettempdir()` alone was wrong: pytest's `tmp_path` lives under
+    whatever `--basetemp` says, and that relocates it out of the temp root.
+    The exemption then silently stopped applying and 19 tests failed in
+    `test_tool_probe.py` -- a signature identical to deleting the exemption
+    outright, and pointing nowhere near the guard.
+    """
+    roots = [os.path.realpath(tempfile.gettempdir())]
+    factory = getattr(config, "_tmp_path_factory", None)
+    if factory is not None:
+        try:
+            roots.append(os.path.realpath(str(factory.getbasetemp())))
+        except Exception:
+            pass
+    return tuple(roots)
+
+
+def _is_a_fixture_binary(program: str, roots: tuple[str, ...]) -> bool:
+    """Is this a binary the test built, rather than one on the machine?
+
+    `test_tool_probe.py` writes a fake `idb_companion` into `tmp_path` and
+    execs it to check the probe reports a broken binary correctly. That is the
+    opposite of reading the developer's desk -- the whole point is that the
+    binary is fabricated -- but it matches on basename, so a guard that only
+    looks at the name blocks the tests that are doing it right.
+
+    The distinction is the path: an explicit path under the temp root is
+    something the run created. A bare name is resolved from `PATH`, which is
+    the machine.
+    """
+    if "/" not in program:
+        return False
+    resolved = os.path.realpath(program)
+    return any(resolved.startswith(root + os.sep) for root in roots)
+
+
+def _device_tool_in(parts: list[str], roots: tuple[str, ...] = ()) -> str | None:
+    """The device tool this command runs, or None.
+
+    Reads argv[0], and *through* a shell: `SimctlBackend._run_shell` spawns
+    `sh -c "xcrun simctl listapps ... | plutil ..."`, where argv[0] is `sh`
+    and the check that only looked there saw nothing. That is the one seam
+    that voids the whole guard, and it lives in the class the guard is named
+    after.
+    """
+    if _is_a_fixture_binary(parts[0], roots):
+        return None
+    name = parts[0].split("/")[-1]
+    if name in _DEVICE_TOOLS:
+        return name
+    if name in _SHELLS:
+        # Every word of the script, so a tool anywhere in a pipeline counts.
+        for chunk in parts[1:]:
+            for word in chunk.replace("|", " ").replace(";", " ").split():
+                if word.split("/")[-1] in _DEVICE_TOOLS:
+                    return word.split("/")[-1]
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_subprocess_spawns(monkeypatch, request):
     """Fail any test that spawns a real device-side subprocess.
 
     `_start_usbmux_forward` runs `pymobiledevice3 usbmux forward 18100 8100
@@ -321,25 +484,103 @@ def _no_real_subprocess_spawns(monkeypatch):
 
     Recorded and re-raised at teardown, because callers of this path wrap it in
     their own error handling.
+
+    **Widened in #272 from one command shape to every device tool.** It used to
+    block only `pymobiledevice3 ... forward` while this docstring claimed the
+    whole class, and `simctl`, `devicectl`, `adb` and `emulator` went straight
+    through: one test in `test_device_controller.py` spawned fifty real
+    processes, including `adb -s <a real phone's serial>`. That is not merely
+    slow (88s for 129 tests). It is the exact defect `CONTRIBUTING.md` records
+    from the first Linux CI run -- tests that "shelled out to a real `xcrun`,
+    got a list their fake UDID was not in, and passed regardless". Green then
+    means the developer's desk, not the code.
+
+    Escape hatch: `@pytest.mark.real_device_tools` on a test that genuinely
+    needs hardware. It is a marker rather than a silent stub on purpose --
+    substituting an empty list would let a test go on asserting against a
+    query it never really made, which is the same failure one level quieter.
     """
     import asyncio
+    import subprocess
 
     violations: list[str] = []
+    forwards: list[str] = []
     real_exec = asyncio.create_subprocess_exec
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+    tmp_roots = _fixture_binary_roots(request.config)
+    allowed = request.node.get_closest_marker("real_device_tools") is not None
 
-    async def guarded(program, *args, **kwargs):
-        parts = [str(program), *(str(a) for a in args)]
+    def _check(parts: list[str]) -> None:
         name = parts[0].split("/")[-1]
         if name.startswith("pymobiledevice3") and "forward" in parts:
-            violations.append(" ".join(parts))
+            forwards.append(" ".join(parts))
             raise AssertionError(f"blocked: {' '.join(parts)}")
+        if not allowed and _device_tool_in(parts, tmp_roots) is not None:
+            violations.append(" ".join(parts[:4]))
+            raise AssertionError(f"blocked: {' '.join(parts[:4])}")
+
+    async def guarded(program, *args, **kwargs):
+        _check([str(program), *(str(a) for a in args)])
         return await real_exec(program, *args, **kwargs)
 
+    # Three wrappers, deliberately, and not redundancy to be tidied away:
+    # `asyncio.create_subprocess_exec` and `subprocess.run` both funnel
+    # through `subprocess.Popen` on today's CPython, so patching `Popen`
+    # alone would in fact catch all three. That is a fact about the
+    # interpreter's internal layering, not a contract -- and a guard whose
+    # coverage silently shrinks when Python reorganises internals is this
+    # file's own subject arriving by a slower route. Each wrapper states
+    # what it covers. The double-check costs nothing: `violations` is
+    # deduplicated with `dict.fromkeys` before it is reported.
+    #
+    # Both seams. The async one is what the device backends use, but
+    # `server/main.py` reaches for `subprocess.run(["xcrun", "simctl",
+    # "help"])` and `setup.py` for `xcodebuild -version`, and a guard on one
+    # of two seams claims more than it covers -- the same "a guard on one path
+    # does not cover its siblings" this repo has hit twice in the proxy code.
+    def _sync_args(cmd, shell: bool) -> list[str]:
+        if isinstance(cmd, (list, tuple)):
+            return [str(c) for c in cmd]
+        # `subprocess.run("adb devices", shell=True)` is a script, not a
+        # program name. Wrapping it as a one-element list tested the whole
+        # string as argv[0], which never matches -- the same seam the `sh -c`
+        # fix closed on the async side, left open on this one.
+        if shell:
+            return ["sh", "-c", str(cmd)]
+        return [str(cmd)]
+
+    def guarded_run(cmd, *a, **k):
+        _check(_sync_args(cmd, bool(k.get("shell"))))
+        return real_run(cmd, *a, **k)
+
+    # A subclass, not a function: while this fixture is active
+    # `subprocess.Popen` *is* whatever we put here, and a function is not a
+    # type. `isinstance(p, subprocess.Popen)` then raises "arg 2 must be a
+    # type", subclassing it fails at import, and `Popen[bytes]` in a runtime
+    # annotation fails -- each pointing at the code under test rather than at
+    # the guard that broke it.
+    class GuardedPopen(real_popen):
+        def __init__(self, cmd, *a, **k):
+            _check(_sync_args(cmd, bool(k.get("shell"))))
+            super().__init__(cmd, *a, **k)
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded)
+    monkeypatch.setattr(subprocess, "run", guarded_run)
+    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
     yield
-    assert not violations, (
+    assert not forwards, (
         "this test spawned a real usbmux forward, which outlives it and squats "
-        "port 18100 (issue #160): " + "; ".join(violations)
+        "port 18100 (issue #160): " + "; ".join(forwards)
+    )
+    assert not violations, (
+        "this test asked the developer's actual machine what devices are "
+        "attached (#272). Its assertions are then about whatever happened to "
+        "be plugged in: a fake UDID passes because it is absent from a real "
+        "list, not because the code is right -- which is how the first Linux "
+        "CI run produced 41 failures from one bug. Mock the backend, or mark "
+        "the test `@pytest.mark.real_device_tools` if it genuinely needs "
+        "hardware. Spawned: " + "; ".join(dict.fromkeys(violations))
     )
 
 

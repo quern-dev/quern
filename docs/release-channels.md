@@ -67,6 +67,33 @@ in the normal course of any session.
 
 ## For maintainers — release-cut procedure
 
+### Your own release notes: `RELEASE_LOCAL.md`
+
+Cutting a release needs facts that are true of *your* machines and nobody
+else's: which keychain profile you created, which install you use for the
+update test, which host the tarball check runs against. None of that belongs in
+a public repository — it is wrong for every other reader, and it reads as though
+quern depends on one person's setup.
+
+Keep it in **`RELEASE_LOCAL.md`** at the repository root. It is gitignored
+beside `RELEASE_NOTES.md`, for the same reason: a `git add -A` swept one of
+those into #152, where CodeRabbit reviewed it as documentation and reported its
+command count as wrong.
+
+**Values and local facts only — never procedure.** The steps live in this
+document and stay here, so there is one source of truth for *how* and a separate
+one for *yours*. Two files describing the same procedure will drift, and the
+untracked one is the copy nobody reviews.
+
+Nothing in it should be irrecoverable. Everything below is re-derivable from the
+machine itself — `security find-identity -v -p codesigning` for the identity,
+`xcrun notarytool store-credentials` to recreate a profile — so losing the file
+costs an afternoon of rediscovery, not a release. Do not put secrets in it: the
+keychain already holds those, and a plaintext file at a repository root is
+exactly where they should not be.
+
+`scripts/release-local-template.md` is a starting point — copy it and fill it in.
+
 ### Channel branches: where they live, what they track
 
 Two reserved branches on `origin`:
@@ -109,12 +136,12 @@ For each item, ask "did this release change what this file asserts?" — not
       sync to quern.dev, so a stale guide is a stale public page.
 - [ ] **`macos/QuernMenuBar/README.md`** — build and release steps for the app.
 - [ ] **`CHANGELOG.md`** — rename `Unreleased`, date it, add the link ref.
-- [ ] **Run the sync** — `python3 scripts/sync-docs.py --repo <quern>` in the
-      quern.dev checkout, then commit **and push** it. A guide corrected in this
-      repo and never synced leaves the site serving the old text; that happened
-      once for a week. Pushing is the deploy, so an unpushed sync is the same
-      as no sync. `--check` exits 1 on drift and names the pages, which is the
-      quick way to see whether this step is needed at all.
+- [ ] **Run the sync** — see step 9 of the cut procedure below, which is where
+      it is actually done. Listing it here as well is deliberate: the edits are
+      made during this pass, so this is where you notice it is needed. Run
+      `python3 scripts/sync-docs.py --repo <quern> --check` in the quern.dev
+      checkout now — it exits 1 on drift and names the pages — then do the
+      sync itself at step 9.
 - [ ] **Commit and push the doc pass itself.** Easy to skip, because the
       checklist above produces edits and says nothing about landing them — and
       the tag is cut from `main`, so anything still sitting in the working tree
@@ -188,6 +215,26 @@ DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
 ```sh
 # 7. Check the published release from the outside.
 scripts/release-verify.sh vN.M.K
+
+# 8. Run step 7 AGAIN, an hour or more later.
+#    quern.dev caches the ref it resolves for about an hour, so immediately
+#    after publishing it still names the *previous* version and that check
+#    can only skip. A skip is not a pass: until this second run, nothing has
+#    confirmed that the site offers the new release to an existing install.
+scripts/release-verify.sh vN.M.K      # expect 0 skipped this time
+
+# 9. Publish the documentation to quern.dev.
+#    A SEPARATE REPOSITORY and a separate deploy: nothing above touches it,
+#    and the release being out does not put a single doc fix on the site.
+#    The checkout path is in RELEASE_LOCAL.md.
+cd <quern.dev checkout>
+git pull --ff-only
+python3 scripts/sync-docs.py --repo <quern>       # rewrites the drifted pages
+git add -A && git commit -m "Sync docs for quern N.M.K"
+git push origin main                              # pushing IS the deploy
+
+# 10. Confirm the site matches.
+python3 scripts/sync-docs.py --repo <quern> --check   # expect exit 0
 ```
 
 That last step is not optional and takes under ten seconds. It asserts what a
@@ -207,6 +254,36 @@ served locally its resolver asks GitHub instead. That was found by rehearsing
 against 0.18.4, where it reported two passes it had not earned -- the local
 server was never asked -- and it matters because a rehearsal of an
 already-published tag is exactly when the wrong answer matches.
+
+**Steps 9 and 10 are a second deploy, and they get forgotten.** quern.dev is a
+separate repository with its own `main`, and pushing to it is what publishes
+the site — nothing in steps 1-8 touches it. A guide corrected in the quern repo
+and never synced leaves the site serving the old text.
+
+This was a checkbox in the documentation pass above and nothing else, and it
+did not work: at the 0.21.0 cut the site was still synced at **0.19.0**, so it
+had been missed twice running, and two pages had been telling users the wrong
+thing for two releases — one of them describing the exact local-capture
+behaviour that #275 fixed. It is a numbered step now because the doc pass ends
+with edits landing in *this* repo, which feels like finishing, and the second
+repository is out of sight.
+
+Step 10 is the check that it took. `--check` exits 0 only when every synced
+page matches, so a partial or unpushed sync cannot read as done.
+
+**Step 8 exists because the first run cannot check quern.dev, and the release
+is not verified until it does.** The site caches the ref it resolves for about
+an hour, so a verify run immediately after publishing reports:
+
+    – quern.dev still names the previous version, 0m after publishing — its
+      ref cache is an hour; re-run this step after that to confirm it caught up
+
+That is the check confirming an *existing install* is actually offered the new
+release, which is the single thing most users experience. Skipping it leaves
+the most user-visible property of the release unverified, and it is the easiest
+step in the whole procedure to walk away from, because everything else has
+already gone green and the release looks finished. Set a reminder; the 0.21.0
+cut is the one where this was noticed and written down.
 
 **The tarball is no longer a pure `git archive`.** `--publish` now runs
 `npm ci && npm run build` inside the staged tree and ships `mcp/dist`, dropping
@@ -238,11 +315,26 @@ NOTARY_PROFILE="your-notarytool-profile" \
 That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
 `--publish` command to run at step 6.
 
-**Step 0b, also before any of the above.** Rehearse the update:
+**Step 0b. Bump the version first, then rehearse** — *after* step 1's edits are
+committed, and before the tag in step 2:
 
 ```sh
 scripts/release-rehearsal.sh            # candidate HEAD, from the published release
 ```
+
+The bump has to come first because the rehearsal compares the candidate's
+version against the previous release's and refuses when they match:
+
+    error: candidate and previous are both 0.20.0 — bump first
+
+That guard is right — rehearsing a candidate that claims the version already
+published tests nothing, since the updater decides what to do by comparing
+those two numbers. An earlier wording of this step said "also before any of the
+above", which cannot work; it was found by running it during the 0.21.0 cut.
+
+So the real order is: **doc pass → step 0 (notarize) → step 1 (bump, commit) →
+step 0b (rehearse) → step 2 (tag)**. The step numbering is historical; the
+dependency is not.
 
 Nothing gets tagged unless this passes. `release-verify.sh` checks a release
 after it is published; this checks the thing that actually breaks, which is
@@ -302,28 +394,36 @@ in a single run. It needs the tag and Release to already exist, so it belongs
 at step 6, not step 0.
 
 **Where the credentials actually are.** `macos/QuernMenuBar/README.md` covers
-the one-time setup with placeholders; the values in use on the maintainer's
-machine are recorded in the mp3cd project, which established this signing
-setup first and is the reference for it:
+the one-time setup. Nothing secret is in this repository and nothing needs to
+be: the secrets live in the keychain, and `release-menubar.sh` reads both of
+these from the environment.
 
-    /Volumes/Home/Dev/mp3cd/mp3cd-gpui/CLAUDE.md
+- **Signing identity** — `$SIGNING_IDENTITY`, exported from your shell profile.
+  That is the value `DEVELOPER_ID_APP` wants, so
+  `DEVELOPER_ID_APP="$SIGNING_IDENTITY"` works once the profile is sourced.
+  `security find-identity -v -p codesigning` lists what the machine actually
+  holds if the variable is missing.
+- **Notarization profile** — `$NOTARY_PROFILE`, the name of a `notarytool`
+  keychain profile you created with `xcrun notarytool store-credentials`.
+  `release-menubar.sh` refuses to start without it. Confirm it still works
+  before beginning a release:
 
-In short, and worth knowing before you go looking:
+      xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"
 
-- **Signing identity** — `$SIGNING_IDENTITY`, exported from `~/.zshrc`. That is
-  the value `DEVELOPER_ID_APP` wants, so `DEVELOPER_ID_APP="$SIGNING_IDENTITY"`
-  works once the profile is sourced. `security find-identity -v -p codesigning`
-  lists what the machine actually holds if the variable is missing.
-- **Notarization profile** — `mp3cd-notarize`, a `notarytool` keychain profile.
-  Confirm it still works before starting a release with
-  `xcrun notarytool history --keychain-profile mp3cd-notarize`, which is much
-  faster than finding out at the end of a build.
+  That is much faster than finding out at the end of a build, and it is the
+  check worth running even when nothing has changed — a profile can stop
+  resolving without anything in this repository moving.
 
 They are **separate credentials**: signing is a keychain identity, notarizing is
 an Apple ID plus an app-specific password stored under that profile name. Having
 one working tells you nothing about the other, which is the thing that wastes an
-afternoon. Use whatever name you gave it when you ran `store-credentials` if you
-set this up yourself.
+afternoon.
+
+**The concrete values are not written down here, on purpose.** Both are
+machine-specific — a profile name you chose and a shell variable you exported —
+and a public repository describing one maintainer's laptop is wrong for every
+other reader. Keep yours in `RELEASE_LOCAL.md` at the repository root, which is
+gitignored; see *Your own release notes* below.
 
 **Why the ordering matters:** see the *GitHub quirk* section. Once the Release
 in step 5 exists, you cannot retroactively move any branch to that commit. The
