@@ -17,6 +17,7 @@ from server.device.sim_bridge import (
     SimBridgeManager,
     find_simulator_kit,
 )
+from server.models import DeviceError
 
 
 def _backend_with_send(send_impl):
@@ -549,7 +550,7 @@ class TestTheBinaryCacheIsKeyedOnContent:
         )
         monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
 
-        with pytest.raises(RuntimeError, match="Failed to compile"):
+        with pytest.raises(DeviceError, match="Failed to compile"):
             await mgr.ensure_binary()
         assert not mgr._stamp_path.exists()
 
@@ -710,7 +711,7 @@ class TestCancellationIsNotSwallowed:
 
         mgr._pending_response.cancel()  # what the reader's cleanup does
 
-        with pytest.raises(RuntimeError, match="exited"):
+        with pytest.raises(DeviceError, match="exited"):
             await task
         assert not task.cancelled(), (
             "a crashed bridge surfaced as a cancelled task; nothing cancelled it"
@@ -718,7 +719,7 @@ class TestCancellationIsNotSwallowed:
         assert mgr._kill_process.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_a_timeout_still_becomes_a_runtime_error(self):
+    async def test_a_timeout_still_becomes_a_device_error(self):
         """The control: the timeout path is unchanged."""
         mgr = self._manager()
 
@@ -726,7 +727,7 @@ class TestCancellationIsNotSwallowed:
             raise TimeoutError
 
         with patch("asyncio.wait_for", _times_out):
-            with pytest.raises(RuntimeError, match="timed out"):
+            with pytest.raises(DeviceError, match="timed out"):
                 await mgr._send_locked({"cmd": "tap"})
         assert mgr._kill_process.await_count == 1
 

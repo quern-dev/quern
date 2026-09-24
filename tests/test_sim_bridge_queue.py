@@ -32,7 +32,7 @@ from server.device.sim_bridge import (
     SimBridgeBackend,
     SimBridgeManager,
 )
-from server.models import SimBridgeSaturatedError
+from server.models import DeviceError, SimBridgeSaturatedError
 
 
 @pytest.fixture
@@ -162,12 +162,18 @@ async def test_slot_is_released_when_the_operation_raises(backend, mgr, monkeypa
     """A failing operation must not leak a slot — enough failures would
     otherwise wedge the bridge permanently."""
     async def boom(_cmd):
-        raise RuntimeError("sim-bridge: exploded")
+        raise DeviceError("sim-bridge: exploded", tool="sim-bridge")
 
     monkeypatch.setattr(backend, "_send_admitted", boom)
     for _ in range(MAX_CONCURRENT_OPERATIONS + 3):
-        with pytest.raises(RuntimeError):
+        # Not merely DeviceError: SimBridgeSaturatedError *is* one, and was
+        # not a RuntimeError, so widening the type here would silently accept
+        # saturation this test used to surface.
+        with pytest.raises(DeviceError) as caught:
             await backend._send({"cmd": "tap"})
+        assert not isinstance(caught.value, SimBridgeSaturatedError), (
+            "saturation was accepted as the expected failure"
+        )
 
     assert mgr._operations == 0, "operation slots leaked on the error path"
 
@@ -300,7 +306,7 @@ async def test_a_late_response_cannot_be_matched_to_the_next_command(mgr, monkey
 
     monkeypatch.setattr("server.device.sim_bridge.asyncio.wait_for", short_wait)
 
-    with pytest.raises(RuntimeError, match="timed out"):
+    with pytest.raises(DeviceError, match="timed out"):
         await mgr.send({"cmd": "describe-ui", "udid": "SIM-A"})
 
     assert killed, "the subprocess must be killed before the lock is released"
@@ -327,7 +333,7 @@ async def test_the_timeout_message_warns_against_auto_retry(mgr, monkeypatch):
 
     monkeypatch.setattr("server.device.sim_bridge.asyncio.wait_for", short_wait)
 
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(DeviceError) as exc:
         await mgr.send({"cmd": "tap", "udid": "SIM-A"})
 
     msg = str(exc.value)
