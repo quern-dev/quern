@@ -22,7 +22,6 @@ mcp/dist/
 # Project
 .quern/
 *.log
-tools/ios-preview
 
 # Session notes / investigation logs
 *.txt
@@ -57,3 +56,7 @@ RELEASE_LOCAL.md
 # tarball for two weeks before anyone noticed.
 /-
 macos/QuernMenuBar/.build/
+
+# SwiftPM build products. macos/QuernMedia/.build is ~116 MB of module cache
+# and object files; `git add -A` from the repo root will sweep it in.
+.build/

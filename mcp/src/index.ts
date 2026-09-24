@@ -62,7 +62,7 @@ const instructions = [
   "- Filter aggressively: always filter logs by level/process/search, flows by host/method/status, UI by max_elements/children_of",
   "",
   "TOOL QUICK REFERENCE:",
-  "- See screen: get_screen_summary (quick) | get_ui_tree (full) | take_screenshot (visual) | take_annotated_screenshot (a11y overlay) | preview_device (live video, physical USB only)",
+  "- See screen: get_screen_summary (quick) | get_ui_tree (full) | take_screenshot (visual) | take_annotated_screenshot (a11y overlay) | preview_device (live video, USB devices + booted simulators)",
   "- Identify screen by name (when a knowledge base is loaded): identify_screen | get_screen_summary?identify=true. Set up with load_landmarks, validate with validate_landmarks. The deterministic 'what screen am I on?' answer — use this instead of parsing labels yourself.",
   "- Interact: tap_element (preferred) | tap (coordinates, rare) | swipe | type_text (clear_text first if field has content)",
   "- Network: get_flow_summary → query_flows → get_flow_detail | wait_for_flow (block until match) | set_mock (synthetic responses) | set_intercept + release_flow (modify live traffic)",

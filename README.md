@@ -398,7 +398,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **Device management** — list, boot, shutdown, and erase simulators; discover physical devices and Android emulators
 - **App management** — install, launch, terminate, uninstall, list apps; build an Xcode scheme and install it across several devices in one call
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays, and screenshot timelines that auto-capture after every UI action so a whole run can be reviewed frame by frame
-- **Live preview** — real-time video windows for USB-connected physical devices, independently per-device
+- **Live preview** — real-time video windows for USB-connected physical devices and booted simulators, independently per-device
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->

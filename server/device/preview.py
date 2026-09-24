@@ -1,32 +1,71 @@
-"""Preview manager for live iOS device screen previews via CoreMediaIO.
+"""Preview manager for live iOS device and simulator screen previews.
 
 Uses a long-running ios-preview subprocess in --interactive mode,
 communicating via a JSON Lines protocol on stdin/stdout. Supports
 independent per-device preview control.
+
+Two kinds of preview reach the same windows by different routes. A physical
+device is a CoreMediaIO capture device, which ios-preview opens directly. A
+simulator is not a capture device at all -- it never appears in a discovery
+session -- so `quern-media` captures its framebuffer, serves it as MJPEG on
+loopback, and ios-preview displays the stream. That is the only way a
+simulator can be previewed, and it is why this module owns a second kind of
+subprocess.
+
+Both are addressed by an opaque session key: a capture device by its
+CoreMediaIO unique ID, a simulator by its udid. Names are not identities --
+two phones of the same model report the same one -- so they are accepted as
+input and resolved, never stored as the key.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import shutil
 import subprocess
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR
+from server.device.media_engine import build_media_engine
+from server.lifecycle.ports import find_available_port
 
 logger = logging.getLogger(__name__)
 
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "ios-preview"
 APP_BUNDLE_NAME = "Quern Preview.app"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _SOURCE_CANDIDATES = [
-    Path(__file__).resolve().parent.parent.parent / "tools" / "ios-preview.swift",
+    _PROJECT_ROOT / "tools" / "ios-preview" / "main.swift",
+]
+#: Compiled alongside the script. It is named main.swift because Swift allows
+#: top-level code only in a file called that, which is what lets a second file
+#: join the same `swiftc` invocation — and that is what puts the frame parser
+#: somewhere with a test target, rather than duplicated inside a file that has
+#: none. A list so tests can empty it.
+_SHARED_SOURCE_CANDIDATES = [
+    _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
+    / "Encode" / "JPEGFraming.swift",
 ]
 _RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
+
+# Where simulator streams start looking for a port. Scanned upward, never
+# hardcoded into anything that outlives the process -- the window is told the
+# URL it should open, so nothing else has to agree on the number.
+STREAM_BASE_PORT = 8422
+# A cold `quern-media` has to attach to the simulator framebuffer first.
+STREAM_START_TIMEOUT = 20.0
+# Gap between consecutive adds. CoreMediaIO races when several capture
+# sessions start at once; a constant so tests can drive several adds without
+# paying for it.
+ADD_STAGGER_SECONDS = 1.0
 
 _INFO_PLIST = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -55,6 +94,20 @@ _INFO_PLIST = """\
 </dict>
 </plist>
 """
+
+
+async def booted_simulators() -> list[tuple[str, str]]:
+    """(udid, name) for every booted simulator.
+
+    A seam rather than an inline simctl call: preview.add() has to tell a
+    simulator udid apart from a device name, and a test that shells out to
+    simctl to find out is neither fast nor offline-safe.
+    """
+    from server.device.simctl import SimctlBackend
+    from server.models import DeviceState
+
+    devices = await SimctlBackend().list_devices()
+    return [(d.udid, d.name) for d in devices if d.state == DeviceState.BOOTED]
 
 
 def bundle_paths() -> tuple[Path, Path]:
@@ -98,12 +151,25 @@ def build_preview_bundle() -> Path:
     source = _find_source()
     if source is None:
         raise RuntimeError(
-            "ios-preview.swift source not found. "
-            "Expected at tools/ios-preview.swift relative to the project root."
+            "ios-preview source not found. Expected at "
+            "tools/ios-preview/main.swift relative to the project root."
         )
 
+    # Every file that goes into the binary, so editing the shared parser
+    # rebuilds too. Comparing against the script alone would leave a stale app
+    # behind an edit that never appeared to take.
+    sources = [source, *_shared_sources()]
+    try:
+        newest_source = max(p.stat().st_mtime for p in sources)
+    except OSError as exc:
+        # A source vanished between the existence check and here -- a branch
+        # switch mid-build. The documented contract of this function is
+        # RuntimeError; an OSError escaping reaches the preview API as an
+        # unhandled 500 instead of an actionable message.
+        raise RuntimeError(f"ios-preview source disappeared while building: {exc}") from exc
+
     bundle, binary = bundle_paths()
-    if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+    if binary.exists() and binary.stat().st_mtime >= newest_source:
         # Rewrite the bundle scaffolding even on the fast path. The freshness
         # test only asks about the binary, so a run that compiled and then
         # failed to finish the bundle -- no Info.plist, no icon -- leaves a
@@ -128,7 +194,7 @@ def build_preview_bundle() -> Path:
             [
                 swiftc,
                 "-o", str(binary),
-                str(source),
+                *[str(p) for p in sources],
                 "-framework", "AVFoundation",
                 "-framework", "CoreMediaIO",
                 "-framework", "AppKit",
@@ -162,6 +228,29 @@ def _find_source() -> Path | None:
     return None
 
 
+def _shared_sources() -> list[Path]:
+    """Extra files compiled into the app. Required, not best-effort.
+
+    Returning only the ones that happen to exist meant a missing parser
+    compiled the script alone, and swiftc then reported `cannot find
+    'JPEGFraming' in scope` against main.swift -- naming the file that is fine
+    rather than the one that is gone.
+
+    Raises:
+        RuntimeError: naming every missing path.
+    """
+    missing = [p for p in _SHARED_SOURCE_CANDIDATES if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "ios-preview cannot be built: missing "
+            + ", ".join(str(p) for p in missing)
+            + ". The app compiles from tools/ios-preview/main.swift together "
+            "with these, so a checkout without macos/QuernMedia cannot "
+            "produce it."
+        )
+    return list(_SHARED_SOURCE_CANDIDATES)
+
+
 @dataclass
 class PreviewDeviceInfo:
     name: str
@@ -170,9 +259,28 @@ class PreviewDeviceInfo:
 
 @dataclass
 class ActivePreview:
+    #: The session key: a CoreMediaIO unique ID, or a simulator udid.
     name: str
     position: int
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    #: "device" for a CoreMediaIO capture device, "simulator" for an MJPEG
+    #: stream served by quern-media.
+    kind: str = "device"
+    #: Loopback port quern-media serves on. None for a capture device.
+    stream_port: int | None = None
+    #: Human-readable name, for reporting. Not an identity.
+    label: str | None = None
+
+
+@dataclass
+class _StreamProcess:
+    """A quern-media subprocess feeding one preview window."""
+
+    process: asyncio.subprocess.Process
+    port: int
+    #: Last few stderr lines, for reporting why a stream stopped.
+    log: deque[str]
+    drain: asyncio.Task | None = None
 
 
 class PreviewManager:
@@ -201,6 +309,11 @@ class PreviewManager:
         self._stagger_lock = asyncio.Lock()
         self._bundle_path = QUERN_BIN_DIR / APP_BUNDLE_NAME
         self._binary_path = self._bundle_path / "Contents" / "MacOS" / BINARY_NAME
+        # session key -> the quern-media process feeding that window, its
+        # port, and the tail of its stderr. The tail is kept because a stream
+        # that dies mid-preview says why on the way out, and by the time
+        # anyone asks the process is gone.
+        self._streams: dict[str, _StreamProcess] = {}
 
     async def ensure_binary(self) -> Path:
         """Lazy-compile ios-preview if needed. Returns path to binary.
@@ -235,7 +348,10 @@ class PreviewManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        self._reader_task = asyncio.create_task(self._stdout_reader())
+        self._reader_task = asyncio.create_task(
+            self._stdout_reader(), name="preview-stdout-reader"
+        )
+        self._reader_task.add_done_callback(self._report_background_failure)
 
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=15.0)
@@ -259,6 +375,7 @@ class PreviewManager:
 
     def _cleanup_state(self) -> None:
         """Reset all internal state."""
+        self._terminate_streams()
         self._process = None
         self._available = []
         self._active.clear()
@@ -336,7 +453,9 @@ class PreviewManager:
     def _dispatch_event(self, event: dict) -> None:
         """Handle a single event from the subprocess."""
         evt_type = event.get("event")
-        name = event.get("name", "")
+        # Events are addressed by session key. `name`, where present, is a
+        # display label and never an identity.
+        name = event.get("key", "")
 
         if evt_type == "ready":
             devices = event.get("devices", [])
@@ -377,7 +496,7 @@ class PreviewManager:
                 preview = self._active.pop(name)
                 self._positions.discard(preview.position)
                 logger.info("Preview device disconnected: %s", name)
-            self._available = [d for d in self._available if d.name != name]
+            self._available = [d for d in self._available if d.cmio_id != name]
             # Settle whatever was in flight, according to what it asked for. A
             # remove got what it wanted -- the preview is gone. An add did not:
             # completing it successfully would have add() record a preview for
@@ -398,11 +517,11 @@ class PreviewManager:
             # Announced, not opened -- in interactive mode the server decides
             # what is on screen. Recording it keeps the available list honest
             # between explicit `list` calls.
-            if not any(d.name == name for d in self._available):
+            if not any(d.cmio_id == name for d in self._available):
                 self._available.append(
-                    PreviewDeviceInfo(name=name, cmio_id=event.get("id", ""))
+                    PreviewDeviceInfo(name=event.get("name", name), cmio_id=name)
                 )
-                logger.info("Preview device connected: %s", name)
+                logger.info("Preview device connected: %s", event.get("name", name))
 
         elif evt_type == "window_closed":
             # User closed the window manually
@@ -410,6 +529,14 @@ class PreviewManager:
                 preview = self._active.pop(name)
                 self._positions.discard(preview.position)
                 logger.info("Preview window closed by user: %s", name)
+            # A simulator stream outlives its window unless it is stopped
+            # here: nothing else notices, and it keeps encoding frames for a
+            # viewer that has gone.
+            if name in self._streams:
+                task = asyncio.create_task(
+                    self._stop_stream(name), name=f"stop-stream[{name}]"
+                )
+                task.add_done_callback(self._report_background_failure)
 
         elif evt_type == "devices":
             devices = event.get("devices", [])
@@ -440,31 +567,118 @@ class PreviewManager:
             pos += 1
         return pos
 
-    async def add(self, name: str) -> ActivePreview:
-        """Add a preview for a device by name.
+    def _key_for_label(self, label: str) -> str:
+        """The session key of the active preview showing `label`.
 
-        Args:
-            name: Device name (must match a name from _available).
+        Returns `label` unchanged when nothing matches: the caller may be
+        naming a stream whose window the user already closed, which
+        `_stop_stream` handles.
+
+        Refuses a label two previews share, for the reason `_resolve_device`
+        refuses an ambiguous device name -- two simulators of one model carry
+        one name, and closing whichever came first shuts a window the caller
+        did not name.
+        """
+        matches = [key for key, p in self._active.items() if p.label == label]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"{len(matches)} previews are called '{label}'. "
+                f"Remove one by its key: {', '.join(matches)}"
+            )
+        return matches[0] if matches else label
+
+    def _resolve_device(self, identifier: str) -> PreviewDeviceInfo | None:
+        """Find a capture device by unique ID, or unambiguously by name.
+
+        ID first: it is the identity. A name is a label, and two phones of the
+        same model share one -- so a name matching more than one device is
+        refused rather than resolved. Picking the first was the original
+        defect: a caller asking for phone B got phone A, silently and
+        repeatably.
+
+        Refusing is the only honest answer here, because there is nothing to
+        disambiguate *with*. CoreMediaIO's `uniqueID` is not the hardware UDID
+        and not the CoreDevice UUID either -- measured on one iPhone 11:
+        `A65275E0-...` to CoreMediaIO against `B34C4EE9-...` from devicectl --
+        so `canonical_device_id` cannot bridge them and no caller upstream can
+        hand us the right ID for a name.
+
+        Raises:
+            RuntimeError: when a name matches more than one connected device.
+        """
+        for device in self._available:
+            if device.cmio_id == identifier:
+                return device
+
+        by_name = [d for d in self._available if d.name == identifier]
+        if len(by_name) > 1:
+            ids = ", ".join(d.cmio_id for d in by_name)
+            raise RuntimeError(
+                f"{len(by_name)} connected devices are called '{identifier}'. "
+                f"Ask for one by its id: {ids}"
+            )
+        return by_name[0] if by_name else None
+
+    async def add(self, name: str) -> ActivePreview:
+        """Open a preview for a physical device or a booted simulator.
+
+        Accepts a CoreMediaIO device name, that device's unique ID, or a
+        simulator udid, and works out which it is. Names are accepted because
+        they are what a person reads off the menu; IDs because they are
+        unambiguous, which a name is not.
 
         Returns:
             ActivePreview record.
 
         Raises:
-            RuntimeError: If device not found or add fails.
+            RuntimeError: if nothing matches, or the preview fails to open.
         """
         await self._ensure_process()
 
-        # Check if already active
-        if name in self._active:
-            return self._active[name]
+        device = self._resolve_device(name)
+        if device is not None:
+            return await self._add_device(device)
 
-        # Validate name
-        available_names = [d.name for d in self._available]
-        if name not in available_names:
+        # Not a capture device. A simulator is the other thing it can be, and
+        # it reaches the screen by a different route entirely.
+        #
+        # The udid is checked across every simulator before any name is, for
+        # the reason `_resolve_device` checks ids first: a name that collides
+        # with some other simulator's udid must not win.
+        booted = await booted_simulators()
+        for udid, sim_name in booted:
+            if name == udid:
+                return await self.add_simulator(udid, title=sim_name)
+
+        # Two booted simulators of one model carry one name -- cloning a
+        # device is the ordinary way to get there. Opening whichever simctl
+        # happened to list first is the defect `_resolve_device` and
+        # `_key_for_label` both refuse to commit, and it was asymmetric as
+        # well as wrong: `add` picked one while `remove` with the same string
+        # raised once both were active.
+        by_name = [(u, n) for u, n in booted if n == name]
+        if len(by_name) > 1:
+            udids = ", ".join(u for u, _ in by_name)
             raise RuntimeError(
-                f"Device '{name}' not found in CoreMediaIO devices. "
-                f"Available: {available_names}"
+                f"{len(by_name)} booted simulators are called '{name}'. "
+                f"Ask for one by its udid: {udids}"
             )
+        if by_name:
+            udid, sim_name = by_name[0]
+            return await self.add_simulator(udid, title=sim_name)
+
+        available = [f"{d.name} ({d.cmio_id})" for d in self._available]
+        raise RuntimeError(
+            f"'{name}' is not a connected device or a booted simulator. "
+            f"Devices: {available or 'none'}"
+        )
+
+    async def _add_device(self, device: PreviewDeviceInfo) -> ActivePreview:
+        """Open a preview window on a CoreMediaIO capture device."""
+        key = device.cmio_id
+
+        if key in self._active:
+            return self._active[key]
 
         async with self._stagger_lock:
             position = self._next_position()
@@ -472,34 +686,260 @@ class PreviewManager:
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
             cid = self._next_command_id()
-            self._pending[name] = (cid, "add", fut)
+            self._pending[key] = (cid, "add", fut)
 
             await self._send(
-                {"cmd": "add", "name": name, "position": position, "id": cid}
+                {"cmd": "add", "key": key, "position": position, "id": cid}
             )
 
             try:
                 await asyncio.wait_for(fut, timeout=10.0)
             except TimeoutError:
-                self._pending.pop(name, None)
-                raise RuntimeError(f"Timeout adding preview for {name}")
+                self._pending.pop(key, None)
+                raise RuntimeError(
+                    f"Timeout adding preview for {device.name}"
+                ) from None
 
-            preview = ActivePreview(name=name, position=position)
-            self._active[name] = preview
+            preview = ActivePreview(name=key, position=position, label=device.name)
+            self._active[key] = preview
             self._positions.add(position)
 
-            # Stagger: wait 1s before allowing the next add
-            await asyncio.sleep(1.0)
+            # Stagger: give CoreMediaIO a moment before the next add
+            await asyncio.sleep(ADD_STAGGER_SECONDS)
 
             return preview
 
+    async def add_simulator(self, udid: str, title: str | None = None) -> ActivePreview:
+        """Open a preview window on a booted simulator.
+
+        A simulator is not a CoreMediaIO device, so there is nothing for
+        ios-preview to capture directly. `quern-media` attaches to the
+        framebuffer and serves it as MJPEG on loopback; the window displays
+        that stream. Filed under the udid.
+
+        Raises:
+            RuntimeError: if quern-media cannot serve the simulator, or the
+                window does not open.
+        """
+        await self._ensure_process()
+
+        if udid in self._active:
+            return self._active[udid]
+
+        # Off the event loop: a cold build is several seconds.
+        binary = await build_media_engine()
+
+        async with self._stagger_lock:
+            # Re-checked under the lock. The check above happens before an
+            # await on a build that can take seconds, so two calls for one
+            # udid -- an agent retrying after a client timeout is enough --
+            # both passed it. The second then overwrote `_streams[udid]`,
+            # stranding the first `quern-media`: out of `_streams`, so
+            # `_stop_stream`, `_terminate_streams` and `stop()` could not
+            # reach it, holding its port and the framebuffer subscription
+            # until the server exited. It also leaked the first `position`
+            # and sent ios-preview a second `add_stream` for a live window.
+            if udid in self._active:
+                return self._active[udid]
+
+            position = self._next_position()
+            port = find_available_port(
+                STREAM_BASE_PORT,
+                exclude={s.port for s in self._streams.values()},
+            )
+            stream = await self._start_stream(udid, binary, port)
+
+            # Every failure from here tears the stream down. A quern-media
+            # left running would hold both the port and the framebuffer
+            # subscription against the next attempt, which would then fail
+            # for a reason that has nothing to do with why this one did.
+            try:
+                await self._wait_until_serving(udid, stream)
+
+                loop = asyncio.get_event_loop()
+                fut: asyncio.Future = loop.create_future()
+                cid = self._next_command_id()
+                self._pending[udid] = (cid, "add", fut)
+
+                await self._send({
+                    "cmd": "add_stream",
+                    "key": udid,
+                    "title": title or udid,
+                    "url": f"http://127.0.0.1:{port}/stream",
+                    "position": position,
+                    "id": cid,
+                })
+
+                try:
+                    await asyncio.wait_for(fut, timeout=15.0)
+                except TimeoutError:
+                    self._pending.pop(udid, None)
+                    raise RuntimeError(
+                        f"Timeout opening a preview window for {udid[:8]}"
+                    ) from None
+            except BaseException:
+                await self._stop_stream(udid)
+                raise
+
+            preview = ActivePreview(
+                name=udid, position=position, kind="simulator", stream_port=port,
+                label=title,
+            )
+            self._active[udid] = preview
+            self._positions.add(position)
+            return preview
+
+    async def _start_stream(
+        self, udid: str, binary: Path, port: int
+    ) -> _StreamProcess:
+        """Launch quern-media against a simulator, draining its stderr."""
+        process = await asyncio.create_subprocess_exec(
+            str(binary), "--sim-udid", udid, "--serve", str(port),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stream = _StreamProcess(process=process, port=port, log=deque(maxlen=20))
+        # Drained rather than left to fill: a preview runs for as long as
+        # someone watches it, and an unread pipe eventually blocks the writer.
+        stream.drain = asyncio.create_task(
+            self._drain_stream(udid, stream), name=f"stream-drain[{udid}]"
+        )
+        # `_stop_stream` only awaits this task if it is still running, so a
+        # drain that died on its own would never have its exception read.
+        stream.drain.add_done_callback(self._report_background_failure)
+        self._streams[udid] = stream
+        return stream
+
+    async def _drain_stream(self, udid: str, stream: _StreamProcess) -> None:
+        """Keep the stderr pipe empty, and keep the last of it."""
+        assert stream.process.stderr is not None
+        try:
+            while True:
+                line = await stream.process.stderr.readline()
+                if not line:
+                    return
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    stream.log.append(text)
+                    logger.debug("quern-media[%s]: %s", udid[:8], text)
+        except asyncio.CancelledError:
+            return
+
+    async def _wait_until_serving(self, udid: str, stream: _StreamProcess) -> None:
+        """Wait until quern-media accepts a connection, or say why it will not.
+
+        A process that died and one that is merely slow look identical from
+        the port, and reporting a timeout for a simulator that was never
+        booted sends the reader somewhere the fault is not.
+        """
+        deadline = time.monotonic() + STREAM_START_TIMEOUT
+        while time.monotonic() < deadline:
+            if stream.process.returncode is not None:
+                detail = " / ".join(stream.log) or "no output"
+                raise RuntimeError(
+                    f"quern-media exited ({stream.process.returncode}) before "
+                    f"serving {udid[:8]}: {detail}"
+                )
+            try:
+                _reader, writer = await asyncio.open_connection(
+                    "127.0.0.1", stream.port
+                )
+            except OSError:
+                await asyncio.sleep(0.1)
+                continue
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+            return
+
+        raise RuntimeError(
+            f"quern-media did not serve {udid[:8]} on port {stream.port} "
+            f"within {STREAM_START_TIMEOUT}s"
+        )
+
+    @staticmethod
+    def _report_background_failure(task: asyncio.Task) -> None:
+        """Retrieve and log the result of a task nobody awaits.
+
+        Without this an exception surfaces only as "Task exception was never
+        retrieved" when the task is collected -- a line that names neither the
+        task nor the cause, and arrives whenever the collector gets to it.
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Background task %s failed", task.get_name(), exc_info=error)
+
+    async def _stop_stream(self, key: str) -> None:
+        """Stop the quern-media behind a preview, if there is one."""
+        stream = self._streams.pop(key, None)
+        if stream is None:
+            return
+
+        if stream.drain and not stream.drain.done():
+            stream.drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stream.drain
+
+        if stream.process.returncode is None:
+            stream.process.terminate()
+            try:
+                await asyncio.wait_for(stream.process.wait(), timeout=5.0)
+            except TimeoutError:
+                stream.process.kill()
+                await stream.process.wait()
+
+    def _terminate_streams(self) -> None:
+        """Synchronous teardown, for the paths that cannot await.
+
+        Signals only; the processes are reaped by the event loop. Used where
+        the manager is resetting state after the preview process has already
+        gone, and leaving these running would orphan a capture per window.
+        """
+        for stream in self._streams.values():
+            if stream.drain and not stream.drain.done():
+                stream.drain.cancel()
+            if stream.process.returncode is None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    stream.process.terminate()
+        self._streams.clear()
+
     async def remove(self, name: str) -> None:
-        """Remove a preview for a device by name."""
+        """Remove a preview, by session key, device name, or simulator name.
+
+        The same three forms `add` takes, and for the same reason: whatever
+        opened a window has to be able to close it.
+
+        A simulator is filed under its udid with the simulator name as its
+        label, and `_resolve_device` searches capture devices only -- so it
+        cannot see that label. `remove("iPhone 16 Pro")` therefore fell
+        through with a display name for a key, matched nothing, and returned
+        normally with the window still open and quern-media still holding the
+        framebuffer subscription. Silence is what the bug looked like.
+
+        Capture devices are resolved first, exactly as in `add`. Resolving the
+        label first would let one string name a different window depending on
+        which end of the pair you called.
+
+        Raises:
+            RuntimeError: when a label matches more than one active preview.
+        """
+        if name not in self._active:
+            device = self._resolve_device(name)
+            if device is not None and device.cmio_id in self._active:
+                name = device.cmio_id
+            else:
+                name = self._key_for_label(name)
         if self._process is None or self._process.returncode is not None:
             self._active.pop(name, None)
+            await self._stop_stream(name)
             return
 
         if name not in self._active:
+            # No window, but a stream may still be running behind a window the
+            # user closed. Leaving it would hold the framebuffer subscription.
+            await self._stop_stream(name)
             return
 
         loop = asyncio.get_event_loop()
@@ -507,7 +947,7 @@ class PreviewManager:
         cid = self._next_command_id()
         self._pending[name] = (cid, "remove", fut)
 
-        await self._send({"cmd": "remove", "name": name, "id": cid})
+        await self._send({"cmd": "remove", "key": name, "id": cid})
 
         try:
             await asyncio.wait_for(fut, timeout=5.0)
@@ -518,14 +958,19 @@ class PreviewManager:
         preview = self._active.pop(name, None)
         if preview:
             self._positions.discard(preview.position)
+        await self._stop_stream(name)
 
     async def stop(self) -> dict:
         """Stop all previews and kill the process."""
         if self._process is None or self._process.returncode is not None:
+            for key in list(self._streams):
+                await self._stop_stream(key)
             self._cleanup_state()
             return {"status": "stopped"}
 
         pid = self._process.pid
+        for key in list(self._streams):
+            await self._stop_stream(key)
         try:
             await self._send({"cmd": "quit"})
             await asyncio.wait_for(self._process.wait(), timeout=5.0)
@@ -543,6 +988,9 @@ class PreviewManager:
             name: {
                 "position": p.position,
                 "started_at": p.started_at.isoformat(),
+                "kind": p.kind,
+                **({"name": p.label} if p.label else {}),
+                **({"stream_port": p.stream_port} if p.stream_port else {}),
             }
             for name, p in self._active.items()
         }

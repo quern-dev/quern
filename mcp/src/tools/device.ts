@@ -874,13 +874,13 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("preview_device", {
-    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO (USB only, not simulators). Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices.`,
+    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO over USB. Booted iOS simulators are supported too, by a different route: quern-media reads the simulator framebuffer and serves it as MJPEG. Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices -- simulators are not included in that sweep and must be named.`,
     inputSchema: strictParams({
       udid: z
         .string()
         .optional()
         .describe(
-          "UDID of a physical device to preview. If omitted, previews all USB-connected devices."
+          "UDID of a physical device (iOS or Android), a booted iOS simulator, or an Android emulator. If omitted, previews every USB-connected physical iOS device and nothing else -- no simulators, no Android."
         ),
     }),
   }, async ({ udid }) => {
@@ -914,7 +914,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("stop_preview", {
-    description: `Stop a live device preview. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
+    description: `Stop a live device preview. Accepts the UDID of a physical device or of a booted simulator. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
     inputSchema: strictParams({
       udid: z
         .string()

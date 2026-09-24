@@ -1115,15 +1115,39 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        # iOS physical → CoreMediaIO
-        if not controller._is_physical(udid):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Device {udid} is a simulator. Live preview only works with "
-                       f"physical devices connected via USB.",
-            )
-
         pm = _get_preview_manager(request)
+
+        # iOS simulator → quern-media serves its framebuffer as MJPEG on
+        # loopback and the preview app opens a window on that stream.
+        #
+        # The udid goes straight through. The name round-trip below exists
+        # because CoreMediaIO matches on a localizedName and has no idea
+        # simulators exist; a simulator preview is filed under its udid, so
+        # resolving it to a name would only throw the identity away.
+        #
+        # This route used to refuse simulators with a 400, which left the
+        # capability with no way in: `PreviewManager.add` grew simulator
+        # support and this is the only HTTP path that reaches it. `preview_stop`
+        # never had the matching gate, so stopping a simulator preview was
+        # reachable while starting one was not.
+        if not controller._is_physical(udid):
+            try:
+                preview = await pm.add(udid)
+            except DeviceError as e:
+                # `add` enumerates booted simulators through simctl to match
+                # the udid, so an unavailable or mid-update Xcode raises here.
+                # Uncaught it is a bare 500 with no detail; routed through the
+                # shared handler it says which tool failed and why, the same
+                # as every other simctl-backed route.
+                raise _handle_device_error(e)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {
+                "status": "added",
+                "name": preview.label or preview.name,
+                "position": preview.position,
+                "platform": "ios",
+            }
 
         # Get device name for the CoreMediaIO match
         device_name = None
@@ -1146,7 +1170,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             preview = await pm.add(device_name)
             return {
                 "status": "added",
-                "name": preview.name,
+                "name": preview.label or preview.name,
                 "position": preview.position,
                 "platform": "ios",
             }
@@ -1164,13 +1188,13 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         added = []
         errors = []
         for dev in pm._available:
-            if dev.name in pm._active:
+            if dev.cmio_id in pm._active:
                 added.append({"name": dev.name, "status": "already_active"})
                 continue
             try:
-                preview = await pm.add(dev.name)
+                preview = await pm.add(dev.cmio_id)
                 added.append({
-                    "name": preview.name,
+                    "name": preview.label or preview.name,
                     "position": preview.position,
                     "status": "added",
                 })
@@ -1201,8 +1225,29 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
             await sp.remove(udid)
             return {"status": "removed", "serial": udid}
 
-        # iOS → CoreMediaIO
         pm = _get_preview_manager(request)
+
+        # iOS simulator → the udid is the session key, so it goes straight
+        # through, exactly as in `preview_start`.
+        #
+        # Resolving it to a display name throws the identity away, and
+        # `PreviewManager.remove` resolves capture devices before labels: with
+        # a phone and a simulator of the same name both previewed, the name
+        # landed on the phone. That closed the wrong window and returned
+        # "removed", while the simulator's window and its `quern-media` stayed
+        # up holding the framebuffer subscription.
+        #
+        # This is also why the simulator path must not touch `list_devices`
+        # below — a udid that is already the key needs no lookup, and a
+        # `DeviceError` from an unavailable simctl used to 404 it.
+        if not controller._is_physical(udid):
+            try:
+                await pm.remove(udid)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {"status": "removed", "udid": udid}
+
+        # iOS physical → CoreMediaIO, which matches on a localizedName.
         device_name: str | None = None
         try:
             devices = await controller.list_devices()
@@ -1219,7 +1264,13 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
                 detail=f"Could not resolve device name for UDID {udid}",
             )
 
-        await pm.remove(device_name)
+        # Caught for the reason `preview_start` catches it: an ambiguous name
+        # is a RuntimeError carrying the only instructions the caller can act
+        # on, and uncaught it reaches FastAPI as a 500 with no detail at all.
+        try:
+            await pm.remove(device_name)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
         return {"status": "removed", "name": device_name}
 
     # No UDID — stop all

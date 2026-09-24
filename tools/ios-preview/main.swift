@@ -10,11 +10,18 @@
 //   ios-preview 0 2          # preview devices by index
 //   ios-preview --interactive # JSON Lines protocol on stdin/stdout
 //
-// Build: swiftc -o tools/ios-preview tools/ios-preview.swift -framework AVFoundation -framework CoreMediaIO -framework AppKit
+// Build: swiftc -o ios-preview tools/ios-preview/main.swift \
+//          macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
+//          -framework AVFoundation -framework CoreMediaIO -framework AppKit
+//
+// Named main.swift because it is top-level code: Swift allows that only
+// in a file with that name, and it has to compile alongside a second file
+// so the frame parser can live somewhere with a test target.
 
 import AVFoundation
 import AppKit
 import CoreMediaIO
+import ImageIO
 import Foundation
 
 // MARK: - Enable iOS screen capture device discovery
@@ -241,10 +248,17 @@ func loadAppIcon() {
 
 // MARK: - PreviewController protocol
 
+/// Sessions are addressed by `AVCaptureDevice.uniqueID`, not by name.
+///
+/// Two phones of the same model report the same `localizedName`, so a
+/// name-keyed session table could only ever hold one of them, and unplugging
+/// one left the other's window unreachable. The unique ID is also what
+/// survives a re-plug, which a name does not: the old entry kept the name
+/// taken and the returning device could not attach.
 protocol PreviewController: AnyObject {
     var allDevices: [AVCaptureDevice] { get set }
-    var activeDeviceNames: Set<String> { get }
-    func togglePreview(name: String, position: Int)
+    var activeSessionKeys: Set<String> { get }
+    func togglePreview(key: String, position: Int)
     func nextPosition() -> Int
 }
 
@@ -271,8 +285,8 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
             for device in devices {
                 let item = NSMenuItem(title: device.localizedName, action: #selector(DevicesMenuDelegate.toggleDevice(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = device.localizedName
-                if controller.activeDeviceNames.contains(device.localizedName) {
+                item.representedObject = device.uniqueID
+                if controller.activeSessionKeys.contains(device.uniqueID) {
                     item.state = .on
                 }
                 menu.addItem(item)
@@ -287,8 +301,8 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
 
     @objc func toggleDevice(_ sender: NSMenuItem) {
         guard let controller = controller,
-              let name = sender.representedObject as? String else { return }
-        controller.togglePreview(name: name, position: controller.nextPosition())
+              let key = sender.representedObject as? String else { return }
+        controller.togglePreview(key: key, position: controller.nextPosition())
     }
 
     @objc func refreshDevices(_ sender: NSMenuItem) {
@@ -454,7 +468,7 @@ class PreviewWindow: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         sizer?.cancel()
         session.stopRunning()
-        onWindowClosed?(device.localizedName)
+        onWindowClosed?(device.uniqueID)
     }
 }
 
@@ -467,7 +481,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     let mode: FilterMode
     private var deviceObservers: [NSObjectProtocol] = []
 
-    var activeDeviceNames: Set<String> {
+    var activeSessionKeys: Set<String> {
         return Set(activePreviews.keys)
     }
 
@@ -501,13 +515,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// exists -- which also meant replugging could not attach to it, because
     /// the name was still taken.
     private func deviceVanished(_ device: AVCaptureDevice) {
-        let name = device.localizedName
-        allDevices.removeAll { $0.uniqueID == device.uniqueID }
-        guard let preview = activePreviews[name] else { return }
-        fputs("  \(name) disconnected — closing its window\n", stderr)
+        let key = device.uniqueID
+        allDevices.removeAll { $0.uniqueID == key }
+        guard let preview = activePreviews[key] else { return }
+        fputs("  \(device.localizedName) disconnected — closing its window\n", stderr)
         preview.onWindowClosed = nil  // we are already removing it
         preview.stop()
-        activePreviews.removeValue(forKey: name)
+        activePreviews.removeValue(forKey: key)
     }
 
     /// Plugging a phone in opens its window, so the app keeps showing what is
@@ -518,12 +532,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// device and must not sprout windows for the rest. List mode never gets
     /// here -- it prints and exits.
     private func deviceAppeared(_ device: AVCaptureDevice) {
-        let name = device.localizedName
         if !allDevices.contains(where: { $0.uniqueID == device.uniqueID }) {
             allDevices.append(device)
         }
 
-        guard activePreviews[name] == nil else { return }
+        guard activePreviews[device.uniqueID] == nil else { return }
 
         switch mode {
         case .all:
@@ -534,8 +547,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             return
         }
 
-        fputs("  \(name) connected — opening its window\n", stderr)
-        togglePreview(name: name, position: nextPosition())
+        fputs("  \(device.localizedName) connected — opening its window\n", stderr)
+        togglePreview(key: device.uniqueID, position: nextPosition())
     }
 
     func onDevicesReady() {
@@ -579,40 +592,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             print("  \(device.localizedName)")
             fputs("  Creating preview window for \(device.localizedName) (index \(i))...\n", stderr)
             let preview = PreviewWindow(device: device, index: i)
-            preview.onWindowClosed = { [weak self] name in
-                self?.activePreviews.removeValue(forKey: name)
+            preview.onWindowClosed = { [weak self] key in
+                self?.activePreviews.removeValue(forKey: key)
             }
-            activePreviews[device.localizedName] = preview
+            activePreviews[device.uniqueID] = preview
             fputs("  Preview window created for \(device.localizedName)\n", stderr)
         }
         // Stagger session starts to avoid CoreMediaIO race conditions
-        let names = devices.map { $0.localizedName }
-        startNextSession(names: names, index: 0)
+        startNextSession(keys: devices.map { $0.uniqueID }, index: 0)
         print("Close all windows or Ctrl+C to quit.")
     }
 
-    func startNextSession(names: [String], index: Int) {
-        guard index < names.count, let preview = activePreviews[names[index]] else { return }
+    func startNextSession(keys: [String], index: Int) {
+        guard index < keys.count, let preview = activePreviews[keys[index]] else { return }
         preview.start()
-        if index + 1 < names.count {
+        if index + 1 < keys.count {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.startNextSession(names: names, index: index + 1)
+                self.startNextSession(keys: keys, index: index + 1)
             }
         }
     }
 
-    func togglePreview(name: String, position: Int) {
-        if let preview = activePreviews[name] {
+    func togglePreview(key: String, position: Int) {
+        if let preview = activePreviews[key] {
             preview.onWindowClosed = nil
             preview.stop()
-            activePreviews.removeValue(forKey: name)
+            activePreviews.removeValue(forKey: key)
         } else {
-            guard let device = allDevices.first(where: { $0.localizedName == name }) else { return }
+            guard let device = allDevices.first(where: { $0.uniqueID == key }) else { return }
             let preview = PreviewWindow(device: device, index: position)
-            preview.onWindowClosed = { [weak self] name in
-                self?.activePreviews.removeValue(forKey: name)
+            preview.onWindowClosed = { [weak self] closedKey in
+                self?.activePreviews.removeValue(forKey: closedKey)
             }
-            activePreviews[name] = preview
+            activePreviews[key] = preview
             preview.start()
         }
     }
@@ -635,8 +647,352 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
 // MARK: - Interactive mode: PreviewSession
 
-class PreviewSession: NSObject, NSWindowDelegate {
+// MARK: - Session kinds
+
+/// What the controller needs of a preview, whatever is behind it.
+///
+/// Two kinds exist. A `PreviewSession` mirrors a CoreMediaIO capture device;
+/// a `StreamPreviewSession` displays an MJPEG stream served by `quern-media`.
+/// The second exists because a simulator is not a capture device and never
+/// appears in a `DiscoverySession`, so it cannot be previewed the first way
+/// at all.
+///
+/// `sessionKey` is deliberately opaque here: a capture device's
+/// `AVCaptureDevice.uniqueID`, a stream's udid. The controller and the server
+/// only ever echo it back, so neither has to know which it is holding.
+protocol PreviewSessionKind: AnyObject {
+    var sessionKey: String { get }
+    var onWindowClosed: ((String) -> Void)? { get set }
+    func start()
+    func stop()
+}
+
+// MARK: - MJPEG stream client
+
+/// Reads an MJPEG stream and hands back one image per frame.
+///
+/// The framing itself — why markers rather than the multipart boundary — is
+/// documented on `JPEGFraming`, which owns it.
+final class MJPEGClient: NSObject, URLSessionDataDelegate {
+    /// Frame extraction lives in `QuernMedia/Encode/JPEGFraming.swift`, which
+    /// `build_preview_bundle` compiles alongside this file. It is the one part
+    /// of this client that is pure enough to test, and this file has no test
+    /// target — which is how a 15s inactivity timeout and a black window both
+    /// shipped from here.
+    private var framing = JPEGFraming()
+
+    private let url: URL
+    private let onConnected: () -> Void
+    private let onFrame: (CGImage) -> Void
+    private let onError: (String) -> Void
+
+    /// Guards `session`, `task` and `stopped`, which `stop()` writes from the
+    /// main queue while the delegate callbacks read them on URLSession's.
+    /// `framing` and `announced` are not guarded: both are touched only from
+    /// the delegate queue, which is serial.
+    /// Silence longer than this means the stream is gone, not merely idle.
+    ///
+    /// Both URLSession timeouts are unbounded on purpose — see `start()` — so
+    /// nothing else notices a peer that stops sending without closing. That
+    /// is a dropped network, or a producer wedged with its socket open; a
+    /// process that dies sends a FIN and arrives as didCompleteWithError.
+    ///
+    /// The server repeats its last frame every few seconds so that silence
+    /// means something. This sits well above that: missing one repeat is a
+    /// hiccup, missing several is a dead peer.
+    private static let idleTimeout: TimeInterval = 20
+
+    private let lock = NSLock()
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var stopped = false
+    private var lastDataAt = Date()
+    private var watchdog: DispatchSourceTimer?
+    /// `multipart/x-mixed-replace` is a sequence of responses as far as
+    /// URLSession is concerned, so this delegate call arrives once per *frame*,
+    /// not once per stream. Measured: the acknowledgement fired on every frame
+    /// until this gate went in.
+    private var announced = false
+
+    init(
+        url: URL,
+        onConnected: @escaping () -> Void,
+        onFrame: @escaping (CGImage) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        self.url = url
+        self.onConnected = onConnected
+        self.onFrame = onFrame
+        self.onError = onError
+        super.init()
+    }
+
+    func start() {
+        let config = URLSessionConfiguration.default
+        // Both timeouts are effectively off, and they have to be.
+        // `timeoutIntervalForRequest` is an inactivity timeout that keeps
+        // running while a response is open, and the server sends only when a
+        // frame arrives -- there is no keepalive. An idle simulator composites
+        // nothing, so at 15s a preview of a still screen died exactly 15
+        // seconds after its first frame. Measured: "The request timed out."
+        // followed by window_closed at 21.6s against a first frame at 6.6s.
+        //
+        // Nothing is lost by waiting forever. A stream that really has gone
+        // closes the connection, and that arrives as didCompleteWithError.
+        config.timeoutIntervalForRequest = .greatestFiniteMagnitude
+        config.timeoutIntervalForResource = .greatestFiniteMagnitude
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        let task = session.dataTask(with: url)
+        lock.lock()
+        self.session = session
+        self.task = task
+        lastDataAt = Date()
+        lock.unlock()
+        startWatchdog()
+        task.resume()
+    }
+
+    /// Safe from any queue. `stop()` is called on the main queue, while the
+    /// delegate callbacks below run on URLSession's own queue.
+    func stop() {
+        lock.lock()
+        stopped = true
+        let task = self.task
+        let session = self.session
+        let timer = watchdog
+        self.session = nil
+        self.task = nil
+        watchdog = nil
+        lock.unlock()
+
+        timer?.cancel()
+        task?.cancel()
+        session?.invalidateAndCancel()
+    }
+
+    private func startWatchdog() {
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "quern.preview.watchdog")
+        )
+        let tick = Self.idleTimeout / 4
+        timer.schedule(deadline: .now() + tick, repeating: tick)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let silent = Date().timeIntervalSince(self.lastDataAt)
+            let alreadyStopped = self.stopped
+            self.lock.unlock()
+            guard !alreadyStopped, silent >= Self.idleTimeout else { return }
+            self.onError(String(
+                format: "no data for %.0fs — the stream is gone, not idle", silent
+            ))
+        }
+        lock.lock()
+        watchdog = timer
+        lock.unlock()
+        timer.resume()
+    }
+
+    private var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        // `cancel()` is asynchronous, so a response already dispatched can
+        // land after stop() returned. Downstream identity checks happen to
+        // catch it today; not firing callbacks for a stopped client is the
+        // guarantee this class should be making itself.
+        guard !isStopped else {
+            completionHandler(.cancel)
+            return
+        }
+
+        // The acknowledgement signal. Deliberately not "first frame": the
+        // simulator framebuffer is event-driven and costs nothing while idle,
+        // so a simulator sitting on a static screen sends no frames at all and
+        // an add waiting for one would time out on a working preview.
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 200 {
+            if !announced {
+                announced = true
+                onConnected()
+            }
+            completionHandler(.allow)
+        } else {
+            onError("stream returned HTTP \(code)")
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
+    ) {
+        guard !isStopped else { return }
+        lock.lock()
+        lastDataAt = Date()
+        lock.unlock()
+        for jpeg in framing.append(data) {
+            guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                // Dropped silently before. A frame that will not decode --
+                // two SOIs with no EOI between them produce one, since marker
+                // scanning cannot tell them apart -- looked identical to a
+                // screen that had not changed.
+                fputs("  stream \(url.absoluteString): dropped a frame that "
+                    + "would not decode (\(jpeg.count) bytes)\n", stderr)
+                continue
+            }
+            onFrame(image)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
+    ) {
+        guard !isStopped else { return }
+        onError(error?.localizedDescription ?? "stream ended")
+    }
+
+}
+
+// MARK: - Stream-backed preview window
+
+/// A preview window fed by an MJPEG stream instead of a capture device.
+///
+/// The window opens at the same default size as a capture preview and takes
+/// the stream's own proportions from the first frame that arrives -- the
+/// stream advertises no dimensions before then, which is the same problem
+/// `StreamAspectSizer` solves for capture devices by polling the input port.
+final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
+    let sessionKey: String
+    let window: NSWindow
+    var onWindowClosed: ((String) -> Void)?
+
+    private let url: URL
+    private let imageLayer = CALayer()
+    private var client: MJPEGClient?
+    private var haveSized = false
+    private var connected = false
+    private var reported = false
+
+    init(sessionKey: String, title: String, url: URL, position: Int) {
+        self.sessionKey = sessionKey
+        self.url = url
+
+        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let windowWidth: CGFloat = 400
+        let windowHeight: CGFloat = 710
+        let xOffset = CGFloat(position) * (windowWidth + 20) + 50
+        let yOffset = screenFrame.height - windowHeight - 80
+
+        window = NSWindow(
+            contentRect: NSRect(x: xOffset, y: yOffset, width: windowWidth, height: windowHeight),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = title
+        window.isReleasedWhenClosed = false
+
+        imageLayer.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+        imageLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        // Matches AVCaptureVideoPreviewLayer's .resizeAspect, so a stream
+        // whose window has not been sized yet letterboxes rather than stretches.
+        imageLayer.contentsGravity = .resizeAspect
+        imageLayer.backgroundColor = NSColor.black.cgColor
+
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
+        view.wantsLayer = true
+        view.layer?.addSublayer(imageLayer)
+        window.contentView = view
+
+        super.init()
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Called once the stream's HTTP response arrives, on the main queue.
+    var onConnected: (() -> Void)?
+
+    /// Called once, on the main queue, when the stream ends or fails. The
+    /// flag says whether the add had already been acknowledged, which decides
+    /// whether the server hears a failed add or a closed window.
+    var onFailed: ((Bool, String) -> Void)?
+
+    func start() {
+        let client = MJPEGClient(
+            url: url,
+            onConnected: { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.connected = true
+                    self.onConnected?()
+                }
+            },
+            onFrame: { [weak self] image in
+                DispatchQueue.main.async { self?.show(image) }
+            },
+            onError: { [weak self] message in
+                // A dead stream used to be logged and nothing else: the
+                // window stayed on screen showing its last frame, the
+                // URLSession kept the delegate alive, and the server went on
+                // believing the preview was running -- the same failure the
+                // capture path handles in deviceVanished.
+                DispatchQueue.main.async {
+                    guard let self, !self.reported else { return }
+                    self.reported = true
+                    fputs("  stream \(self.sessionKey): \(message)\n", stderr)
+                    let wasAcknowledged = self.connected
+                    self.stop()
+                    self.onFailed?(wasAcknowledged, message)
+                }
+            }
+        )
+        self.client = client
+        client.start()
+    }
+
+    func stop() {
+        client?.stop()
+        client = nil
+        window.delegate = nil
+        window.close()
+    }
+
+    private func show(_ image: CGImage) {
+        // Layer contents are not animatable here; without this every frame
+        // cross-fades into the last and the preview smears.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageLayer.contents = image
+        CATransaction.commit()
+
+        guard !haveSized, image.width > 0, image.height > 0 else { return }
+        haveSized = true
+        fputs("  stream \(sessionKey): first frame \(image.width)x\(image.height)\n", stderr)
+        let aspect = CGFloat(image.width) / CGFloat(image.height)
+        let contentHeight = window.contentView?.frame.height ?? 710
+        window.setContentSize(NSSize(width: (contentHeight * aspect).rounded(), height: contentHeight))
+        window.contentAspectRatio = NSSize(width: image.width, height: image.height)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        client?.stop()
+        client = nil
+        onWindowClosed?(sessionKey)
+    }
+}
+
+class PreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
     let deviceName: String
+    let sessionKey: String
     let window: NSWindow
     let session: AVCaptureSession
     var onWindowClosed: ((String) -> Void)?
@@ -645,6 +1001,7 @@ class PreviewSession: NSObject, NSWindowDelegate {
 
     init(device: AVCaptureDevice, position: Int) {
         self.deviceName = device.localizedName
+        self.sessionKey = device.uniqueID
         self.session = AVCaptureSession()
 
         session.beginConfiguration()
@@ -707,21 +1064,21 @@ class PreviewSession: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         sizer?.cancel()
         session.stopRunning()
-        onWindowClosed?(deviceName)
+        onWindowClosed?(sessionKey)
     }
 }
 
 // MARK: - Interactive delegate
 
 class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
-    var sessions: [String: PreviewSession] = [:]
+    var sessions: [String: any PreviewSessionKind] = [:]
     var allDevices: [AVCaptureDevice] = []
     var positions: Set<Int> = []
     var stdinConnected = true
     let devicesMenuDelegate = DevicesMenuDelegate()
     private var deviceObservers: [NSObjectProtocol] = []
 
-    var activeDeviceNames: Set<String> {
+    var activeSessionKeys: Set<String> {
         return Set(sessions.keys)
     }
 
@@ -797,19 +1154,37 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
         switch cmd {
         case "add":
-            guard let name = json["name"] as? String else {
-                emit(["event": "error", "message": "add requires 'name'"])
+            // `key` is what this speaks; `name` is accepted because a person
+            // driving it by hand has the name and not the ID.
+            guard let identifier = (json["key"] ?? json["name"]) as? String else {
+                emit(["event": "error", "message": "add requires 'key' or 'name'"])
                 return
             }
             let position = json["position"] as? Int ?? nextPosition()
-            handleAdd(name: name, position: position, id: id)
+            handleAdd(name: identifier, position: position, id: id)
 
-        case "remove":
-            guard let name = json["name"] as? String else {
-                emit(["event": "error", "message": "remove requires 'name'"])
+        case "add_stream":
+            guard let key = (json["key"] ?? json["name"]) as? String else {
+                emit(["event": "error", "message": "add_stream requires 'key'"])
                 return
             }
-            handleRemove(name: name, id: id)
+            guard let urlString = json["url"] as? String, let url = URL(string: urlString) else {
+                emit([
+                    "event": "add_failed", "key": key,
+                    "error": "add_stream requires a valid 'url'", "id": id as Any,
+                ])
+                return
+            }
+            let position = json["position"] as? Int ?? nextPosition()
+            let title = json["title"] as? String ?? key
+            handleAddStream(key: key, title: title, url: url, position: position, id: id)
+
+        case "remove":
+            guard let key = (json["key"] ?? json["name"]) as? String else {
+                emit(["event": "error", "message": "remove requires 'key' or 'name'"])
+                return
+            }
+            handleRemove(key: key, id: id)
 
         case "list":
             handleList()
@@ -824,33 +1199,52 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
     // MARK: Command handlers
 
-    func handleAdd(name: String, position: Int, id: String? = nil) {
-        // Already previewing?
-        if sessions[name] != nil {
-            emit(["event": "add_failed", "name": name, "error": "Already previewing", "id": id as Any])
+    /// Opens a window on a CoreMediaIO capture device.
+    ///
+    /// `identifier` is resolved to the device's `uniqueID`, which is what the
+    /// session is filed under and what every event about it echoes back. A
+    /// caller that sent a name therefore gets replies keyed by ID; the server
+    /// sends the ID it was handed in `ready`, so for it the two are the same.
+    func handleAdd(name identifier: String, position: Int, id: String? = nil) {
+        // Both forms are accepted because both are things a caller reasonably
+        // holds -- the server has the ID from `ready`, a person driving this
+        // by hand has the name off the menu. The ID wins: two phones of the
+        // same model share a name, and matching on it picks whichever was
+        // discovered first.
+        guard let device = allDevices.first(where: { $0.uniqueID == identifier })
+            ?? allDevices.first(where: { $0.localizedName == identifier }) else {
+            emit([
+                "event": "add_failed", "key": identifier,
+                "error": "Device not found", "id": id as Any,
+            ])
             return
         }
 
-        // Find device by exact name
-        guard let device = allDevices.first(where: { $0.localizedName == name }) else {
-            emit(["event": "add_failed", "name": name, "error": "Device not found", "id": id as Any])
+        let key = device.uniqueID
+        if sessions[key] != nil {
+            emit([
+                "event": "add_failed", "key": key,
+                "error": "Already previewing", "id": id as Any,
+            ])
             return
         }
 
-        // Create session
         let session = PreviewSession(device: device, position: position)
 
         if session.session.inputs.isEmpty {
             session.stop()
-            emit(["event": "add_failed", "name": name, "error": "Cannot create input", "id": id as Any])
+            emit([
+                "event": "add_failed", "key": key,
+                "error": "Cannot create input", "id": id as Any,
+            ])
             return
         }
 
-        session.onWindowClosed = { [weak self] closedName in
-            self?.onWindowClosed(name: closedName)
+        session.onWindowClosed = { [weak self] closedKey in
+            self?.onWindowClosed(name: closedKey)
         }
 
-        sessions[name] = session
+        sessions[key] = session
         positions.insert(position)
 
         // Start capture, then acknowledge after a brief delay for CoreMediaIO.
@@ -864,16 +1258,16 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         session.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak session] in
             guard let self else { return }
-            guard let session, self.sessions[name] === session else {
+            guard let session, self.sessions[key] === session else {
                 self.emit([
                     "event": "add_failed",
-                    "name": name,
+                    "key": key,
                     "error": "Window closed before the preview was acknowledged",
                     "id": id as Any,
                 ])
                 return
             }
-            self.emit(["event": "added", "name": name, "id": id as Any])
+            self.emit(["event": "added", "key": key, "id": id as Any])
         }
     }
 
@@ -884,20 +1278,20 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     /// requested this preview should be able to tell "the phone was unplugged"
     /// from "someone called remove".
     private func deviceVanished(_ device: AVCaptureDevice) {
-        let name = device.localizedName
-        allDevices.removeAll { $0.uniqueID == device.uniqueID }
-        if let session = sessions[name] {
-            fputs("  \(name) disconnected — closing its window\n", stderr)
+        let key = device.uniqueID
+        allDevices.removeAll { $0.uniqueID == key }
+        if let session = sessions[key] {
+            fputs("  \(device.localizedName) disconnected — closing its window\n", stderr)
             session.onWindowClosed = nil
             session.stop()
-            sessions.removeValue(forKey: name)
+            sessions.removeValue(forKey: key)
             rebuildPositions()
         }
         // Emitted whether or not a window was open. The server prunes its
         // available-devices list on this event, so returning early for a
         // device nobody was previewing left the server advertising an
         // unplugged phone until something forced a refresh.
-        emit(["event": "disconnected", "name": name])
+        emit(["event": "disconnected", "key": key, "name": device.localizedName])
     }
 
     /// No window is opened here on purpose. In interactive mode the server
@@ -908,21 +1302,78 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         if !allDevices.contains(where: { $0.uniqueID == device.uniqueID }) {
             allDevices.append(device)
         }
-        emit(["event": "connected", "name": device.localizedName, "id": device.uniqueID])
+        emit(["event": "connected", "key": device.uniqueID, "name": device.localizedName])
     }
 
-    func handleRemove(name: String, id: String? = nil) {
-        guard let session = sessions[name] else {
-            emit(["event": "error", "message": "Not previewing: \(name)"])
+    /// Opens a window on an MJPEG stream rather than a capture device.
+    ///
+    /// How a simulator reaches the screen: `quern-media` captures its
+    /// framebuffer and serves it, the server passes the URL here. Filed under
+    /// the caller's key -- a udid in practice -- which every event about it
+    /// echoes back, exactly as a capture device echoes its name.
+    func handleAddStream(key: String, title: String, url: URL, position: Int, id: String? = nil) {
+        if sessions[key] != nil {
+            emit([
+                "event": "add_failed", "key": key,
+                "error": "Already previewing", "id": id as Any,
+            ])
+            return
+        }
+
+        let session = StreamPreviewSession(
+            sessionKey: key, title: title, url: url, position: position
+        )
+        session.onWindowClosed = { [weak self] closedKey in
+            self?.onWindowClosed(name: closedKey)
+        }
+
+        // `stop()` clears the window delegate, so a stream that dies reports
+        // itself here rather than through windowWillClose. Before the
+        // acknowledgement it is a failed add; after it, the window is simply
+        // gone, and the server tears down quern-media on that.
+        session.onFailed = { [weak self, weak session] wasAcknowledged, message in
+            guard let self, let session, self.sessions[key] === session else { return }
+            self.sessions.removeValue(forKey: key)
+            self.rebuildPositions()
+            if wasAcknowledged {
+                self.emit(["event": "window_closed", "key": key])
+            } else {
+                self.emit([
+                    "event": "add_failed", "key": key,
+                    "error": message, "id": id as Any,
+                ])
+            }
+        }
+
+        // Acknowledged when the stream's response arrives, not after a fixed
+        // delay: a capture device is ready on a timer because CoreMediaIO
+        // offers nothing better, whereas a stream says so itself. The same
+        // identity re-check applies -- the window can be closed inside the
+        // wait, and acknowledging anyway would have the server record a
+        // preview with no window and then refuse to open a fresh one.
+        session.onConnected = { [weak self, weak session] in
+            guard let self else { return }
+            guard let session, self.sessions[key] === session else { return }
+            self.emit(["event": "added", "key": key, "id": id as Any])
+        }
+
+        sessions[key] = session
+        positions.insert(position)
+        session.start()
+    }
+
+    func handleRemove(key: String, id: String? = nil) {
+        guard let session = sessions[key] else {
+            emit(["event": "error", "message": "Not previewing: \(key)"])
             return
         }
 
         session.onWindowClosed = nil  // Prevent double event
         session.stop()
-        sessions.removeValue(forKey: name)
+        sessions.removeValue(forKey: key)
         // Release position (we don't track which position maps to which session, so just rebuild)
         rebuildPositions()
-        emit(["event": "removed", "name": name, "id": id as Any])
+        emit(["event": "removed", "key": key, "id": id as Any])
     }
 
     func handleList() {
@@ -946,11 +1397,11 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         handleQuit()
     }
 
-    func togglePreview(name: String, position: Int) {
-        if sessions[name] != nil {
-            handleRemove(name: name)
+    func togglePreview(key: String, position: Int) {
+        if sessions[key] != nil {
+            handleRemove(key: key)
         } else {
-            handleAdd(name: name, position: position)
+            handleAdd(name: key, position: position)
         }
     }
 
@@ -963,7 +1414,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     func onWindowClosed(name: String) {
         sessions.removeValue(forKey: name)
         rebuildPositions()
-        emit(["event": "window_closed", "name": name])
+        emit(["event": "window_closed", "key": name])
     }
 
     func nextPosition() -> Int {
