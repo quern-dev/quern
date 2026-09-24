@@ -97,6 +97,20 @@ def _is_wifi_inet_line(line: str) -> bool:
     fell back to cellular still has an address, on `rmnet_data0`. Matching any
     non-loopback interface would call that a successful reattach.
 
+    The *presence of an address* is the other half, and it is sufficient here
+    rather than merely convenient. Measured on an LG H932 and a Pixel 3 XL:
+    `svc wifi disable` releases the address, and `ip -4 -o addr show` then
+    prints no `wlan` line at all -- a downed interface does not sit there
+    holding a stale IPv4. The Pixel showed the same from the other direction,
+    `<NO-CARRIER,...> state DOWN` with no `inet` to its name.
+
+    Carrier state would be the more direct question, and it is not available to
+    ask. On the same unrooted phone `ip link show wlan0`,
+    `/sys/class/net/wlan0/carrier` and `.../operstate` all return permission
+    denied to the adb shell user, and unrooted physical phones are the entire
+    point of this feature. A check that cannot run on the target hardware is
+    not a stronger check.
+
     Format: `30: wlan0    inet 192.168.1.244/24 brd 192.168.1.255 scope global`
     """
     parts = line.split()
