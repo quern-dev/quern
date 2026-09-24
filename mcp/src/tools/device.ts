@@ -244,7 +244,7 @@ NOTE: If you want to capture network traffic from this app:
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle."),
+        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -696,7 +696,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle."),
+        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded."),
       capture_screenshots: z
         .boolean()
         .default(false)

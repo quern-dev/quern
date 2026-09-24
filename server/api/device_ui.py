@@ -463,7 +463,9 @@ async def tap_element(request: Request, body: TapElementRequest):
             if body.include_screen_context and result.get("status") not in (
                 "not_found", "ambiguous",
             ):
-                result["screen_context"] = await _capture_screen_context(controller, resolved)
+                result["screen_context"] = await _capture_screen_context(
+                    controller, resolved, request.app.state.landmark_registry,
+                )
 
             return _with_input_warning(controller, resolved, result)
         except DeviceError as e:
@@ -673,7 +675,9 @@ async def type_text(request: Request, body: TypeTextRequest):
                 after = await _capture_action_screenshot(controller, udid, "type_after")
                 result["screenshots"] = {"before": before, "after": after}
             if body.include_screen_context:
-                result["screen_context"] = await _capture_screen_context(controller, udid)
+                result["screen_context"] = await _capture_screen_context(
+                    controller, udid, request.app.state.landmark_registry,
+                )
             return _with_input_warning(controller, udid, result)
         except DeviceError as e:
             raise _handle_device_error(e)

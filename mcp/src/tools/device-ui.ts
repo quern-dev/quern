@@ -449,7 +449,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation."),
+        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -722,7 +722,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues."),
+        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded."),
       capture_screenshots: z
         .boolean()
         .default(false)
