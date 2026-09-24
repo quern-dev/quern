@@ -513,6 +513,56 @@ class RecordDeviceProxyRequest(BaseModel):
     #: the device to be configured and got a 200 would reasonably believe it
     #: was.
     apply: bool = False
+    #: Unset the device's proxy and forget every config recorded for it. The
+    #: half #265 records as missing entirely: the setting lives in the global
+    #: settings provider and survives reboots, so without this it is the
+    #: device's configuration until something else changes it -- and a device
+    #: pointed at a proxy that is no longer listening has no working network
+    #: at all. Android only, and refused alongside `apply`.
+    clear: bool = False
+
+
+def _reattach_hint(reattached: bool | None, *, cleared: bool = False) -> str | None:
+    """What to do when the bounce did not bring the network back.
+
+    Measured on a physical Pixel 3 XL: `svc wifi disable/enable` sometimes
+    reassociates and sometimes leaves the interface NO-CARRIER indefinitely --
+    not reattached within 60s, where the wait in `reattach_network` is 10s.
+    The setting is still written and survives a reboot, so the device is
+    configured but not yet capturing, and it has no working network until it
+    rejoins. Saying so is the difference between a caller that fixes it and
+    one that reports the proxy as broken.
+    """
+    if reattached is not False:
+        return None
+    if cleared:
+        # No "call clear" here: that is what just happened, and advising it
+        # again would send a caller round a loop that cannot help.
+        return (
+            "The proxy is unset, but the Wi-Fi bounce did not bring the "
+            "network back. Reconnect the device (Settings > Wi-Fi, tap the "
+            "network) to restore it."
+        )
+    return (
+        "The Wi-Fi bounce did not bring the network back. The setting is "
+        "written and will take effect when the device rejoins. Reconnect it "
+        "(Settings > Wi-Fi, tap the network), or POST again with clear=true "
+        "to unset the proxy."
+    )
+
+
+async def _read_device_proxy(controller, udid: str) -> str | None:
+    """The device's current proxy, or None if it has none or cannot be asked.
+
+    A read-back failure is not worth failing the write over -- the write
+    already succeeded -- but it must not be reported as "no proxy set" either,
+    so the caller gets None for both and the log carries the difference.
+    """
+    try:
+        return await controller.adb.get_http_proxy(udid)
+    except Exception:
+        _logger.debug("Could not read back the proxy on %s", udid, exc_info=True)
+        return None
 
 
 @router.post("/device-proxy-config")
@@ -528,10 +578,52 @@ async def record_device_proxy_config_endpoint(
     provided. Call this after completing Wi-Fi proxy setup in device Settings.
     """
     from server.lifecycle.state import detect_host_ip_for_subnet, detect_local_ip
-    from server.proxy.cert_state import record_device_proxy_config
+    from server.proxy.cert_state import (
+        forget_device_proxy_configs,
+        record_device_proxy_config,
+    )
 
     controller = request.app.state.device_controller
     is_android = controller._is_android(body.udid)
+
+    if body.apply and body.clear:
+        raise HTTPException(
+            status_code=400,
+            detail="apply and clear are opposites; pass one or neither.",
+        )
+
+    if body.clear and not is_android:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "clear is only supported on Android. On iOS the Wi-Fi proxy is "
+                "removed by hand in Settings."
+            ),
+        )
+
+    if body.clear:
+        # Before the SSID work below: clearing needs no network name, and
+        # demanding one would make a device that has dropped off Wi-Fi --
+        # exactly what a bad proxy causes -- impossible to put right.
+        try:
+            await controller.adb.clear_http_proxy(body.udid)
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not clear the proxy on {body.udid}: {e}",
+            ) from e
+        forgotten = forget_device_proxy_configs(canonical_device_id(body.udid))
+        reattached = await controller.adb.reattach_network(body.udid)
+        return {
+            "udid": body.udid,
+            "cleared": True,
+            "forgot_ssids": forgotten,
+            "network_reattached": reattached,
+            "hint": _reattach_hint(reattached, cleared=True),
+            #: Read back from the device rather than inferred from the call
+            #: returning. None here is the success case.
+            "device_proxy": await _read_device_proxy(controller, body.udid),
+        }
 
     if body.apply and not is_android:
         # Refused rather than ignored. A caller that asked for the device to be
@@ -641,10 +733,21 @@ async def record_device_proxy_config_endpoint(
         #: device is configured and not yet capturing, and saying "applied"
         #: alone would hide it.
         "network_reattached": reattached,
+        #: Actionable rather than merely accurate: None unless the bounce
+        #: failed, in which case it names the two ways out.
+        "hint": _reattach_hint(reattached),
         #: Named so a hosting misconfiguration is diagnosable. If the device
         #: cannot reach this address, that is the thing to check, and a caller
         #: should not have to infer which address quern chose.
         "proxy_reachable_at": f"{proxy_host}:{port}",
+        #: What the device actually holds, read back over adb rather than
+        #: inferred from `set_http_proxy` returning without raising. None when
+        #: nothing was applied. Asserting something positive happened is the
+        #: point: a write that silently did not take looks exactly like one
+        #: that did.
+        "device_proxy": (
+            await _read_device_proxy(controller, body.udid) if applied else None
+        ),
     }
 
 

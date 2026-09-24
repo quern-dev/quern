@@ -251,6 +251,27 @@ def record_device_proxy_config(
     update_cert_state(udid, existing)
 
 
+def forget_device_proxy_configs(udid: str) -> list[str]:
+    """Drop every recorded Wi-Fi proxy config for a device, naming what went.
+
+    Android's `global http_proxy` is one setting for the whole device, not one
+    per network, so clearing it invalidates every SSID recorded here at once.
+    Leaving the records behind would be the failure this file keeps producing:
+    a stored config that reads as current while the device is no longer
+    routed anywhere.
+
+    Returns the SSIDs removed so a caller can report what it undid rather than
+    assert that something happened.
+    """
+    existing = read_cert_state_for_device(udid) or {}
+    configs: dict[str, Any] = existing.get("wifi_proxy_configs") or {}
+    removed = sorted(configs)
+    if removed:
+        existing["wifi_proxy_configs"] = {}
+        update_cert_state(udid, existing)
+    return removed
+
+
 def _create_and_open():
     """Create cert state file and return file handle opened for read/write."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

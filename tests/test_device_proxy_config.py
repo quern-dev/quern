@@ -49,6 +49,8 @@ def _android(udid: str = "PHONE1", *, ssid="MonaLisa", ip="192.168.1.244"):
     ctrl.adb.get_wifi_ssid = AsyncMock(return_value=ssid)
     ctrl.adb.set_http_proxy = AsyncMock()
     ctrl.adb.reattach_network = AsyncMock(return_value=True)
+    ctrl.adb.clear_http_proxy = AsyncMock()
+    ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
     return ctrl
 
 
@@ -254,3 +256,201 @@ class TestCertInstallNoLongerRoutesTheDevice:
         assert installed is True
         adb.install_system_cert.assert_awaited_once()
         adb.set_http_proxy.assert_not_awaited()
+
+
+class TestTheResponseReportsTheDeviceNotTheRequest:
+    """`set_http_proxy` returning without raising is not evidence the setting
+    took. Reading it back is."""
+
+    async def test_the_applied_proxy_is_read_back_from_the_device(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="192.168.1.189:9177")
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True),
+                _request(ctrl, port=9177),
+            )
+
+        ctrl.adb.get_http_proxy.assert_awaited_once_with("PHONE1")
+        assert out["device_proxy"] == "192.168.1.189:9177"
+
+    async def test_a_write_that_did_not_take_is_visible(self):
+        """The failure this repo keeps producing: success and broken looking
+        identical. If the device reports something other than what quern set,
+        the response says so rather than echoing the request."""
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["applied"] is True
+        assert out["device_proxy"] is None
+
+    async def test_no_read_back_when_nothing_was_applied(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", ssid="w", client_ip="1.2.3.4"),
+                _request(ctrl),
+            )
+
+        assert out["device_proxy"] is None
+        ctrl.adb.get_http_proxy.assert_not_awaited()
+
+
+class TestClearingIsPossibleAtAll:
+    """A device pointed at a proxy that is no longer listening has no working
+    network. Measured: the setting survives a reboot, so without an unset it
+    stays the device's configuration."""
+
+    async def test_clear_unsets_and_reattaches(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        ctrl.adb.clear_http_proxy.assert_awaited_once_with("PHONE1")
+        ctrl.adb.reattach_network.assert_awaited_once_with("PHONE1")
+        ctrl.adb.set_http_proxy.assert_not_awaited()
+        assert out["cleared"] is True
+        assert out["device_proxy"] is None
+
+    async def test_clear_needs_no_ssid(self):
+        """Clearing must work on a device that has dropped off Wi-Fi, which is
+        exactly what a bad proxy address causes -- so requiring an SSID would
+        make the broken case unrecoverable."""
+        ctrl = _android()
+        ctrl.adb.get_wifi_ssid = AsyncMock(return_value=None)
+        ctrl.adb.get_lan_ip = AsyncMock(return_value=None)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert out["cleared"] is True
+
+    async def test_clear_forgets_the_recorded_configs(self, tmp_path, monkeypatch):
+        """A stored config outliving the setting reads as current."""
+        import server.api.proxy_certs as mod
+        from server.proxy import cert_state
+
+        monkeypatch.setattr(cert_state, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(cert_state, "CERT_STATE_FILE", tmp_path / "certs.json")
+        cert_state.record_device_proxy_config(
+            "PHONE1", "MonaLisa", "192.168.1.189", 9177, client_ip="192.168.1.244",
+        )
+        assert (cert_state.read_cert_state_for_device("PHONE1") or {})[
+            "wifi_proxy_configs"
+        ]
+
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b, patch.object(mod, "canonical_device_id", lambda u: u):
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert out["forgot_ssids"] == ["MonaLisa"]
+        assert not (cert_state.read_cert_state_for_device("PHONE1") or {}).get(
+            "wifi_proxy_configs"
+        )
+
+    async def test_apply_and_clear_together_is_refused(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b, pytest.raises(HTTPException) as e:
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True, clear=True),
+                _request(ctrl),
+            )
+
+        assert e.value.status_code == 400
+        ctrl.adb.set_http_proxy.assert_not_awaited()
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+
+    async def test_clear_on_ios_is_refused(self):
+        ctrl = _ios()
+        ctrl.adb.clear_http_proxy = AsyncMock()
+        a, b = _hosts()
+        with a, b, pytest.raises(HTTPException) as e:
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="IOS1", clear=True), _request(ctrl),
+            )
+
+        assert e.value.status_code == 400
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+
+
+class TestAFailedReattachSaysWhatToDo:
+    """`network_reattached: false` is accurate but not actionable on its own.
+    Measured on a physical Pixel 3 XL, where the bounce sometimes leaves the
+    interface NO-CARRIER indefinitely and the device has no network until it
+    rejoins."""
+
+    async def test_a_failed_reattach_carries_a_hint(self):
+        ctrl = _android()
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["network_reattached"] is False
+        assert "clear=true" in out["hint"]
+
+    async def test_a_successful_reattach_carries_none(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["hint"] is None
+
+    async def test_recording_without_applying_carries_none(self):
+        """reattached is None here, not False -- nothing was attempted."""
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", ssid="w", client_ip="1.2.3.4"),
+                _request(ctrl),
+            )
+
+        assert out["hint"] is None
+
+    async def test_the_clear_hint_does_not_advise_clearing_again(self):
+        """Observed live: the generic hint told a caller that had just
+        cleared to clear again, which is a loop that cannot help. The device
+        needs reconnecting, and that is the only advice left."""
+        ctrl = _android()
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert "clear=true" not in out["hint"]
+        assert "Wi-Fi" in out["hint"]
+
+    async def test_a_failed_clear_reattach_carries_a_hint(self):
+        ctrl = _android()
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl),
+            )
+
+        assert out["hint"] is not None
