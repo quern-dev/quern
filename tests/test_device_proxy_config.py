@@ -689,3 +689,49 @@ class TestQuernMakesTheComparisonItself:
 
         assert out["device_proxy"] is None
         assert out["proxy_verified"] is None
+
+
+class TestAMissingSsidDoesNotBlockTheDeviceWrite:
+    """`settings put global http_proxy` is one setting for the whole device and
+    is not tied to a network -- which is why `clear` has never needed an SSID.
+    Requiring one to *apply* refused to configure a phone on Ethernet, a phone
+    that had dropped off Wi-Fi, or any device whose `dumpsys wifi` quern could
+    not read."""
+
+    async def test_apply_without_an_ssid_still_configures_the_device(self):
+        ctrl = _android()
+        ctrl.adb.get_wifi_ssid = AsyncMock(return_value=None)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        ctrl.adb.set_http_proxy.assert_awaited_once_with(
+            "PHONE1", "192.168.1.189", 9101,
+        )
+        assert out["applied"] is True
+        assert out["recorded"] is False
+
+    async def test_recording_still_needs_one(self):
+        """Without an SSID there is no key to file it under, and inventing one
+        would make the record unfindable."""
+        ctrl = _android()
+        ctrl.adb.get_wifi_ssid = AsyncMock(return_value=None)
+        a, b = _hosts()
+        with a, b, pytest.raises(HTTPException) as e:
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1"), _request(ctrl),
+            )
+
+        assert e.value.status_code == 400
+
+    async def test_an_ssid_present_is_still_recorded(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["recorded"] is True

@@ -173,3 +173,76 @@ class TestTheBounceRefusesToCutItsOwnConnection:
         monkeypatch.setattr(adb, "_run_adb_for_device", fake)
 
         assert await adb.reattach_network("8BAY0WCL7") is True
+
+
+class TestWirelessDebuggingSerialsCountAsNetwork:
+    """Android 11+ wireless debugging found over mDNS produces a serial with no
+    colon at all, so the `host:port` shape alone called it USB and cleared it
+    to have its Wi-Fi turned off -- the exact failure the check exists to
+    prevent."""
+
+    def test_the_mdns_form_is_a_network_transport(self):
+        from server.device.adb import AdbBackend
+
+        assert AdbBackend.is_network_transport(
+            "adb-8BAY0WCL7-AbCdEf._adb-tls-connect._tcp"
+        ) is True
+        assert AdbBackend.is_network_transport("adb-XYZ._adb._tcp") is True
+
+    async def test_an_mdns_device_is_not_bounced(self, adb, monkeypatch):
+        run = AsyncMock(return_value=("", ""))
+        monkeypatch.setattr(adb, "_run_adb_for_device", run)
+
+        assert await adb.reattach_network(
+            "adb-8BAY0WCL7-AbCdEf._adb-tls-connect._tcp"
+        ) is False
+        run.assert_not_awaited()
+
+
+class TestTheRadioIsNotLeftOff:
+    """`disable` succeeding and `enable` failing left the device with no radio,
+    reported as a failed reattach, with a hint telling the caller to tap a
+    network on a phone whose Wi-Fi was off."""
+
+    async def test_enable_is_retried(self, adb, monkeypatch):
+        attempts = {"enable": 0}
+
+        async def fake(serial, *args):
+            if args == ("shell", "svc", "wifi", "enable"):
+                attempts["enable"] += 1
+                if attempts["enable"] < 3:
+                    raise RuntimeError("transient adb error")
+                return ("", "")
+            if args[:2] == ("shell", "ip"):
+                return ("30: wlan0    inet 192.168.1.244/24 brd x", "")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+
+        assert await adb.reattach_network("8BAY0WCL7") is True
+        assert attempts["enable"] == 3
+
+    async def test_enable_failing_every_time_reports_failure(self, adb, monkeypatch):
+        async def fake(serial, *args):
+            if args == ("shell", "svc", "wifi", "enable"):
+                raise RuntimeError("adb gone")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+
+        assert await adb.reattach_network("8BAY0WCL7") is False
+
+    async def test_a_failed_disable_changes_nothing_and_is_not_retried(
+        self, adb, monkeypatch,
+    ):
+        """Nothing happened on the device, so there is nothing to undo."""
+        calls = []
+
+        async def fake(serial, *args):
+            calls.append(args)
+            raise RuntimeError("offline")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+
+        assert await adb.reattach_network("8BAY0WCL7") is False
+        assert calls == [("shell", "svc", "wifi", "disable")]

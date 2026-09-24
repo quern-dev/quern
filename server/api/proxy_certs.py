@@ -649,6 +649,7 @@ async def record_device_proxy_config_endpoint(
             # between two branches of one endpoint are a KeyError waiting for
             # whichever branch the caller did not test.
             "applied": False,
+            "recorded": False,
             "ssid": None,
             "wifi_proxy_host": None,
             "wifi_proxy_port": None,
@@ -711,9 +712,17 @@ async def record_device_proxy_config_endpoint(
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
-    if not ssid:
+    if not ssid and not body.apply:
         # The config is keyed by SSID. Without one there is nowhere to put it,
         # and inventing a key would make the record unfindable.
+        #
+        # Only the *record* needs one, though. `settings put global http_proxy`
+        # is one setting for the whole device and is not tied to a network --
+        # which is exactly why `clear` has never required an SSID, and why
+        # requiring one here refused to configure a phone on Ethernet, a phone
+        # that had dropped off Wi-Fi, or any device whose `dumpsys wifi` quern
+        # cannot read. The device write happens either way and `recorded` says
+        # whether anything was filed.
         raise HTTPException(
             status_code=400,
             detail=(
@@ -766,10 +775,12 @@ async def record_device_proxy_config_endpoint(
         await _read_device_proxy(controller, body.udid) if applied else (None, False)
     )
 
-    record_device_proxy_config(
-        canonical_device_id(body.udid), ssid, proxy_host, port,
-        client_ip=client_ip,
-    )
+    recorded = bool(ssid)
+    if recorded:
+        record_device_proxy_config(
+            canonical_device_id(body.udid), ssid, proxy_host, port,
+            client_ip=client_ip,
+        )
     return {
         "udid": body.udid,
         "ssid": ssid,
@@ -780,6 +791,10 @@ async def record_device_proxy_config_endpoint(
         #: value from one it supplied.
         "detected": detected or None,
         "applied": applied,
+        #: Whether anything was filed under an SSID. False means the device was
+        #: configured but quern has no per-network record of it, which is the
+        #: honest outcome for a device it could not read a network name from.
+        "recorded": recorded,
         #: Always present, so a caller need not know which flag it sent.
         "cleared": False,
         #: None when nothing was applied. False means the setting was written

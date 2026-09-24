@@ -766,9 +766,12 @@ rm -rf /data/local/tmp/tmp-ca-copy
     def is_network_transport(serial: str) -> bool:
         """Whether adb reaches this device over TCP rather than USB.
 
-        `adb connect` serials are `host:port`; USB serials are the hardware
-        serial and emulators are `emulator-5554`. Neither contains a colon, so
-        the shape is the whole test.
+        Two forms reach a device over the network. `adb connect` produces
+        `host:port`. Android 11+ wireless debugging discovered over mDNS
+        produces `adb-<serial>-<suffix>._adb-tls-connect._tcp`, which has no
+        colon at all -- so the `host:port` shape alone called it USB and
+        cleared it to have its Wi-Fi turned off. USB serials are the hardware
+        serial and emulators are `emulator-5554`; neither matches either form.
 
         This is not cosmetic: `svc wifi disable` on a device whose adb
         connection runs over that same Wi-Fi severs the control channel
@@ -776,6 +779,8 @@ rm -rf /data/local/tmp/tmp-ca-copy
         device is left with Wi-Fi off and no way back that does not involve
         someone walking over to it.
         """
+        if "._adb-tls-connect._tcp" in serial or "._adb._tcp" in serial:
+            return True
         host, sep, port = serial.rpartition(":")
         return bool(sep and host and port.isdigit())
 
@@ -808,10 +813,30 @@ rm -rf /data/local/tmp/tmp-ca-copy
             return False
         try:
             await self._run_adb_for_device(serial, "shell", "svc", "wifi", "disable")
-            await asyncio.sleep(1.0)
-            await self._run_adb_for_device(serial, "shell", "svc", "wifi", "enable")
         except Exception:
-            logger.debug("Could not bounce Wi-Fi on %s", serial, exc_info=True)
+            # Nothing has changed on the device, so there is nothing to undo.
+            logger.debug("Could not disable Wi-Fi on %s", serial, exc_info=True)
+            return False
+        await asyncio.sleep(1.0)
+        # Retried where `disable` is not, and warned about rather than logged
+        # at debug. `svc wifi enable` is idempotent, and sharing one `try` with
+        # the disable meant a transient adb error between the two left the
+        # device with its radio off -- reported as a failed reattach, with a
+        # hint telling the caller to tap a network on a phone whose Wi-Fi was
+        # no longer on.
+        for attempt in range(3):
+            try:
+                await self._run_adb_for_device(
+                    serial, "shell", "svc", "wifi", "enable",
+                )
+                break
+            except Exception:
+                logger.warning(
+                    "Could not re-enable Wi-Fi on %s (attempt %d of 3)",
+                    serial, attempt + 1, exc_info=True,
+                )
+                await asyncio.sleep(0.5)
+        else:
             return False
         # Wait for an address rather than a fixed sleep: the reattach is the
         # point, and a caller told "done" before the device has a route would
