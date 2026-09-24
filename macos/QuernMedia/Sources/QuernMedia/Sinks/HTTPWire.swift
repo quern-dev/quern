@@ -97,6 +97,16 @@ public enum HTTPWire {
         keyframePathMatch(path) == .exact
     }
 
+    /// The control endpoint exists but nothing is wired to serve it.
+    ///
+    /// 503 rather than 204: answering "no content" for a request that did no
+    /// work is the same false success a near-miss path used to give, and this
+    /// one is on the endpoint's own happy path.
+    public static func noEncoderResponse() -> Data {
+        Data("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
+            .appending("Connection: close\r\n\r\n").utf8)
+    }
+
     public static func notFoundResponse() -> Data {
         Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
             .appending("Connection: close\r\n\r\n").utf8)
@@ -144,7 +154,31 @@ public enum HTTPWire {
         }
     }
 
+    /// The index page's response headers, with no body.
+    ///
+    /// For `HEAD`, which must carry the headers a `GET` would — including the
+    /// real `Content-Length` — and no body. Handing the whole page to `send`
+    /// put the body on the wire, which is what this used to do.
+    public static func indexHeaders(for codec: StreamPipeline.Codec) -> Data {
+        Data(indexHead(for: codec).utf8)
+    }
+
+    private static func indexHead(for codec: StreamPipeline.Codec) -> String {
+        """
+        HTTP/1.1 200 OK\r
+        Content-Type: text/html; charset=utf-8\r
+        Content-Length: \(indexBody(for: codec).utf8.count)\r
+        Connection: close\r
+        \r
+
+        """
+    }
+
     public static func indexPage(for codec: StreamPipeline.Codec) -> Data {
+        Data((indexHead(for: codec) + indexBody(for: codec)).utf8)
+    }
+
+    private static func indexBody(for codec: StreamPipeline.Codec) -> String {
         let body: String
         switch codec {
         case .mjpeg:
@@ -164,13 +198,6 @@ public enum HTTPWire {
             <p><code>ffplay -fflags nobuffer http://127.0.0.1:PORT/stream</code></p></div>
             """
         }
-        return Data("""
-        HTTP/1.1 200 OK\r
-        Content-Type: text/html; charset=utf-8\r
-        Content-Length: \(body.utf8.count)\r
-        Connection: close\r
-        \r
-        \(body)
-        """.utf8)
+        return body
     }
 }

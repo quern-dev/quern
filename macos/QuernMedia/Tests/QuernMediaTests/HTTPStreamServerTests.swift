@@ -684,3 +684,46 @@ func indexPageOnlyAnswersBrowserMethods() async throws {
     #expect(postText.hasPrefix("HTTP/1.1 404"), "got: \(postText.prefix(40))")
     #expect(!postText.contains("<img src="), "HTML served to a POST")
 }
+
+
+@Test("the control endpoint refuses when no encoder is wired to it")
+func keyframeWithoutAnEncoderIsRefused() async throws {
+    // The CLI always supplies the hook, but the initialiser makes it
+    // optional. Without this the route counted the request and answered 204
+    // having done nothing -- the same false success the near-miss path was
+    // fixed for, on the endpoint's own happy path.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264)
+    try server.start()
+    defer { server.stop() }
+
+    let reply = await rawRequest(method: "POST", path: "/keyframe", port: port)
+    let text = String(decoding: reply, as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 503"), "got: \(text.prefix(40))")
+    #expect(server.keyframeRequests == 0, "a request nobody served was counted")
+}
+
+@Test("HEAD returns the headers a GET would, and no body")
+func headSendsNoBody() async throws {
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let head = await rawRequest(method: "HEAD", path: "/", port: port)
+    let headText = String(decoding: head, as: UTF8.self)
+    let get = await rawRequest(method: "GET", path: "/", port: port)
+    let getText = String(decoding: get, as: UTF8.self)
+
+    #expect(headText.hasPrefix("HTTP/1.1 200"), "got: \(headText.prefix(40))")
+    // The body is what must be absent, so assert on the body -- not on a
+    // byte count, which a header change would move.
+    #expect(!headText.contains("<img src="), "HEAD sent the page body")
+    #expect(getText.contains("<img src="), "GET stopped sending the page")
+
+    // Same headers, including the real Content-Length of the body GET sends.
+    let headHeaders = headText.components(separatedBy: "\r\n\r\n")[0]
+    let getHeaders = getText.components(separatedBy: "\r\n\r\n")[0]
+    #expect(headHeaders == getHeaders, "HEAD and GET disagree on headers")
+    #expect(headHeaders.contains("Content-Length: \(getText.components(separatedBy: "\r\n\r\n")[1].utf8.count)"))
+}
