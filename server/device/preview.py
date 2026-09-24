@@ -619,6 +619,59 @@ class PreviewManager:
             )
         return by_name[0] if by_name else None
 
+    async def add_capture_device(self, identifier: str) -> ActivePreview:
+        """Open a preview for a CoreMediaIO capture device, and only that.
+
+        For a caller that already knows it wants a physical device. `add`
+        works out the kind from whatever resolves, which is right for a name
+        a person typed and wrong here: a phone CoreMediaIO has not published
+        yet -- locked, untrusted, or inside the ~3s discovery window -- would
+        fall through to a booted simulator of the same name, and default
+        simulator names *are* device model names. `preview_start` already
+        establishes the kind with `_is_physical` and used to discard it.
+
+        Raises:
+            RuntimeError: when no capture device matches, or the name matches
+                more than one.
+        """
+        await self._ensure_process()
+
+        device = self._resolve_device(identifier)
+        if device is None:
+            available = [f"{d.name} ({d.cmio_id})" for d in self._available]
+            raise RuntimeError(
+                f"No connected capture device matches '{identifier}'. "
+                f"Connected: {available or 'none'}. A device that is locked, "
+                "untrusted, or still enumerating does not appear here -- "
+                "CoreMediaIO discovery takes about 3 seconds after attach, so "
+                "unlock the device, trust this Mac, and try again."
+            )
+        return await self._add_device(device)
+
+    async def add_booted_simulator(self, udid: str) -> ActivePreview:
+        """Open a preview for a booted simulator, and only that.
+
+        The mirror of `add_capture_device`. Resolves the title from simctl so
+        the window is labelled, and refuses a udid that is not booted rather
+        than starting a `quern-media` against a framebuffer that will never
+        produce a frame -- which presents as a preview that opens and stays
+        black.
+
+        Raises:
+            RuntimeError: when no booted simulator has this udid.
+            DeviceError: when simctl cannot be reached.
+        """
+        await self._ensure_process()
+
+        for booted_udid, sim_name in await booted_simulators():
+            if booted_udid == udid:
+                return await self.add_simulator(udid, title=sim_name)
+
+        raise RuntimeError(
+            f"No booted simulator has the udid '{udid}'. "
+            "Boot it first: xcrun simctl boot <udid>."
+        )
+
     async def add(self, name: str) -> ActivePreview:
         """Open a preview for a physical device or a booted simulator.
 
@@ -627,16 +680,42 @@ class PreviewManager:
         they are what a person reads off the menu; IDs because they are
         unambiguous, which a name is not.
 
+        For a caller that already knows the kind, `add_capture_device` and
+        `add_simulator` say so and cannot resolve to the other one.
+
         Returns:
             ActivePreview record.
 
         Raises:
-            RuntimeError: if nothing matches, or the preview fails to open.
+            RuntimeError: if nothing matches, if the name matches both kinds,
+                or the preview fails to open.
         """
         await self._ensure_process()
 
         device = self._resolve_device(name)
         if device is not None:
+            # A name can be a capture device's *and* a booted simulator's --
+            # default simulator names are device model names, so this is
+            # ordinary rather than contrived. Preferring the capture device
+            # silently is the same guess `_resolve_device` refuses to make
+            # between two phones, and there is nothing to disambiguate with.
+            # An id never reaches here ambiguously: `_resolve_device` matches
+            # ids before names.
+            #
+            # No route reaches this today: every caller now states the kind,
+            # and the HTTP layer only ever has a udid. It guards this method's
+            # contract for a caller that genuinely has a typed name, and it is
+            # covered by a direct unit test rather than a route test. Worth
+            # knowing before treating it as production defence.
+            if device.name == name:
+                twins = [u for u, n in await booted_simulators() if n == name]
+                if twins:
+                    raise RuntimeError(
+                        f"'{name}' is both a connected device and a booted "
+                        f"simulator. Ask for the device by its id "
+                        f"({device.cmio_id}) or the simulator by its udid "
+                        f"({', '.join(twins)})."
+                    )
             return await self._add_device(device)
 
         # Not a capture device. A simulator is the other thing it can be, and
@@ -922,6 +1001,9 @@ class PreviewManager:
         label first would let one string name a different window depending on
         which end of the pair you called.
 
+        For a caller that already knows the kind, `remove_capture_device`
+        says so and cannot resolve to a simulator.
+
         Raises:
             RuntimeError: when a label matches more than one active preview.
         """
@@ -931,6 +1013,39 @@ class PreviewManager:
                 name = device.cmio_id
             else:
                 name = self._key_for_label(name)
+        await self._remove_session(name)
+
+    async def remove_capture_device(self, identifier: str) -> None:
+        """Remove a capture device's preview, and only that.
+
+        The mirror of `add_capture_device`, and it exists for a sharper
+        reason. `remove` falls back to matching an active preview's *label*,
+        and a simulator is filed under its udid with its name as that label --
+        so a caller asking to stop a phone's preview, with the phone either
+        unenumerated or simply not being previewed, closed a same-named
+        simulator's window instead, tore down its `quern-media`, and returned
+        `{"status": "removed"}`. Measured, not theorised.
+
+        That is worse than the `add` side of the same bug: opening a surplus
+        window is recoverable, and destroying a session the caller never
+        named is not.
+
+        Resolving to nothing is not an error. Stopping a preview that is not
+        open is a no-op, which keeps stop idempotent -- what matters is that
+        it is a no-op rather than somebody else's window.
+        """
+        device = self._resolve_device(identifier)
+        key = device.cmio_id if device is not None else identifier
+        if key not in self._active:
+            # Never fall back to a label here. A stream may still be running
+            # behind a window the user closed, and `_stop_stream` is keyed,
+            # so this reaches that case without touching anything else.
+            await self._stop_stream(key)
+            return
+        await self._remove_session(key)
+
+    async def _remove_session(self, name: str) -> None:
+        """Tear down one session, by key. Callers resolve the key first."""
         if self._process is None or self._process.returncode is not None:
             self._active.pop(name, None)
             await self._stop_stream(name)

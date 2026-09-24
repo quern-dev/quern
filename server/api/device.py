@@ -1172,7 +1172,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         # reachable while starting one was not.
         if not controller._is_physical(udid):
             try:
-                preview = await pm.add(udid)
+                preview = await pm.add_booted_simulator(udid)
             except DeviceError as e:
                 # `add` enumerates booted simulators through simctl to match
                 # the udid, so an unavailable or mid-update Xcode raises here.
@@ -1187,6 +1187,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 "name": preview.label or preview.name,
                 "position": preview.position,
                 "platform": "ios",
+                "kind": preview.kind,
             }
 
         # Get device name for the CoreMediaIO match
@@ -1207,12 +1208,20 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             )
 
         try:
-            preview = await pm.add(device_name)
+            # `add_capture_device`, not `add`: this branch has already
+            # established the device is physical, and `add` would work the
+            # kind out again from whatever resolves. A phone CoreMediaIO has
+            # not published yet falls through to a booted simulator of the
+            # same name there, and default simulator names are device model
+            # names -- so the caller asking for their phone silently gets a
+            # simulator, with nothing in the response to tell them apart.
+            preview = await pm.add_capture_device(device_name)
             return {
                 "status": "added",
                 "name": preview.label or preview.name,
                 "position": preview.position,
                 "platform": "ios",
+                "kind": preview.kind,
             }
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -1229,14 +1238,20 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         errors = []
         for dev in pm._available:
             if dev.cmio_id in pm._active:
-                added.append({"name": dev.name, "status": "already_active"})
+                added.append({
+                    "name": dev.name,
+                    "status": "already_active",
+                    "kind": pm._active[dev.cmio_id].kind,
+                })
                 continue
             try:
-                preview = await pm.add(dev.cmio_id)
+                # Also kind-explicit: this loop is over the capture-device list.
+                preview = await pm.add_capture_device(dev.cmio_id)
                 added.append({
                     "name": preview.label or preview.name,
                     "position": preview.position,
                     "status": "added",
+                    "kind": preview.kind,
                 })
             except RuntimeError as e:
                 errors.append({"name": dev.name, "error": str(e)})
@@ -1285,7 +1300,7 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
                 await pm.remove(udid)
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
-            return {"status": "removed", "udid": udid}
+            return {"status": "removed", "udid": udid, "kind": "simulator"}
 
         # iOS physical → CoreMediaIO, which matches on a localizedName.
         device_name: str | None = None
@@ -1307,11 +1322,19 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
         # Caught for the reason `preview_start` catches it: an ambiguous name
         # is a RuntimeError carrying the only instructions the caller can act
         # on, and uncaught it reaches FastAPI as a 500 with no detail at all.
+        # `remove_capture_device`, not `remove`: this branch has already
+        # established the device is physical, and `remove` falls back to
+        # matching an active preview's *label*. A simulator is filed under
+        # its udid with its name as that label, so asking to stop a phone's
+        # preview closed a same-named simulator's window, tore down its
+        # quern-media, and answered {"status": "removed"} -- destroying a
+        # session the caller never named and reporting it as the one they
+        # asked for.
         try:
-            await pm.remove(device_name)
+            await pm.remove_capture_device(device_name)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
-        return {"status": "removed", "name": device_name}
+        return {"status": "removed", "name": device_name, "kind": "device"}
 
     # No UDID — stop all
     pm = _get_preview_manager(request)
