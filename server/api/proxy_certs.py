@@ -522,7 +522,21 @@ class RecordDeviceProxyRequest(BaseModel):
     clear: bool = False
 
 
-def _reattach_hint(reattached: bool | None, *, cleared: bool = False) -> str | None:
+def _bound_loopback_only(adapter) -> bool:
+    """Whether the proxy listens only on loopback.
+
+    `listen_host` is caller-reconfigurable (`POST /proxy/config`), and a proxy
+    rebound to 127.0.0.1 is reachable from the Mac and from no device at all.
+    Without this the response reports `applied: true` and a field named
+    `proxy_reachable_at` for an address nothing on the network can use.
+    """
+    host = getattr(adapter, "listen_host", None) if adapter else None
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _reattach_hint(
+    reattached: bool | None, *, cleared: bool = False, networked: bool = False,
+) -> str | None:
     """What to do when the bounce did not bring the network back.
 
     Measured on a physical Pixel 3 XL: `svc wifi disable/enable` sometimes
@@ -535,6 +549,16 @@ def _reattach_hint(reattached: bool | None, *, cleared: bool = False) -> str | N
     """
     if reattached is not False:
         return None
+    if networked:
+        # A different fact entirely from "the bounce failed": nothing was
+        # attempted, on purpose. Telling this caller to retry would invite
+        # them to strand the device by hand.
+        return (
+            "The setting is written, but quern did not bounce Wi-Fi: adb "
+            "reaches this device over the network, and the bounce would cut "
+            "that connection. It takes effect the next time the device "
+            "attaches to Wi-Fi."
+        )
     if cleared:
         # No "call clear" here: that is what just happened, and advising it
         # again would send a caller round a loop that cannot help.
@@ -617,9 +641,26 @@ async def record_device_proxy_config_endpoint(
         return {
             "udid": body.udid,
             "cleared": True,
+            # Same keys as the apply path, so a client can read `applied`
+            # without first working out which flag it sent. Divergent shapes
+            # between two branches of one endpoint are a KeyError waiting for
+            # whichever branch the caller did not test.
+            "applied": False,
+            "ssid": None,
+            "wifi_proxy_host": None,
+            "wifi_proxy_port": None,
+            "client_ip": None,
+            "detected": None,
+            "proxy_reachable_at": None,
+            "proxy_bound_locally_only": _bound_loopback_only(
+                getattr(request.app.state, "proxy_adapter", None)
+            ),
             "forgot_ssids": forgotten,
             "network_reattached": reattached,
-            "hint": _reattach_hint(reattached, cleared=True),
+            "hint": _reattach_hint(
+                reattached, cleared=True,
+                networked=controller.adb.is_network_transport(body.udid),
+            ),
             #: Read back from the device rather than inferred from the call
             #: returning. None here is the success case.
             "device_proxy": await _read_device_proxy(controller, body.udid),
@@ -728,6 +769,8 @@ async def record_device_proxy_config_endpoint(
         #: value from one it supplied.
         "detected": detected or None,
         "applied": applied,
+        #: Always present, so a caller need not know which flag it sent.
+        "cleared": False,
         #: None when nothing was applied. False means the setting was written
         #: but the network did not come back -- which is the case where the
         #: device is configured and not yet capturing, and saying "applied"
@@ -735,7 +778,14 @@ async def record_device_proxy_config_endpoint(
         "network_reattached": reattached,
         #: Actionable rather than merely accurate: None unless the bounce
         #: failed, in which case it names the two ways out.
-        "hint": _reattach_hint(reattached),
+        "hint": _reattach_hint(
+            reattached, networked=controller.adb.is_network_transport(body.udid),
+        ),
+        #: Whether the proxy is bound somewhere the device can actually
+        #: reach. A loopback bind is reachable from the Mac and from nothing
+        #: else, so the address below would be one the device can never use --
+        #: and the field naming it cannot say so on its own.
+        "proxy_bound_locally_only": _bound_loopback_only(adapter),
         #: Named so a hosting misconfiguration is diagnosable. If the device
         #: cannot reach this address, that is the thing to check, and a caller
         #: should not have to infer which address quern chose.

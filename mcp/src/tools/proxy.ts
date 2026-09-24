@@ -796,30 +796,57 @@ the background and can be re-enabled with configure_system_proxy.`,
   });
 
   server.registerTool("record_device_proxy_config", {
-    description: `Record that the Wi-Fi proxy has been configured on a physical device. ` +
-    `Call this after successfully completing the Wi-Fi proxy setup in device Settings. ` +
-    `Quern stores the config per Wi-Fi network (SSID) so multiple networks are tracked independently. ` +
-    `The proxy host is auto-derived from the Mac interface on the same subnet as the device's client_ip — ` +
-    `this is always the correct host regardless of interface names or routing tables. ` +
-    `The port is derived from the running server. ` +
-    `Passing client_ip also enables per-device flow filtering via the client_ip parameter on query_flows/get_flow_summary.`,
+    description: `Point a device at the Quern proxy, or record that someone else did. ` +
+    `On Android, pass apply=true and Quern writes the setting itself over adb — no root, ` +
+    `no Settings screen, on any device or emulator — then bounces Wi-Fi so it takes effect, ` +
+    `since the setting is only read when the network attaches. ` +
+    `On iOS the proxy is still configured by hand in Settings > Wi-Fi; call this afterwards to record it, ` +
+    `and apply/clear are refused rather than silently ignored. ` +
+    `Pass clear=true to unset it — the setting survives reboots, and a device left pointing at a proxy ` +
+    `that is no longer listening has no working network. ` +
+    `On Android, ssid and client_ip are read off the device when omitted, so prefer omitting them to guessing. ` +
+    `The proxy host is the Mac interface on the device's own subnet; the port comes from the running proxy. ` +
+    `Check network_reattached and hint in the response: applied means the setting was written, ` +
+    `not that traffic is flowing yet. ` +
+    `client_ip also enables per-device flow filtering on query_flows/get_flow_summary.`,
     inputSchema: strictParams({
       udid: z.string().describe("Device UDID"),
-      ssid: z.string().describe(
-        "Wi-Fi network name the device is connected to " +
-        "(visible at the top of Settings > Wi-Fi)."
-      ),
+      ssid: z
+        .string()
+        .optional()
+        .describe(
+          "Wi-Fi network name. Optional on Android, where Quern reads it from the device; " +
+          "supply it on iOS (visible at the top of Settings > Wi-Fi)."
+        ),
       client_ip: z
         .string()
         .optional()
         .describe(
-          "Device's LAN IP address (Settings > Wi-Fi > (network) > IP Address). " +
-          "Used to find the correct Mac interface IP automatically and to filter captured flows."
+          "Device's LAN IP address. Optional on Android, where Quern reads it from the device; " +
+          "on iOS see Settings > Wi-Fi > (network) > IP Address. " +
+          "Used to find the correct Mac interface IP and to filter captured flows."
+        ),
+      apply: z
+        .boolean()
+        .optional()
+        .describe(
+          "Android only: write the proxy setting to the device over adb and reattach the network, " +
+          "rather than only recording it. Refused with 400 on iOS."
+        ),
+      clear: z
+        .boolean()
+        .optional()
+        .describe(
+          "Android only: unset the device's proxy and forget every config recorded for it. " +
+          "Use this to undo apply, and to rescue a device pointing at a proxy that is gone."
         ),
     }),
-  }, async ({ udid, ssid, client_ip }) => {
+  }, async ({ udid, ssid, client_ip, apply, clear }) => {
     try {
-      const body: Record<string, unknown> = { udid, ssid };
+      const body: Record<string, unknown> = { udid };
+      if (ssid !== undefined) body.ssid = ssid;
+      if (apply !== undefined) body.apply = apply;
+      if (clear !== undefined) body.clear = clear;
       if (client_ip !== undefined) body.client_ip = client_ip;
       const data = await apiRequest(
         "POST",

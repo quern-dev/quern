@@ -34,8 +34,8 @@ from server.device.controller import DeviceController
 from server.models import DeviceType
 
 
-def _request(ctrl, port: int = 9101):
-    adapter = SimpleNamespace(listen_port=port)
+def _request(ctrl, port: int = 9101, listen_host: str = "0.0.0.0"):
+    adapter = SimpleNamespace(listen_port=port, listen_host=listen_host)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         device_controller=ctrl, proxy_adapter=adapter,
     )))
@@ -49,6 +49,9 @@ def _android(udid: str = "PHONE1", *, ssid="MonaLisa", ip="192.168.1.244"):
     ctrl.adb.get_wifi_ssid = AsyncMock(return_value=ssid)
     ctrl.adb.set_http_proxy = AsyncMock()
     ctrl.adb.reattach_network = AsyncMock(return_value=True)
+    # Explicit rather than a truthy MagicMock: this decides whether the Wi-Fi
+    # bounce is even attempted.
+    ctrl.adb.is_network_transport = MagicMock(return_value=False)
     ctrl.adb.clear_http_proxy = AsyncMock()
     ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
     return ctrl
@@ -58,13 +61,23 @@ def _ios(udid: str = "IOS1"):
     ctrl = DeviceController()
     ctrl._device_type_cache[udid] = DeviceType.DEVICE
     ctrl.adb = MagicMock()
+    ctrl.adb.is_network_transport = MagicMock(return_value=False)
     return ctrl
 
 
-def _hosts(host="192.168.1.189"):
+def _hosts(host="192.168.1.189", fallback="10.99.99.99"):
+    """Two *different* addresses, deliberately.
+
+    They used to be the same value, which made the headline of this change --
+    that quern picks the host interface on the device's own subnet rather than
+    whatever the default route happens to be -- impossible to observe: the
+    subnet lookup could be deleted outright and every test still passed. A
+    machine with Wi-Fi and Ethernet on different subnets is the case that
+    matters, and there the fallback is the wrong answer.
+    """
     return patch(
         "server.lifecycle.state.detect_host_ip_for_subnet", return_value=host,
-    ), patch("server.lifecycle.state.detect_local_ip", return_value=host)
+    ), patch("server.lifecycle.state.detect_local_ip", return_value=fallback)
 
 
 class TestItAppliesRatherThanOnlyRecording:
@@ -454,3 +467,133 @@ class TestAFailedReattachSaysWhatToDo:
             )
 
         assert out["hint"] is not None
+
+
+class TestItWillNotStrandADeviceItCannotReach:
+    """`svc wifi disable` on a device whose adb connection runs over that same
+    Wi-Fi severs the control channel, and the `enable` that would undo it can
+    never arrive. The farm devices this feature targets are reached over the
+    network."""
+
+    async def test_no_bounce_over_a_network_transport(self):
+        ctrl = _android("192.168.1.9:5555")
+        ctrl.adb.is_network_transport = MagicMock(return_value=True)
+        # What the real `reattach_network` does over a network transport: it
+        # declines and says so, rather than cutting its own connection.
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="192.168.1.9:5555", apply=True),
+                _request(ctrl),
+            )
+
+        assert out["applied"] is True
+        assert "would cut" in out["hint"]
+        assert "Settings > Wi-Fi" not in out["hint"]
+
+    def test_the_transport_shape_is_the_test(self):
+        from server.device.adb import AdbBackend
+
+        assert AdbBackend.is_network_transport("192.168.1.9:5555") is True
+        assert AdbBackend.is_network_transport("emulator-5554") is False
+        assert AdbBackend.is_network_transport("8BAY0WCL7") is False
+        assert AdbBackend.is_network_transport("LGH9328170b5f6") is False
+        assert AdbBackend.is_network_transport("host:notaport") is False
+
+
+class TestAProxyNothingCanReachIsNotReportedAsReachable:
+    async def test_a_loopback_bind_is_flagged(self):
+        """`listen_host` is caller-reconfigurable. Rebound to 127.0.0.1 the
+        proxy is reachable from the Mac and from no device at all, while the
+        response still names an address under `proxy_reachable_at`."""
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True),
+                _request(ctrl, listen_host="127.0.0.1"),
+            )
+
+        assert out["proxy_bound_locally_only"] is True
+
+    async def test_a_wildcard_bind_is_not_flagged(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True),
+                _request(ctrl, listen_host="0.0.0.0"),
+            )
+
+        assert out["proxy_bound_locally_only"] is False
+
+
+class TestTheHostAddressComesFromTheDevicesSubnet:
+    """On a Mac with Wi-Fi and Ethernet on different subnets, the default-route
+    address is reachable from the Mac and not from the phone."""
+
+    async def test_the_subnet_match_wins_over_the_default_route(self):
+        ctrl = _android(ip="192.168.1.244")
+        a, b = _hosts(host="192.168.1.189", fallback="10.99.99.99")
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["wifi_proxy_host"] == "192.168.1.189"
+        ctrl.adb.set_http_proxy.assert_awaited_once_with(
+            "PHONE1", "192.168.1.189", 9101,
+        )
+
+    async def test_the_device_ip_is_what_the_subnet_lookup_is_given(self):
+        """Not the caller's guess and not the host's own address: the lookup
+        only works if it is handed the device's address."""
+        ctrl = _android(ip="192.168.1.244")
+        with patch(
+            "server.lifecycle.state.detect_host_ip_for_subnet",
+            return_value="192.168.1.189",
+        ) as subnet, patch(
+            "server.lifecycle.state.detect_local_ip", return_value="10.99.99.99",
+        ):
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        subnet.assert_called_once_with("192.168.1.244")
+
+    async def test_the_fallback_is_used_when_no_interface_shares_the_subnet(self):
+        ctrl = _android(ip="192.168.1.244")
+        with patch(
+            "server.lifecycle.state.detect_host_ip_for_subnet", return_value=None,
+        ), patch(
+            "server.lifecycle.state.detect_local_ip", return_value="10.99.99.99",
+        ):
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+
+        assert out["wifi_proxy_host"] == "10.99.99.99"
+
+
+class TestBothBranchesReturnTheSameShape:
+    """Divergent keys between two branches of one endpoint are a KeyError
+    waiting for whichever branch the caller did not test."""
+
+    async def test_clear_and_apply_agree_on_their_keys(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            applied = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl),
+            )
+        ctrl2 = _android()
+        c, d = _hosts()
+        with c, d:
+            cleared = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl2),
+            )
+
+        assert set(applied) - set(cleared) == set()
+        assert cleared["applied"] is False
+        assert applied["cleared"] is False

@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -260,16 +261,57 @@ def forget_device_proxy_configs(udid: str) -> list[str]:
     a stored config that reads as current while the device is no longer
     routed anywhere.
 
-    Returns the SSIDs removed so a caller can report what it undid rather than
-    assert that something happened.
+    Clears **every spelling** of the device, not just the canonical one, and
+    reports what a subsequent read can no longer see rather than what it set
+    out to remove. Both halves were wrong first time round, and they hid each
+    other. `read_cert_state_for_device` returns the canonicalised *merge* of
+    every spelling, while `update_cert_state` writes to the one raw key it is
+    handed; so zeroing the canonical entry left the other spelling's configs
+    on disk, and `_canonicalised` unioned them straight back on the next read.
+    Meanwhile the return value was computed from the read *before* the write,
+    so it asserted a removal that the very next read contradicted -- a claim
+    that could not fail, which is the shape that keeps getting through here.
     """
-    existing = read_cert_state_for_device(udid) or {}
-    configs: dict[str, Any] = existing.get("wifi_proxy_configs") or {}
-    removed = sorted(configs)
-    if removed:
-        existing["wifi_proxy_configs"] = {}
-        update_cert_state(udid, existing)
-    return removed
+    from server.device.devicectl import canonical_device_id
+
+    canonical = canonical_device_id(udid)
+    before = set((read_cert_state_for_device(udid) or {}).get(
+        "wifi_proxy_configs"
+    ) or {})
+    if not before:
+        return []
+
+    # Raw keys, deliberately: this needs the spellings as they sit on disk,
+    # which is exactly what the canonicalised read hides.
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = CERT_STATE_FILE.open("a+") if CERT_STATE_FILE.exists() else _create_and_open()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        content = fd.read()
+        try:
+            state = json.loads(content) if content.strip() else {}
+        except json.JSONDecodeError:
+            state = {}
+
+        for key, entry in state.items():
+            if canonical_device_id(key) == canonical and isinstance(entry, dict):
+                entry["wifi_proxy_configs"] = {}
+
+        fd.seek(0)
+        fd.truncate()
+        json.dump(state, fd, indent=2)
+        fd.flush()
+        os.fsync(fd.fileno())
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+    # What actually went, read back through the same merge a caller would use.
+    after = set((read_cert_state_for_device(udid) or {}).get(
+        "wifi_proxy_configs"
+    ) or {})
+    return sorted(before - after)
 
 
 def _create_and_open():

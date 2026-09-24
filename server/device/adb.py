@@ -762,6 +762,23 @@ rm -rf /data/local/tmp/tmp-ca-copy
         value = (stdout or "").strip()
         return None if value in ("", "null") else value
 
+    @staticmethod
+    def is_network_transport(serial: str) -> bool:
+        """Whether adb reaches this device over TCP rather than USB.
+
+        `adb connect` serials are `host:port`; USB serials are the hardware
+        serial and emulators are `emulator-5554`. Neither contains a colon, so
+        the shape is the whole test.
+
+        This is not cosmetic: `svc wifi disable` on a device whose adb
+        connection runs over that same Wi-Fi severs the control channel
+        mid-call, and the `enable` that would undo it can never arrive. The
+        device is left with Wi-Fi off and no way back that does not involve
+        someone walking over to it.
+        """
+        host, sep, port = serial.rpartition(":")
+        return bool(sep and host and port.isdigit())
+
     async def reattach_network(self, serial: str) -> bool:
         """Bounce Wi-Fi so a changed proxy setting is picked up.
 
@@ -778,6 +795,17 @@ rm -rf /data/local/tmp/tmp-ca-copy
         so `svc wifi` is a no-op there and this reports False rather than
         pretending. Emulators pick the setting up without a bounce.
         """
+        if self.is_network_transport(serial):
+            # Refused, not attempted. Bouncing Wi-Fi here would cut the
+            # connection carrying the command to turn it back on, stranding a
+            # device that may be in another building. The proxy setting is
+            # already written and takes effect when the device next attaches,
+            # so declining costs a delay; going ahead can cost the device.
+            logger.warning(
+                "Not bouncing Wi-Fi on %s: adb reaches it over the network, "
+                "and the bounce would sever that connection", serial,
+            )
+            return False
         try:
             await self._run_adb_for_device(serial, "shell", "svc", "wifi", "disable")
             await asyncio.sleep(1.0)
@@ -791,12 +819,20 @@ rm -rf /data/local/tmp/tmp-ca-copy
         for _ in range(20):
             await asyncio.sleep(0.5)
             try:
+                # Every interface, not `wlan0`. `get_lan_ip` deliberately
+                # avoids assuming that name a few lines down, and a device on
+                # `wlan1` reattached fine while being reported as failed --
+                # complete with a hint telling the caller to go and fix a
+                # device that was already working.
                 stdout, _ = await self._run_adb_for_device(
-                    serial, "shell", "ip", "-4", "-o", "addr", "show", "wlan0",
+                    serial, "shell", "ip", "-4", "-o", "addr", "show",
                 )
             except Exception:
                 continue
-            if "inet " in (stdout or ""):
+            if any(
+                "inet " in line and " lo " not in line
+                for line in (stdout or "").splitlines()
+            ):
                 return True
         return False
 
@@ -815,12 +851,28 @@ rm -rf /data/local/tmp/tmp-ca-copy
             logger.debug("Could not read Wi-Fi state on %s", serial, exc_info=True)
             return None
         for line in (stdout or "").splitlines():
-            if "mWifiInfo SSID:" in line:
-                ssid = line.split("mWifiInfo SSID:", 1)[1].split(",", 1)[0].strip()
-                # `<unknown ssid>` is what an unassociated device reports.
-                if ssid and not ssid.startswith("<"):
-                    return ssid
-                return None
+            if "mWifiInfo SSID:" not in line:
+                continue
+            rest = line.split("mWifiInfo SSID:", 1)[1].strip()
+            # `WifiInfo.getSSID()` wraps a valid UTF-8 SSID in double quotes,
+            # so the format varies by build: the Pixel 3 XL here emits
+            # `SSID: MonaLisaOverdrive,` bare, while quoted builds emit
+            # `SSID: "MonaLisaOverdrive",`. Splitting on the first comma
+            # handles neither an embedded comma nor the quotes, and the SSID
+            # is the *storage key* -- a stray pair of quotes files one network
+            # under two records and never matches `detect_current_ssid`, which
+            # returns the name unquoted.
+            if rest.startswith('"'):
+                end = rest.find('"', 1)
+                ssid = rest[1:end] if end > 0 else rest[1:]
+            else:
+                # Unquoted: runs to the next field rather than the next comma,
+                # so an SSID containing one survives.
+                ssid = rest.split(", BSSID:", 1)[0].rstrip(",").strip()
+            # `<unknown ssid>` is what an unassociated device reports.
+            if ssid and not ssid.startswith("<"):
+                return ssid
+            return None
         return None
 
     async def get_lan_ip(self, serial: str) -> str | None:
@@ -843,11 +895,18 @@ rm -rf /data/local/tmp/tmp-ca-copy
         except Exception:
             logger.debug("Could not read the route on %s", serial, exc_info=True)
             return None
+        # `src` as the last token is not hypothetical -- truncated output ends
+        # wherever the read ended -- and indexing past it raised straight out
+        # of here into a 500. Measured shape on a real device:
+        #   8.8.8.8 via 192.168.1.1 dev wlan0 table 1030 src 192.168.1.244 ...
         parts = (stdout or "").split()
-        if "src" in parts:
-            candidate = parts[parts.index("src") + 1]
-            return candidate or None
-        return None
+        if "src" not in parts:
+            return None
+        idx = parts.index("src") + 1
+        if idx >= len(parts):
+            logger.debug("Route output on %s ended at 'src'", serial)
+            return None
+        return parts[idx] or None
 
     async def is_screen_on(self, serial: str) -> bool:
         """Check if the device screen is on (interactive)."""
