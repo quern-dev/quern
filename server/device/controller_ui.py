@@ -1629,7 +1629,7 @@ class DeviceControllerUI:
         if not checker:
             raise DeviceError(
                 f"Unknown condition: {condition}",
-                tool=self._backend_name(udid),
+                tool="quern",
             )
 
         # Polling loop
