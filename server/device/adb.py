@@ -710,12 +710,144 @@ rm -rf /data/local/tmp/tmp-ca-copy
             return False
 
     async def set_http_proxy(self, serial: str, host: str, port: int) -> None:
-        """Set the global HTTP proxy on the device."""
+        """Set the global HTTP proxy on the device.
+
+        Nothing here is emulator-specific: this is `settings put global` on any
+        Android device, rooted or not, over USB or TCP. The gate that used to
+        restrict it to `ANDROID_EMULATOR` was withholding a universal
+        capability -- and the one genuinely emulator-specific detail, the
+        `10.0.2.2` address, lived inside the block it guarded.
+
+        **The setting is read when the network attaches**, so on its own this
+        does nothing to a device that is already connected. Measured on a
+        physical phone: setting it and then browsing produced zero proxied
+        requests; the same after `reattach_network()` produced twenty. Callers
+        that want it to take effect must reattach.
+        """
         await self._run_adb_for_device(
             serial, "shell", "settings", "put", "global",
             "http_proxy", f"{host}:{port}",
         )
         logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
+
+    async def clear_http_proxy(self, serial: str) -> None:
+        """Remove the global HTTP proxy.
+
+        `settings delete` rather than writing `:0`. The written-sentinel form
+        leaves a row saying "proxy: none", which reads to anyone inspecting the
+        device as a deliberate configuration rather than an absence -- and it
+        is what `settings get` returns instead of `null`, so quern could not
+        tell a cleared device from one that had never been set.
+
+        This is the half #265 records as missing entirely: the setting lives in
+        the global settings provider and survives reboots, so without an unset
+        it is the device's configuration until something else changes it.
+        """
+        await self._run_adb_for_device(
+            serial, "shell", "settings", "delete", "global", "http_proxy",
+        )
+        logger.info("Cleared HTTP proxy on %s", serial)
+
+    async def get_http_proxy(self, serial: str) -> str | None:
+        """What the device's global proxy is set to, or None.
+
+        `settings get` prints the string `null` for an unset key, which is not
+        the same as the empty output a failed read gives. Both are reported as
+        None here, deliberately: a caller wanting to know whether the *read*
+        worked should catch the error rather than read a sentinel.
+        """
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "settings", "get", "global", "http_proxy",
+        )
+        value = (stdout or "").strip()
+        return None if value in ("", "null") else value
+
+    async def reattach_network(self, serial: str) -> bool:
+        """Bounce Wi-Fi so a changed proxy setting is picked up.
+
+        Returns whether the device came back with an address.
+
+        Required, not cosmetic: the proxy setting is read when the network
+        attaches, so changing it on a connected device has no effect until
+        something reattaches. This is the step whose absence makes
+        `settings put global http_proxy` look like it does not work, which is
+        almost certainly why the per-SSID Wi-Fi proxy UI has been assumed
+        necessary.
+
+        An emulator has no Wi-Fi -- its network is a QEMU NAT link on `eth0` --
+        so `svc wifi` is a no-op there and this reports False rather than
+        pretending. Emulators pick the setting up without a bounce.
+        """
+        try:
+            await self._run_adb_for_device(serial, "shell", "svc", "wifi", "disable")
+            await asyncio.sleep(1.0)
+            await self._run_adb_for_device(serial, "shell", "svc", "wifi", "enable")
+        except Exception:
+            logger.debug("Could not bounce Wi-Fi on %s", serial, exc_info=True)
+            return False
+        # Wait for an address rather than a fixed sleep: the reattach is the
+        # point, and a caller told "done" before the device has a route would
+        # configure a proxy the device cannot yet reach.
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            try:
+                stdout, _ = await self._run_adb_for_device(
+                    serial, "shell", "ip", "-4", "-o", "addr", "show", "wlan0",
+                )
+            except Exception:
+                continue
+            if "inet " in (stdout or ""):
+                return True
+        return False
+
+    async def get_wifi_ssid(self, serial: str) -> str | None:
+        """The SSID the device is associated with, or None.
+
+        Saves a caller typing it. `record_device_proxy_config` keys its
+        configs by SSID, and until now a human read it off the device's
+        screen and passed it in.
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(
+                serial, "shell", "dumpsys", "wifi",
+            )
+        except Exception:
+            logger.debug("Could not read Wi-Fi state on %s", serial, exc_info=True)
+            return None
+        for line in (stdout or "").splitlines():
+            if "mWifiInfo SSID:" in line:
+                ssid = line.split("mWifiInfo SSID:", 1)[1].split(",", 1)[0].strip()
+                # `<unknown ssid>` is what an unassociated device reports.
+                if ssid and not ssid.startswith("<"):
+                    return ssid
+                return None
+        return None
+
+    async def get_lan_ip(self, serial: str) -> str | None:
+        """The device's own address on the network it routes through.
+
+        `ip route get 8.8.8.8` rather than reading an interface, because it
+        answers the question that matters -- which address this device would
+        use to reach something off-device -- without assuming the interface is
+        called `wlan0`. An emulator answers with its NAT address, which is
+        correct: that is what it would use.
+
+        This is what `record_device_proxy_config` calls `client_ip`, and what
+        flow attribution matches against. Having a human type it is what makes
+        Android flows unattributable today (#262).
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(
+                serial, "shell", "ip", "route", "get", "8.8.8.8",
+            )
+        except Exception:
+            logger.debug("Could not read the route on %s", serial, exc_info=True)
+            return None
+        parts = (stdout or "").split()
+        if "src" in parts:
+            candidate = parts[parts.index("src") + 1]
+            return candidate or None
+        return None
 
     async def is_screen_on(self, serial: str) -> bool:
         """Check if the device screen is on (interactive)."""

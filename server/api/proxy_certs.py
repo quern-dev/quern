@@ -499,8 +499,20 @@ async def install_cert(
 
 class RecordDeviceProxyRequest(BaseModel):
     udid: str
-    ssid: str  # Wi-Fi network name (visible at top of Settings > Wi-Fi)
-    client_ip: str | None = None  # Device's LAN IP (Settings > Wi-Fi > network > IP Address)
+    #: Optional on Android, where quern reads it from the device. Still
+    #: required in practice on iOS, where a human is doing the configuring and
+    #: is looking at the screen anyway.
+    ssid: str | None = None
+    #: The device's own LAN address. Optional for the same reason: on Android
+    #: `ip route get` answers it, and a human typing it is what makes Android
+    #: flows unattributable (#262).
+    client_ip: str | None = None
+    #: Apply the proxy to the device, not merely record that someone else did.
+    #: Android only -- quern can write the setting over adb. On iOS this is
+    #: refused rather than silently ignored, because a caller that asked for
+    #: the device to be configured and got a 200 would reasonably believe it
+    #: was.
+    apply: bool = False
 
 
 @router.post("/device-proxy-config")
@@ -518,9 +530,39 @@ async def record_device_proxy_config_endpoint(
     from server.lifecycle.state import detect_host_ip_for_subnet, detect_local_ip
     from server.proxy.cert_state import record_device_proxy_config
 
+    controller = request.app.state.device_controller
+    is_android = controller._is_android(body.udid)
+
+    if body.apply and not is_android:
+        # Refused rather than ignored. A caller that asked for the device to be
+        # configured and received a 200 would reasonably believe it had been.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "apply is only supported on Android, where quern can write the "
+                "setting over adb. On iOS the Wi-Fi proxy is configured by hand "
+                "in Settings; call this without apply to record what you set."
+            ),
+        )
+
+    # Asked for, not typed in. Both are readable over adb, and a human reading
+    # them off a screen is what has kept Android flows unattributable (#262).
+    client_ip = body.client_ip
+    ssid = body.ssid
+    detected: list[str] = []
+    if is_android:
+        if not client_ip:
+            client_ip = await controller.adb.get_lan_ip(body.udid)
+            if client_ip:
+                detected.append("client_ip")
+        if not ssid:
+            ssid = await controller.adb.get_wifi_ssid(body.udid)
+            if ssid:
+                detected.append("ssid")
+
     proxy_host = None
-    if body.client_ip:
-        proxy_host = detect_host_ip_for_subnet(body.client_ip)
+    if client_ip:
+        proxy_host = detect_host_ip_for_subnet(client_ip)
     if not proxy_host:
         proxy_host = detect_local_ip()
     if not proxy_host:
@@ -528,6 +570,17 @@ async def record_device_proxy_config_endpoint(
 
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
+
+    if not ssid:
+        # The config is keyed by SSID. Without one there is nowhere to put it,
+        # and inventing a key would make the record unfindable.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Wi-Fi network name. Pass ssid, or connect the device to "
+                "Wi-Fi so quern can read it."
+            ),
+        )
 
     # Canonicalised before it is stored. `_ip_map` feeds these keys straight
     # into `owns()`, so a config recorded under the spelling Xcode shows never
@@ -551,16 +604,47 @@ async def record_device_proxy_config_endpoint(
     # the failed case, and every file written before canonicalisation existed.
     # Canonicalising here as well is belt and braces: it costs nothing when the
     # map is warm, which it is on any server that has listed devices.
+    applied = False
+    reattached: bool | None = None
+    if body.apply:
+        try:
+            await controller.adb.set_http_proxy(body.udid, proxy_host, port)
+            applied = True
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not set the proxy on {body.udid}: {e}",
+            ) from e
+        # Not optional. The setting is read when the network attaches, so on a
+        # device that is already connected this call alone changes nothing --
+        # measured at zero proxied requests before the bounce and twenty
+        # after. Reporting success without it would be reporting the request
+        # rather than the outcome.
+        reattached = await controller.adb.reattach_network(body.udid)
+
     record_device_proxy_config(
-        canonical_device_id(body.udid), body.ssid, proxy_host, port,
-        client_ip=body.client_ip,
+        canonical_device_id(body.udid), ssid, proxy_host, port,
+        client_ip=client_ip,
     )
     return {
         "udid": body.udid,
-        "ssid": body.ssid,
+        "ssid": ssid,
         "wifi_proxy_host": proxy_host,
         "wifi_proxy_port": port,
-        "client_ip": body.client_ip,
+        "client_ip": client_ip,
+        #: What quern worked out for itself, so a caller can tell a detected
+        #: value from one it supplied.
+        "detected": detected or None,
+        "applied": applied,
+        #: None when nothing was applied. False means the setting was written
+        #: but the network did not come back -- which is the case where the
+        #: device is configured and not yet capturing, and saying "applied"
+        #: alone would hide it.
+        "network_reattached": reattached,
+        #: Named so a hosting misconfiguration is diagnosable. If the device
+        #: cannot reach this address, that is the thing to check, and a caller
+        #: should not have to infer which address quern chose.
+        "proxy_reachable_at": f"{proxy_host}:{port}",
     }
 
 
