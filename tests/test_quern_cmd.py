@@ -347,11 +347,27 @@ class TestTheWrapperRunsFromAnywhere:
         their_project = tmp_path / "their-app"
         (their_project / "server").mkdir(parents=True)
         (their_project / "server" / "__init__.py").write_text("")
+        # A *runnable* shadow, which is the dangerous shape. An empty package
+        # loses noisily -- python reports "cannot be directly executed" and
+        # any check notices. One with a working __main__ wins silently: it
+        # exits 0 and prints whatever the caller's program prints, so a test
+        # asserting only that quern did not crash passes against the defect.
+        # Verified: with -P removed this prints the marker below and exits 0,
+        # which `_expect_clean_run` accepts.
+        (their_project / "server" / "__main__.py").write_text(
+            'print("quern THEIR-PACKAGE-WON")\n'
+        )
 
         result = self._run(dest / "quern", their_project)
 
         self._expect_clean_run(result, "from a directory containing server/")
         combined = result.stdout + result.stderr
+        assert "THEIR-PACKAGE-WON" not in combined, (
+            "the caller's own server/ package shadowed quern's, and did it "
+            f"quietly -- their program ran and exited 0:\n{combined}"
+        )
+        # The noisy shape, kept: an empty or partial shadow fails this way
+        # instead, and both are the same defect.
         assert "cannot be directly executed" not in combined, (
             f"the caller's own server/ package shadowed quern's:\n{combined}"
         )
