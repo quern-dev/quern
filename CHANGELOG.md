@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **`/video-test` is gone, and with it an unauthenticated route that served the API key.** The page was a browser test harness for MJPEG streaming added in March, and it was in `PUBLIC_PATHS` -- so it needed no bearer token -- while interpolating the live key into its JavaScript at two separate points. Since `--host` defaults to `0.0.0.0`, one unauthenticated GET from anywhere on the network returned the credential for every other endpoint, and left no failed-auth line behind because there was no auth to fail. Deleted rather than patched: the thing it tested now has better front ends in `quern-media`'s own index page and the preview app, and a public page has to justify holding a secret. Four documentation claims that it was a valid public path went with it, and a test now fails if the path is ever returned to `PUBLIC_PATHS`. Reported and fixed as #283.
 
+### Fixed
+- **A timestamp without a UTC offset returned HTTP 500.** `?since=2026-09-21T12:00:00` is valid ISO 8601, and FastAPI parses it into a *naive* datetime; every timestamp quern compares it against is UTC-aware, so the comparison raised `TypeError` and a well-formed request came back as a server error. Six parameters across four endpoints had it — `/logs/query`, `/logs/errors`, `/proxy/flows` and `/crashes/latest` — plus the `since` on `POST /proxy/flows/wait`. A missing offset now means UTC, which is what every timestamp quern *returns* is in; the alternative reading, the caller's wall clock as the **server's** local time, would silently shift the window and return the wrong rows rather than erroring. It only ever fired once there was data to compare, so an empty buffer made it look fine.
+
 ## [0.21.0] - 2026-09-23
 
 ### Added

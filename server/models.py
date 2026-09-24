@@ -3,10 +3,45 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Read a naive datetime as UTC.
+
+    `?since=2026-09-21T12:00:00` is valid ISO 8601 and FastAPI parses it to a
+    *naive* datetime. Everything it is compared against here is UTC-aware, so
+    the comparison raises `TypeError: can't compare offset-naive and
+    offset-aware datetimes` and a well-formed request comes back as HTTP 500.
+
+    **`replace`, not `astimezone`.** `replace(tzinfo=UTC)` reads the wall
+    clock the caller sent as UTC. `astimezone(UTC)` would read it as the
+    *server's* local time and convert -- silently shifting the window by the
+    machine's offset and returning the wrong rows rather than an error. The
+    two are identical when the server runs in UTC, which is what CI does, so
+    the wrong one passes every test unless the timezone is pinned to
+    something else. See #259, where that cost an hour twice in one sitting.
+
+    Naive is accepted rather than rejected because it is valid ISO 8601 and
+    every hand-typed query omits the offset. Refusing it would turn a
+    500 into a 422 without helping anyone.
+    """
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+#: A datetime query parameter or field that tolerates a missing offset.
+#:
+#: Use this for **every** new datetime input. The per-handler
+#: `if x.tzinfo is None` is what left six endpoints returning 500 on a
+#: well-formed request while three others had been fixed one at a time --
+#: the eighth would have been missed too. Annotating the type means a new
+#: endpoint inherits the behaviour instead of having to remember it.
+UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]
 
 
 class LogLevel(str, enum.Enum):
@@ -127,8 +162,8 @@ class LogEntry(BaseModel):
 class LogQueryParams(BaseModel):
     """Parameters for historical log queries."""
 
-    since: datetime | None = None
-    until: datetime | None = None
+    since: UtcDatetime | None = None
+    until: UtcDatetime | None = None
     level: LogLevel | None = None
     process: str | None = None
     category: str | None = None
@@ -421,8 +456,8 @@ class FlowQueryParams(BaseModel):
     status_min: int | None = None
     status_max: int | None = None
     has_error: bool | None = None
-    since: datetime | None = None
-    until: datetime | None = None
+    since: UtcDatetime | None = None
+    until: UtcDatetime | None = None
     #: Empty, never `"default"`. A sentinel that is not a udid compares
     #: unequal to every real one, so `owns()` reads it as FOREIGN and the
     #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
@@ -506,7 +541,7 @@ class WaitForFlowRequest(BaseModel):
     client_ip: str | None = None
     timeout: float = Field(default=10, ge=0.1, le=60)
     interval: float = Field(default=0.5, ge=0.1, le=5)
-    since: datetime | None = None  # defaults to now - 5s if omitted
+    since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
 class WaitForFlowResponse(BaseModel):

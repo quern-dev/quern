@@ -21,6 +21,7 @@ from server.models import (
     LogStreamParams,
     LogSummaryResponse,
     StartOslogRequest,
+    UtcDatetime,
 )
 from server.processing.summarizer import (
     WINDOW_DURATIONS,
@@ -172,8 +173,8 @@ async def stream_logs(
 @router.get("/query", response_model=LogQueryResponse)
 async def query_logs(
     request: Request,
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: UtcDatetime | None = None,
+    until: UtcDatetime | None = None,
     level: LogLevel | None = None,
     process: str | None = None,
     category: str | None = Query(
@@ -278,7 +279,7 @@ async def get_summary(
 @router.get("/errors", response_model=LogErrorsResponse)
 async def get_errors(
     request: Request,
-    since: datetime | None = None,
+    since: UtcDatetime | None = None,
     limit: int = Query(default=50, ge=1, le=1000),
     include_crashes: bool = True,
 ) -> LogErrorsResponse:

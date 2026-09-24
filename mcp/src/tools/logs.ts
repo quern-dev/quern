@@ -272,11 +272,11 @@ export function registerLogTools(server: McpServer): void {
       since: z
         .string()
         .optional()
-        .describe("Start time (ISO 8601, e.g. 2026-02-08T10:00:00Z)"),
+        .describe("Start time (ISO 8601, e.g. 2026-02-08T10:00:00Z). No offset means UTC."),
       until: z
         .string()
         .optional()
-        .describe("End time (ISO 8601)"),
+        .describe("End time (ISO 8601). No offset means UTC."),
       level: z
         .enum(["debug", "info", "notice", "warning", "error", "fault"])
         .optional()
@@ -378,7 +378,7 @@ export function registerLogTools(server: McpServer): void {
       since: z
         .string()
         .optional()
-        .describe("Only errors after this time (ISO 8601)"),
+        .describe("Only errors after this time (ISO 8601). No offset means UTC."),
       limit: z
         .coerce.number()
         .min(1)
@@ -529,7 +529,7 @@ export function registerLogTools(server: McpServer): void {
       since: z
         .string()
         .optional()
-        .describe("Only crashes after this time (ISO 8601)"),
+        .describe("Only crashes after this time (ISO 8601). No offset means UTC."),
       udid: z
         .string()
         .optional()
@@ -691,7 +691,7 @@ With several agents on one server, pass \`udid\` to get only your own device's a
       since: z
         .string()
         .optional()
-        .describe("Start time (ISO 8601). Defaults to the last 5 minutes."),
+        .describe("Start time (ISO 8601). No offset means UTC. Defaults to the last 5 minutes."),
       udid: z
         .string()
         .optional()

@@ -467,7 +467,29 @@ class TestANaiveSinceIsServed:
     """`?since=2026-09-21T12:00:00` -- no offset -- is valid ISO 8601 and
     FastAPI hands it over naive. Comparing it against the UTC-aware timestamps
     everything else uses raised TypeError, so a well-formed request returned
-    HTTP 500 and read as quern being broken."""
+    HTTP 500 and read as quern being broken.
+
+    The coercion now lives on the parameter's type (`UtcDatetime`, #267) rather
+    than inline in this handler, so it happens during FastAPI's validation --
+    which is what fixed the six other endpoints that had the same bug and no
+    inline guard.
+
+    **These tests therefore validate the value before passing it in.** Calling
+    a handler function directly bypasses FastAPI entirely, so a naive value
+    handed straight to `get_trace` is not a case production can produce, and
+    asserting on it would be testing a path that does not exist. The HTTP-level
+    equivalents, which exercise the real validation, are in
+    `tests/test_naive_datetime_params.py`.
+    """
+
+    @staticmethod
+    def _as_fastapi_would(value):
+        """What FastAPI does to the query parameter before the handler sees it."""
+        from pydantic import TypeAdapter
+
+        from server.models import UtcDatetime
+
+        return TypeAdapter(UtcDatetime).validate_python(value)
 
     async def test_it_does_not_raise(self):
         ring = RingBuffer(max_size=10)
@@ -480,7 +502,9 @@ class TestANaiveSinceIsServed:
             flow_store=_FakeFlowStore([_flow(1)]), proxy_adapter=None,
         )))
         result = await get_trace(
-            request=request, since=BASE.replace(tzinfo=None), udid=None, limit=10,
+            request=request,
+            since=self._as_fastapi_would(BASE.replace(tzinfo=None)),
+            udid=None, limit=10,
         )
 
         assert result["since"] == BASE.isoformat()
@@ -506,7 +530,9 @@ class TestANaiveSinceIsServed:
         )))
         result = await get_trace(
             request=request,
-            since=(BASE + timedelta(seconds=11)).replace(tzinfo=None),
+            since=self._as_fastapi_would(
+                (BASE + timedelta(seconds=11)).replace(tzinfo=None),
+            ),
             udid=None, limit=10,
         )
 

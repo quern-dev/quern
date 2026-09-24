@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Query, Request
 
 from server.device.devicectl import canonical_device_id
-from server.models import LogQueryParams, LogSource, TraceResponse
+from server.models import LogQueryParams, LogSource, TraceResponse, UtcDatetime
 from server.trace import (
     APP_LOG_SOURCES,
     Attribution,
@@ -103,7 +103,7 @@ def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) ->
 @router.get("/trace", response_model=TraceResponse)
 async def get_trace(
     request: Request,
-    since: datetime | None = None,
+    since: UtcDatetime | None = None,
     udid: str | None = Query(
         default=None,
         description=(
@@ -126,15 +126,11 @@ async def get_trace(
     if udid:
         udid = canonical_device_id(udid)
 
+    # `since` is a `UtcDatetime`, so a naive value has already been read as
+    # UTC by the time it gets here -- the coercion this endpoint used to do
+    # inline now lives on the type, which is what stopped the other six
+    # endpoints from returning 500 on the same well-formed request (#267).
     window_start = since or datetime.now(UTC) - DEFAULT_WINDOW
-    # `?since=2026-09-21T12:00:00` is a valid ISO 8601 timestamp and FastAPI
-    # parses it into a naive datetime. Every timestamp it is then compared
-    # against is UTC-aware, so the first comparison raised TypeError and the
-    # caller got an HTTP 500 -- a server error for a well-formed request,
-    # reported as though quern had broken. Assume UTC, which is what every
-    # timestamp this endpoint returns is in.
-    if window_start.tzinfo is None:
-        window_start = window_start.replace(tzinfo=UTC)
 
     server_buffer = request.app.state.server_buffer
     ring_buffer = request.app.state.ring_buffer
