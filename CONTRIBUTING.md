@@ -350,6 +350,14 @@ is shared from every checkout, which cuts both ways: live-testing capture from
 a worktree works against an already-trusted simulator without installing a
 second root CA, and a worktree cannot be assumed to have a CA of its own.
 
+**The media suite runs `--no-parallel`, and that is not caution.** CI runners
+are VMs where VideoToolbox falls back to software encoding, and 72 tests at
+once on three cores made every real-time deadline in the suite miss. The
+failures read as corruption rather than contention -- the tell was a
+diagnostic message naming a timeout, not the assertion that fired. Keep the
+flag, and suspect contention before correctness when a timing test fails only
+on CI.
+
 Nor does it isolate the **SwiftPM build lock**. A `swift test` that is killed
 can leave `swift-test` and `swiftpm-testing-helper` processes holding the lock
 on a shared `--scratch-path`, and the next run then blocks for its full 600s
