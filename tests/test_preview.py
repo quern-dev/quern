@@ -896,7 +896,10 @@ class TestSimulatorPreviewRouting:
         added: list[str] = []
 
         class _PM:
-            async def add(self, name):
+            # `add_booted_simulator`, not `add`: the route states the kind.
+            # `add` is deliberately absent so a stub offering both cannot
+            # hide which one the route reached.
+            async def add_booted_simulator(self, name):
                 added.append(name)
                 return preview_mod.ActivePreview(
                     name=udid, position=0, kind="simulator",
@@ -934,7 +937,10 @@ class TestSimulatorPreviewRouting:
                 self.name = "Jerimiah's iPhone"
 
         class _PM:
-            async def add(self, name):
+            # The kind-explicit entry point. `add` is deliberately absent:
+            # the physical branch must not reach the kind-guessing path, and
+            # a stub that offers both cannot show which one was used.
+            async def add_capture_device(self, name):
                 added.append(name)
                 return preview_mod.ActivePreview(
                     name="CMIO-ID", position=0, label="Jerimiah's iPhone"
@@ -952,6 +958,9 @@ class TestSimulatorPreviewRouting:
         )
         assert added == ["Jerimiah's iPhone"]
         assert result["status"] == "added"
+        # The physical branch's `kind` had no assertion anywhere; deleting it
+        # from the route passed the whole suite.
+        assert result["kind"] == "device", result
 
 
 class TestSimulatorStopRouting:
@@ -999,6 +1008,15 @@ class TestSimulatorStopRouting:
     def _pm(removed, raises=None):
         class _PM:
             async def remove(self, name):
+                if raises is not None:
+                    raise raises
+                removed.append(name)
+
+            # The physical branch takes the kind-explicit path. The name is
+            # still resolved -- CoreMediaIO matches on localizedName, so it
+            # has to be -- but it now reaches a resolver that cannot land on
+            # a simulator's label.
+            async def remove_capture_device(self, name):
                 if raises is not None:
                     raise raises
                 removed.append(name)
@@ -1210,3 +1228,350 @@ class TestSimulatorAddSafety:
         assert len(mgr._streams) == 1
         assert len(mgr._positions) == 1
         assert a.name == b.name == udid
+
+
+class TestAskingForAPhoneNeverOpensASimulator:
+    """`add` guesses which kind an identifier names by seeing what resolves.
+
+    That is right for a human typing a name into a menu and wrong for a
+    caller that already knows. `preview_start` checks `_is_physical(udid)`
+    and then discards the answer, so a phone CoreMediaIO has not enumerated
+    yet -- locked, untrusted, or inside the documented ~3s discovery window
+    -- falls through to a booted simulator of the same name. Default
+    simulator names are device model names, so the collision is ordinary.
+    """
+
+    @staticmethod
+    def _manager(monkeypatch, *, available=(), booted=()):
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+        mgr._available = [
+            preview_mod.PreviewDeviceInfo(name=n, cmio_id=i) for n, i in available
+        ]
+
+        async def _no_process():
+            return None
+
+        async def _booted():
+            return list(booted)
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(preview_mod, "booted_simulators", _booted)
+        return mgr
+
+    @staticmethod
+    def _request(pm, *, physical, devices):
+        class _Controller:
+            def _is_android(self, _udid):
+                return False
+
+            def _is_physical(self, _udid):
+                return physical
+
+            async def resolve_udid(self, udid):
+                return udid
+
+            async def list_devices(self):
+                return devices
+
+        class _State:
+            device_controller = _Controller()
+            preview_manager = pm
+            scrcpy_preview = None
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        return _Request()
+
+    def test_a_phone_not_yet_enumerated_does_not_fall_through(self, monkeypatch):
+        from fastapi import HTTPException
+
+        from server.api.device import PreviewStartRequest, preview_start
+
+        opened: list[str] = []
+
+        # The phone is real but CoreMediaIO has not published it yet, and a
+        # simulator of the same model is booted.
+        mgr = self._manager(
+            monkeypatch, available=(), booted=[("sim-udid", "iPhone 16 Pro")]
+        )
+
+        async def _add_sim(udid, title=None):
+            opened.append(udid)
+            raise AssertionError("a request for a phone opened a simulator")
+
+        monkeypatch.setattr(mgr, "add_simulator", _add_sim)
+
+        class _Device:
+            udid = "00008030-000123456789002E"
+            name = "iPhone 16 Pro"
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                preview_start(
+                    self._request(mgr, physical=True, devices=[_Device()]),
+                    PreviewStartRequest(udid="00008030-000123456789002E"),
+                )
+            )
+
+        assert opened == []
+        # The message has to name the discovery window, because "not found"
+        # for a device the caller is looking at reads as a quern bug.
+        assert "enumerat" in str(exc.value.detail).lower() or \
+               "discover" in str(exc.value.detail).lower(), exc.value.detail
+
+    def test_a_name_matching_both_kinds_is_refused(self, monkeypatch):
+        """The guess path keeps guessing for a typed name, but not when both
+        sides answer -- that is the ambiguity `_resolve_device` refuses."""
+        mgr = self._manager(
+            monkeypatch,
+            available=[("iPhone 16 Pro", "CMIO-1")],
+            booted=[("sim-udid", "iPhone 16 Pro")],
+        )
+
+        async def _never(*_a, **_k):
+            raise AssertionError("should have refused rather than picked a side")
+
+        monkeypatch.setattr(mgr, "add_simulator", _never)
+        monkeypatch.setattr(mgr, "_add_device", _never)
+
+        with pytest.raises(RuntimeError, match="both a connected device and a booted simulator"):
+            asyncio.run(mgr.add("iPhone 16 Pro"))
+
+    def test_the_response_says_which_kind_it_opened(self, monkeypatch):
+        """Without this the caller cannot tell a phone from a simulator: the
+        response carried only a name, and both kinds report the same one."""
+        from server.api.device import PreviewStartRequest, preview_start
+        from server.device import preview as preview_mod
+
+        mgr = self._manager(monkeypatch, booted=[("sim-udid", "iPhone 16 Pro")])
+
+        async def _add_sim(udid, title=None):
+            return preview_mod.ActivePreview(
+                name=udid, position=0, kind="simulator", label=title,
+            )
+
+        monkeypatch.setattr(mgr, "add_simulator", _add_sim)
+
+        result = asyncio.run(
+            preview_start(
+                self._request(mgr, physical=False, devices=[]),
+                PreviewStartRequest(udid="sim-udid"),
+            )
+        )
+        assert result["kind"] == "simulator", result
+
+
+class TestStoppingAPhoneNeverClosesASimulator:
+    """The `remove` mirror of TestAskingForAPhoneNeverOpensASimulator.
+
+    `preview_stop` establishes the device is physical and then hands a
+    display name to `remove`, which falls back to matching an active
+    preview's *label*. A simulator is filed under its udid with its name as
+    that label -- so asking to stop a phone's preview closed a same-named
+    simulator's window, tore down its quern-media, and answered
+    `{"status": "removed"}`.
+
+    Worse than the `add` side: opening a surplus window is recoverable,
+    destroying a session the caller never named is not.
+    """
+
+    @staticmethod
+    def _request(pm, *, devices):
+        class _Controller:
+            def _is_android(self, _udid):
+                return False
+
+            def _is_physical(self, _udid):
+                return True
+
+            async def resolve_udid(self, udid):
+                return udid
+
+            async def list_devices(self):
+                return devices
+
+        class _State:
+            device_controller = _Controller()
+            preview_manager = pm
+            scrcpy_preview = None
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        return _Request()
+
+    @staticmethod
+    def _manager(monkeypatch, *, available, active):
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+        mgr._available = [
+            preview_mod.PreviewDeviceInfo(name=n, cmio_id=i) for n, i in available
+        ]
+        for key, (kind, label) in active.items():
+            mgr._active[key] = preview_mod.ActivePreview(
+                name=key, position=len(mgr._positions), kind=kind, label=label
+            )
+        mgr._process = None
+        return mgr
+
+    class _Device:
+        udid = "00008030-PHONE"
+        name = "iPhone 11"
+
+    def test_stopping_an_unpreviewed_phone_leaves_the_simulator_alone(
+        self, monkeypatch
+    ):
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        # The phone is enumerated but not being previewed. The simulator is.
+        mgr = self._manager(
+            monkeypatch,
+            available=[("iPhone 11", "CMIO-PHONE")],
+            active={"sim-udid": ("simulator", "iPhone 11")},
+        )
+        torn_down: list[str] = []
+
+        async def _stop_stream(key):
+            torn_down.append(key)
+
+        monkeypatch.setattr(mgr, "_stop_stream", _stop_stream)
+
+        asyncio.run(
+            preview_stop(
+                self._request(mgr, devices=[self._Device()]),
+                PreviewStopRequest(udid="00008030-PHONE"),
+            )
+        )
+
+        # Asserted on the simulator surviving, not on the response: the bug
+        # returned {"status": "removed"} and looked like success.
+        assert "sim-udid" in mgr._active, "stopping the phone closed the simulator"
+        assert torn_down == ["CMIO-PHONE"], torn_down
+
+    def test_stopping_a_phone_that_is_not_enumerated_is_still_harmless(
+        self, monkeypatch
+    ):
+        """The #284 condition on the stop side: the phone is inside the
+        discovery window, so `_resolve_device` finds nothing and the label
+        fallback used to land on the simulator."""
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        mgr = self._manager(
+            monkeypatch,
+            available=[],
+            active={"sim-udid": ("simulator", "iPhone 11")},
+        )
+        monkeypatch.setattr(mgr, "_stop_stream", lambda key: asyncio.sleep(0))
+
+        asyncio.run(
+            preview_stop(
+                self._request(mgr, devices=[self._Device()]),
+                PreviewStopRequest(udid="00008030-PHONE"),
+            )
+        )
+        assert "sim-udid" in mgr._active, "an unenumerated phone closed the simulator"
+
+    def test_stopping_a_previewed_phone_still_works(self, monkeypatch):
+        """The path that must keep working."""
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        mgr = self._manager(
+            monkeypatch,
+            available=[("iPhone 11", "CMIO-PHONE")],
+            active={"CMIO-PHONE": ("device", "iPhone 11")},
+        )
+        monkeypatch.setattr(mgr, "_stop_stream", lambda key: asyncio.sleep(0))
+
+        result = asyncio.run(
+            preview_stop(
+                self._request(mgr, devices=[self._Device()]),
+                PreviewStopRequest(udid="00008030-PHONE"),
+            )
+        )
+        assert "CMIO-PHONE" not in mgr._active
+        assert result["kind"] == "device", result
+
+
+class TestEverySingleDeviceResponseSaysItsKind:
+    """The `kind` claim has been wrong twice, both times by assertion.
+
+    First draft: "every preview response carries kind" -- false for the
+    sweep, Android, and both stop branches. Second: "every iOS response" --
+    false for the no-UDID stop, which is an aggregate. This pins the shapes
+    so a third wording cannot drift from the code.
+    """
+
+    def test_the_sweep_labels_every_entry(self, monkeypatch):
+        from server.api.device import PreviewStartRequest, preview_start
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+        mgr._available = [preview_mod.PreviewDeviceInfo(name="iPhone 11", cmio_id="CMIO-1")]
+
+        async def _no_process():
+            return None
+
+        async def _add(identifier):
+            return preview_mod.ActivePreview(
+                name=identifier, position=0, kind="device", label="iPhone 11"
+            )
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(mgr, "add_capture_device", _add)
+
+        class _Controller:
+            def _is_android(self, _u):
+                return False
+
+        class _State:
+            device_controller = _Controller()
+            preview_manager = mgr
+            scrcpy_preview = None
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        result = asyncio.run(preview_start(_Request(), PreviewStartRequest()))
+        assert result["devices"], result
+        for entry in result["devices"]:
+            assert "kind" in entry, f"sweep entry without kind: {entry}"
+
+    def test_the_no_udid_stop_is_an_aggregate_with_no_kind(self):
+        """Asserted so the documented exception stays true. Adding `kind`
+        here would mean inventing one for a call that stops both kinds."""
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        class _PM:
+            async def stop(self):
+                return {"status": "stopped"}
+
+        class _SP:
+            async def stop(self):
+                return None
+
+        class _State:
+            device_controller = None
+            preview_manager = _PM()
+            scrcpy_preview = _SP()
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        result = asyncio.run(preview_stop(_Request(), PreviewStopRequest()))
+        assert "kind" not in result, result
