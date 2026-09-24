@@ -1500,3 +1500,78 @@ class TestStoppingAPhoneNeverClosesASimulator:
         )
         assert "CMIO-PHONE" not in mgr._active
         assert result["kind"] == "device", result
+
+
+class TestEverySingleDeviceResponseSaysItsKind:
+    """The `kind` claim has been wrong twice, both times by assertion.
+
+    First draft: "every preview response carries kind" -- false for the
+    sweep, Android, and both stop branches. Second: "every iOS response" --
+    false for the no-UDID stop, which is an aggregate. This pins the shapes
+    so a third wording cannot drift from the code.
+    """
+
+    def test_the_sweep_labels_every_entry(self, monkeypatch):
+        from server.api.device import PreviewStartRequest, preview_start
+        from server.device import preview as preview_mod
+
+        mgr = PreviewManager()
+        mgr._available = [preview_mod.PreviewDeviceInfo(name="iPhone 11", cmio_id="CMIO-1")]
+
+        async def _no_process():
+            return None
+
+        async def _add(identifier):
+            return preview_mod.ActivePreview(
+                name=identifier, position=0, kind="device", label="iPhone 11"
+            )
+
+        monkeypatch.setattr(mgr, "_ensure_process", _no_process)
+        monkeypatch.setattr(mgr, "add_capture_device", _add)
+
+        class _Controller:
+            def _is_android(self, _u):
+                return False
+
+        class _State:
+            device_controller = _Controller()
+            preview_manager = mgr
+            scrcpy_preview = None
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        result = asyncio.run(preview_start(_Request(), PreviewStartRequest()))
+        assert result["devices"], result
+        for entry in result["devices"]:
+            assert "kind" in entry, f"sweep entry without kind: {entry}"
+
+    def test_the_no_udid_stop_is_an_aggregate_with_no_kind(self):
+        """Asserted so the documented exception stays true. Adding `kind`
+        here would mean inventing one for a call that stops both kinds."""
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        class _PM:
+            async def stop(self):
+                return {"status": "stopped"}
+
+        class _SP:
+            async def stop(self):
+                return None
+
+        class _State:
+            device_controller = None
+            preview_manager = _PM()
+            scrcpy_preview = _SP()
+
+        class _App:
+            state = _State()
+
+        class _Request:
+            app = _App()
+
+        result = asyncio.run(preview_stop(_Request(), PreviewStopRequest()))
+        assert "kind" not in result, result
