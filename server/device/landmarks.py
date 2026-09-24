@@ -694,6 +694,64 @@ class LandmarkRegistry:
                 return True
         return False
 
+    async def identify_for_context(self, elements, fetch_page_urls) -> dict:
+        """`identified_as` / `confidence` for a screen context, or nothing.
+
+        One implementation, two callers: the action responses in
+        `server/api/device.py` and the miss paths in
+        `server/device/controller_ui.py`. Those miss paths -- `tap_element`
+        finding nothing, `wait_for_element` timing out -- are where a caller
+        most needs to know which screen it is actually on, and they returned a
+        context without identification, so one endpoint answered in two shapes
+        and nobody could tell "nothing matched" from "this path does not ask".
+
+        It lives here rather than being written twice because the rule it
+        encodes is not obvious -- reach for the page listing only when a loaded
+        landmark needs one -- and a rule spelled in two places is a pair that
+        drifts.
+
+        `fetch_page_urls` is an awaitable-returning callable rather than a
+        controller and a udid: the registry has no business knowing what a
+        device is, and this way the one caller that already has both can supply
+        them without the knowledge base learning about either.
+
+        Mirrors `get_screen_summary?identify=true` rather than inventing a
+        second shape for the same fact -- the same field names, and the same
+        string confidence: "exact", "ambiguous", "none". `candidates` is added
+        on an ambiguous match, which that endpoint does not do, because
+        reporting the first of several matches presents a guess as an
+        identification.
+
+        Silent on failure. Identification is an addition to a response; an
+        action that worked must not report failure because a knowledge base
+        could not be consulted, or because the Web Inspector is down.
+        """
+        try:
+            # Inside the try. `all_screens()` raising would otherwise escape
+            # into the caller's own handler, which discards the *whole* screen
+            # context -- losing title, summary and elements too. Losing the
+            # identification is the intended degradation; losing the screen is
+            # not.
+            screens = self.all_screens()
+            if not screens:
+                return {}
+            # Only reach for the page listing when a loaded landmark needs it,
+            # so a knowledge base with no URL landmarks costs nothing extra.
+            page_urls = await fetch_page_urls() if needs_page_urls(screens) else None
+            result = self.identify(elements, page_urls=page_urls)
+        except Exception:
+            logger.debug("screen identification failed", exc_info=True)
+            return {}
+        identified = {
+            "identified_as": result.get("matched"),
+            "confidence": result.get("confidence"),
+        }
+        if result.get("confidence") == "ambiguous":
+            identified["candidates"] = [
+                result.get("matched"), *result.get("ambiguous_with", []),
+            ]
+        return identified
+
     def all_screens(self, app: str | None = None) -> list[ScreenLandmarks]:
         """Get all screens, optionally filtered by app."""
         if app is not None:
