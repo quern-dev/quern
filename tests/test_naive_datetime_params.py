@@ -452,3 +452,37 @@ class TestEveryDatetimeInputCarriesTheCoercion:
         assert not offenders, (
             f"since/until fields without UtcDatetime: {offenders}"
         )
+
+    def test_a_naive_since_in_a_request_body_matches_the_flow(
+        self, app_for_introspection, pinned_timezone,
+    ):
+        """`POST /proxy/flows/wait` — the only datetime input that arrives in a
+        body rather than a query string, and the one this PR added.
+
+        The model audit above proves `WaitForFlowRequest.since` carries the
+        annotation. It does not prove the value survives FastAPI's body
+        validation and reaches `FlowStore.query` aware, which is where it is
+        compared. An annotation test and a behaviour test are not
+        interchangeable — that conflation is what left four sites uncovered
+        in the first version of this file.
+
+        Asserting `matched` rather than just a non-500 is the point: under
+        `astimezone` the window would start at 18:00Z in this timezone and the
+        12:00Z flow would be missed, returning 200 with `matched: false`.
+        """
+        from fastapi.testclient import TestClient
+
+        pinned_timezone("America/Los_Angeles")
+        client = TestClient(app_for_introspection)
+
+        resp = client.post(
+            "/api/v1/proxy/flows/wait",
+            json={"since": "2026-09-21T11:00:00", "timeout": 0.1, "interval": 0.1},
+            headers={"Authorization": "Bearer test-key-12345"},
+        )
+
+        assert resp.status_code == 200, resp.text[:300]
+        body = resp.json()
+        assert body.get("matched") is True, (
+            f"the seeded 12:00Z flow was not matched by a naive 11:00 since: {body}"
+        )
