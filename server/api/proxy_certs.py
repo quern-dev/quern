@@ -712,6 +712,23 @@ async def record_device_proxy_config_endpoint(
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
+    if body.apply and not getattr(adapter, "is_running", False):
+        # `listen_port` survives the adapter stopping, so without this the
+        # endpoint would write a port nothing is listening on, bounce Wi-Fi,
+        # read the value back, and report `proxy_verified: true` -- every
+        # signal in the response agreeing that a device just lost its network.
+        # The guide says a device pointed at a proxy that is gone has no
+        # working network; declining to create that state is the other half of
+        # saying so.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The proxy is not running, so pointing a device at it would "
+                "leave the device without a working network. Start the proxy "
+                "first, then apply."
+            ),
+        )
+
     if not ssid and not body.apply:
         # The config is keyed by SSID. Without one there is nowhere to put it,
         # and inventing a key would make the record unfindable.

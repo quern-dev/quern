@@ -270,3 +270,55 @@ class TestTheRadioIsNotLeftOff:
         monkeypatch.setattr("asyncio.sleep", AsyncMock())
 
         assert await adb.reattach_network("8BAY0WCL7") is False
+
+
+class TestOnlyWifiCountsAsReattached:
+    """A phone that dropped off Wi-Fi and fell back to cellular still has an
+    address. Counting it would confirm a reattach that did not happen, which is
+    worse than the original `wlan0` bug: the caller stops looking."""
+
+    async def test_cellular_fallback_is_not_a_reattach(self, adb, monkeypatch):
+        async def fake(serial, *args):
+            if args[:2] == ("shell", "ip"):
+                return ("1: lo    inet 127.0.0.1/8 scope host lo\n"
+                        "42: rmnet_data0    inet 10.144.2.55/30 scope global", "")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+        assert await adb.reattach_network("8BAY0WCL7") is False
+
+    async def test_emulator_eth0_is_not_wifi(self, adb, monkeypatch):
+        """An emulator's network is a QEMU NAT link, not Wi-Fi, and the
+        docstring already says this reports False rather than pretending."""
+        async def fake(serial, *args):
+            if args[:2] == ("shell", "ip"):
+                return ("2: eth0    inet 10.0.2.15/24 brd 10.0.2.255 scope global", "")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+        assert await adb.reattach_network("emulator-5554") is False
+
+    async def test_wlan1_still_counts(self, adb, monkeypatch):
+        async def fake(serial, *args):
+            if args[:2] == ("shell", "ip"):
+                return ("31: wlan1    inet 192.168.1.244/24 brd x scope global", "")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+
+        assert await adb.reattach_network("8BAY0WCL7") is True
+
+    async def test_wifi_alongside_cellular_counts(self, adb, monkeypatch):
+        async def fake(serial, *args):
+            if args[:2] == ("shell", "ip"):
+                return ("42: rmnet_data0    inet 10.144.2.55/30 scope global\n"
+                        "30: wlan0    inet 192.168.1.244/24 brd x scope global", "")
+            return ("", "")
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", fake)
+
+        assert await adb.reattach_network("8BAY0WCL7") is True

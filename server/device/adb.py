@@ -90,6 +90,22 @@ _AM_START_FAILURES = (
 )
 
 
+def _is_wifi_inet_line(line: str) -> bool:
+    """Whether an `ip -4 -o addr show` line is a Wi-Fi interface with an address.
+
+    The name is the test, and it has to be: a phone that dropped off Wi-Fi and
+    fell back to cellular still has an address, on `rmnet_data0`. Matching any
+    non-loopback interface would call that a successful reattach.
+
+    Format: `30: wlan0    inet 192.168.1.244/24 brd 192.168.1.255 scope global`
+    """
+    parts = line.split()
+    if len(parts) < 3 or "inet" not in parts:
+        return False
+    name = parts[1].rstrip(":")
+    return name.startswith("wlan") and "inet" in parts
+
+
 class AdbBackend:
     """Manages Android devices and emulators via adb subprocess calls."""
 
@@ -851,20 +867,20 @@ rm -rf /data/local/tmp/tmp-ca-copy
         for _ in range(20):
             await asyncio.sleep(0.5)
             try:
-                # Every interface, not `wlan0`. `get_lan_ip` deliberately
-                # avoids assuming that name a few lines down, and a device on
-                # `wlan1` reattached fine while being reported as failed --
-                # complete with a hint telling the caller to go and fix a
-                # device that was already working.
+                # Every interface, then filtered by name. Hardcoding `wlan0`
+                # reported a device on `wlan1` as failed while it was working;
+                # accepting any non-loopback address overcorrected, because
+                # `rmnet_data0` means the phone fell back to *cellular* with
+                # Wi-Fi still down, and an emulator's `eth0` is not Wi-Fi at
+                # all. Either way this would confirm a reattach that did not
+                # happen -- which is worse than the original bug, since the
+                # caller stops looking.
                 stdout, _ = await self._run_adb_for_device(
                     serial, "shell", "ip", "-4", "-o", "addr", "show",
                 )
             except Exception:
                 continue
-            if any(
-                "inet " in line and " lo " not in line
-                for line in (stdout or "").splitlines()
-            ):
+            if any(_is_wifi_inet_line(line) for line in (stdout or "").splitlines()):
                 return True
         return False
 

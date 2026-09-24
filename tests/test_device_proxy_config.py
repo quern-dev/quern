@@ -34,8 +34,11 @@ from server.device.controller import DeviceController
 from server.models import DeviceType
 
 
-def _request(ctrl, port: int = 9101, listen_host: str = "0.0.0.0"):
-    adapter = SimpleNamespace(listen_port=port, listen_host=listen_host)
+def _request(ctrl, port: int = 9101, listen_host: str = "0.0.0.0",
+             is_running: bool = True):
+    adapter = SimpleNamespace(
+        listen_port=port, listen_host=listen_host, is_running=is_running,
+    )
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         device_controller=ctrl, proxy_adapter=adapter,
     )))
@@ -735,3 +738,47 @@ class TestAMissingSsidDoesNotBlockTheDeviceWrite:
             )
 
         assert out["recorded"] is True
+
+
+class TestApplyingToAProxyThatIsNotThere:
+    """`listen_port` survives the adapter stopping, so nothing in the response
+    would have contradicted itself: the write succeeds, the read-back matches,
+    and `proxy_verified` is true -- for a device that just lost its network."""
+
+    async def test_apply_is_refused_when_the_proxy_is_stopped(self):
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b, pytest.raises(HTTPException) as e:
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True),
+                _request(ctrl, is_running=False),
+            )
+
+        assert e.value.status_code == 409
+        ctrl.adb.set_http_proxy.assert_not_awaited()
+
+    async def test_recording_is_still_allowed(self):
+        """Recording what someone else configured does not touch the device."""
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", ssid="w", client_ip="1.2.3.4"),
+                _request(ctrl, is_running=False),
+            )
+
+        assert out["applied"] is False
+
+    async def test_clearing_is_still_allowed(self):
+        """Especially then: a stopped proxy is exactly when a device needs
+        rescuing from pointing at it."""
+        ctrl = _android()
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", clear=True),
+                _request(ctrl, is_running=False),
+            )
+
+        assert out["cleared"] is True
+        ctrl.adb.clear_http_proxy.assert_awaited_once()

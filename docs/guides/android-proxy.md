@@ -4,13 +4,20 @@ Capturing HTTPS traffic from Android emulators and physical devices. Android's c
 
 ## The Quick Version
 
-For rootable emulators (Google APIs images):
+Two separate steps, in this order. Routing first:
+
+> "Point my Android device at the quern proxy"
+
+That works on **any** device or emulator, rooted or not, and is enough on its
+own to capture plain HTTP. It also has to come first, because the certificate
+is served *by* the proxy.
+
+Then, for rootable emulators (Google APIs images):
 
 > "Install the proxy certificate on my Android emulator"
 
-Your agent handles everything: root access, certificate installation, HTTP proxy configuration. Traffic starts flowing.
-
-For non-rootable devices, you'll need to modify your app. Keep reading.
+For non-rootable devices — including every physical phone — the certificate is
+the part that needs work, and you'll need to modify your app. Keep reading.
 
 ## Why Android Is Different
 
@@ -23,12 +30,15 @@ This means installing a cert through Android Settings doesn't help for debugging
 
 ## Rootable Emulators (Automatic)
 
-If your emulator uses a Google APIs image (not Google Play), your agent handles everything automatically. Behind the scenes, it:
+If your emulator uses a Google APIs image (not Google Play), your agent installs the certificate automatically. Behind the scenes, it:
 
 1. Verifies the emulator is rootable
 2. Converts the mitmproxy CA to Android's expected format
 3. Installs it as a system certificate
-4. Configures the HTTP proxy to route through your Mac
+
+It does **not** route the device through the proxy — that is
+[its own step](#http-proxy), and it applies to every device rather than just
+rootable ones.
 
 The technique varies by API level:
 
