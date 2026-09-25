@@ -70,18 +70,27 @@ echo
 echo "── pre-merge checks (walkthrough comment, not a review) ──"
 # Deliberately re-fetched from the issue comments: with zero reviews there is no
 # review body to carry this, which is the case the section exists for.
+# One record per comment, marker-separated: the tally and the rows it describes
+# have to come from the *same* comment. Concatenating every body and taking the
+# last tally pairs a current tally with an older comment's rows, which reports a
+# failure that may already be resolved -- the misreporting this file exists to
+# stop, in the tool meant to stop it.
 gh api "repos/$OWNER/$NAME/issues/$N/comments?per_page=100" --paginate \
-  --jq '.[] | select(.user.login=="coderabbitai[bot]") | .body' \
+  --jq '.[] | select(.user.login=="coderabbitai[bot]") | "\u0000CR-COMMENT\u0000" + .body' \
 | python3 -c '
 import re, sys
-text = sys.stdin.read()
 
-tallies = re.findall(r"Pre-merge checks \| ([^<\n]*)", text)
-if not tallies:
+comments = [c for c in sys.stdin.read().split("\x00CR-COMMENT\x00") if c.strip()]
+withtable = [c for c in comments if "Pre-merge checks" in c]
+if not withtable:
     print("  (no checks table -- CodeRabbit may not have processed this PR)")
     raise SystemExit(0)
+if len(withtable) > 1:
+    print(f"  note: {len(withtable)} comments carry a table; reading the newest")
 
-tally = tallies[-1].strip()
+# The newest one, and everything below is parsed from it alone.
+text = withtable[-1]
+tally = re.findall(r"Pre-merge checks \| ([^<\n]*)", text)[-1].strip()
 print(f"  tally: {tally}")
 
 # Rows look like:  | Check name | <status> | explanation | resolution |
