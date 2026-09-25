@@ -423,11 +423,30 @@ class DeviceController(DeviceControllerUI):
         refused by default rather than admitted by default, which is the half
         of this that keeps being true after today (#263).
         """
-        if self._device_type(udid) != DeviceType.SIMULATOR:
-            raise DeviceError(
-                f"{operation} is only supported on simulators",
-                tool="simctl",
+        kind = self._device_type(udid)
+        if kind == DeviceType.SIMULATOR:
+            return
+        # The leading clause is load-bearing: `_handle_device_error` matches
+        # the literal string "only supported on simulators" to return 400, so
+        # rewording it wholesale would silently turn every one of these
+        # refusals into a 500. The detail is appended rather than substituted.
+        if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
+            detail = (
+                f" {udid} is Android, and quern has no Android equivalent for "
+                "this operation -- it is implemented through simctl, which "
+                "drives iOS simulators only."
             )
+        elif kind == DeviceType.DEVICE:
+            detail = f" {udid} is a physical iOS device."
+        else:
+            detail = (
+                f" quern does not recognise {udid or '(empty udid)'}; list "
+                "devices first so it can be identified."
+            )
+        raise DeviceError(
+            f"{operation} is only supported on simulators.{detail}",
+            tool="simctl",
+        )
 
     async def _ensure_device_type_cached(self, udid: str) -> None:
         """Populate device type cache if this UDID isn't known yet.
@@ -1203,8 +1222,18 @@ class DeviceController(DeviceControllerUI):
         return resolved
 
     async def clear_app_data(self, bundle_id: str, udid: str | None = None) -> str:
-        """Clear all app data for a simulator app. Returns the resolved udid."""
+        """Clear all app data for an app. Returns the resolved udid.
+
+        Follows the branch-on-Android-first pattern the rest of this class
+        uses, rather than falling through to a simulator guard. Inverting that
+        guard for #263 turned this from a cryptic simctl failure into a
+        confident false claim -- "only supported on simulators" about a device
+        whose `pm clear` answers `Success`.
+        """
         resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            await self.adb.clear_app_data(resolved, bundle_id)
+            return resolved
         self._require_simulator(resolved, "Clear app data")
         try:
             await self.simctl.terminate_app(resolved, bundle_id)

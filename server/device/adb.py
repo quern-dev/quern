@@ -1162,6 +1162,35 @@ rm -rf /data/local/tmp/tmp-ca-copy
         # touches app content (secure keyguards still require the passcode).
         await self._run_adb_for_device(serial, "shell", "wm", "dismiss-keyguard")
 
+    async def clear_app_data(self, serial: str, package: str) -> None:
+        """Wipe an app's data, the Android equivalent of `simctl privacy reset`.
+
+        `pm clear` needs no root and works on any device -- verified on an
+        unrooted release-keys Pixel 3 XL, which answered `Success`. Quern
+        refused this outright until #299, telling the caller it was "only
+        supported on simulators" about a device that demonstrably does it.
+
+        Also terminates the app, which `pm clear` does implicitly, so callers
+        do not need a separate stop.
+        """
+        stdout, stderr = await self._run_adb_for_device(
+            serial, "shell", "pm", "clear", package,
+        )
+        out = f"{stdout or ''}{stderr or ''}"
+        if "Success" not in out:
+            # Belt and braces rather than the primary check. Measured on a
+            # Pixel 3 XL, a bad package prints `Failed` *and* exits 1, so
+            # `_run_adb_for_device` raises before this is reached. It stays
+            # because exit-code propagation through `adb shell` is a property
+            # of the adb version rather than of the command -- the pre-shell-v2
+            # protocol did not forward it at all -- so on an older host the
+            # status would be 0 and the output would be the only signal.
+            raise DeviceError(
+                f"Could not clear data for {package} on {serial}: "
+                f"{out.strip() or 'no output'}",
+                tool="adb",
+            )
+
     async def set_location(
         self, serial: str, latitude: float, longitude: float,
         satellites: int = 4,

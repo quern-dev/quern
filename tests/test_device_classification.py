@@ -247,3 +247,79 @@ class TestAnUnknownDeviceIsNotAGuess:
         """`_is_android` must not become the new default-shaped guess."""
         assert DeviceController()._is_android("never-seen") is False
         assert DeviceController()._is_physical("never-seen") is False
+
+
+class TestClearAppDataHasAnAndroidPath:
+    """Inverting the simulator guard turned this from a cryptic simctl failure
+    into a confident false claim: "only supported on simulators" about a device
+    whose `pm clear` answers `Success`. Measured on an unrooted release-keys
+    Pixel 3 XL, which needs no root for it."""
+
+    async def test_android_clears_through_pm(self, monkeypatch):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["PHONE"] = DeviceType.ANDROID_DEVICE
+        ctrl.adb.clear_app_data = AsyncMock()
+        ctrl.simctl.clear_app_data = AsyncMock()
+        monkeypatch.setattr(ctrl, "resolve_udid", AsyncMock(return_value="PHONE"))
+
+        assert await ctrl.clear_app_data("com.example.App") == "PHONE"
+        ctrl.adb.clear_app_data.assert_awaited_once_with("PHONE", "com.example.App")
+        ctrl.simctl.clear_app_data.assert_not_awaited()
+
+    async def test_a_simulator_still_goes_to_simctl(self, monkeypatch):
+        """The positive control: an Android path that swallowed everything
+        would satisfy the test above on its own."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM"] = DeviceType.SIMULATOR
+        ctrl.adb.clear_app_data = AsyncMock()
+        ctrl.simctl.terminate_app = AsyncMock()
+        ctrl.simctl.clear_app_data = AsyncMock()
+        monkeypatch.setattr(ctrl, "resolve_udid", AsyncMock(return_value="SIM"))
+
+        await ctrl.clear_app_data("com.example.App")
+        ctrl.simctl.clear_app_data.assert_awaited_once()
+        ctrl.adb.clear_app_data.assert_not_awaited()
+
+    async def test_a_failed_clear_is_reported(self):
+        adb = AdbBackend()
+        adb._run_adb_for_device = AsyncMock(return_value=("Failed", ""))
+        with pytest.raises(DeviceError):
+            await adb.clear_app_data("PHONE", "com.does.not.exist")
+
+    async def test_a_successful_clear_does_not_raise(self):
+        adb = AdbBackend()
+        adb._run_adb_for_device = AsyncMock(return_value=("Success", ""))
+        await adb.clear_app_data("PHONE", "com.example.App")
+
+
+class TestARefusalSaysWhyRatherThanJustNo:
+    """Eleven operations went from silently reaching simctl with an adb serial
+    to being refused. A refusal that does not say what the device is leaves the
+    caller no better off than the cryptic failure it replaced."""
+
+    def test_an_android_refusal_names_android(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["Z"] = DeviceType.ANDROID_DEVICE
+        with pytest.raises(DeviceError) as e:
+            ctrl._require_simulator("Z", "Set hardware keyboard")
+        assert "Android" in str(e.value)
+
+    def test_an_unknown_refusal_says_it_is_unknown(self):
+        ctrl = DeviceController()
+        with pytest.raises(DeviceError) as e:
+            ctrl._require_simulator("Z", "Set hardware keyboard")
+        assert "does not recognise" in str(e.value)
+
+    @pytest.mark.parametrize("kind", [
+        DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR, DeviceType.DEVICE, None,
+    ])
+    def test_every_refusal_keeps_the_phrase_that_maps_to_400(self, kind):
+        """`_handle_device_error` matches the literal string to return 400
+        (`api/device.py`). Rewording it wholesale would turn each of these
+        refusals into a 500 with nothing to indicate it had happened."""
+        ctrl = DeviceController()
+        if kind is not None:
+            ctrl._device_type_cache["Z"] = kind
+        with pytest.raises(DeviceError) as e:
+            ctrl._require_simulator("Z", "Erase")
+        assert "only supported on simulators" in str(e.value)
