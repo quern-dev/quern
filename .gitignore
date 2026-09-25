@@ -30,7 +30,8 @@ docs/bugs/
 docs/test-results/
 
 # Local AI
-.claude/
+.claude/*
+!.claude/skills/
 
 idb-companion-*.tar.gz
 
